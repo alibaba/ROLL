@@ -20,6 +20,9 @@
   <a href="./assets/roll_wechat.png" target="_blank">
     <img src="https://img.shields.io/badge/WeChat-green?logo=wechat" alt="WeChat QR">
   </a>
+    <a href="https://deepwiki.com/alibaba/ROLL" target="_blank">
+    <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
+  </a>
 </p>
 
 </div>
