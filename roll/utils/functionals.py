@@ -465,15 +465,14 @@ def difficulty_mask(data: "DataProto", n_sample=-1, low_threshold=0.1, high_thre
 def compute_token_reward(data: "DataProto", pipeline_config: RLVRConfig, kl_ctrl: AdaptiveKLController):
     token_level_rewards = expand_to_token_level(data)
     beta = 0
-    kld = torch.zeros_like(data.batch["response_mask"][:, 1:], dtype=torch.float32)
+    kld = compute_approx_kl(
+        log_probs=data.batch["old_log_probs"],
+        log_probs_base=data.batch["ref_log_probs"],
+        action_mask=data.batch["response_mask"][:, 1:],
+        kl_penalty=pipeline_config.kl_penalty,
+    )
     # 是否添加token level kl
     if pipeline_config.add_token_level_kl and "ref_log_probs" in data.batch.keys():
-        kld = compute_approx_kl(
-            log_probs=data.batch["old_log_probs"],
-            log_probs_base=data.batch["ref_log_probs"],
-            action_mask=data.batch["response_mask"][:, 1:],
-            kl_penalty=pipeline_config.kl_penalty,
-        )
         beta = kl_ctrl.value
         token_level_rewards = token_level_rewards - beta * kld
 
