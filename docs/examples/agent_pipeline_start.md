@@ -54,7 +54,7 @@ Before you begin, ensure you have the following:
 
    Ensure any specific dependencies for your chosen agentic environments or models are also met.
 
-3. **Python Environment** – A working Python environment (preferably 3.8+).
+3. **Python Environment** – A working Python environment (python=3.10, or use our docker_images).
 
 4. **Ray Setup (Recommended for Distributed Execution)**  
    * Install Ray:
