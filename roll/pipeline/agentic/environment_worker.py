@@ -679,9 +679,9 @@ class EnvironmentWorker(Worker):
 
     def _parse_response(self, response: str) -> List:
         pattern = (
-            r"<think>(.*?)</think>\s*<answer>(.*?)</answer>"
+            r"^<think>(.*?)</think>\s*<answer>(.*?)</answer>$"
             if self.pipeline_config.enable_think
-            else r"<answer>(.*?)</answer>"
+            else r"^<answer>(.*?)</answer>$"
         )
         match = re.search(pattern, response, re.DOTALL)
         if not match:
