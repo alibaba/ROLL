@@ -256,3 +256,30 @@ class AgenticConfig(BaseConfig):
                 env_configs[env_id] = entry
             done_groups += n_group
         env_manager_config.env_configs = env_configs
+
+    def set_max_steps(self, max_steps: int):
+        actor_backward_batch_size = (
+                self.actor_train.training_args.per_device_train_batch_size
+                * self.actor_train.training_args.gradient_accumulation_steps
+        )
+        critic_backward_batch_size = (
+                self.critic.training_args.per_device_train_batch_size
+                * self.critic.training_args.gradient_accumulation_steps
+        )
+        # 没有除dp_size，需要在分布式环境初始化后再除
+        self.actor_train.training_args.max_steps = max_steps * (
+                self.rollout_batch_size
+                * self.actor_infer.generating_args.num_return_sequences
+                * self.ppo_epochs
+                // actor_backward_batch_size
+        )
+        self.critic.training_args.max_steps = max_steps * (
+                self.rollout_batch_size
+                * self.actor_infer.generating_args.num_return_sequences
+                // critic_backward_batch_size
+        )
+
+        logger.info(f"pipeline max_steps: {self.max_steps} to {max_steps}")
+        logger.info(f"actor train max_steps without dp_size: {self.actor_train.training_args.max_steps}")
+        logger.info(f"critic train max_steps without dp_size: {self.critic.training_args.max_steps}")
+        self.max_steps = max_steps
