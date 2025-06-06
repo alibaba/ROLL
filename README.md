@@ -34,9 +34,10 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 ## 📢 News
 
-| 📣   Updates                                                                                               |
-|:-----------------------------------------------------------------------------------------------------------|
-| **[05/30/2025]** 🎉 Training RLVR and Agentic RL with ROLL is now available! Explore the new capabilities. |
+| 📣   Updates                                                                                                                                   |
+|:-----------------------------------------------------------------------------------------------------------------------------------------------|
+| **[06/06/2025]** 🎉 ROLL tech report is now available! Access the report [here](./assets/Alibaba_Roll_TecReport.pdf).                          |
+| **[05/30/2025]** 🎉 Training RLVR and Agentic RL with ROLL is now available! Explore the new capabilities.                                     |
 ---
 
 ## 🗺️ Architecture at a Glance
