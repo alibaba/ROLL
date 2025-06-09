@@ -152,6 +152,7 @@ class MathRuleRewardWorker(Worker):
             # print(f'answer outpus: {outputs}')
             # verify_answer.append(verify_math_sample(response, answer))
             response = response.replace("<|endoftext|>", "")
+            response = response.replace("<|im_end|>", "")
             response = response.replace("<pad>", "")
             try:
                 with timeout(5):
