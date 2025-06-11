@@ -2,11 +2,10 @@
 
 ## 准备环境
 1. 购买阿里云服务器
-- 单机版本 选择 GPU：NVIDIA V100
+- 单机版本 可选择 GPU：NVIDIA V100
 - 建议您通过ECS控制台购买GPU实例时，同步选中安装GPU驱动
-2. 选中分配公网IPv4地址，带宽计费方式选择按使用流量，建议带宽峰值选择100 Mbps，以加快模型下载速度。
-3. 远程连接GPU实例，进入机器终端
-4. 安装 Docker 环境：参考 https://developer.aliyun.com/mirror/docker-ce/?spm=a2c6h.25603864.0.0.59637e39XhdIj0
+2. 远程连接GPU实例，进入机器终端
+3. 安装 Docker 环境：参考 https://developer.aliyun.com/mirror/docker-ce/
 ```shell
 # step 1: 安装必要的一些系统工具
 sudo yum install -y yum-utils
@@ -23,7 +22,7 @@ sudo service docker start
 # 安装校验
 docker version
 ```
-5. 安装 NVIDIA容器工具包
+4. 安装 NVIDIA容器工具包
 ```shell
 curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | \
   sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
@@ -36,12 +35,15 @@ sudo systemctl restart docker
 ```
 
 ## 环境配置
-参考 https://code.alibaba-inc.com/openlm/ScaleAligner/blob/open/roll/README.md
 ```shell
 # 1. 拉取docker镜像
-sudo docker pull roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-sglang046
-# 或者
-sudo docker pull roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-vllm084
+sudo docker pull <image_address>
+
+# 镜像地址
+# torch2.6.0 + SGlang0.4.6: roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-sglang046
+# torch2.6.0 + vLLM0.8.4: roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-vllm084
+# torch2.5.1 + SGlang0.4.3: roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch251-sglang043
+# torch2.5.1 + vLLM0.7.3: roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch251-vllm073
 
 # 2. 启动一个docker容器，指定GPU支持，并始终保持容器运行
 sudo docker images
@@ -82,10 +84,9 @@ pip install -r requirements_torch260_sglang.txt -i https://mirrors.aliyun.com/py
 export PYTHONPATH="/workspace/ROLL-main:$PYTHONPATH"
 
 # 方法一：指定yaml文件路径，需要以脚本目录即examples为根目录
-python examples/start_rlvr_pipeline.py --config_path qwen2.5-7B-rlvr_megatron  --config_name rlvr_config
+python examples/start_agentic_pipeline.py --config_path qwen2.5-0.5B-agentic_ds  --config_name agent_val_frozen_lake
 
 # 方法二：直接执行sh脚本
-bash examples/qwen2.5-7B-rlvr_megatron/run_rlvr_pipeline.sh
 bash examples/qwen2.5-0.5B-agentic_ds/run_agentic_pipeline_frozen_lake.sh
 
 # 根据需要修改config
@@ -94,7 +95,7 @@ vim examples/qwen2.5-0.5B-agentic_ds/agent_val_frozen_lake.yaml
 
 单卡V100显存config修改要点：
 ```yaml
-# 将系统预期的 GPU 数量从 8 块减少到你实际拥有的 1 块 V100
+# 将系统预期的GPU数量从8块减少到你实际拥有的1块V100
 num_gpus_per_node: 1 
 # 训练进程现在只映射到 GPU 0
 actor_train.device_mapping: list(range(0,1))
@@ -112,7 +113,7 @@ actor_train.model_args.dtype: fp16
 actor_infer.model_args.dtype: fp16
 reference.model_args.dtype: fp16
 
-# 大模型训练框架从 DeepSpeed 切换到 Megatron-LM，参数可以批量发送
+# 大模型训练框架从 DeepSpeed 切换到 Megatron-LM，参数可以批量发送，运行速度更快
 strategy_name: megatron_train
 strategy_config:
   tensor_model_parallel_size: 1
@@ -121,12 +122,24 @@ strategy_config:
   use_distributed_optimizer: true
   recompute_granularity: full
 
-# 减少并行运行的训练环境组和验证环境组，以适配单 GPU 资源
+# 减少每条轨迹的最大动作数，使得每个Rollout轨迹更短，减少了LLM生成内容的长度
+max_actions_per_traj: 10    
+
+# 减少并行运行的训练环境组和验证环境组，以适配单GPU资源
 train_env_manager.env_groups: 1
 train_env_manager.n_groups: 1
 val_env_manager.env_groups: 2
 val_env_manager.n_groups: [1, 1]
 val_env_manager.tags: [SimpleSokoban, FrozenLake]
+
+# 减少总的训练步骤，以便更快运行一个完整的训练流程，用于快速调试
+max_steps: 100
 ```
 
+pipeline运行中的log截图示例：
+<img src="assets/log_1.png" width="100%" alt="log1">
+
+<img src="assets/log_2.png" width="100%" alt="log2">
+
+<img src="assets/log_3.png" width="100%" alt="log3">
 
