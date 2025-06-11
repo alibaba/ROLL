@@ -1,9 +1,13 @@
 import json
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import torch
 
-from roll.utils.logging import logger
+from roll.utils.logging import get_logger
+
+logger = get_logger()
+
+tracker_registry: Dict[str, Any] = {}
 
 
 class BaseTracker:
@@ -87,11 +91,11 @@ def create_tracker(tracker_name: str, config: dict, **kwargs) -> BaseTracker:
         return BaseTracker()
     logger.info(f"create tracker {tracker_name}, kwargs: {kwargs}")
 
-    if tracker_name == "tensorboard":
-        return TensorBoardTracker(config, **kwargs)
-    elif tracker_name == "wandb":
-        return WandbTracker(config, **kwargs)
-    elif tracker_name == "stdout":
-        return StdoutTracker(config, **kwargs)
-    else:
-        raise ValueError(f"Unknown tracker name: {tracker_name}")
+    if tracker_name not in tracker_registry:
+        raise ValueError(f"Unknown tracker name: {tracker_name}, total registered trackers: {tracker_registry.keys()}")
+    tracker_cls = tracker_registry[tracker_name]
+    return tracker_cls(config, **kwargs)
+
+tracker_registry["tensorboard"] = TensorBoardTracker
+tracker_registry["wandb"] = WandbTracker
+tracker_registry["stdout"] = StdoutTracker

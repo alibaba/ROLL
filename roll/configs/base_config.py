@@ -57,9 +57,9 @@ class BaseConfig:
     logging_dir: str = field(
         default="./output/logs",
         metadata={"help": "Directory to store logs."})
-    track_with: Literal["wandb", "tensorboard", "stdout"] = field(
+    track_with: str = field(
         default="tensorboard",
-        metadata={"help": "The type of tracker to be used for tracking."}
+        metadata={"help": "The type of tracker to be used for tracking, one of ['wandb', 'tensorboard', 'stdout']."}
     )
     tracker_kwargs: dict = field(
         default_factory=dict,
@@ -136,6 +136,10 @@ class BaseConfig:
                     "Ensure that GPU resource allocation aligns with the request in a multi-node setup."
         }
     )
+    model_download_type: str = field(
+        default="MODELSCOPE",
+        metadata={"help": "snapshot_download func source type, such as MODELSCOPE, HUGGINGFACE_HUB."},
+    )
 
 
     def to_dict(self):
@@ -162,17 +166,13 @@ class BaseConfig:
                 self.tracker_kwargs.get("log_dir", self.output_dir), self.exp_name, datetime.now().strftime("%Y%m%d-%H%M%S")
             )
             logger.info(f"add timestamp to tensorboard log_dir {self.tracker_kwargs['log_dir']}")
-        elif self.track_with == "wandb":
-            pass
-        elif self.track_with == "stdout":
-            pass
-        else:
-            raise ValueError(f"Unrecognized track_with: {self.track_with}")
 
         self.logging_dir = os.path.join(self.logging_dir, self.exp_name)
         logger.info(f"add exp_name to logging_dir {self.logging_dir}")
         os.environ["ROLL_LOG_DIR"] = self.logging_dir
         get_logger()
+
+        os.environ["MODEL_DOWNLOAD_TYPE"] = self.model_download_type
 
         upload_type = self.checkpoint_config.get("type", None)
         if upload_type == "file_system":

@@ -1,20 +1,27 @@
 import contextlib
+import copy
 import hashlib
 import os
 import shutil
 import tempfile
 import traceback
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 from filelock import FileLock
 from huggingface_hub import snapshot_download
 
 from roll.utils.logging import get_logger
-from roll.utils.upload_utils import FileSystemUploader
-
+from roll.utils.upload_utils import uploader_registry
 
 logger = get_logger()
 
+model_download_registry: Dict[str, Any] = {}
+model_download_registry["HUGGINGFACE_HUB"] = snapshot_download
+try:
+    from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
+    model_download_registry["MODELSCOPE"] = ms_snapshot_download
+except Exception as e:
+    logger.error(e)
 
 @contextlib.contextmanager
 def file_lock_context(lock_path: str):
@@ -27,13 +34,14 @@ def download_model(model_name_or_path: str, local_dir: Optional[str] = None):
     if os.path.isdir(model_name_or_path):
         return model_name_or_path
 
-    use_model_scope = os.getenv("USE_MODELSCOPE", "0") == "1"
-    with file_lock_context(model_name_or_path):
-        if use_model_scope:
-            from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
+    model_download_type = os.getenv("MODEL_DOWNLOAD_TYPE", "MODELSCOPE")
+    if model_download_type not in model_download_registry:
+        raise ValueError(f"Unknown model_download_type: {model_download_type},"
+                         f" total registered model download type: {model_download_registry.keys()}")
+    model_download_func = model_download_registry[model_download_type]
 
-            return ms_snapshot_download(model_name_or_path, local_dir=local_dir)
-        return snapshot_download(model_name_or_path, local_dir=local_dir)
+    with file_lock_context(model_name_or_path):
+        return model_download_func(model_name_or_path, local_dir=local_dir)
 
 
 class CheckpointManager:
@@ -42,11 +50,16 @@ class CheckpointManager:
     """
 
     def __init__(self, checkpoint_config=None):
-        self.checkpoint_config: Dict = checkpoint_config
+        self.checkpoint_config: Dict = copy.deepcopy(checkpoint_config)
         self.uploader = None
-        logger.info(f"{checkpoint_config}")
-        output_dir = self.checkpoint_config.get("output_dir")
-        self.uploader = FileSystemUploader(output_dir=output_dir)
+        logger.info(f"checkpoint_config: {checkpoint_config}")
+        if self.checkpoint_config:
+            upload_type = self.checkpoint_config.pop("type", "file_system")
+            if upload_type not in uploader_registry:
+                raise ValueError(
+                    f"Unknown tracker name: {upload_type}, total registered trackers: {uploader_registry.keys()}")
+            uploader_cls = uploader_registry[upload_type]
+            self.uploader = uploader_cls(**self.checkpoint_config)
 
     def upload(self, ckpt_id, local_state_path, keep_local_file=False):
         try:

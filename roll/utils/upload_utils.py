@@ -6,6 +6,8 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
+uploader_registry = {}
+
 
 class FileSystemUploader:
     """
@@ -17,7 +19,7 @@ class FileSystemUploader:
     }
     """
 
-    def __init__(self, output_dir):
+    def __init__(self, output_dir, *args, **kwargs):
         self.output_dir = output_dir
         logger.info(f"use FileSystemUploader to upload {output_dir}")
 
@@ -27,3 +29,6 @@ class FileSystemUploader:
         logger.info(f"{local_state_path} save to {ckpt_id_output_dir}, wait...")
         shutil.copytree(local_state_path, ckpt_id_output_dir, dirs_exist_ok=True)
         logger.info(f"{local_state_path} save to {ckpt_id_output_dir}, done...")
+
+
+uploader_registry['file_system'] = FileSystemUploader
