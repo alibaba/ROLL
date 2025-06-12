@@ -38,6 +38,8 @@ def get_driver_node_name():
     assert is_driver(), "this function should only be ran on a driver"
     return os.getenv("WORKER_ID", f"{get_driver_master_addr()}:{get_driver_rank()}")
 
+def is_multi_tenant():
+    return os.getenv("MULTI_TENANT", "0") == "1"
 
 def execute(cmd, check=False, retry=1):
     ret = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=check)
@@ -75,7 +77,10 @@ def filter_known_msg(msg):
 
 
 def is_ray_cluster_running():
-    ret = subprocess.run(f"ray status --address {get_driver_master_addr()}:{get_driver_master_port()}", shell=True, capture_output=True)
+    if is_multi_tenant():
+        ret = subprocess.run(f"ray status --address {get_driver_master_addr()}:{get_driver_master_port()}", shell=True, capture_output=True)
+    else:
+        ret = subprocess.run(f"ray status", shell=True, capture_output=True)
     if ret.returncode != 0:
         return False
     return True
