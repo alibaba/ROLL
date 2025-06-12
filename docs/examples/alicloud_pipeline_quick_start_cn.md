@@ -5,7 +5,18 @@
 - 单机版本 可选择 GPU：NVIDIA V100
 - 建议您通过ECS控制台购买GPU实例时，同步选中安装GPU驱动
 2. 远程连接GPU实例，进入机器终端
-3. 安装 Docker 环境：参考 https://developer.aliyun.com/mirror/docker-ce/
+3. 安装 NVIDIA容器工具包
+```shell
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | \
+  sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
+  
+# 安装 NVIDIA Container Toolkit 软件包
+sudo yum install -y nvidia-container-toolkit
+
+# 重启docker
+sudo systemctl restart docker
+```
+4. 安装 Docker 环境：参考 https://developer.aliyun.com/mirror/docker-ce/
 ```shell
 # step 1: 安装必要的一些系统工具
 sudo yum install -y yum-utils
@@ -22,17 +33,7 @@ sudo service docker start
 # 安装校验
 docker version
 ```
-4. 安装 NVIDIA容器工具包
-```shell
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | \
-  sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
-  
-# 安装 NVIDIA Container Toolkit 软件包
-sudo yum install -y nvidia-container-toolkit
 
-# 重启docker
-sudo systemctl restart docker
-```
 
 ## 环境配置
 ```shell
@@ -47,14 +48,13 @@ sudo docker pull <image_address>
 
 # 2. 启动一个docker容器，指定GPU支持，并始终保持容器运行
 sudo docker images
-sudo docker exec -it <image_id> /bin/bash
-sudo docker run -d \
+sudo docker run -dit \
   --gpus all \
   --network=host \
   --ipc=host \
   --shm-size=2gb \
   <image_id> \
-  /bin/bash -c 'tail -f /dev/null'
+  /bin/bash
 
 # 3. 进入docker容器（下次重新连接也要执行这条命令）
 sudo docker ps
