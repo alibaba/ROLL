@@ -19,7 +19,7 @@ def is_distribute_initialized():
 def _set_random_seed(seed_):
     """Set random seed for reproducability."""
     if seed_ is not None and seed_ > 0:
-        seed = seed_  # TuningFactory dataloader requires seed be the same for all ranks
+        seed = seed_  # some dist dataloaders may require the same seed for all ranks
         # # Ensure that different pipeline MP stages get different seeds.
         # seed = seed_ + (100 * mpu.get_pipeline_model_parallel_rank())
         # # Ensure different data parallel ranks get different seeds

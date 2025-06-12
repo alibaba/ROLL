@@ -6,7 +6,7 @@ import torch
 from megatron.core import mpu
 from megatron.core.tensor_parallel import model_parallel_cuda_manual_seed
 from tqdm import tqdm
-from transformers import AutoConfig, AutoTokenizer, HfArgumentParser
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, HfArgumentParser
 
 from mcore_adapter.models import AutoModel as AutoMcaModel
 from mcore_adapter.models.converter.dist_converter import DistConverter
@@ -39,6 +39,8 @@ def convert_hf_to_mca(convert_args: ConvertArguments, dist_args: DistributingPar
     template: "Template" = get_template(hf_config.model_type)
     mca_config = template.convert_hf_to_mca_config(
         hf_config,
+        bf16=convert_args.bf16,
+        fp16=convert_args.fp16,
         **dist_args.get_config_dict()
     )
     template.set_mca_config_for_ops(mca_config)
@@ -97,7 +99,19 @@ def convert_hf_to_mca(convert_args: ConvertArguments, dist_args: DistributingPar
         template.release()
 
     tokenizer = AutoTokenizer.from_pretrained(convert_args.checkpoint_path, trust_remote_code=True)
-    tokenizer.save_pretrained(convert_args.output_path)
+    try:
+        processor = AutoProcessor.from_pretrained(convert_args.checkpoint_path, trust_remote_code=True)
+    except Exception as e:
+        logger.info(f"Processor was not found: {e}.")
+        processor = tokenizer
+    if processor is not None and "Processor" not in processor.__class__.__name__:
+        processor = None
+
+    if processor is not None:
+        setattr(processor, "tokenizer", tokenizer)
+    else:
+        processor = tokenizer
+    processor.save_pretrained(convert_args.output_path)
 
 def convert_mca_to_hf(convert_args: ConvertArguments):
     torch_dtype = None

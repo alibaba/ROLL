@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass, field, fields
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from transformers import Seq2SeqTrainingArguments as HFSeq2SeqTrainingArguments
 from transformers import TrainingArguments as HFTrainingArguments
@@ -93,6 +93,13 @@ class DistributingParallelArguments:
             "choices": ["uniform", "recompute"],
         },
     )
+    recompute_modules: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "A comma-separated list of modules to recompute. Only effective when recompute_granularity "
+            "is set to 'selective'. Choices: core_attn, moe_act, layernorm, mla_up_proj, mlp, moe. Default: core_attn"
+        },
+    )
     recompute_num_layers: Optional[int] = field(
         default=None,
         metadata={
@@ -162,50 +169,12 @@ class DistributingParallelArguments:
             " Without this, the shared epxerts execute after the routed experts."
         },
     )
-    # fp8
-    fp8: Optional[Literal["e4m3", "hybrid"]] = field(
+    moe_router_dtype: Optional[str] = field(
         default=None,
         metadata={
-            "help": "If set, enables the use of FP8 precision through Transformer Engine. There are 2 predefined"
-            "choices (1) 'e4m3' uniformly uses e4m3 for all FP8 tensors, (2) 'hybrid' uses e4m3 for all FP8"
-            "activation and weight tensors and e5m2 for all FP8 output activation gradient tensors.",
-            "choices": ["e4m3", "hybrid"],
+            "help": "Data type for routing and expert output weighted averaging. Using fp32 or fp64 can "
+            "improve stability especially when the number of experts is large. None means no changes for dtype.",
         },
-    )
-    fp8_margin: int = field(
-        default=0,
-        metadata={"help": "Controls the margin for FP8 scaling factor."},
-    )
-    fp8_interval: int = field(
-        default=1,
-        metadata={"help": "Controls how often the scaling factor is recomputed."},
-    )
-    fp8_amax_history_len: int = field(
-        default=1,
-        metadata={"help": "The length of the amax history window used for scaling factor computation."},
-    )
-    fp8_amax_compute_algo: Literal["most_recent", "max"] = field(
-        default="most_recent",
-        metadata={
-            "help": "Algorithm used for choosing the `amax` value for the scaling factor computation. There are 2"
-            "predefined choices: `max` chooses the largest `amax` in the history window, while `most_recent`"
-            "always chooses the most recently seen value.",
-            "choices": ["most_recent", "max"],
-        },
-    )
-    fp8_wgrad: bool = field(
-        default=True,
-        metadata={
-            "help": "When set to False, override FP8 config options and do the wgrad computation in higher precision."
-        },
-    )
-    fp8_dot_product_attention: bool = field(
-        default=False,
-        metadata={"help": "When set to True, use the FP8 implementation of Dot Product Attention."},
-    )
-    fp8_multi_head_attention: bool = field(
-        default=False,
-        metadata={"help": "When set to True, use the FP8 implementation of Multi Head Attention."},
     )
     # train options
     calculate_per_token_loss: bool = field(
@@ -222,9 +191,24 @@ class DistributingParallelArguments:
             "choices": ["local", "transformer_engine"],
         },
     )
+    additional_configs: Optional[Union[dict, str]] = field(
+        default_factory=dict,
+        metadata={
+            "help": "Dictionary or Path to a JSON file containing additional configuration parameters for the model.",
+        },
+    )
 
     def __post_init__(self):
-        pass
+        if self.additional_configs is not None and isinstance(self.additional_configs, str):
+            try:
+                with open(self.additional_configs, "r", encoding="utf-8") as f:
+                    self.additional_configs = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load additional configs from {self.additional_configs}: {e}")
+                raise e
+
+        if self.recompute_modules is not None and isinstance(self.recompute_modules, str):
+            self.recompute_modules = self.recompute_modules.split(",")
 
     def get_config_dict(self):
         return {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) is not None}

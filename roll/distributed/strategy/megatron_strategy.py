@@ -196,17 +196,7 @@ class MegatronInferStrategy(InferenceStrategy):
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, **forward_args
         )
 
-        def cp_loss_func_wrap(loss_func):
-            def cp_loss_func(*args, **kwargs):
-                res = loss_func(*args, **kwargs)
-                loss = res[0]
-                if loss is not None and mpu.get_context_parallel_world_size() > 1:
-                    loss = loss * mpu.get_context_parallel_world_size()
-                return loss, *res[1:]
-
-            return cp_loss_func
-
-        return output_tensor, partial(cp_loss_func_wrap(loss_func), data)
+        return output_tensor, partial(loss_func, data)
 
     def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
         pass

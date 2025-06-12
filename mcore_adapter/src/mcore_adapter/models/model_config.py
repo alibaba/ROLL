@@ -72,10 +72,13 @@ class PretrainedConfig:
         os.makedirs(save_directory, exist_ok=True)
         output_config_file = os.path.join(save_directory, MCA_CONFIG_NAME)
         self.to_json_file(output_config_file)
-        self.save_hf_auto_map_files(save_directory)
+        config_dict = json.loads(self.hf_config_json) if self.hf_config_json else {}
+        if "auto_map" in config_dict:
+            self.save_hf_auto_map_files(save_directory)
 
     def save_hf_auto_map_files(self, save_directory: str):
         # name_or_path denotes the path of the from_pretrained model, i.e., where auto map files are located
+        # TODO: should archive the auto map files in a cache path
         hf_files_path = self.name_or_path
         if not (hf_files_path and os.path.isdir(hf_files_path)):
             return
@@ -88,9 +91,16 @@ class PretrainedConfig:
                     shutil.copyfile(full_path, dest_path)
 
     def update_with_args(self, args: "DistributingParallelArguments", verbose: bool = True):
+        if args.additional_configs is not None:
+            for k, v in args.additional_configs.items():
+                if hasattr(self, k):
+                    setattr(self, k, v)
+                else:
+                    logger.warning(f"Config {k} is not found in model config, will not update it.")
+
         for f in dataclasses.fields(DistributingParallelArguments):
             name = f.name
-            if not hasattr(self, name):
+            if name in ["additional_configs"] or not hasattr(self, name):
                 continue
             # args config has higher priority
             if getattr(args, name) is None:
@@ -146,7 +156,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         default="rope",
         metadata={
             "help": "Position embedding type.",
-            "choices": ["learned_absolute", "rope", "none"],
+            "choices": ["learned_absolute", "rope", "mrope", "none"],
         },
     )
     padded_vocab_size: Optional[int] = field(
@@ -229,6 +239,11 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             logger.warning("When tensor parallelism is not used, cannot use sequence parallelism!")
             self.sequence_parallel = False
         self.attention_backend = check_and_get_attention_backend_by_env(self.attention_backend)
+        if self.num_moe_experts is not None and self.num_moe_experts >= 32 and self.moe_router_dtype is None:
+            self.moe_router_dtype = "fp32"
+            logger.warning(f"Using {self.moe_router_dtype} for moe_router_dtype, "
+                           "since num_moe_experts is large and moe_router_dtype not set.")
+
         super().__post_init__()
         pipeline_size = self.pipeline_model_parallel_size
         if self.virtual_pipeline_model_parallel_size is not None:

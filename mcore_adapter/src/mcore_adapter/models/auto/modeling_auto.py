@@ -21,7 +21,7 @@ MODEL_MAPPING_NAMES = {
     "qwen2_moe": McaGPTModel,
     "qwen3_moe": McaGPTModel,
     "qwen2_vl": Qwen2VLModel,
-    "qwen2_5_vl": Qwen2_5_VLModel
+    "qwen2_5_vl": Qwen2_5_VLModel,
 }
 
 

@@ -7,8 +7,6 @@ if TYPE_CHECKING:
     from torch import Tensor
 
 
-TURBO_LAYER_PREFIX = "decoder.layers."
-TURBO_MOE_PREFIX = ".mlp.experts.local_experts."
 MAX_SHARD_SIZE = 5_000_000_000  # 5GB
 
 # below is copy from huggingface-hub

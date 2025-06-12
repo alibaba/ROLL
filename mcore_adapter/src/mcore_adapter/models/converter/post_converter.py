@@ -2,7 +2,13 @@ from itertools import product
 from typing import TYPE_CHECKING, Optional
 
 import torch
-from transformers import AutoModelForCausalLM, AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoModelForVision2Seq,
+    AutoProcessor,
+    AutoTokenizer,
+)
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from ...checkpointing import get_checkpoint_name
@@ -10,12 +16,6 @@ from ...utils import get_logger
 from ..auto.config_auto import AutoConfig
 from .dist_converter import DistConverter
 from .template import get_template
-
-
-try:
-    from transformers import AutoModelForImageTextToText
-except ImportError:
-    AutoModelForImageTextToText = AutoModelForVision2Seq
 
 
 if TYPE_CHECKING:
@@ -121,8 +121,17 @@ def convert_checkpoint_to_hf(model_name_or_path: str, save_directory: str, torch
     )
     model.save_pretrained(save_directory)
     mca_config.save_hf_auto_map_files(save_directory)
-    processor_class = AutoTokenizer
-    if mca_config.hf_model_type in ["qwen2_vl", "qwen2_5_vl"]:
-        processor_class = AutoProcessor
-    processor = processor_class.from_pretrained(model_name_or_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
+    try:
+        processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
+    except Exception as e:
+        logger.info(f"Processor was not found: {e}.")
+        processor = tokenizer
+    if processor is not None and "Processor" not in processor.__class__.__name__:
+        processor = None
+
+    if processor is not None:
+        setattr(processor, "tokenizer", tokenizer)
+    else:
+        processor = tokenizer
     processor.save_pretrained(save_directory)

@@ -149,6 +149,7 @@ register_dist_config(
     default_dist_config.merge_configs(shared_moe_dist_config),
 )
 
+
 register_dist_config(
     ["qwen2_vl", "qwen2_5_vl"],
     [

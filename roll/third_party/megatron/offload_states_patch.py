@@ -14,7 +14,7 @@ import gc
 import types
 from collections import defaultdict
 from enum import Enum
-from typing import Container, List, Tuple, Union
+from typing import Container, List, Union
 
 import torch
 from megatron.core import DistributedDataParallel
@@ -24,9 +24,8 @@ from megatron.core.optimizer import MegatronOptimizer, ChainedOptimizer, FP32Opt
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.moe.legacy_a2a_token_dispatcher import MoEAlltoAllSEQTokenDispatcher
 from megatron.core.transformer.moe.moe_layer import MoELayer
-from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher, MoEAllGatherTokenDispatcher, \
-    MoETokenDispatcher
-from megatron.core.utils import is_float8tensor
+from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher, MoEAllGatherTokenDispatcher
+from megatron.core.fp8_utils import is_float8tensor
 from torch import Tensor
 
 from roll.utils.offload_states import move_tensors_to_device_buffer, move_device_buffer_to_tensors

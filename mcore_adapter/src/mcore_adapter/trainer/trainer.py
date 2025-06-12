@@ -241,7 +241,7 @@ class McaTrainer(Trainer):
                 loss_info, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group()
             )
             losses, loss_mask = loss_info[0], loss_info[1]
-        loss = losses
+        loss = losses.clone()  # clone to make sure loss is not a view
         local_num_tokens = loss_mask.clone().detach()
         if local_num_tokens == 0:
             local_num_tokens += 1  # avoid divide by zero
@@ -249,8 +249,7 @@ class McaTrainer(Trainer):
             metrics = {"loss": (loss.clone().detach(), local_num_tokens)}
         else:
             metrics = {"loss": (loss / local_num_tokens).clone().detach()}
-        # reason for loss * cp_size: https://github.com/NVIDIA/Megatron-LM/issues/673
-        return loss * cp_size, local_num_tokens.int(), metrics
+        return loss, local_num_tokens.int(), metrics
 
     def _inner_forward_step(self, data_iterator: Iterator, model: DistributedDataParallel):
         outputs = self._pre_compute_loss(data_iterator, model)

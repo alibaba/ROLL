@@ -180,7 +180,7 @@ class DPOTrainer(McaTrainer):
             "sft_loss": sft_loss.detach(),
             # TODO: is logits mean needed for metrics? it needs more calculation and communication
         }
-        return loss * cp_size, metrics
+        return loss, metrics
 
     def _inner_compute_log_probs_forward_step(self, data_iterator: Iterator, model):
         outputs = self._pre_compute_loss(data_iterator, model, compute_ref_logps=True)
