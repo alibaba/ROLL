@@ -44,7 +44,12 @@ def load_hf_model(model: PreTrainedModel):
     if device_map is None:
         model.to("cuda")
     else:
-        [model.get_submodule(layer_name).to(f"cuda:{device_id}") for layer_name, device_id in device_map.items()]
+        [
+            model.get_submodule(layer_name).to(
+                device_id if isinstance(device_id, torch.device) else f"cuda:{device_id}"
+            )
+            for layer_name, device_id in device_map.items()
+        ]
 
 
 def get_mapping_to_flat_buffer(tensors: List[torch.Tensor]) -> List[Tuple[torch.Tensor, int, int]]:

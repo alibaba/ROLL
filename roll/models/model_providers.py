@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, List
 
 import torch
 from transformers import (
@@ -7,6 +7,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
+    AutoModelForVision2Seq,
     AutoProcessor,
     AutoTokenizer,
     PreTrainedTokenizer,
@@ -101,7 +102,7 @@ def load_model(
     init_kwargs = {"trust_remote_code": True, **model_args.model_config_kwargs}
     config = AutoConfig.from_pretrained(model_name_or_path, **init_kwargs)
     if model_args.attn_implementation is not None and model_args.attn_implementation != "auto":
-        setattr(config, "attn_implementation", model_args.attn_implementation)
+        setattr(config, "_attn_implementation", model_args.attn_implementation)
     if not is_trainable:
         setattr(config, "use_cache", True)
     if model_args.moe_aux_loss_coef is not None:
@@ -116,7 +117,11 @@ def load_model(
 
     init_kwargs["config"] = config
     init_kwargs["pretrained_model_name_or_path"] = model_name_or_path
-    model = AutoModelForCausalLM.from_pretrained(**init_kwargs)
+    if type(config) in AutoModelForVision2Seq._model_mapping.keys():  # assume built-in models
+        model_class = AutoModelForVision2Seq  # image and video
+    else:
+        model_class = AutoModelForCausalLM  # text
+    model = model_class.from_pretrained(**init_kwargs)
     if not model_args.disable_gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
@@ -153,12 +158,172 @@ def load_model(
     return model
 
 
+def patch_model(model, config, use_mcore):
+    import types
+
+    model_type = config.model_type
+
+    forward_patch = None
+    # patch to force vit forward with mock image to avoid hang
+    if use_mcore:
+        if "qwen2_vl" == model_type or "qwen2_5_vl" == model_type:
+
+            def forward_patch(
+                self,
+                input_ids: "torch.Tensor",
+                position_ids: Optional["torch.Tensor"] = None,
+                attention_mask: Optional["torch.Tensor"] = None,
+                decoder_input: Optional["torch.Tensor"] = None,
+                labels: Optional["torch.Tensor"] = None,
+                pixel_values: Optional["torch.Tensor"] = None,
+                pixel_values_videos: Optional["torch.Tensor"] = None,
+                image_grid_thw: Optional["torch.LongTensor"] = None,
+                video_grid_thw: Optional["torch.LongTensor"] = None,
+                second_per_grid_ts: Optional[torch.Tensor] = None,  # for videos
+                **kwargs,
+            ):
+                force_vit_image = kwargs.pop("force_vit_image", False)
+                force_vit_video = kwargs.pop("force_vit_video", False)
+                if position_ids is None and input_ids is not None:
+                    position_ids, _ = self.get_rope_index(
+                        input_ids, image_grid_thw, video_grid_thw, second_per_grid_ts, attention_mask
+                    )
+                cp_batch = {
+                    "position_ids": position_ids,
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                }
+                if self.config.context_parallel_size > 1:
+                    cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
+                    cp_batch = (
+                        type(self)
+                        .mro()[1]
+                        .get_batch_on_this_cp_rank(self, cp_batch, dim3_keys=["attention_mask", "position_ids"])
+                    )
+                if (
+                    not self.pre_process
+                    or (pixel_values is None and pixel_values_videos is None)
+                    or decoder_input is not None
+                ):
+                    return (
+                        type(self)
+                        .mro()[1]
+                        .forward(self, decoder_input=decoder_input, labels=labels, **cp_batch, **kwargs)
+                    )
+                inputs_ranges = self.get_input_ranges(input_ids.shape[1])
+                inputs_embeds = self.embedding(input_ids=cp_batch["input_ids"], position_ids=cp_batch["position_ids"])
+                if pixel_values is not None:
+                    inputs_embeds = self.construct_inputs_embeds(
+                        input_ids,
+                        inputs_embeds,
+                        pixel_values,
+                        image_grid_thw,
+                        inputs_ranges,
+                        self.config.image_token_id,
+                    )
+                elif force_vit_image:
+                    # force vit forward with mock image to avoid hang
+                    inputs_embeds = self._handle_missing_visual(inputs_embeds)
+                if pixel_values_videos is not None:
+                    inputs_embeds = self.construct_inputs_embeds(
+                        input_ids,
+                        inputs_embeds,
+                        pixel_values_videos,
+                        video_grid_thw,
+                        inputs_ranges,
+                        self.config.video_token_id,
+                    )
+                elif force_vit_video:
+                    # force vit forward with mock image to avoid hang
+                    inputs_embeds = self._handle_missing_visual(inputs_embeds)
+                decoder_input = inputs_embeds
+                return (
+                    type(self).mro()[1].forward(self, decoder_input=decoder_input, labels=labels, **cp_batch, **kwargs)
+                )
+
+        if forward_patch is not None:
+            for model_chunk in model.get_models():
+                model_chunk.forward = types.MethodType(forward_patch, model_chunk)
+    else:
+        if "qwen2_vl" == model_type or "qwen2_5_vl" == model_type:
+            ori_forward = type(model).forward
+
+            def _handle_missing_visual(self, inputs_embeds: "torch.FloatTensor"):
+                mock_pixel_values = torch.zeros(
+                    4,
+                    self.config.vision_config.in_channels
+                    * self.config.vision_config.temporal_patch_size
+                    * self.config.vision_config.patch_size
+                    * self.config.vision_config.patch_size,
+                    device=inputs_embeds.device,
+                    dtype=inputs_embeds.dtype,
+                )
+                mock_grid_thw = torch.LongTensor([[1, 2, 2]]).to(inputs_embeds.device)
+                image_embeddings = self.visual(mock_pixel_values, grid_thw=mock_grid_thw)
+                inputs_embeds = inputs_embeds + image_embeddings.mean() * 0
+                return inputs_embeds
+
+            def forward_patch(
+                self,
+                input_ids: torch.LongTensor = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                position_ids: Optional[torch.LongTensor] = None,
+                past_key_values: Optional[List[torch.FloatTensor]] = None,
+                inputs_embeds: Optional[torch.FloatTensor] = None,
+                labels: Optional[torch.LongTensor] = None,
+                use_cache: Optional[bool] = None,
+                output_attentions: Optional[bool] = None,
+                output_hidden_states: Optional[bool] = None,
+                return_dict: Optional[bool] = None,
+                pixel_values: Optional[torch.Tensor] = None,
+                pixel_values_videos: Optional[torch.FloatTensor] = None,
+                image_grid_thw: Optional[torch.LongTensor] = None,
+                video_grid_thw: Optional[torch.LongTensor] = None,
+                rope_deltas: Optional[torch.LongTensor] = None,
+                cache_position: Optional[torch.LongTensor] = None,
+                **kwargs,
+            ):
+                assert inputs_embeds is None
+                if kwargs.pop("force_vit_image", False) and pixel_values is None:
+                    # force vit forward with mock image to avoid hang
+                    inputs_embeds = self.model.embed_tokens(input_ids)
+                    inputs_embeds = _handle_missing_visual(self, inputs_embeds)
+                if kwargs.pop("force_vit_video", False) and pixel_values_videos is None:
+                    if inputs_embeds is None:
+                        inputs_embeds = self.model.embed_tokens(input_ids)
+                    # force vit forward with mock image to avoid hang
+                    inputs_embeds = _handle_missing_visual(self, inputs_embeds)
+                return ori_forward(
+                    self,
+                    input_ids,
+                    attention_mask,
+                    position_ids,
+                    past_key_values,
+                    inputs_embeds,
+                    labels,
+                    use_cache,
+                    output_attentions,
+                    output_hidden_states,
+                    return_dict,
+                    pixel_values,
+                    pixel_values_videos,
+                    image_grid_thw,
+                    video_grid_thw,
+                    rope_deltas,
+                    cache_position,
+                )
+
+        if forward_patch is not None:
+            model.forward = types.MethodType(forward_patch, model)
+
+
 def default_actor_model_provider(
     tokenizer: "PreTrainedTokenizer",
     model_args: "ModelArguments",
     training_args: "TrainingArguments" = None,
     is_trainable: Optional[bool] = False,
 ):
+    config = AutoConfig.from_pretrained(model_args.model_name_or_path)
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
     if (
@@ -170,7 +335,6 @@ def default_actor_model_provider(
         if model_args.moe_aux_loss_coef is not None and training_args.moe_aux_loss_coeff is None:
             training_args.moe_aux_loss_coeff = model_args.moe_aux_loss_coef
         model = AutoModel.from_pretrained(model_args.model_name_or_path, training_args)
-        freeze_model(model, model_args)
         if is_trainable:
             model.train()
             for param in model.parameters():
@@ -179,6 +343,8 @@ def default_actor_model_provider(
             model.eval()
             for param in model.parameters():
                 param.requires_grad = False
+        freeze_model(model, model_args)
+        patch_model(model, config, use_mcore=True)
     else:
         # hf
         init_kwargs = {
@@ -197,6 +363,7 @@ def default_actor_model_provider(
         model = load_model(model_args, is_trainable, False)
         if model.config.pad_token_id is None:
             model.config.pad_token_id = tokenizer.pad_token_id
+        patch_model(model, config, use_mcore=False)
 
     model_args.model_name_or_path = old_model_name_or_path
     return model

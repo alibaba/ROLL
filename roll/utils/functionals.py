@@ -415,7 +415,10 @@ def expand_to_token_level(data: "DataProto"):
     attention_mask = data.batch["attention_mask"]
     position_ids = data.batch["position_ids"]
     if position_ids.dim() == 3:
-        # qwen2vl, (bsz, 3, seqlen), 0/1/2 is same for text
+        # qwen2vl, (bsz, 3, seqlen), 0/1/2 is same for text, while values of
+        # position_ids for text cannot stand for index of tokens, thus use the
+        # right padding attention_mask to calculate eos index or `argmax` rather
+        # than `max` of position_ids to calculate eos index
         position_ids = position_ids[:, 0]
     eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
     token_level_rewards = torch.zeros_like(attention_mask, dtype=response_level_rewards.dtype)  # (bsz, seqlen)
@@ -437,8 +440,9 @@ def batch_reward_norm(response_level_rewards: torch.Tensor, div_std=True):
     return normalized_rewards
 
 
-def group_reward_norm(response_level_rewards: torch.Tensor, n_sample=-1, div_std=True, div_std_global=False):
+def group_reward_norm(data: "DataProto", n_sample=-1, div_std=True, div_std_global=False):
     assert n_sample > 1, "n_sample must > 1"
+    response_level_rewards = data.batch["response_level_rewards"].clone().detach()
     reshape_reward = response_level_rewards.reshape(*response_level_rewards.size()[:-1], -1, n_sample)
     reshape_reward = reshape_reward - reshape_reward.mean(dim=-1, keepdim=True)
     if div_std:
@@ -446,8 +450,8 @@ def group_reward_norm(response_level_rewards: torch.Tensor, n_sample=-1, div_std
             reshape_reward = reshape_reward / (torch.std(reshape_reward, dim=-1, keepdim=True) + 1e-6)
         else:
             reshape_reward = reshape_reward / (torch.std(reshape_reward) + 1e-6)
-    response_level_rewards = reshape_reward.reshape(*response_level_rewards.size())
-    return response_level_rewards
+    data.batch["response_level_rewards"] = reshape_reward.reshape(*response_level_rewards.size())
+    return data
 
 
 def difficulty_mask(data: "DataProto", n_sample=-1, low_threshold=0.1, high_threshold=0.95):
@@ -506,13 +510,13 @@ def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_c
     if pipeline_config.adv_estimator == "grpo" or pipeline_config.reward_norm == "group":
         if pipeline_config.reward_shift:
             response_level_rewards = group_reward_norm(
-                response_level_rewards,
+                data,
                 n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
                 div_std=False,
             )
         else:
             response_level_rewards = group_reward_norm(
-                response_level_rewards,
+                data,
                 n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
                 div_std=True,
             )
@@ -778,9 +782,18 @@ def postprocess_generate(
         attention_mask[i][:valid_length] = 1
         attention_mask[i][valid_length:] = 0
         new_response_mask[i][valid_length - response_length : valid_length] = 1
-        if position_ids.dim() == 3:
+        if position_ids.dim() == 3 and shift > 0:
             # shift as output to convert to right padding
+            # NOTE: left shift without clear right might lead to unclean values
+            # in right part, which especially is the case when using long prompt
+            # length and short response length. This usually makes no effect if
+            # mask is right, while it might make trouble to for multi-modal model
+            # like Qwen2-vl, since extra image_token would be left which might
+            # cause error: Image features and image tokens do not match
             output_position_ids[i, ..., :-shift] = output_position_ids[i, ..., shift:].clone()
+            # only clean in VLM(qwen2-vl) to make no effect on LLM
+            if prompt_length > response_length:
+                output[i, -shift:] = pad_token_id
 
     prompt_mask = (attention_mask == 1) & (new_response_mask == 0)
     if position_ids.dim() == 3:

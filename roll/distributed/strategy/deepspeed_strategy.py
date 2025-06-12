@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict
 from datetime import timedelta
 from typing import Callable, Tuple, Dict
 
@@ -46,6 +47,9 @@ class DeepSpeedInferStrategy(InferenceStrategy):
             * self.worker_config.training_args.gradient_accumulation_steps
             * self.worker.world_size
         )
+        self.worker_config.strategy_args.strategy_config["gradient_clipping"] = (
+            self.worker.pipeline_config.max_grad_norm
+        )
         self.ds_config = HfDeepSpeedConfig(self.worker_config.strategy_args.strategy_config)
 
     def initialize(self, model_provider):
@@ -61,30 +65,6 @@ class DeepSpeedInferStrategy(InferenceStrategy):
 
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
-
-        # in transformers 4.49.0, qwen2.5-vl using fa2 with apply_rotary_pos_emb_flashatt
-        # has dtype error when used with deepspeed, please refer to
-        # https://github.com/huggingface/transformers/pull/36188
-        # in transformers 4.50.0, shape error: shape '[8, 5120, -1, 128]' is invalid for
-        # query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        # https://github.com/QwenLM/Qwen2.5-VL/issues/1032
-        # patch for transformers 4.49.0 currently
-        try:
-            import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as modeling_qwen2_5_vl
-
-            def apply_rotary_pos_emb_flashatt(
-                q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-            ) -> Tuple[torch.Tensor, torch.Tensor]:
-                cos = cos.chunk(2, dim=-1)[0].contiguous()
-                sin = sin.chunk(2, dim=-1)[0].contiguous()
-                q_embed = modeling_qwen2_5_vl.apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
-                k_embed = modeling_qwen2_5_vl.apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
-                return q_embed, k_embed
-
-            modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = apply_rotary_pos_emb_flashatt
-        except:
-            # if not include qwen2_5_vl, throw exception by others
-            pass
 
         model = model_provider(tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=False)
 
@@ -122,14 +102,24 @@ class DeepSpeedInferStrategy(InferenceStrategy):
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
             if "multi_modal_inputs" in data.non_tensor_batch:
                 multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
-                for key in multi_modal_inputs[0].keys():
+                multi_modal_data = defaultdict(list)
+                # mm inputs of some samples would be empty to allow text and mm
+                # mixed data
+                for sample_mm_inputs in multi_modal_inputs:
+                    for key in sample_mm_inputs.keys():
+                        multi_modal_data[key].append(sample_mm_inputs[key])
+                for key in multi_modal_data.keys():
                     assert key not in forward_args
                     # DataProto.to('cuda') in upper frame not work for non_tensor_batch
-                    forward_args[key] = torch.concat([inputs[key] for inputs in multi_modal_inputs], dim=0).to(
-                        input_ids.device
-                    )
+                    forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
+                forward_args.update({"force_vit_image": True})
+            # set use_cache=False manually for the same reason as HfInferStrategy
             output = self.model(
-                input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, **forward_args
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=False,
+                **forward_args,
             )
             loss, loss_reduced = forward_func(data, output.logits)
             losses_reduced.append(loss_reduced)
@@ -222,30 +212,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         self.worker.rank_info.dp_size = dist.get_world_size()
 
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
-
-        # in transformers 4.49.0, qwen2.5-vl using fa2 with apply_rotary_pos_emb_flashatt
-        # has dtype error when used with deepspeed, please refer to
-        # https://github.com/huggingface/transformers/pull/36188
-        # in transformers 4.50.0, shape error: shape '[8, 5120, -1, 128]' is invalid for
-        # query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        # https://github.com/QwenLM/Qwen2.5-VL/issues/1032
-        # patch for transformers 4.49.0 currently
-        try:
-            import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as modeling_qwen2_5_vl
-
-            def apply_rotary_pos_emb_flashatt(
-                q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-            ) -> Tuple[torch.Tensor, torch.Tensor]:
-                cos = cos.chunk(2, dim=-1)[0].contiguous()
-                sin = sin.chunk(2, dim=-1)[0].contiguous()
-                q_embed = modeling_qwen2_5_vl.apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
-                k_embed = modeling_qwen2_5_vl.apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
-                return q_embed, k_embed
-
-            modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = apply_rotary_pos_emb_flashatt
-        except:
-            # if not include qwen2_5_vl, throw exception by others
-            pass
+        self.processor = default_processor_provider(model_args=self.worker_config.model_args)
 
         model = model_provider(tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=True)
 
@@ -266,7 +233,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         logger.info(f"max steps worker train {self.worker_config.training_args.max_steps}")
 
         scheduler = get_scheduler(
-            "cosine",
+            self.worker_config.training_args.lr_scheduler_type,
             optimizer,
             num_warmup_steps=self.worker_config.training_args.get_warmup_steps(
                 self.worker_config.training_args.max_steps
@@ -309,12 +276,17 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
             if "multi_modal_inputs" in data.non_tensor_batch:
                 multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
-                for key in multi_modal_inputs[0].keys():
+                multi_modal_data = defaultdict(list)
+                # mm inputs of some samples would be empty to allow text and mm
+                # mixed data
+                for sample_mm_inputs in multi_modal_inputs:
+                    for key in sample_mm_inputs.keys():
+                        multi_modal_data[key].append(sample_mm_inputs[key])
+                for key in multi_modal_data.keys():
                     assert key not in forward_args
                     # DataProto.to('cuda') in upper frame not work for non_tensor_batch
-                    forward_args[key] = torch.concat([inputs[key] for inputs in multi_modal_inputs], dim=0).to(
-                        input_ids.device
-                    )
+                    forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
+                forward_args.update({"force_vit_image": True})
             output = self.model(
                 input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, **forward_args
             )
@@ -327,6 +299,9 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                 self.load_states(include=[OffloadStateType.optimizer_states])
             self.model.step()
             if is_gradient_accumulation_boundary:
+                # global_grad_norm is calculated in optimizer.step thus put it
+                # into metrics after optimizer.step
+                metrics.update({self.worker_config.name + "/" + "grad_norm": self.model.get_global_grad_norm().item()})
                 self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
         return metrics
 

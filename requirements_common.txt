@@ -2,7 +2,7 @@ ray
 numpy<2.0a0,>=1.25
 tensordict
 sympy==1.13.1
-transformers
+transformers==4.51.2
 modelscope
 datasets==3.1.0
 tqdm

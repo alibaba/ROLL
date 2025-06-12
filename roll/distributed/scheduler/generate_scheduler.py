@@ -80,11 +80,6 @@ class GenerateScheduler:
 
         generate_opt_level = pipeline_config.generate_opt_level
         num_return_sequences = actor_cluster.worker_config.generating_args.num_return_sequences
-        if self.pipeline_config.drop_generation_num > 0:
-            logger.info(
-                f"num_return_sequences {num_return_sequences} increase to {num_return_sequences + pipeline_config.drop_generation_num}, to sample more."
-            )
-            num_return_sequences += pipeline_config.drop_generation_num
 
         is_num_return_sequences_expand = pipeline_config.is_num_return_sequences_expand
         if generate_opt_level == 0 and is_num_return_sequences_expand:
@@ -257,8 +252,7 @@ class GenerateScheduler:
                     request_refs = []
 
         gen_metrics = self.cluster.stop_server()
-        # generate结束时，应该收到num_return_sequences + drop_generation_num 条返回结果
-        generate_return_num = num_return_sequences + self.pipeline_config.drop_generation_num
+        generate_return_num = num_return_sequences
         response_ids_list_of_list = []
         eos_token_id = None
         pad_token_id = None
@@ -312,7 +306,6 @@ class GenerateScheduler:
 
         self.responses[prompt_id].append(data)
         required_response_count = self.cluster.worker_config.generating_args.num_return_sequences
-        required_response_count += self.pipeline_config.drop_generation_num
         self.prompt_id_2_request_ids[prompt_id].remove(data.meta_info["request_id"])
         if len(self.responses[prompt_id]) * self.response_batch_size >= required_response_count:
             # 取已经完成的prompt_id，对应的request_ids，需要都取消

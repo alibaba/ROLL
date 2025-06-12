@@ -1,4 +1,5 @@
 from concurrent import futures
+from collections import defaultdict
 from datetime import timedelta
 from typing import List, Optional, Callable, Dict, Tuple
 
@@ -66,15 +67,20 @@ class HfInferStrategy(InferenceStrategy):
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
             if "multi_modal_inputs" in data.non_tensor_batch:
                 multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
-                for key in multi_modal_inputs[0].keys():
+                multi_modal_data = defaultdict(list)
+                # mm inputs of some samples would be empty to allow text and mm
+                # mixed data
+                for sample_mm_inputs in multi_modal_inputs:
+                    for key in sample_mm_inputs.keys():
+                        multi_modal_data[key].append(sample_mm_inputs[key])
+                for key in multi_modal_data.keys():
                     assert key not in forward_args
                     # DataProto.to('cuda') in upper frame not work for non_tensor_batch
-                    forward_args[key] = torch.concat([inputs[key] for inputs in multi_modal_inputs], dim=0).to(
-                        input_ids.device
-                    )
-            # Qwen2-vl in transformers-4.48.2 requires padding_side='right' when
-            # using fa2 and past_key_values (which is not None and would init as
-            # DynamicCache when use_cache), thus set use_cache=False
+                    forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
+            # in Qwen2-vl/Qwen2.5-vl, use_cache=False should be set manually to
+            # to avoid error in _update_causal_mask, otherwise past_key_values
+            # is not None (would init as DynamicCache when use_cache) and requires
+            # left-padding when using fa2
             output = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -104,12 +110,16 @@ class HfInferStrategy(InferenceStrategy):
             forward_args = data.meta_info.get("forward_args", {})
             if "multi_modal_inputs" in data.non_tensor_batch:
                 multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
-                for key in multi_modal_inputs[0].keys():
+                multi_modal_data = defaultdict(list)
+                # mm inputs of some samples would be empty to allow text and mm
+                # mixed data
+                for sample_mm_inputs in multi_modal_inputs:
+                    for key in sample_mm_inputs.keys():
+                        multi_modal_data[key].append(sample_mm_inputs[key])
+                for key in multi_modal_data.keys():
                     assert key not in forward_args
                     # DataProto.to('cuda') in upper frame not work for non_tensor_batch
-                    forward_args[key] = torch.concat([inputs[key] for inputs in multi_modal_inputs], dim=0).to(
-                        input_ids.device
-                    )
+                    forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
             output = self.model.generate(
                 input_ids=input_ids, attention_mask=attention_mask, use_cache=True, **forward_args, **generation_config
             )

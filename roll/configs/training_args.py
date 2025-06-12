@@ -26,6 +26,9 @@ class TrainingArguments:
         default=5e-5,
         metadata={"help": "The initial learning rate for AdamW."}
     )
+    lr_scheduler_type: str = field(
+        default="linear",
+        metadata={"help": "The scheduler type to use. Refer to HF"})
     weight_decay: float = field(
         default=0.0,
         metadata={"help": "Weight decay for AdamW if we apply some."}

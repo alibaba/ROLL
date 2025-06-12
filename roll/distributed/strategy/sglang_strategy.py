@@ -14,15 +14,6 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
 import sglang as sgl
 
-# sglang v0.4.3.post4 use AutoModel.register to register qwen2_5_vl to
-# use it which conflicts with transformers newer version which would
-# registry qwen2_5_vl by itself (>=4.49.0). Thus patch here
-# While Qwen2_5_VLImageProcessor is not registered by transformers, maybe
-# it is left out which lead to model hub update for qwen2_5_vl
-# https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct/commit/6e6556e8ce728c7b3e438d75ebf04ec93403dc19
-# NOTE: NOT WORK patch directly since sglang load model in a subprocess,
-# put it into run_scheduler_process
-
 from roll.third_party.sglang import patch as sglang_patch
 
 from sglang.srt.hf_transformers_utils import get_tokenizer
@@ -189,17 +180,35 @@ class SgLangStrategy(InferenceStrategy):
         input_ids = batch.batch["input_ids"]  # (bs, prompt_length)
         attention_mask = batch.batch["attention_mask"]  # left-padded attention_mask
 
-        prompt_token_ids = gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
         image_data = None
         if "multi_modal_data" in batch.non_tensor_batch:
+            prompt_token_ids = []
             image_data = []
-            # sglang enforce str/bytes image data
+            # sglang enforce str(path or url)/bytes image data currently
+            # TODO: path image_processor.load_image with hash according to:
+            # https://github.com/sgl-project/sglang/pull/4915
             for data in batch.non_tensor_batch["multi_modal_data"]:
-                byte_stream = io.BytesIO()
-                # TODO: support multi-images
-                data["multi_modal_data"]["image"][0].save(byte_stream, "png")
-                image_data.append(byte_stream.getvalue())
-                byte_stream.close()
+                # bug exists in sglang, it only puts image str (standing for path
+                # or url) into list and leaves out image bytes. Thus when using
+                # image bytes, put it into list mannully
+                prompt_token_ids.append(data["prompt_token_ids"])
+                # for text and multi-modal mixed data
+                if (
+                    "multi_modal_data" not in data
+                    or "image" not in data["multi_modal_data"]
+                    or not data["multi_modal_data"]["image"]
+                ):
+                    image_data.append(None)
+                    continue
+                image_per_sample = []
+                for image in data["multi_modal_data"]["image"]:
+                    byte_stream = io.BytesIO()
+                    image.save(byte_stream, "png")
+                    image_per_sample.append(byte_stream.getvalue())
+                    byte_stream.close()
+                image_data.append(image_per_sample)
+        else:
+            prompt_token_ids = gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
         sglang_outputs = self.model.generate(
             input_ids=prompt_token_ids, image_data=image_data, sampling_params=self.sampling_params
         )

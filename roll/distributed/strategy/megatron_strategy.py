@@ -1,5 +1,6 @@
 import os
 import random
+from collections import defaultdict
 from functools import partial
 from typing import List, Dict, Iterator, Callable, Tuple
 
@@ -54,6 +55,9 @@ class MegatronInferStrategy(InferenceStrategy):
         super().__init__(worker)
         config_dict = self.worker_config.training_args.to_dict()
         config_dict.update(self.worker_config.strategy_args.strategy_config)
+        # maybe put max_grad_norm into training_args as transformers do, rather
+        # than in pipeline_config (PPOConfig)
+        config_dict.update({"max_grad_norm": self.worker.pipeline_config.max_grad_norm})
         logger.info(f"training_args: {config_dict}")
         self.megatron_train_args = TrainingArguments(**config_dict)
         self.model = None
@@ -98,11 +102,25 @@ class MegatronInferStrategy(InferenceStrategy):
             dist.broadcast_object_list(obj_list, src=src_rank, group=group)
             return obj_list[0]
 
+        # to avoid making side-effect on LLM, if want to broadcast non_tensor_batch,
+        # set _broadcast_non_tensor_batch into meta_info
+        broadcast_non_tensor_batch = batch.meta_info.get("_broadcast_non_tensor_batch", False)
+
         if mpu.get_pipeline_model_parallel_rank() == 0 and mpu.get_tensor_and_context_parallel_world_size() > 1:
-            batch.batch = broadcast_obj(batch.batch, mpu.get_tensor_and_context_parallel_group())
+            if broadcast_non_tensor_batch:
+                tmp_batch = broadcast_obj(batch, mpu.get_tensor_and_context_parallel_group())
+                batch.batch = tmp_batch.batch
+                batch.non_tensor_batch = tmp_batch.non_tensor_batch
+            else:
+                batch.batch = broadcast_obj(batch.batch, mpu.get_tensor_and_context_parallel_group())
 
         if mpu.get_pipeline_model_parallel_world_size() > 1:
-            batch.batch = broadcast_obj(batch.batch, mpu.get_pipeline_model_parallel_group())
+            if broadcast_non_tensor_batch:
+                tmp_batch = broadcast_obj(batch, mpu.get_pipeline_model_parallel_group())
+                batch.batch = tmp_batch.batch
+                batch.non_tensor_batch = tmp_batch.non_tensor_batch
+            else:
+                batch.batch = broadcast_obj(batch.batch, mpu.get_pipeline_model_parallel_group())
 
         return batch
 
@@ -163,12 +181,17 @@ class MegatronInferStrategy(InferenceStrategy):
             position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
         if "multi_modal_inputs" in data.non_tensor_batch:
             multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
-            for key in multi_modal_inputs[0].keys():
+            multi_modal_data = defaultdict(list)
+            # mm inputs of some samples would be empty to allow text and mm
+            # mixed data
+            for sample_mm_inputs in multi_modal_inputs:
+                for key in sample_mm_inputs.keys():
+                    multi_modal_data[key].append(sample_mm_inputs[key])
+            for key in multi_modal_data.keys():
                 assert key not in forward_args
                 # DataProto.to('cuda') in upper frame not work for non_tensor_batch
-                forward_args[key] = torch.concat([inputs[key] for inputs in multi_modal_inputs], dim=0).to(
-                    input_ids.device
-                )
+                forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
+            forward_args.update({"force_vit_image": True})
         output_tensor = model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, **forward_args
         )
@@ -378,6 +401,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         metrics = {}
         for mini_metrics in metrics_tensors:
             append_to_dict(metrics, mini_metrics)
+        
+        metrics.update({self.worker_config.name + "/" + "grad_norm": grad_norm})
 
         if self.model.config.num_moe_experts is not None and self.model.config.num_moe_experts > 1:
             reduce_aux_losses_tracker_across_ranks()

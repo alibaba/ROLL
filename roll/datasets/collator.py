@@ -73,8 +73,9 @@ class DataCollatorWithPaddingForMM:
     processor: ProcessorMixin
     extra_data_provider: Optional[callable] = None
     prompt_key: str = "prompt"
-    answer_key: Optional[str] = "extracted"
+    answer_key: Optional[str] = "ground_truth"
     image_key: Optional[str] = "image"
+    image_flag_key: Optional[str] = "image_flag"
     padding: Union[bool, str, PaddingStrategy] = True
     max_length: Optional[int] = None
     pad_to_multiple_of: Optional[int] = None
@@ -85,29 +86,39 @@ class DataCollatorWithPaddingForMM:
         # model_inputs for hf/deepspeed: input_id, attention_mask, pixel_values, image_grid_thw
         padded_features = defaultdict(list)
         un_padded_features = defaultdict(list)
+        mm_feature_keys = set()
         for feature in features:
             # cannot process as batch directly though processor output as batch
             # since pixel_values would be packed among batch images while DataProto
             # requires all data fields has same batch size
+            # if image is None, model_inputs would not inlcude image feature field
             model_inputs: BatchFeature = self.processor(
-                images=feature[self.image_key] if self.image_key else None, text=feature[self.prompt_key]
+                images=feature[self.image_key] if self.image_key and feature[self.image_flag_key] else None,
+                text=feature[self.prompt_key],
             )
             for key in filter(lambda k: k in model_inputs, self.padded_keys):
                 padded_features[key].append(model_inputs.pop(key)[0])
+            # mm feature fileds can be different because of mixed data
+            mm_feature_keys = mm_feature_keys.union(model_inputs.keys())
             # to tensors except padded_keys which would be converted after padding
             model_inputs.convert_to_tensors(tensor_type=self.return_tensors)
             if self.image_key:
-                assert model_inputs, "should have multi-modal features"
+                # allow mixed text and multi-modal data
+                # assert model_inputs, "should have multi-modal features"
                 # tensors in multi_modal_inputs dict have bsz=1 and should be
                 # concat at dim=0 before model forward
                 un_padded_features["multi_modal_inputs"].append(dict(model_inputs))
                 # inputs for infer engine, not tensors
                 un_padded_features["multi_modal_data"].append(
                     {
-                        "prompt_token_ids": self.tokenizer.encode(  # different with input_ids
-                            feature[self.prompt_key], add_special_tokens=False
-                        ),
+                        "prompt_token_ids":  # different with input_ids
+                        self.tokenizer.encode(feature[self.prompt_key], add_special_tokens=False),
                         "multi_modal_data": {"image": [feature[self.image_key]]},
+                    }
+                    if feature[self.image_flag_key]
+                    else {
+                        "prompt_token_ids":  # different with input_ids
+                        self.tokenizer.encode(feature[self.prompt_key], add_special_tokens=False),
                     }
                 )
             un_padded_features[self.answer_key].append(feature[self.answer_key])
@@ -128,18 +139,15 @@ class DataCollatorWithPaddingForMM:
         # `(bs, 3, seq_len)` to put it into DataProto which limits batch size dim
         if self.extra_data_provider:
             fun_params = inspect.signature(self.extra_data_provider).parameters
-            kwargs = dict(
-                (
-                    (key, batch[key])
-                    if key in batch
-                    else (
-                        (key, torch.concat([inputs[key] for inputs in batch["multi_modal_inputs"]], dim=0))
-                        if key in batch["multi_modal_inputs"][0]
-                        else (key, fun_params[key].default)
-                    )
-                )
-                for key in fun_params
-            )
+            kwargs = {}
+            for key in fun_params:
+                if key in batch:
+                    kwargs[key] = batch[key]
+                elif key in mm_feature_keys:
+                    mm_inputs = [inputs[key] for inputs in batch["multi_modal_inputs"] if key in inputs]
+                    kwargs[key] = torch.concat(mm_inputs, dim=0) if mm_inputs else fun_params[key].default
+                else:
+                    kwargs[key] = fun_params[key].default
             extra_data = self.extra_data_provider(**kwargs)
             batch.update(extra_data)
 
