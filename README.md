@@ -37,6 +37,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 | 📣   Updates                                                                                                                                   |
 |:-----------------------------------------------------------------------------------------------------------------------------------------------|
+| **[06/13/2025]** Support Qwen2.5 VL rlvr pipeline and upgrade mcore to 0.12 version.                    |
 | **[06/09/2025]** 🎉 ROLL tech report is now available! Access the report [here](https://arxiv.org/abs/2506.06122).                     |
 | **[05/30/2025]** 🎉 Training RLVR and Agentic RL with ROLL is now available! Explore the new capabilities.                                     |
 ---
