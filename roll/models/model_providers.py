@@ -376,9 +376,9 @@ def default_reward_model_provider(
     is_trainable: Optional[bool] = False,
 ):
     """
-    model.forward 遵循TokenClassifierOutput 协议
+    model.forward follows TokenClassifierOutput protocol
     class TokenClassifierOutput(ModelOutput):
-        logits: torch.FloatTensor   # 必须要有
+        logits: torch.FloatTensor   # Required
         loss: Optional[torch.FloatTensor] = None
         hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
         attentions: Optional[Tuple[torch.FloatTensor, ...]] = None

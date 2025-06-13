@@ -1,11 +1,11 @@
 """
-megatron offload states的实现思路：
+Megatron offload states implementation approach:
 
 offload
-释放megatron.core.distributed.distributed_data_parallel.DistributedDataParallel中的buffer
-offload optimizer中的main_weights, main_weights.to('cpu')，使用flat tensor
-offload optimizer states, to('cpu')
-offload model weights, to('cpu'), 使用flat tensor；释放shard_float16_groups和shard_fp32_groups
+Release buffers in megatron.core.distributed.distributed_data_parallel.DistributedDataParallel
+Offload main_weights in optimizer, main_weights.to('cpu'), using flat tensor
+Offload optimizer states, to('cpu')
+Offload model weights, to('cpu'), using flat tensor; release shard_float16_groups and shard_fp32_groups
 
 
 reload
@@ -221,10 +221,10 @@ def move_ddp_model_params_tensor_to_device(optimizer: DistributedOptimizer,
                     # Clone model -> main.
                     shard_model_param = model_param.detach().view(-1)[param_range.start: param_range.end]
 
-                    # shard_float16_groups 不属于optimizer state的key，可以直接替换param
-                    # 这种方式: optimizer.shard_float16_groups[
+                    # shard_float16_groups is not an optimizer state key, can directly replace param
+                    # This approach: optimizer.shard_float16_groups[
                     # group_index][len(shard_float16_params_this_group)].data = shard_model_param
-                    # 不能实现显存释放，定位到是model_param.detach()的影响，下面的fp32能正常释放
+                    # Cannot achieve memory release, identified as the effect of model_param.detach(), fp32 below can be released normally
                     optimizer.shard_float16_groups[group_index][
                         len(shard_float16_params_this_group)] = shard_model_param
                     shard_float16_params_this_group.append(shard_model_param)
@@ -252,7 +252,7 @@ def move_grad_data_to_device(optimizer,
         # else:
         #     buffer.grad_data.data = buffer.grad_data.data.to(device, non_blocking=non_blocking)
 
-        # 释放grad, 节省cpu memory
+        # Release grad, save CPU memory
         if device == torch.device('cpu'):
             buffer.grad_data.data = torch.tensor(1, dtype=buffer.grad_data.data.dtype, device=device, pin_memory=pin_memory)
             for param in buffer.params[::-1]:
@@ -438,7 +438,7 @@ def offload_megatron_no_grad_module(model_chunks: List[Union[DistributedDataPara
                                     non_blocking: bool = False
                                     ):
     """
-        需要offload一下 grad=False的参数
+        Need to offload parameters with grad=False
     """
 
     device = torch.device('cpu')

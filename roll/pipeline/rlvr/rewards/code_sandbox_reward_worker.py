@@ -79,7 +79,7 @@ class CodeTester:
         self.logger = get_logger()
 
     def check_format(self, prompt_id: str, text: str):
-        # 检查格式是否满足要求：回答中必须包含"</think>"和代码片段
+        # Check if format meets requirements: response must contain "</think>" and code blocks
         has_think_tag = "</think>" in text
         has_code_block = "```" in text
 
@@ -92,7 +92,7 @@ class CodeTester:
         return format
 
     def extract_code_blocks(self, prompt, text: str, case_type: str = "input"):
-        """提取代码块"""
+        """Extract code blocks"""
         if "<|begin_of_solution|>" in text:
             text = text.split("<|begin_of_solution|>")[-1].strip()
         if "</think>" in text:
@@ -122,7 +122,7 @@ class CodeTester:
         return codes, langs, ""
 
     def format_sandbox_test(self, test_code, code_language, case_type, test_cases) -> Optional[List[Dict]]:
-        """格式化sandbox测试用例"""
+        """Format sandbox test cases"""
         test_cases_final = []
         if code_language is None or code_language == "":
             # TDO detect programming language
@@ -249,7 +249,7 @@ class CodeTester:
         return result
 
     def sanbox_result_judge(self, test_cases: List[Dict], sandbox_results: List[Dict]) -> int:
-        """判断测试用例通过数量"""
+        """Judge the number of test cases passed"""
         pass_test_number = 0
         error_types = []
         for i, responses in enumerate(sandbox_results):
@@ -304,7 +304,7 @@ class CodeTester:
         prompt: str = "",
         flag: int = 0,
     ):
-        """单条代码测试"""
+        """Single code test"""
         info = {
             "global_step": global_step,
             "prompt_id": prompt_id,
@@ -320,11 +320,11 @@ class CodeTester:
             "error_info": [],
         }
 
-        # 判断格式是否满足要求
+        # Check if format meets requirements
         format_validation = self.check_format(prompt_id, code)
         info["format_validation"] = format_validation
         start_time = time.time()
-        # 抽取代码片段
+        # Extract code blocks
         codes, code_langs, error_info = self.extract_code_blocks(prompt, code, case_type)
         if error_info != "" or len(codes) == 0:
             info["error_info"] = ["extract_code_blocks error"]
@@ -337,13 +337,13 @@ class CodeTester:
             # TDO detect programming language
             code_language = "python"
 
-        # 格式化sandbox测试用例
+        # Format sandbox test cases
         test_cases, error_info = self.format_sandbox_test(test_code, code_language, case_type, test_cases)
         if error_info != "" or test_cases == None:
             info["error_info"] = ["format_sandbox_test error"]
             return info
 
-        # 调用sandbox测试
+        # Call sandbox testing
         succeed_test_cases, responses = self.sandbox_test(prompt_id, test_cases)
         if not responses or len(succeed_test_cases) == 0:
             info["error_info"] = ["sandbox error"]
@@ -351,7 +351,7 @@ class CodeTester:
             info["validation"] = 0
             return info
 
-        # 判断sandbox测试结果
+        # Judge sandbox test results
         pass_test_number, error_types = self.sanbox_result_judge(succeed_test_cases, responses)
 
         time_duration = time.time() - start_time
@@ -489,8 +489,8 @@ def cal_local_test(prompt_id, response, test_cases, func_name=None, num_process_
 
 class CodeSandboxRewardWorker(Worker):
     """
-    (x)Reward Model 使用 AutoModelForSequenceClassification 协议
-    面向code的sandbox 单测的 reward model
+    (x)Reward Model uses AutoModelForSequenceClassification protocol
+    Code-oriented sandbox unit test reward model
     """
 
     def __init__(self, worker_config: RewardConfig):

@@ -180,7 +180,7 @@ def stage_1_and_2_offload_states(self: DeepSpeedZeroOptimizer,
     # LP param
     if needs_offload(OffloadStateTypeEnum.lp_params, include, self.offloaded_states) and not self.bit16_groups_flat[
         0].is_cpu:
-        # NOTE: 这里只支持offload optimizer 里的参数部分
+        # NOTE: Only supports offloading parameters in optimizer here
         if pin_memory:
             if not hasattr(self, "lp_params_pin_buffers"):
                 self.lp_params_pin_buffers = [
@@ -200,7 +200,7 @@ def stage_1_and_2_offload_states(self: DeepSpeedZeroOptimizer,
         self.offloaded_states.add(OffloadStateTypeEnum.lp_params)
 
     # LP grad
-    # NOTE: 这里好像没有 grad 缓存
+    # NOTE: There seems to be no grad cache here
     if needs_offload(OffloadStateTypeEnum.lp_grads, include, self.offloaded_states):
         pass
 
@@ -231,7 +231,7 @@ def stage_1_and_2_offload_states(self: DeepSpeedZeroOptimizer,
         offload_adam_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
         self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
 
-    # NOTE: 清理额外引用，hp_mapping里包含了一份对全部flat tensor的引用
+    # NOTE: Clean up extra references, hp_mapping contains a reference to all flat tensors
     for group in self.bit16_groups:
         for param in group:
             param._hp_mapping = None
@@ -286,7 +286,7 @@ def stage_1_and_2_reload_states(self: DeepSpeedZeroOptimizer, include=None, non_
         reload_adam_states(self.optimizer, device, non_blocking=non_blocking)
         self.offloaded_states.remove(OffloadStateTypeEnum.optim_states)
 
-    # NOTE: 恢复link
+    # NOTE: Restore link
     for group in self.bit16_groups:
         for param in group:
             param._hp_mapping = None
@@ -329,9 +329,9 @@ def stage_3_offload_states(self: DeepSpeedZeroOptimizer_Stage3,
             if not hasattr(self, "lp_param_contiguous_pin_buffer"):
                 self.lp_param_contiguous_pin_buffer = get_accelerator().pin_memory(
                     torch.empty_like(self.lp_param_buffer, device=device))
-            # NOTE: lp_param_buffer保存了由optimizer里取到的参数顺序
-            #       offload的时候先将 lp_param_buffer.cpu()
-            #       然后将tensor.data cp给model 的tensor.data，这一步也会有顺序不一致问题
+            # NOTE: lp_param_buffer stores parameter order retrieved from optimizer
+            #       When offloading, first move lp_param_buffer.cpu()
+            #       Then copy tensor.data to model's tensor.data, this step may also have order inconsistency issues
             self.lp_param_contiguous_pin_buffer.copy_(self.lp_param_buffer, non_blocking=non_blocking)
             cpu_buffer = self.lp_param_contiguous_pin_buffer
         else:
@@ -359,7 +359,7 @@ def stage_3_offload_states(self: DeepSpeedZeroOptimizer_Stage3,
         else:
             self.grad_partitions_flat_buffer.data = self.grad_partitions_flat_buffer.data.to(device)
         self.averaged_gradients = {}
-        # NOTE: self.__param_id_to_grad_partition里存了一份对grad_partitions_flat_buffer的引用，patch修改需要使用名称修饰
+        # NOTE: self.__param_id_to_grad_partition stores a reference to grad_partitions_flat_buffer, patch modifications need to use name mangling
         setattr(self, "_DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition", {})
 
         self.offloaded_states.add(OffloadStateTypeEnum.lp_grads)
@@ -398,8 +398,8 @@ def stage_3_reload_states(self: DeepSpeedZeroOptimizer_Stage3, include=None, non
         self.lp_param_buffer.data = cpu_buffer.data.to(device, non_blocking=non_blocking)
         self._set_fp16_partitioned_groups_flat()
 
-        # NOTE: 这里遍历的是self.module.parameters()， 而lp_param_buffer里的是fp16 group里取到的，这里参数的顺序不一致
-        #       这里[p.ds_tensor for p in self.module.parameters()]需要按self.fp16_groups的顺序reorder一下
+        # NOTE: Here we iterate over self.module.parameters(), while lp_param_buffer contains parameters from fp16 groups, the parameter order is inconsistent here
+        #       Here [p.ds_tensor for p in self.module.parameters()] needs to be reordered according to self.fp16_groups order
         parameter_partitions: List[Tensor] = [param.ds_tensor for sub_group in self.fp16_groups for param in sub_group]
         for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(parameter_partitions):
             tensor.data = self.lp_param_buffer.data.narrow(0, offset, tensor_numel)
@@ -450,7 +450,7 @@ def parameter_offload_offload_states(self: DeepSpeedZeRoOffload,
     self.offloaded_states = getattr(self, "offloaded_states", set())
 
     if needs_offload(OffloadStateTypeEnum.lp_params, include, self.offloaded_states):
-        # NOTE: 这里不会执行了non_trainable_params都在engine里处理了
+        # NOTE: This won't execute since non_trainable_params are all handled in the engine
         if not hasattr(self, "trainable_params"):
             self.trainable_params = [param.ds_tensor for param in self.module.parameters() if param.requires_grad]
         if len(self.trainable_params) == 0:

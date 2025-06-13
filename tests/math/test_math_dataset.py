@@ -12,7 +12,7 @@ dataset_path = "/home/weixun.wwx/Numina_hardrule_1212_lv2.json"
 dataset = load_dataset("json", data_files=dataset_path)["train"]
 
 
-# 加上format，然后转ids的func
+# Add format, then convert to ids function
 def encode_function(data_i):
     text_list = []
     for instruct in data_i["prompt"]:
@@ -26,11 +26,11 @@ def encode_function(data_i):
     return encodings
 
 
-# 处理数据
+# Process data
 print(dataset)
 dataset = dataset.map(encode_function, batched=True, desc="Encoding dataset")
 print(dataset)
-# 过滤cutoff
+# Filter cutoff
 dataset = dataset.filter(lambda data_i: len(data_i["input_ids"]) <= 512, desc="Filtering dataset")
 print(dataset)
 # ------

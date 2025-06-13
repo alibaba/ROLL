@@ -61,7 +61,7 @@ class LLMEngine073(LLMEngine):
                 parallel_config.worker_cls = \
                     "vllm.worker.multi_step_worker.MultiStepWorker"
         elif vllm_config.speculative_config:
-            # TODO: 投机采样
+            # TODO: Speculative sampling
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = \
                     "vllm.v1.worker.gpu_worker.Worker"
@@ -72,7 +72,7 @@ class LLMEngine073(LLMEngine):
                     "vllm.worker.worker.Worker"
         else:
             if envs.VLLM_USE_V1:
-                # TODO: 实现v1
+                # TODO: Implement v1
                 parallel_config.worker_cls = \
                     "vllm.v1.worker.gpu_worker.Worker"
             else:

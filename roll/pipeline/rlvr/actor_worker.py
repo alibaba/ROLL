@@ -10,9 +10,9 @@ class ActorWorker(BaseActorWorker):
 
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
-        loss func接口定义:
-            data: DataProto, 由train_step透传
-            output_tensor: torch.Tensor, model.forward()的输出Tensor
+        loss func interface definition:
+            data: DataProto, passed through from train_step
+            output_tensor: torch.Tensor, output tensor from model.forward()
         """
 
         response_mask = data.batch["response_mask"][:, 1:].long()
@@ -122,12 +122,12 @@ class ActorWorker(BaseActorWorker):
 
     def compute_sample_weights(self, data: DataProto, response_mask: torch.Tensor):
         """
-        可以基于难度和长度的样本权重
+        Sample weights can be based on difficulty and length
         """
         batch_size = response_mask.shape[0]
         sample_weights = torch.ones(batch_size, device=response_mask.device)
 
-        # 1. 基于难度的权重 - 例如：难度越高，权重越大
+        # 1. Difficulty-based weights - example: higher difficulty, higher weight
         if self.pipeline_config.difficulty_loss_weight and "difficulty" in data.non_tensor_batch:
             try:
                 difficulty = data.non_tensor_batch["difficulty"]
@@ -139,12 +139,12 @@ class ActorWorker(BaseActorWorker):
                 difficulty_weights = 0.5 + 1.5 * norm_difficulty
                 sample_weights = sample_weights * difficulty_weights
             except Exception as e:
-                self.logger.warning(f"跳过difficulty权重计算：{str(e)}")
+                self.logger.warning(f"Skip difficulty weight calculation: {str(e)}")
 
-        # 2. 基于长度的权重 - 例如：长度越长，权重越小
+        # 2. Length-based weights - example: longer length, smaller weight
         response_lengths = response_mask.sum(dim=1).float()
         if self.pipeline_config.length_loss_weight:
-            # 同样归一化长度到[0.5, 2.0]范围
+            # Similarly normalize length to [0.5, 2.0] range
             norm_lengths = (response_lengths - response_lengths.min()) / (
                     response_lengths.max() - response_lengths.min() + 1e-8
             )

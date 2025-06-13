@@ -15,14 +15,14 @@ logger = get_logger()
 @ray.remote
 class RewardScheduler:
     """
-    reward 服务化和generate不同, request接口：
-        reward scheduler需要解决的是不同域的sample的reward计算问题, 不需要实现request粒度的接口；
-        并且reward计算和vllm不同，vllm可以continue batch，所以可以动态add request, reward不行，
-            直接rpc调用reward_cluster.compute_rewards即可(使用rpc方式调用，可以增加reward的数量，增大并发处理能力)
+    Reward service is different from generation, request interface:
+        Reward scheduler needs to solve the reward calculation problem for samples from different domains, no need to implement request-level interface;
+        And reward calculation is different from vllm, vllm can continue batch, so it can dynamically add requests, reward cannot,
+            directly use rpc to call reward_cluster.compute_rewards (using rpc method, can increase the number of rewards, increase concurrent processing capacity)
 
-    reward scheduler需要解决的问题:
-        按domain路由reward
-        dp dispatch 均分/不足dp_size 的限制
+    Problems that reward scheduler needs to solve:
+        Route rewards by domain
+        dp dispatch load balancing/insufficient dp_size limitations
     """
 
     def __init__(self):
@@ -32,13 +32,13 @@ class RewardScheduler:
 
     def compute_rewards(self, data: DataProto, reward_clusters: Dict[str, Any], pipeline_config) -> DataProto:
         """
-        保序返回rewards
+        Return rewards in order
         """
         self.pipeline_config = pipeline_config
         self.reward_clusters = reward_clusters
         data.batch["prompt_id"] = torch.arange(data.batch.batch_size[0], device=data.batch.device)
 
-        # 按domain group by data
+        # Group data by domain
         grouped_data: Dict[str, DataProto] = data.group_by("domain")
 
         domain_rewards_refs: Dict[str, List[ray.ObjectRef]] = defaultdict(list)
@@ -51,8 +51,8 @@ class RewardScheduler:
 
         rewards_list: List[DataProto] = []
         for domain, domain_rewards_ref in domain_rewards_refs.items():
-            # 各reward的输出schema要求一致
-            # reward worker compute_rewards 接口返回结果保序
+            # All rewards require consistent output schema
+            # Reward worker compute_rewards interface returns results in order
             if domain not in grouped_data.keys():
                 continue
             domain_rewards: DataProto = DataProto.materialize_concat(data_refs=domain_rewards_ref)

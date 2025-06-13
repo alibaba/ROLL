@@ -166,7 +166,7 @@ class Llm084(LLM):
     def clear_unfinished_requests(self):
         self._run_engine(use_tqdm=True)
 
-    # 参数同步接口
+    # Parameter synchronization interface
     def setup_collective_group(self, *args, **kwargs):
         self.collective_rpc(method="setup_collective_group", args=args, kwargs=kwargs)
 

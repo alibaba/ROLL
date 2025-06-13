@@ -210,7 +210,7 @@ class TurboModelCreator:
 
 """
 torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s tests/third_party/megatron/test_offload_states.py
--s 显示stdout/err
+-s displays_stdout/err
 """
 
 
@@ -881,7 +881,7 @@ def run_model_fp32_optimizer(mca_model: TurboModelCreator, included_state, pin_m
 @pytest.mark.parametrize("optimizer_type", [None, "dist_optimizer", "fp16", "fp32"])
 def test_megatron_offload_states(included_state, pin_memory, non_blocking, optimizer_type):
     """
-    有四块非optimizer的显存未释放:
+    There are four blocks of non-optimizer GPU memory not released:
     /opt/conda/envs/python3.10.13/lib/python3.10/site-packages/transformer_engine/pytorch/module/base.py:58:get_workspace
     /root/.local/lib/python3.10/site-packages/megatron/core/tensor_parallel/layers.py:413:forward
     /root/.local/lib/python3.10/site-packages/megatron/core/models/gpt/gpt_model.py:249:forward

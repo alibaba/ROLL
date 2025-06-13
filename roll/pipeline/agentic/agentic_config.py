@@ -45,7 +45,7 @@ class EnvManagerConfig(WorkerConfig):
 
     def __post_init__(self):
         """
-        根据es config计算world_size
+        Calculate world_size based on es config
         """
         self.world_size = self.env_groups * self.group_size
         self.env_configs: Optional[Dict[int, Dict]] = None
@@ -266,7 +266,7 @@ class AgenticConfig(BaseConfig):
                 self.critic.training_args.per_device_train_batch_size
                 * self.critic.training_args.gradient_accumulation_steps
         )
-        # 没有除dp_size，需要在分布式环境初始化后再除
+        # Not divided by dp_size, need to divide after distributed environment initialization
         self.actor_train.training_args.max_steps = max_steps * (
                 self.rollout_batch_size
                 * self.actor_infer.generating_args.num_return_sequences
