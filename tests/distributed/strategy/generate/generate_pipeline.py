@@ -62,7 +62,7 @@ class GeneratePipeline(BasePipeline):
     def run(self):
         global_step = 0
 
-        # 计算tokens per second 系统吞吐
+        # Calculate tokens per second system throughput
         tps_timer = _Timer(window_size=5)
         metric_list = []
 
@@ -161,7 +161,7 @@ class GenerateCmpPipeline(BasePipeline):
     def run(self):
         global_step = 0
 
-        # 计算tokens per second 系统吞吐
+        # Calculate tokens per second system throughput
         tps_timer = _Timer(window_size=5)
         metric_list = []
 

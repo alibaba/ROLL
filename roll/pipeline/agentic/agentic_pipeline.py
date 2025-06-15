@@ -107,7 +107,7 @@ class AgenticPipeline(BasePipeline):
 
     @torch.no_grad()
     def run(self):
-        # 计算tokens per second 系统吞吐
+        # Calculate tokens per second system throughput
         tps_timer = _Timer(window_size=5)
 
         for global_step in range(self.pipeline_config.max_steps):
@@ -191,8 +191,8 @@ class AgenticPipeline(BasePipeline):
                     metrics.update(reduce_metrics(old_log_probs.meta_info.pop("metrics", {})))
                 metrics["time/old_log_probs_values"] = cal_old_logpb_timer.last
 
-                # 要按group by处理reward
-                # 可以tag(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
+                # Need to process rewards by group
+                # Can group by tag(env_type)/traj_group_id(group)/batch(rollout_batch)... to calculate reward/adv
                 batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
                 with Timer(name="adv", logger=None) as timer:
                     grouping = self.pipeline_config.reward_normalization.grouping
@@ -228,7 +228,7 @@ class AgenticPipeline(BasePipeline):
                     batch = DataProto.concat(batch_list)
                     batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
                     batch.pop("prompt_id")
-                    # advantage是全局batch计算，还是group内计算？
+                    # Is advantage calculated globally across batch or within groups?
                     batch = compute_advantage(
                         data=batch,
                         gamma=self.pipeline_config.gamma,
@@ -314,8 +314,8 @@ class AgenticPipeline(BasePipeline):
 
 
 def compute_data_metrics(batch):
-    # token_level_scores 是reward model给每个token的打分，可能经过了norm/clip
-    # score 为env的reward，raw value
+    # token_level_scores are scores given by reward model to each token, possibly after norm/clip
+    # score is the environment reward, raw value
     sequence_score = batch.batch["scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
     advantages = batch.batch["advantages"]

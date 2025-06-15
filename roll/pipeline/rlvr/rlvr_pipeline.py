@@ -37,7 +37,7 @@ logger = get_logger()
 
 
 def preprocess_dataset(dataset, prompt_len, encode_function, num_proc):
-    # 处理数据
+    # Process data
     print(f"Begin : {dataset}")
     dataset = dataset.map(
         encode_function,
@@ -46,7 +46,7 @@ def preprocess_dataset(dataset, prompt_len, encode_function, num_proc):
         desc="Encoding dataset",
         load_from_cache_file=False,
     )
-    # 过滤cutoff
+    # Filter cutoff
     dataset = dataset.filter(
         lambda data_i: 5 < len(data_i["input_ids"]) <= prompt_len,
         num_proc=num_proc,
@@ -83,7 +83,7 @@ def update_dataset_domain(tag_2_domain: Dict[str, set[str]], row):
 
 def query_filter_fn(data_list: List[DataProto], config: RLVRConfig) -> bool:
     """
-    各domain的过滤规则可以自定义
+    Custom filtering rules for each domain
     """
     response_level_rewards = [data.batch["response_level_rewards"] for data in data_list]
     if len(response_level_rewards) == 1:
@@ -127,7 +127,7 @@ class RLVRPipeline(BasePipeline):
             val_dataset_paths = self.pipeline_config.validation.data_args.file_name
             self.val_dataset = datasets.load_dataset("json", data_files=val_dataset_paths)["train"]
 
-        # 加上format，然后转ids的func
+        # Add format, then convert to ids function
         template_name = (
             self.pipeline_config.global_template
             if self.pipeline_config.global_template
@@ -311,9 +311,9 @@ class RLVRPipeline(BasePipeline):
 
     @torch.no_grad()
     def run(self):
-        # 计算tokens per second 系统吞吐
+        # Calculate tokens per second system throughput
 
-        # 创建一个专门管理监控指标的类
+        # Create a specialized class for managing monitoring metrics
         metrics_mgr = MetricsManager()
 
         tps_timer = _Timer(window_size=5)
@@ -330,7 +330,7 @@ class RLVRPipeline(BasePipeline):
             metrics_mgr.clear_metrics()
             with tps_timer, Timer(name="step_total", logger=None) as step_total_timer:
 
-                # 先model update，resume时不需要保存infer cluster的状态
+                # First model update, no need to save infer cluster state during resume
                 if self.pipeline_config.adv_estimator == "gae":
                     self.critic.offload_states(blocking=True)
                 self.actor_train.offload_states(blocking=True)
@@ -349,7 +349,7 @@ class RLVRPipeline(BasePipeline):
                 batch: DataProto = DataProto()
                 batch.meta_info = {"global_step": global_step}
 
-                # 要按domain group by生成对应的batch
+                # Generate corresponding batches grouped by domain
                 with actor_infer_timer, actor_infer_response_timer, Timer(
                     name="step_generate", logger=None
                 ) as step_generate_timer:
@@ -409,18 +409,18 @@ class RLVRPipeline(BasePipeline):
                     metrics_mgr.add_reduced_metrics(old_log_probs.meta_info.pop("metrics", {}))
                     metrics_mgr.add_metric("time/old_log_probs", cal_old_logpb_timer.last)
 
-                # 要按domain group by处理reward
+                # Process rewards grouped by domain
                 batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
                 batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
                 batch_list = []
                 for domain, domain_batch in batch_grouped.items():
-                    # 1. 处理mask相关策略， 获取sample level mask
+                    # 1. Process mask related strategies, get sample level mask
                     with Timer(name="get_sample_level_mask", logger=None) as get_sample_level_mask_timer:
                         domain_batch, mask_metrics = get_sample_level_mask(domain_batch, self.pipeline_config)
                         metrics_mgr.add_metrics(mask_metrics)
                         metrics_mgr.add_metric("time/get_sample_level_mask", get_sample_level_mask_timer.last)
 
-                    # 2. 处理reward相关策略
+                    # 2. Process reward related strategies
                     with Timer(name="reward_postprocess", logger=None) as reward_postprocess_timer:
                         domain_batch, response_level_metrics = reward_postprocess(
                             domain_batch, self.pipeline_config, self.running
@@ -428,7 +428,7 @@ class RLVRPipeline(BasePipeline):
                         metrics_mgr.add_metrics(response_level_metrics)
                         metrics_mgr.add_metric("time/reward_postprocess", reward_postprocess_timer.last)
 
-                    # 3. 计算token level rewards
+                    # 3. Calculate token level rewards
                     with Timer(name="get_token_reward", logger=None) as get_token_reward_timer:
                         domain_batch, token_level_metrics = compute_token_reward(
                             domain_batch, self.pipeline_config, self.kl_ctrl
@@ -436,7 +436,7 @@ class RLVRPipeline(BasePipeline):
                         metrics_mgr.add_metrics(token_level_metrics)
                         metrics_mgr.add_metric("time/get_token_reward", get_token_reward_timer.last)
 
-                    # 4. 计算advantage
+                    # 4. Calculate advantage
                     final_response_mask = domain_batch.batch["final_response_mask"].clone()
                     with Timer(name="compute_advantage", logger=None) as compute_advantage_timer:
                         domain_batch = compute_advantage(

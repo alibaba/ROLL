@@ -48,8 +48,8 @@ def _hf_verify_math_sample(response, answer, output_queue):
 
 def hf_verify_math_sample(answer_a, answer_b, timeout_sec=5.0):
     """
-    在多进程中调用 hf math verify,
-    以在超时时间内完不成时返回 False.
+    Call hf math verify in multiprocessing,
+    return False when timeout occurs.
     """
     output_queue = multiprocessing.Queue()
 
@@ -58,7 +58,7 @@ def hf_verify_math_sample(answer_a, answer_b, timeout_sec=5.0):
     p.join(timeout_sec)
 
     if p.is_alive():
-        # 超时 -> 杀掉子进程, 返回 False
+        # Timeout -> kill subprocess, return False
         p.terminate()
         p.join()
         return False, "", ""
@@ -118,8 +118,8 @@ def format_reward_fn(text: str, pattern: Optional[str] = r"^<think>.*?</think>.*
 
 class MathRuleRewardWorker(Worker):
     """
-    (x)Reward Model 使用 AutoModelForSequenceClassification 协议
-    面向math的rule reward model
+    (x)Reward Model uses AutoModelForSequenceClassification protocol
+    Math-oriented rule reward model
     """
 
     def __init__(self, worker_config: WorkerConfig):

@@ -51,7 +51,7 @@ def get_masks_and_scores(
 ):
     """
     input_ids: shape (bsz, seq_len)
-    all_scores: list[list[float], 存储每个env每轮的reward
+    all_scores: list[list[float]], stores reward for each env per turn
     Get loss mask that only learns between <|im_start|>assistant and <|im_end|>. Currently only supports qwen.
     NOTE: important! This assumes that the input_ids starts with system and then user & assistant in alternative ways
     NOTE: important! input_ids is left pad
@@ -65,7 +65,7 @@ def get_masks_and_scores(
     non_prompt_mask = turn_indicators > 2  # learns everything after system prompt + user prompts
 
     # turn text: '<|im_start|>assistant\n<answer>Right</answer><|im_end|>'
-    # <|im_start|>assistant\n 应该mask掉才对，保留<|im_end|>
+    # <|im_start|>assistant\n should be masked, keep <|im_end|>
     for idx, scores in enumerate(zip_longest(*all_scores, fillvalue=0)):
         turn_indicator = idx * 2 + 3  # 0: pad. 1: system. 2+2n: user. 3+2n: assistant
         turn_start_position = (input_ids == turn_start_token) & (turn_indicators == turn_indicator)
@@ -129,19 +129,19 @@ def left_pad_2_right(
 
 class EnvironmentWorker(Worker):
     """
-    1. 一个EnvironmentWorker(进程)持有一个env实例: 执行env.reset, env.step, 管理rollout的状态
-        group trajectory表达: group内的init state一致，依赖env_config 中的seed来控制, 一个group内env 对应episode的seed一致
-        不采用持有envs的原因是，envs需要管理一组env的交互，增加描述的复杂性
-    2. 持有infer_cluster ref, 用于async generate
-    3. run_rollout_loop, 持续rollout trajectory, 将done的trajectory回传到output_queue
+    1. One EnvironmentWorker (process) holds an env instance: executes env.reset, env.step, manages rollout state
+        group trajectory representation: init state within group is consistent, controlled by seed in env_config, env within a group corresponds to consistent episode seed
+        reason for not holding envs: envs need to manage interaction of a group of envs, increasing complexity of description
+    2. Holds infer_cluster ref, used for async generate
+    3. run_rollout_loop, continuously rollout trajectory, returns done trajectory to output_queue
 
-    承担EnvStateManager的history收集功能
-    一个group内的env reset进度应该一致
+    Takes on EnvStateManager's history collection functionality
+    Env reset progress within a group should be consistent
 
-    TODO: env并行方式后续改成进程+线程并行：目的解决一个env占用一个进程对系统资源的开销
-          - 一个EnvironmentWorker持有n个EnvStateManager
-          - EnvStateManager管理一个env的rollout loop
-          - EnvStateManager.run_rollout_loop,运行在n个线程里
+    TODO: env parallelism will later be changed to process+thread parallelism: purpose is to solve the overhead of one env occupying one process on system resources
+          - One EnvironmentWorker holds n EnvStateManagers
+          - EnvStateManager manages one env's rollout loop
+          - EnvStateManager.run_rollout_loop, runs in n threads
     TODO: GiGPO: https://arxiv.org/abs/2505.10978
     """
 
@@ -276,7 +276,7 @@ class EnvironmentWorker(Worker):
         lm_output: DataProto = ray.get(self.generate_scheduler.generate_one_request.remote(data=gen_batch))
 
         if lm_output is not None:
-            # 未被abort
+            # not aborted
             gen_batch.meta_info.pop("generation_config")
             gen_batch.meta_info.pop("response_callback_fn")
             lm_input = lm_input.repeat(repeat_times=generation_config["num_return_sequences"])
@@ -286,11 +286,11 @@ class EnvironmentWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def run_rollout_loop(self, data: DataProto):
         """
-        1. 每次调用run_rollout_loop,
-            会持续的play episode, 直到收到采集完成的command
-            需要重置seed, 确保每个group的seed一致
-            episode_id 置0
-        seed更新逻辑:
+        1. Each call to run_rollout_loop,
+            continuously play episode, until receiving collection completion command
+            need to reset seed, ensure seed consistency within each group
+            episode_id set to 0
+        seed update logic:
             group_seed = seed + group_seed
             episode_seed = group_seed + episode_id
 
@@ -379,9 +379,9 @@ class EnvironmentWorker(Worker):
 
     def formulate_rollouts(self):
         """
-        1. 每个env的trajectory 是一个rollout
-        2. 每个rollout 是一个List[Dict]
-        3. 每个Dict 是一个step的信息
+        1. Each env's trajectory is a rollout
+        2. Each rollout is a List[Dict]
+        3. Each Dict is information for one step
         """
         llm_input_texts, messages_list = self._format_messages(
             env_output=self.rollout_cache, prepare_for_update=True, use_raw_llm_response=False
@@ -436,7 +436,7 @@ class EnvironmentWorker(Worker):
         llm_inputs.batch["non_prompt_mask"] = non_prompt_mask
         llm_inputs.batch["response_mask"] = non_prompt_mask
         if self.pipeline_config.enable_response_mask:
-            # 只使用llm的response mask，不包含环境的state
+            # only use llm's response mask, not including environment's state
             llm_inputs.batch["response_mask"] = response_mask
         first_true_indices = non_prompt_mask.int().argmax(dim=1)
         no_true_mask = ~non_prompt_mask.any(dim=1)
@@ -601,7 +601,7 @@ class EnvironmentWorker(Worker):
                 )
             if "llm_raw_response" in content:
                 # yali: using the raw response will cause continuous crashes: https://aliyuque.antfin.com/mdl-team/traning/wmne4oyxg4dozwia
-                #       改成actions合理吗？
+                #       is it reasonable to change to actions?
                 messages.append(
                     {
                         "role": "assistant",
@@ -627,12 +627,12 @@ class EnvironmentWorker(Worker):
             else:
                 text += "<answer>"  # force the LLM to answer
 
-        # TODO: 应该没有必要，注意处理mask
+        # TODO: should not be necessary, pay attention to handling mask
         text = text.replace("<|im_end|>\n", "<|im_end|>")
         return [text], [messages]
 
     def _init_prefix_lookup(self):
-        # TODO: 这里并不合理
+        # TODO: this is not reasonable here
         prefix_lookup = {}
         prefixes = {}
         env_config_lookup = {}

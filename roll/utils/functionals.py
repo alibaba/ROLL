@@ -40,8 +40,8 @@ def delete_tensor_grad_visitor(obj, path):
 
 def traverse_obj(value, visitor, path=()):
     """
-    遍历对象的所有属性，包括属性的属性，找到所有的 Tensor。
-    :param value: 任意 Python 对象
+    Traverse all attributes of an object, including attributes of attributes, to find all Tensors.
+    :param value: Any Python object
     :visitor
     :path
     """
@@ -86,7 +86,7 @@ def divide_by_chunk_size(
     data: Union[np.ndarray, TensorDict], chunk_sizes: List[int]
 ) -> List[Union[np.ndarray, TensorDict]]:
     """
-    将numpy数组按照chunks的大小切分
+    Split numpy array according to chunk sizes
     """
     if not isinstance(data, (np.ndarray, TensorDict)):
         raise TypeError("Input 'array' must be a numpy ndarray or a TensorDict.")
@@ -314,7 +314,7 @@ def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = T
 
 def response_level_masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True):
     """Whiten values with masked values."""
-    # 考虑response的影响？
+    # Consider the impact of response?
     mean = masked_mean(values, mask, dim=-1)
     var = masked_var(mean, mask)
     mean = mean.mean()
@@ -475,7 +475,7 @@ def compute_token_reward(data: "DataProto", pipeline_config: RLVRConfig, kl_ctrl
         action_mask=data.batch["response_mask"][:, 1:],
         kl_penalty=pipeline_config.kl_penalty,
     )
-    # 是否添加token level kl
+    # Whether to add token level kl
     if pipeline_config.add_token_level_kl and "ref_log_probs" in data.batch.keys():
         beta = kl_ctrl.value
         token_level_rewards = token_level_rewards - beta * kld
@@ -505,8 +505,8 @@ def compute_token_reward(data: "DataProto", pipeline_config: RLVRConfig, kl_ctrl
 def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_ctrl):
     response_level_rewards = data.batch["response_level_rewards"].clone().detach()
     response_level_metrics = {"critic/reward_clip_frac": 0.0}
-    # 对reward进行处理: 可以选择不同的normalization方法
-    # 使用group-based normalization (按prompt分组)
+    # Process rewards: can choose different normalization methods
+    # Use group-based normalization (group by prompt)
     if pipeline_config.adv_estimator == "grpo" or pipeline_config.reward_norm == "group":
         if pipeline_config.reward_shift:
             response_level_rewards = group_reward_norm(
@@ -521,14 +521,14 @@ def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_c
                 div_std=True,
             )
 
-    # 使用batch-based normalization (整个batch)
+    # Use batch-based normalization (entire batch)
     elif pipeline_config.reward_norm == "batch":
         if hasattr(pipeline_config, "reward_shift") and pipeline_config.reward_shift:
             response_level_rewards = batch_reward_norm(response_level_rewards, div_std=False)
         else:
             response_level_rewards = batch_reward_norm(response_level_rewards, div_std=True)
 
-    # 使用running statistics进行normalization
+    # Use running statistics for normalization
     elif pipeline_config.reward_norm == "running":
         running = running_ctrl["domain"]
         running.update(response_level_rewards)
@@ -541,7 +541,7 @@ def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_c
         else:
             response_level_rewards = (response_level_rewards - mean) / std
 
-    # 对reward进行clip
+    # Clip reward
     if pipeline_config.reward_clip:
         reward_clip_frac = compute_clip_fraction(
             values=response_level_rewards, clip_max=pipeline_config.reward_clip, clip_min=-pipeline_config.reward_clip
@@ -561,7 +561,7 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
     batch_size = data.batch["response_mask"].size(0)
     mask_metrics = {}
 
-    # mask相关策略
+    # Mask related strategies
     data.batch["origin_response_mask"] = data.batch["response_mask"].clone()
     response_mask = data.batch["response_mask"][:, 1:].clone()
     true_response_length = response_mask.sum(-1).float()
@@ -569,7 +569,7 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
 
     final_sample_mask = torch.ones(batch_size, device=response_mask.device)
 
-    # 1. max_len_mask: 过滤掉超过最大长度的样本
+    # 1. max_len_mask: Filter out samples exceeding maximum length
     if pipeline_config.max_len_mask:
         max_len_mask = (max_response_length != true_response_length).float()
         final_sample_mask = final_sample_mask * max_len_mask
@@ -577,7 +577,7 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
     else:
         mask_metrics["actor/max_len_mask_ratio"] = 1.0
 
-    # 2. difficulty_mask: 基于难度的过滤
+    # 2. difficulty_mask: Filter based on difficulty
     if pipeline_config.difficulty_mask:
         data = difficulty_mask(
             data,
@@ -594,7 +594,7 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
     else:
         mask_metrics["actor/difficulty_mask_ratio"] = 1.0
 
-    # 3. error_max_len_clip: 基于错误和长度的过滤
+    # 3. error_max_len_clip: Filter based on errors and length
     if pipeline_config.error_max_len_clip:
         scores = data.batch["scores"]
         error_len_mask = ((scores == 0) & (true_response_length < pipeline_config.error_max_len_threshold)) | (
@@ -692,7 +692,7 @@ def compute_advantage(
 
     data.batch["raw_advantages"] = advantages
     if whiten_advantages:
-        # TODO whiten过程中是否要考虑response的长度？
+        # TODO Should response length be considered during whitening process?
         advantages = masked_whiten(values=advantages, mask=response_mask)
     advantages = advantages * response_mask
 
@@ -725,8 +725,8 @@ def postprocess_generate(
     from roll.distributed.scheduler.protocol import DataProto
 
     if fill_eos_token:
-        # yali: 如果output最后一个token不是pad_token_id，则替换成eos_token_id,
-        #  TODO: 需要消融这个变化的影响
+        # yali: If the last token of output is not pad_token_id, replace it with eos_token_id,
+        #  TODO: Need to ablate the impact of this change
         last_token_index = output.size(1) - 1
         need_replace_mask = output[:, last_token_index] != pad_token_id
         output[need_replace_mask, last_token_index] = eos_token_id

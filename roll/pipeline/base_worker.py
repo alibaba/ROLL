@@ -163,7 +163,7 @@ class ActorWorker(Worker):
     @torch.no_grad()
     def start_server(self, data: DataProto):
         """
-        解决dp generate的长尾问题，async+ load balance
+        Solve dp generate long tail problem, async + load balance
         """
         global_step = data.meta_info.get("global_step", 0)
         is_offload_states = data.meta_info.get("is_offload_states", True)
@@ -235,9 +235,9 @@ class ActorWorker(Worker):
 
     def forward_func_log_probs(self, data: DataProto, output_tensor: torch.Tensor):
         """
-        forward func 接口定义:
-            data: DataProto, 由forward_step透传
-            output_tensor: torch.Tensor, model.forward()的输出Tensor
+        forward func interface definition:
+            data: DataProto, passed through from forward_step
+            output_tensor: torch.Tensor, output tensor from model.forward()
         """
         log_probs = self.strategy.op_compute_log_probs(
             logits=output_tensor, input_ids=data.batch["input_ids"], attention_mask=data.batch["response_mask"]
@@ -247,9 +247,9 @@ class ActorWorker(Worker):
 
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
-        loss func接口定义:
-            data: DataProto, 由train_step透传
-            output_tensor: torch.Tensor, model.forward()的输出Tensor
+        loss func interface definition:
+            data: DataProto, passed through from train_step
+            output_tensor: torch.Tensor, output tensor from model.forward()
         """
 
         response_mask = data.batch["response_mask"][:, 1:].long()
@@ -324,7 +324,7 @@ class ActorWorker(Worker):
         with Timer("do_checkpoint") as total_timer:
             ckpt_id = f"checkpoint-{global_step}"
 
-            # actor train是直接存在save dir目录下的，其他role是存在save_dir/cluster_name下的
+            # actor train is saved directly in save dir directory, other roles are saved in save_dir/cluster_name
             save_dir = os.path.join(self.pipeline_config.output_dir, self.worker_name, ckpt_id)
             self.logger.info(f"save checkpoint-{global_step} to {save_dir}")
 
@@ -341,10 +341,10 @@ class ActorWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def add_request(self, command, data: DataProto):
         """
-        data req meta_info里需要包含:
+        data req meta_info needs to contain:
             request_id: str
             response_callback_fn: callable
-        generation_config, 按request设置
+        generation_config, set by request
         """
         if command == GenerateRequestType.ALIVE_CHECK:
             if self.thread_server is not None:
@@ -474,9 +474,9 @@ class CriticWorker(Worker):
 
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
-        loss func接口定义:
-            data: DataProto, 由train_step透传
-            output_tensor: torch.Tensor, model.forward()的输出Tensor
+        loss func interface definition:
+            data: DataProto, passed through from train_step
+            output_tensor: torch.Tensor, output tensor from model.forward()
         """
         response_mask = data.batch["response_mask"][:, 1:]
         old_values = data.batch["values"]
@@ -534,7 +534,7 @@ class CriticWorker(Worker):
 
 class RewardWorker(Worker):
     """
-    Reward Model 使用 AutoModelForSequenceClassification 协议
+    Reward Model uses AutoModelForSequenceClassification protocol
     """
 
     def __init__(self, worker_config: WorkerConfig):
