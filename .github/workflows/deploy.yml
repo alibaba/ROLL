@@ -45,3 +45,4 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./docs_roll/build
+          publish_branch: main
