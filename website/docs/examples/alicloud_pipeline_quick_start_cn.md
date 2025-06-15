@@ -137,9 +137,9 @@ max_steps: 100
 ```
 
 pipeline运行中的log截图示例：
-<img src="assets/log_1.png" width="100%" alt="log1">
+<img src="assets/log_1.png" width="100%" alt="log1" />
 
-<img src="assets/log_2.png" width="100%" alt="log2">
+<img src="assets/log_2.png" width="100%" alt="log2" />
 
-<img src="assets/log_3.png" width="100%" alt="log3">
+<img src="assets/log_3.png" width="100%" alt="log3" />
 
