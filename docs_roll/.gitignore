@@ -1,6 +1,5 @@
 # Dependencies
 /node_modules
-node_modules/
 
 # Production
 /build
@@ -8,7 +7,7 @@ node_modules/
 # Generated files
 .docusaurus
 .cache-loader
-yarn.lock
+package-lock.json
 
 # Misc
 .DS_Store
