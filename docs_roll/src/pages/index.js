@@ -15,7 +15,7 @@ function HomepageHeader() {
         <h1 className="hero__title">{siteConfig.title}</h1>
         <p className="hero__subtitle">{siteConfig.tagline}</p>
         <div className={styles.buttons}>
-          <img src="img/roll.jpeg" alt="ROLL" style={{ maxWidth: '600px' }} />
+          <img src="img/roll.jpeg" alt="ROLL" style={{ maxWidth: '50%' }} />
         </div>
       </div>
     </header>
