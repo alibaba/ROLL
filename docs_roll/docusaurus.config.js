@@ -91,11 +91,11 @@ const config = {
             items: [
               {
                 label: '阿里云ROLL实践手册',
-                to: '/docs/简体中文/examples/alicloud_pipeline_quick_start_cn',
+                to: '/docs/简体中文/StepByStep/alicloud_pipeline_quick_start_cn',
               },
               {
                 label: '配置指南',
-                to: '/docs/简体中文/examples/config_guide_cn',
+                to: '/docs/简体中文/快速开始/config_guide_cn',
               },
             ],
           },
