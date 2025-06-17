@@ -155,8 +155,8 @@ Used for configuring training parameters such as `learning_rate`, `weight_decay`
 - `training_args.per_device_train_batch_size`: The batch size to use when training.
 - `training_args.gradient_accumulation_steps`: The number of gradient accumulation steps.
 
-In deepspeed training the global train batch size is `per_device_train_batch_size` * `gradient_accumulation_steps` * world_size (a.k.a length of `device_mapping` for `actor_train`/`critic`).
+In deepspeed training the global train batch size is `per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size (a.k.a length of `device_mapping` for `actor_train`/`critic`).
 
-In megatron training the global train batch size is `per_device_train_batch_size` * `gradient_accumulation_steps` * world_size / `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `context_parallel_size` (don't need to divide `expert_model_parallel_size`).
+In megatron training the global train batch size is `per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size / `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `context_parallel_size` (don't need to divide `expert_model_parallel_size`).
 
-If you want to perform one optimization step in each rollout, set `gradient_accumulation_steps` to `rollout_batch_size` * `num_return_sequences_in_group` * `tensor_model_parallel_size` * `pipeline_model_parallel_size` * `context_parallel_size`/ `per_device_train_batch_size` / world_size.
+If you want to perform one optimization step in each rollout, set `gradient_accumulation_steps` to `rollout_batch_size` \* `num_return_sequences_in_group` \* `tensor_model_parallel_size` \* `pipeline_model_parallel_size` \* `context_parallel_size`/ `per_device_train_batch_size` / world_size.

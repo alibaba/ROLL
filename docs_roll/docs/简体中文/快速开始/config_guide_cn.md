@@ -286,8 +286,8 @@ actor_train:
 - `training_args.per_device_train_batch_size`: 在每个设备上进行训练时使用的批次大小。
 - `training_args.gradient_accumulation_steps`: 梯度累积的步数。
 
-在 DeepSpeed 训练中，全局训练批次大小是`per_device_train_batch_size` * `gradient_accumulation_steps` * world_size (即`actor_train`/`critic`的`device_mapping`长度)。
+在 DeepSpeed 训练中，全局训练批次大小是`per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size (即`actor_train`/`critic`的`device_mapping`长度)。
 
-在 Megatron 训练中，全局训练批次大小是`per_device_train_batch_size` * `gradient_accumulation_steps` * world_size / `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `context_parallel_size` (不需要除以`expert_model_parallel_size`).
+在 Megatron 训练中，全局训练批次大小是`per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size / `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `context_parallel_size` (不需要除以`expert_model_parallel_size`).
 
-如果你想在每次 Rollout 中执行一次优化步骤，则应设置`gradient_accumulation_steps`为 `rollout_batch_size` * `num_return_sequences_in_group` * `tensor_model_parallel_size` * `pipeline_model_parallel_size` * `context_parallel_size`/ `per_device_train_batch_size` / world_size.
+如果你想在每次 Rollout 中执行一次优化步骤，则应设置`gradient_accumulation_steps`为 `rollout_batch_size` \* `num_return_sequences_in_group` \* `tensor_model_parallel_size` \* `pipeline_model_parallel_size` \* `context_parallel_size`/ `per_device_train_batch_size` / world_size.
