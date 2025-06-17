@@ -1,4 +1,4 @@
-# 快速上手：阿里云单机版指南
+# 快速上手：阿里云单机版部署指南
 
 ## 准备环境
 1. 购买阿里云服务器
@@ -139,9 +139,9 @@ max_steps: 100
 ```
 
 pipeline运行中的log截图示例：
-<img src="../../../../static/img/log_1.png" width="100%" alt="log1" />
+![log1](../../../static/img/log_1.png)
 
-<img src="../../../../static/img/log_2.png" width="100%" alt="log2" />
+![log2](../../../static/img/log_2.png)
 
-<img src="../../../../static/img/log_3.png" width="100%" alt="log3" />
+![log3](../../../static/img/log_3.png)
 

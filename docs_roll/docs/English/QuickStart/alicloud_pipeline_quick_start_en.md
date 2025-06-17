@@ -137,9 +137,9 @@ max_steps: 100
 ```
 
 Example Log Screenshots during Pipeline Execution:
-<img src="../../../../static/img/log_1.png" width="100%" alt="log1" />
+![log1](../../../static/img/log_1.png)
 
-<img src="../../../../static/img/log_2.png" width="100%" alt="log2" />
+![log2](../../../static/img/log_2.png)
 
-<img src="../../../../static/img/log_3.png" width="100%" alt="log3" />
+![log3](../../../static/img/log_3.png)
 
