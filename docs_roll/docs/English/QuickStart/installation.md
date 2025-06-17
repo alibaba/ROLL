@@ -1,5 +1,18 @@
 # Installation
 
+## Requirements
+- Python: Version == 3.10
+- CUDA Version >= 12.4
+- cuDNN Version >= 9.1.0
+- PyTorch >= 2.5.1
+- SGlang >= 0.4.3
+- vLLM >= 0.7.3
+
+ROLL supports various backends. Currently, the following configurations are available:
+
+- `DeepSpeed` and `Megatron-LM` for training.
+- `SGLang` and `vLLM` for rollout generation.
+
 ## 🐳 Install from Docker
 
 We provide pre-built Docker images for a quick start (Links will be updated):
