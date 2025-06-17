@@ -1,4 +1,4 @@
-# Alibaba Cloud ROLL Quick Start Guide
+# Quickstart: Singel Node based on Alibaba Cloud
 
 ## Environment Preparation
 1. Purchase an Alibaba Cloud Server
@@ -118,6 +118,10 @@ strategy_config:
   use_distributed_optimizer: true
   recompute_granularity: full
 
+# In megatron training the global train batch size is equivalent to per_device_train_batch_size * gradient_accumulation_steps * world_size
+actor_train.training_args.per_device_train_batch_size: 1
+actor_train.training_args.gradient_accumulation_steps: 16  
+
 # Reduce the maximum number of actions per trajectory, making each Rollout trajectory shorter that reduces the length of LLM-generated content.
 max_actions_per_traj: 10    
 
@@ -133,9 +137,9 @@ max_steps: 100
 ```
 
 Example Log Screenshots during Pipeline Execution:
-<img src="assets/log_1.png" width="100%" alt="log1" />
+<img src="../../../../static/img/log_1.png" width="100%" alt="log1" />
 
-<img src="assets/log_2.png" width="100%" alt="log2" />
+<img src="../../../../static/img/log_2.png" width="100%" alt="log2" />
 
-<img src="assets/log_3.png" width="100%" alt="log3" />
+<img src="../../../../static/img/log_3.png" width="100%" alt="log3" />
 

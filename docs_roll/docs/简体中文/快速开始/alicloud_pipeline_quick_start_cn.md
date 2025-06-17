@@ -1,4 +1,4 @@
-# 阿里云ROLL快速上手指南
+# 快速上手：阿里云单机版指南
 
 ## 准备环境
 1. 购买阿里云服务器
@@ -120,6 +120,10 @@ strategy_config:
   use_distributed_optimizer: true
   recompute_granularity: full
 
+# 在 Megatron 训练中，全局训练批次大小是 per_device_train_batch_size * gradient_accumulation_steps * world_size
+actor_train.training_args.per_device_train_batch_size: 1
+actor_train.training_args.gradient_accumulation_steps: 16  
+
 # 减少每条轨迹的最大动作数，使得每个Rollout轨迹更短，减少了LLM生成内容的长度
 max_actions_per_traj: 10    
 
@@ -135,9 +139,9 @@ max_steps: 100
 ```
 
 pipeline运行中的log截图示例：
-<img src="assets/log_1.png" width="100%" alt="log1" />
+<img src="../../../../static/img/log_1.png" width="100%" alt="log1" />
 
-<img src="assets/log_2.png" width="100%" alt="log2" />
+<img src="../../../../static/img/log_2.png" width="100%" alt="log2" />
 
-<img src="assets/log_3.png" width="100%" alt="log3" />
+<img src="../../../../static/img/log_3.png" width="100%" alt="log3" />
 
