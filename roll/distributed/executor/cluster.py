@@ -191,7 +191,7 @@ class Cluster:
                     raise ValueError(f"Fail to set method_name {method_name}")
 
     def execute_rank_zero_sync(self, method_name: str, *args, **kwargs):
-        return ray.get(self.execute_all_async(method_name, *args, **kwargs))
+        return ray.get(self.execute_rank_zero_async(method_name, *args, **kwargs))
 
     def execute_rank_zero_async(self, method_name: str, *args, **kwargs):
         remote_call = getattr(self.workers[0], method_name)
