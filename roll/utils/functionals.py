@@ -509,17 +509,18 @@ def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_c
     # 使用group-based normalization (按prompt分组)
     if pipeline_config.adv_estimator == "grpo" or pipeline_config.reward_norm == "group":
         if pipeline_config.reward_shift:
-            response_level_rewards = group_reward_norm(
+            data = group_reward_norm(
                 data,
                 n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
                 div_std=False,
             )
         else:
-            response_level_rewards = group_reward_norm(
+            data = group_reward_norm(
                 data,
                 n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
                 div_std=True,
             )
+        response_level_rewards = data.batch["response_level_rewards"].clone().detach()
 
     # 使用batch-based normalization (整个batch)
     elif pipeline_config.reward_norm == "batch":
