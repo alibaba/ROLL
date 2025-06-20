@@ -9,7 +9,7 @@ curl -fsSL https://github.com/alibaba/ROLL/blob/main/scripts/install_docker_nvid
 ```
 
 ## 环境配置
-从[镜像地址](https://github.com/alibaba/ROLL/blob/main/docs_roll/docs/English/QuickStart/image_address.md)中选择你需要的Docker镜像，下文均以 *torch2.6.0 + vLLM0.8.4* 为例
+从[镜像地址](https://alibaba.github.io/ROLL/docs/English/QuickStart/image_address)中选择你需要的Docker镜像，下文均以 *torch2.6.0 + vLLM0.8.4* 为例
 
 # 1. 启动一个docker容器，指定GPU支持，暴露容器端口，并始终保持容器运行
 sudo docker run -dit \
