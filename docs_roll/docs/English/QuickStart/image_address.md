@@ -6,4 +6,4 @@ We provide pre-built Docker images for a quick start (Links will be updated):
 * `torch2.5.1 + SGlang0.4.3`: roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch251-sglang043
 * `torch2.5.1 + vLLM0.7.3`: roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch251-vllm073
 
-You can also find Dockerfiles under the `docker/` directory to build your own images.
+You can also find [Dockerfiles](https://github.com/StephenRi/ROLL/tree/feature/fix-ref-for-docs/docker) under the `docker/` directory to build your own images.
