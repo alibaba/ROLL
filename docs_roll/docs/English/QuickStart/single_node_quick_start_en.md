@@ -9,7 +9,7 @@ curl -fsSL https://github.com/alibaba/ROLL/blob/main/scripts/install_docker_nvid
 ```
 
 ## Environment Configuration
-Choose your desired image from the [image addresses](https://github.com/alibaba/ROLL/blob/main/docs_roll/docs/English/QuickStart/image_address.md). The following example will use *torch2.6.0 + vLLM0.8.4*.
+Choose your desired image from the [image addresses](https://alibaba.github.io/ROLL/docs/English/QuickStart/image_address). The following example will use *torch2.6.0 + vLLM0.8.4*.
 ```shell
 # 1. Start a Docker container with GPU support, expose the port, and keep the container running.
 sudo docker run -dit \

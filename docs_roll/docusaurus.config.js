@@ -90,8 +90,8 @@ const config = {
             title: 'Examples',
             items: [
               {
-                label: '阿里云ROLL实践手册',
-                to: '/docs/简体中文/StepByStep/alicloud_pipeline_quick_start_cn',
+                label: 'ROLL单机实践手册',
+                to: '/docs/简体中文/快速开始/single_node_quick_start_cn',
               },
               {
                 label: '配置指南',
