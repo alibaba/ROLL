@@ -1,0 +1,193 @@
+defaults:
+  - ../config/envs@_here_
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "agentic_pipeline"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+render_save_dir: /data/oss_bucket_0/yali/output/render
+system_envs:
+  USE_MODELSCOPE: '1'
+
+#track_with: wandb
+#tracker_kwargs:
+#  api_key:
+#  project: roll-agentic
+#  name: ${exp_name}_frozen_lake
+#  notes: "agentic_pipeline"
+#  tags:
+#    - agentic
+#    - roll
+#    - baseline
+
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban
+
+num_gpus_per_node: 2
+
+max_steps: 100
+save_steps: 10000
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+rollout_batch_size: 64
+val_batch_size: 16
+sequence_length: 4096
+
+reward_clip: 20
+advantage_clip: 10.0
+ppo_epochs: 1
+adv_estimator: "reinforce"
+#pg_clip: 0.1
+#dual_clip_loss: True
+init_kl_coef: 0.0
+whiten_advantages: true
+entropy_loss_coef: 0
+
+pretrain: Qwen/Qwen2.5-0.5B-Instruct
+reward_pretrain: Qwen/Qwen2.5-0.5B-Instruct
+
+actor_train:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: false
+    dtype: fp16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
+    warmup_steps: 10
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    #strategy_name: deepspeed_train
+    #strategy_config: ${deepspeed_zero2}
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  device_mapping: list(range(0,4))
+  infer_batch_size: 1
+
+actor_infer:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: fp16
+  generating_args:
+    max_new_tokens: 32 # single-turn response length
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: 1
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.8
+      block_size: 16
+      load_format: auto
+  device_mapping: list(range(0,4))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: fp16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,4))
+  infer_batch_size: 1
+
+enable_response_mask: True
+action_sep: "||"
+use_turn_scores: False # important to GAE when applying token-level rewards to token-level advantages. If False, will take the sum of scores as the reward for the last turn.
+enable_think: False # False -> no think RL
+max_actions_per_traj: 10
+reward_normalization:
+  grouping: tags # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
+  method: identity # asym_clip / identity / mean_std
+
+custom_envs:
+  SimpleSokoban:
+    env_type: sokoban
+    max_actions_per_traj:  ${max_actions_per_traj} # used in environment state manager to control the actual max actions executed per trajectory
+    max_steps_per_traj: ${max_actions_per_traj}
+    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+    max_tokens: 100 # used to curate llm prompt "max words", not used for rollout
+    env_config: # keys should be a subset of SokobanConfig
+      dim_x: 6
+      dim_y: 6
+      num_boxes: 1
+      max_steps: ${max_actions_per_traj}
+  LargerSokoban:
+    env_type: sokoban
+    max_actions_per_traj:  ${max_actions_per_traj}
+    max_steps_per_traj: ${max_actions_per_traj}
+    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+    max_tokens: 100
+    env_config:
+      dim_x: 8
+      dim_y: 8
+      num_boxes: 2
+      max_steps: ${max_actions_per_traj}
+      search_depth: 10
+  SokobanDifferentGridVocab:
+    env_type: sokoban
+    max_actions_per_traj:  ${max_actions_per_traj}
+    max_steps_per_traj: ${max_actions_per_traj}
+    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+    max_tokens: 100
+    env_config: # keys should be a subset of SokobanConfig
+      search_depth: 30
+      dim_x: 6
+      dim_y: 6
+      num_boxes: 1
+      max_steps: ${max_actions_per_traj}
+      grid_lookup: { 0: "W", 1: ".", 2: "G", 3: "C", 4: "B", 5: "A", 6: "@" }
+      grid_vocab: { "W": "wall", ".": "empty", "G": "target", "C": "box on target", "B": "box", "A": "player", "@": "player on target" }
+  FrozenLake:
+    env_type: frozen_lake
+    max_actions_per_traj:  ${max_actions_per_traj}
+    max_steps_per_traj: ${max_actions_per_traj}
+    env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
+    max_tokens: 100
+    env_config:
+      is_slippery: false
+
+train_env_manager:
+  format_penalty: -0.001
+  env_groups: 1
+  group_size: 1
+  tags: [FrozenLake]
+  n_groups: [1] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+
+val_env_manager:
+  env_groups: 2
+  group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
+  tags: [SimpleSokoban, FrozenLake]
+  n_groups: [1, 1] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation

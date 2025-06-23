@@ -1,9 +1,9 @@
-# 快速上手：单机版部署指南
+# 快速上手：多节点部署指南
 
 ## 准备环境
-1. 购买配备GPU的机器，并同步安装GPU驱动
+1. 购买多台配备GPU的机器，并同步安装GPU驱动，其中一台作为主节点，其它作为工作节点（下文示例为2台机器各2个GPU）
 2. 远程连接GPU实例，进入机器终端
-3. 运行以下命令安装 Docker环境 和 NVIDIA容器工具包
+3. 分别运行以下命令安装 Docker环境 和 NVIDIA容器工具包
 ```shell
 curl -fsSL https://github.com/alibaba/ROLL/blob/main/scripts/install_docker_nvidia_container_toolkit.sh | sudo bash
 ```
@@ -36,31 +36,56 @@ pip install -r requirements_torch260_vllm.txt -i https://mirrors.aliyun.com/pypi
 ```
 
 ## pipeline运行
+1. 在主节点配置环境变量:
 ```shell
-bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_single_node_demo.sh
+export MASTER_ADDR="ip of master node"
+export MASTER_PORT="port of master node"  # Default: 6379
+export WORLD_SIZE=2
+export RANK=0
+export NCCL_SOCKET_IFNAME=eth0
+export GLOO_SOCKET_IFNAME=eth0
+```
+注意事项：
+- `MASTER_ADDR` 和 `MASTER_PORT` 定义了分布式集群的通信端点。
+- `WORLD_SIZE` 指定了集群中的节点总数（例如 2 个节点）。
+- `RANK` 用于标识节点的角色（0 表示主节点，1、2、3 等表示工作节点）。
+- `NCCL_SOCKET_IFNAME` 和 `GLOO_SOCKET_IFNAME` 指定了 GPU/集群通信使用的网络接口（通常为 eth0）。
+
+2. 在主节点上运行pipeline
+```shell
+bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_node_demo.sh
+```
+ray集群启动后，会看到下面的log示例：
+![log_ray_multi_nodes](../../../static/img/log_ray_multi_nodes.png)
+
+3. 在工作节点配置环境变量
+```shell
+export MASTER_ADDR="ip of master node"
+export MASTER_PORT="port of master node" # Default: 6379
+export WORLD_SIZE=2
+export RANK=1
+export NCCL_SOCKET_IFNAME=eth0
+export GLOO_SOCKET_IFNAME=eth0
 ```
 
-pipeline运行中的log截图示例：
-![log_pipeline_start](../../../static/img/log_pipeline_start.png)
+4. 在工作节点上连接主节点启动的ray集群：
+```shell
+ray start --address='ip of master node:port of master node' --num-gpus=2
+```
 
-![log_pipeline_in_training](../../../static/img/log_pipeline_in_training.png)
-
-![log_pipeline_complete](../../../static/img/log_pipeline_complete.png)
-
-
-## 参考：单卡V100显存 config修改要点
+## 参考：多卡V100显存 config修改要点
 ```yaml
-# 将系统预期的GPU数量从8块减少到你实际拥有的1块V100
-num_gpus_per_node: 1 
-# 训练进程现在只映射到 GPU 0
-actor_train.device_mapping: list(range(0,1))
-# 推理进程现在只映射到 GPU 0
-actor_infer.device_mapping: list(range(0,1))
-# 参考模型进程现在只映射到 GPU 0
-reference.device_mapping: list(range(0,1))
+# 将系统预期的GPU数量从8块减少到你实际拥有的2块V100
+num_gpus_per_node: 2
+# 训练进程现在映射到 GPU 0-3
+actor_train.device_mapping: list(range(0,4))
+# 推理进程现在映射到 GPU 0-3
+actor_infer.device_mapping: list(range(0,4))
+# 参考模型进程现在映射到 GPU 0-3
+reference.device_mapping: list(range(0,4))
 
 # 大幅减小Rollout阶段/Validation阶段的批量大小，防止单GPU处理大批次时显存不足
-rollout_batch_size: 16
+rollout_batch_size: 64
 val_batch_size: 16
 
 # V100 对 FP16 有较好的原生支持，而对 BF16 的支持不如 A100/H100，切换到 FP16 可以提高兼容性和稳定性，同时节省显存。
@@ -77,7 +102,7 @@ strategy_config:
   use_distributed_optimizer: true
   recompute_granularity: full
 
-# 在 Megatron 训练中，全局训练批次大小是 per_device_train_batch_size * gradient_accumulation_steps * world_size
+# 在 Megatron 训练中，全局训练批次大小是 per_device_train_batch_size * gradient_accumulation_steps * world_size，这里的world_size = 4
 actor_train.training_args.per_device_train_batch_size: 1
 actor_train.training_args.gradient_accumulation_steps: 16  
 
