@@ -1,9 +1,9 @@
-# Quickstart: Singel Node Deployment Guide
+# Quickstart: Multi Nodes Deployment Guide
 
 ## Environment Preparation
-1. Purchase a machine equipped with GPU and install GPU drivers simultaneously
+1. Purchase multiple machines equipped with GPU and install GPU drivers simultaneously. One machine serves as the master node, and the others serve as worker nodes. (e.g., 2 machines with 2 GPUs each).
 2. Connect remotely to the GPU instance and access the machine terminal
-3. Install Docker environment and NVIDIA Container Toolkit
+3. Install Docker environment and NVIDIA Container Toolkit on each machine
 ```shell
 curl -fsSL https://github.com/alibaba/ROLL/blob/main/scripts/install_docker_nvidia_container_toolkit.sh  | sudo bash   
 ```
@@ -35,32 +35,58 @@ cd ROLL
 pip install -r requirements_torch260_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/
 ```
 
-## Pipeline Execution
+## pipeline运行
+1. Set environment variables on the master node:
 ```shell
-bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_single_node_demo.sh  
+export MASTER_ADDR="ip of master node"
+export MASTER_PORT="port of master node"  # Default: 6379
+export WORLD_SIZE=2
+export RANK=0
+export NCCL_SOCKET_IFNAME=eth0
+export GLOO_SOCKET_IFNAME=eth0
 ```
 
-Example Log Screenshots during Pipeline Execution:
-![log_pipeline_start](../../../static/img/log_pipeline_start.png)
+Notes:
+- `MASTER_ADDR` and `MASTER_PORT` define the communication endpoint for the distributed cluster.
+- `WORLD_SIZE` specifies the total number of nodes in the cluster (e.g., 2 nodes).
+- `RANK` identifies the node's role (0 for master, 1、2、3 etc. for worker nodes).
+- `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` specify the network interface for GPU/cluster communication (typically eth0).
 
-![log_pipeline_in_training](../../../static/img/log_pipeline_in_training.png)
+2. Run the pipeline on the master node:
+```shell
+bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_node_demo.sh
+```
+After the Ray cluster starts, you will see log examples like:
+![log_ray_multi_nodes](../../../static/img/log_ray_multi_nodes.png)
 
-![log_pipeline_complete](../../../static/img/log_pipeline_complete.png)
+3. Set environment variables on the worker node:
+```shell
+export MASTER_ADDR="ip of master node"
+export MASTER_PORT="port of master node" # Default: 6379
+export WORLD_SIZE=2
+export RANK=1
+export NCCL_SOCKET_IFNAME=eth0
+export GLOO_SOCKET_IFNAME=eth0
+```
 
+4. Connect the worker node to the Ray cluster on the master node:
+```shell
+ray start --address='ip of master node:port of master node' --num-gpus=2
+```
 
-## Reference: V100 Single-GPU Memory Configuration Optimization
+## Reference: V100 Multi-GPU Memory Configuration Optimization
 ```yaml
-# Reduce the system's expected number of GPUs from 8 to your actual 1 V100
-num_gpus_per_node: 1 
-# Training processes are now mapped only to GPU 0
-actor_train.device_mapping: list(range(0,1))
-# Inference processes are now mapped only to GPU 0
-actor_infer.device_mapping: list(range(0,1))
-# Reference model processes are now mapped only to GPU 0
-reference.device_mapping: list(range(0,1))
+# Reduce the system's expected number of GPUs from 8 to your actual 2 V100
+num_gpus_per_node: 2
+# Training processes are now mapped to GPU 0-3
+actor_train.device_mapping: list(range(0,4))
+# Inference processes are now mapped only to GPU 0-3
+actor_infer.device_mapping: list(range(0,4))
+# Reference model processes are now mapped to GPU 0-3
+reference.device_mapping: list(range(0,4))
 
 # Significantly reduce the batch sizes for Rollout and Validation stages to prevent out-of-memory errors on a single GPU
-rollout_batch_size: 16
+rollout_batch_size: 64
 val_batch_size: 16
 
 # V100 has better native support for FP16 than BF16 (unlike A100/H100). Switching to FP16 improves compatibility and stability, while also saving GPU memory.
@@ -77,7 +103,7 @@ strategy_config:
   use_distributed_optimizer: true
   recompute_granularity: full
 
-# In megatron training the global train batch size is equivalent to per_device_train_batch_size * gradient_accumulation_steps * world_size
+# In megatron training the global train batch size is equivalent to per_device_train_batch_size * gradient_accumulation_steps * world_size, and here world_size is 4
 actor_train.training_args.per_device_train_batch_size: 1
 actor_train.training_args.gradient_accumulation_steps: 16  
 
