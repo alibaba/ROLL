@@ -41,11 +41,11 @@ bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_single_node_demo.sh
 ```
 
 pipeline运行中的log截图示例：
-![log1](../../../static/img/log_1.png)
+![log_pipeline_start](../../../static/img/log_pipeline_start.png)
 
-![log2](../../../static/img/log_2.png)
+![log_pipeline_in_training](../../../static/img/log_pipeline_in_training.png)
 
-![log3](../../../static/img/log_3.png)
+![log_pipeline_complete](../../../static/img/log_pipeline_complete.png)
 
 
 ## 参考：单卡V100显存 config修改要点

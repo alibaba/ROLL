@@ -1,7 +1,7 @@
 # Quickstart: Multi Node Deployment Guide
 
 ## Environment Preparation
-1. Purchase multiple machines equipped with GPU and install GPU drivers simultaneously (e.g., 2 machines with 2 GPUs each).
+1. Purchase multiple machines equipped with GPU and install GPU drivers simultaneously. One machine serves as the master node, and the others serve as worker nodes. (e.g., 2 machines with 2 GPUs each).
 2. Connect remotely to the GPU instance and access the machine terminal
 3. Install Docker environment and NVIDIA Container Toolkit on each machine
 ```shell
@@ -45,7 +45,21 @@ export RANK=0
 export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0
 ```
-2. Set environment variables on the worker node:
+
+Notes:
+- `MASTER_ADDR` and `MASTER_PORT` define the communication endpoint for the distributed cluster.
+- `WORLD_SIZE` specifies the total number of nodes in the cluster (e.g., 2 nodes).
+- `RANK` identifies the node's role (0 for master, 1、2、3 etc. for worker nodes).
+- `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` specify the network interface for GPU/cluster communication (typically eth0).
+
+2. Run the pipeline on the master node:
+```shell
+bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_node_demo.sh
+```
+After the Ray cluster starts, you will see log examples like:
+![log_ray_multi_nodes](../../../static/img/log_ray_multi_nodes.png)
+
+3. Set environment variables on the worker node:
 ```shell
 export MASTER_ADDR="ip of master node"
 export MASTER_PORT="port of master node" # Default: 6379
@@ -54,18 +68,6 @@ export RANK=1
 export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0
 ```
-Notes:
-- `MASTER_ADDR` and `MASTER_PORT` define the communication endpoint for the distributed cluster.
-- `WORLD_SIZE` specifies the total number of nodes in the cluster (e.g., 2 nodes).
-- `RANK` identifies the node's role (0 for master, 1 for worker).
-- `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` specify the network interface for GPU/cluster communication (typically eth0).
-
-3. Run the pipeline on the master node:
-```shell
-bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_node_demo.sh
-```
-After the Ray cluster starts, you will see log examples like:
-![log4](../../../static/img/log_4.png)
 
 4. Connect the worker node to the Ray cluster on the master node:
 ```shell

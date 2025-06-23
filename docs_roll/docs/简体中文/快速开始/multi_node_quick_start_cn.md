@@ -1,7 +1,7 @@
 # 快速上手：多节点部署指南
 
 ## 准备环境
-1. 购买多台配备GPU的机器，并同步安装GPU驱动（下文示例为2台机器各2个GPU）
+1. 购买多台配备GPU的机器，并同步安装GPU驱动，其中一台作为主节点，其它作为工作节点（下文示例为2台机器各2个GPU）
 2. 远程连接GPU实例，进入机器终端
 3. 分别运行以下命令安装 Docker环境 和 NVIDIA容器工具包
 ```shell
@@ -45,7 +45,20 @@ export RANK=0
 export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0
 ```
-2. 在工作节点配置环境变量
+注意事项：
+- `MASTER_ADDR` 和 `MASTER_PORT` 定义了分布式集群的通信端点。
+- `WORLD_SIZE` 指定了集群中的节点总数（例如 2 个节点）。
+- `RANK` 用于标识节点的角色（0 表示主节点，1、2、3 等表示工作节点）。
+- `NCCL_SOCKET_IFNAME` 和 `GLOO_SOCKET_IFNAME` 指定了 GPU/集群通信使用的网络接口（通常为 eth0）。
+
+2. 在主节点上运行pipeline
+```shell
+bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_node_demo.sh
+```
+ray集群启动后，会看到下面的log示例：
+![log_ray_multi_nodes](../../../static/img/log_ray_multi_nodes.png)
+
+3. 在工作节点配置环境变量
 ```shell
 export MASTER_ADDR="ip of master node"
 export MASTER_PORT="port of master node" # Default: 6379
@@ -54,18 +67,6 @@ export RANK=1
 export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0
 ```
-注意事项：
-- `MASTER_ADDR` 和 `MASTER_PORT` 定义了分布式集群的通信端点。
-- `WORLD_SIZE` 指定了集群中的节点总数（例如 2 个节点）。
-- `RANK` 用于标识节点的角色（0 表示主节点，1 表示工作节点）。
-- `NCCL_SOCKET_IFNAME` 和 `GLOO_SOCKET_IFNAME` 指定了 GPU/集群通信使用的网络接口（通常为 eth0）。
-
-3. 在主节点上运行pipeline
-```shell
-bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_node_demo.sh
-```
-ray集群启动后，会看到下面的log示例：
-![log4](../../../static/img/log_4.png)
 
 4. 在工作节点上连接主节点启动的ray集群：
 ```shell
