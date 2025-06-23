@@ -54,7 +54,7 @@ Notes:
 
 2. Run the pipeline on the master node:
 ```shell
-bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_node_demo.sh
+bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_nodes_demo.sh
 ```
 After the Ray cluster starts, you will see log examples like:
 ![log_ray_multi_nodes](../../../static/img/log_ray_multi_nodes.png)

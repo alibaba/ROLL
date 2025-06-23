@@ -53,7 +53,7 @@ export GLOO_SOCKET_IFNAME=eth0
 
 2. 在主节点上运行pipeline
 ```shell
-bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_node_demo.sh
+bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_nodes_demo.sh
 ```
 ray集群启动后，会看到下面的log示例：
 ![log_ray_multi_nodes](../../../static/img/log_ray_multi_nodes.png)
