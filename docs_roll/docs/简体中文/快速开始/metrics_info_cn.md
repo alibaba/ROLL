@@ -1,16 +1,58 @@
-# 分析指标 
+# 实验数据分析与查看 
 
-## Algorithm Performance Metrics 算法效果指标
+## 实验数据追踪
+pipeline对应的config文件中，提供了两种数据追踪方式
+- TensorBoard
+- Weights & Biases (wandb)
+```yaml
+# wandb (Weights & Biases) 提供了更高级的云端实验管理和协作功能。
+#track_with: wandb
+#tracker_kwargs:
+#  api_key:
+#  project: roll-agentic
+#  name: ${exp_name}_frozen_lake
+#  notes: "agentic_pipeline"
+#  tags:
+#    - agentic
+#    - roll
+#    - baseline
 
-### Validation 验证阶段
+track_with: tensorboard
+tracker_kwargs:
+  # log_dir 是 TensorBoard 日志文件的根目录。每次实验运行会在该目录下创建以时间戳命名的子目录。
+  log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban
+```
+## 实验数据可视化
+下文以TensorBoard为例，介绍如何可视化查看实验数据
+
+1. **确保TensorBoard已安装**
+```shell
+pip install tensorboard
+```
+
+2. **启动TensorBoard。**pipeline运行结束后，在log_dir目录下（例如 /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban），可以找到以日期时间命名的各个实验运行目录。通过以下命令启动tensorboard，它将扫描该日期时间目录下的运行日志：
+```shell
+tensorboard --logdir /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban/{latest_date}
+```
+
+3. 在终端中，会看到如下提示
+![tensorboard_start](../../../static/img/tensorboard_start.png)
+
+4. 在浏览器中打开*localhost:6006*，即可查看TensorBoard界面。如果在远程机器上使用，需要正确配置端口映射。
+![tensorboard](../../../static/img/tensorboard.png)
+
+
+## 算法效果指标
+
+### 验证阶段
 - val/score/mean: 验证阶段，每个 episode 的平均分数。反映模型在未见过环境上的平均表现。
 - val/score/max / val/score/min: 验证阶段，每个 episode 的最高分数 / 最低分数。
 
 ### 价值相关
 - critic/lr: 价值函数（Critic）的学习率。学习率是优化器更新模型参数的步长。
 - critic/loss: 价值网络预测值与真实回报之间的损失。
-- critic/value: 在数据收集时，旧价值网络对批次中状态的预测值均值。
-- critic/vpred: 当前价值网络对批次中状态的预测值均值。
+- critic/value: 数据收集或训练开始时，旧策略的价值网络对批次中状态的预测值均值。这些值通常在计算优势函数时作为基准。
+- critic/vpred: 当前正在优化中的价值网络对批次中状态的预测值均值。该值会随着训练迭代而更新。
 - critic/clipfrac: 价值函数是否使用了裁剪（value_clip）以及裁剪生效的比例。
 - critic/error: 价值网络预测值与真实回报之间的均方误差。
 
@@ -43,9 +85,9 @@
 - actor/approxkl: 当前策略与旧策略之间的近似KL散度。衡量每一步策略更新的步长。
 - actor/policykl: 当前策略与旧策略之间的精确KL散度。
 
-#### 评估指标
+### 评估指标
 - critic/ref_log_prob/mean: 参考模型输出的平均 log 概率。用于衡量旧策略或参考策略的性能基准。
-- critic/old_log_prob/mean: 旧策略（训练前 Actor）输出的平均 log 概率。用于衡量当前策略的性能。
+- critic/old_log_prob/mean: 旧策略（训练前 Actor）输出的平均 log 概率。用于衡量新旧策略之间的差异。
 - critic/entropy/mean: 策略的平均熵。熵衡量策略的随机性或探索性，高熵表示更强的探索。
 - critic/reward_clip_frac: 奖励裁剪的比例。反映有多少奖励值被裁剪了，如果太高可能需要调整奖励范围或裁剪阈值。
 
@@ -64,7 +106,7 @@
 - actor/negative_sft_loss: 负样本监督微调损失。
 
 
-## Framework Performance Metrics 框架性能指标
+## 框架性能指标
 
 ### 全局系统指标 
 - system/tps: 每秒处理的 tokens 数量（Tokens Per Second）。这是衡量整个系统吞吐量的关键指标。
@@ -77,13 +119,14 @@
 - time/adv: 优势（Advantages）计算阶段的耗时。
 
 ### 各执行阶段
-metric_infix=f"{self.cluster_name}/train_step" 训练阶段
-metric_infix=f"{self.cluster_name}/generate" 文本生成/推理阶段
-metric_infix=f"{self.cluster_name}/model_update" 模型参数更新/同步阶段
-metric_infix=f"{self.cluster_name}/compute_log_probs" 计算对数概率阶段
-metric_infix=f"{self.cluster_name}/do_checkpoint“ 模型保存/检查点阶段
-metric_infix=f"{self.cluster_name}/compute_values" 计算价值阶段
-metric_infix=f"{self.cluster_name}/compute_rewards" 计算奖励阶段
+在下面的时间指标和内存指标中，{metric_infix} 会被替换为具体的执行阶段标识，例如：
+- train_step: 训练阶段
+- generate: 文本生成/推理阶段
+- model_update: 模型参数更新/同步阶段
+- compute_log_probs: 计算对数概率阶段
+- do_checkpoint: 模型保存/检查点阶段
+- compute_values: 计算价值阶段
+- compute_rewards: 计算奖励阶段
 
 #### 时间指标
 - time/{metric_infix}/total: 整个操作的总执行时间（从进入 state_offload_manger 到退出）。
@@ -92,28 +135,28 @@ metric_infix=f"{self.cluster_name}/compute_rewards" 计算奖励阶段
 - time/{metric_infix}/offload: 模型状态从 GPU 或内存中卸载（strategy.offload_states()）的时间。
 
 #### GPU内存指标
-- 开始时（模型状态卸载后）的内存快照 (start/offload)
-    - memory/{metric_infix}/start/offload/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
-    - memory/{metric_infix}/start/offload/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
-    - memory/{metric_infix}/start/offload/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
-    - memory/{metric_infix}/start/offload/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
-- 加载模型状态后（业务逻辑执行前）的内存快照 (start/onload)
-    - memory/{metric_infix}/start/onload/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
-    - memory/{metric_infix}/start/onload/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
-    - memory/{metric_infix}/start/onload/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
-    - memory/{metric_infix}/start/onload/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
-- 业务逻辑执行后（模型状态卸载前）的内存快照 (end/onload)
-    - memory/{metric_infix}/end/onload/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
-    - memory/{metric_infix}/end/onload/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
-    - memory/{metric_infix}/end/onload/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
-    - memory/{metric_infix}/end/onload/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
-    - memory/{metric_infix}/end/onload/max_allocated_frac/{device_id}: 某个 device_id 上已分配 GPU 内存峰值占总 GPU 内存的比例 (分数)。
-    - memory/{metric_infix}/end/onload/max_reserved_frac/{device_id}: 某个 device_id 上已预留 GPU 内存峰值占总 GPU 内存的比例 (分数)。
-- 卸载模型状态后（操作结束）的内存快照 (end/offload)
-    - memory/{metric_infix}/end/offload/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
-    - memory/{metric_infix}/end/offload/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
-    - memory/{metric_infix}/end/offload/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
-    - memory/{metric_infix}/end/offload/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
+- 开始时（模型状态卸载后）的内存快照
+    - memory/{metric_infix}/**start/offload**/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
+    - memory/{metric_infix}/**start/offload**/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
+    - memory/{metric_infix}/**start/offload**/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
+    - memory/{metric_infix}/**start/offload**/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
+- 加载模型状态后（业务逻辑执行前）的内存快照
+    - memory/{metric_infix}/**start/onload**/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
+    - memory/{metric_infix}/**start/onload**/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
+    - memory/{metric_infix}/**start/onload**/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
+    - memory/{metric_infix}/**start/onload**/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
+- 业务逻辑执行后（模型状态卸载前）的内存快照
+    - memory/{metric_infix}/**end/onload**/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
+    - memory/{metric_infix}/**end/onload**/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
+    - memory/{metric_infix}/**end/onload**/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
+    - memory/{metric_infix}/**end/onload**/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
+    - memory/{metric_infix}/**end/onload**/max_allocated_frac/{device_id}: 某个 device_id 上已分配 GPU 内存峰值占总 GPU 内存的比例 (分数)。
+    - memory/{metric_infix}/**end/onload**/max_reserved_frac/{device_id}: 某个 device_id 上已预留 GPU 内存峰值占总 GPU 内存的比例 (分数)。
+- 卸载模型状态后（操作结束）的内存快照
+    - memory/{metric_infix}/**end/offload**/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
+    - memory/{metric_infix}/**end/offload**/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
+    - memory/{metric_infix}/**end/offload**/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
+    - memory/{metric_infix}/**end/offload**/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
 
 #### CPU内存指标
 - memory/cpu/{metric_infix}/start/rss: 进程在操作开始时占用的实际物理内存 (Resident Set Size)。
