@@ -2,7 +2,7 @@
 
 ## Pipeline Config
 
-Refer to [RLVR Pipeline Start](./agent_pipeline_start.md) and [Agentic Pipeline Start](./agent_pipeline_start.md) for more details about RLVR/Agentic pipeline configurations and reward settings.
+Refer to [RLVR Pipeline Start](https://alibaba.github.io/ROLL/docs/English/StepByStep/rlvr_pipeline_start) and [Agentic Pipeline Start](https://alibaba.github.io/ROLL/docs/English/StepByStep/agent_pipeline_start) for more details about RLVR/Agentic pipeline configurations and reward settings.
 
 ```yaml
 rollout_batch_size: 64
