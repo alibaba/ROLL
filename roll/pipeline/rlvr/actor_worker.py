@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import numpy as np
 import torch
 
@@ -10,11 +23,10 @@ class ActorWorker(BaseActorWorker):
 
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
-        loss func接口定义:
-            data: DataProto, 由train_step透传
-            output_tensor: torch.Tensor, model.forward()的输出Tensor
-        """
-
+        loss function interface definition:
+            data (DataProto): Input data passed through from `train_step`
+            output_tensor (torch.Tensor): Output logits from `model.forward()`.
+        """  
         response_mask = data.batch["response_mask"][:, 1:].long()
         final_response_mask = data.batch.get("final_response_mask", response_mask)
 
@@ -122,12 +134,12 @@ class ActorWorker(BaseActorWorker):
 
     def compute_sample_weights(self, data: DataProto, response_mask: torch.Tensor):
         """
-        可以基于难度和长度的样本权重
+        Compute sample weights based on task difficulty and response length.
         """
         batch_size = response_mask.shape[0]
         sample_weights = torch.ones(batch_size, device=response_mask.device)
 
-        # 1. 基于难度的权重 - 例如：难度越高，权重越大
+        # 1. difficulty-based weighting: e.g. higher difficulty gets higher weight
         if self.pipeline_config.difficulty_loss_weight and "difficulty" in data.non_tensor_batch:
             try:
                 difficulty = data.non_tensor_batch["difficulty"]
@@ -139,15 +151,16 @@ class ActorWorker(BaseActorWorker):
                 difficulty_weights = 0.5 + 1.5 * norm_difficulty
                 sample_weights = sample_weights * difficulty_weights
             except Exception as e:
-                self.logger.warning(f"跳过difficulty权重计算：{str(e)}")
+                self.logger.warning(f"Skipping difficulty-based weighting: {str(e)}")
 
-        # 2. 基于长度的权重 - 例如：长度越长，权重越小
+        # 2. length-based weighting: e.g. longer response gets lower weight
         response_lengths = response_mask.sum(dim=1).float()
         if self.pipeline_config.length_loss_weight:
-            # 同样归一化长度到[0.5, 2.0]范围
+            # Normalize lengths to [0.0, 1.0] range
             norm_lengths = (response_lengths - response_lengths.min()) / (
                     response_lengths.max() - response_lengths.min() + 1e-8
             )
+            # Scale to [0.5, 1.5] range
             length_weights = 1.5 - norm_lengths
             sample_weights = sample_weights * length_weights
 

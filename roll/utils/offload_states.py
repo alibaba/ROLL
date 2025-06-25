@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from enum import Enum
 from typing import List, Tuple, Union
 
@@ -9,8 +22,10 @@ from trl import AutoModelForCausalLMWithValueHead
 
 class OffloadStateType(str, Enum):
     """
-    offload/reload需要区分训练和推理阶段，在actor_train/critic用于计算log_probs和values时，只需要reload model_params
-    """
+    Differentiates between training and inference phases:
+    - In actor_train/critic, only `model_params` need to be reloaded for computing log_probs and values.
+    - Other states (optimizer_states, other_params) can be offloaded during training to reduce GPU memory usage.
+    """    
 
     model_params = "model_params"
     optimizer_states = "optimizer_states"
@@ -19,7 +34,7 @@ class OffloadStateType(str, Enum):
 
 def offload_hf_model(model: PreTrainedModel):
     """
-    根据 hf_device_map 将模型的各个层卸载到 CPU
+    Offloads model layers to CPU based on `hf_device_map`.
     """
     if isinstance(model, AutoModelForCausalLMWithValueHead):
         offload_hf_model(model=model.pretrained_model)
@@ -34,7 +49,7 @@ def offload_hf_model(model: PreTrainedModel):
 
 def load_hf_model(model: PreTrainedModel):
     """
-    根据 hf_device_map 将模型的各个层卸载到 对应的GPU
+    Loads model layers to corresponding GPUs based on `hf_device_map`.
     """
     if isinstance(model, AutoModelForCausalLMWithValueHead):
         load_hf_model(model=model.pretrained_model)

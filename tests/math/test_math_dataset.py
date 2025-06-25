@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
@@ -12,7 +25,7 @@ dataset_path = "/home/weixun.wwx/Numina_hardrule_1212_lv2.json"
 dataset = load_dataset("json", data_files=dataset_path)["train"]
 
 
-# 加上format，然后转ids的func
+# Add format, then convert to ids function
 def encode_function(data_i):
     text_list = []
     for instruct in data_i["prompt"]:
@@ -26,11 +39,11 @@ def encode_function(data_i):
     return encodings
 
 
-# 处理数据
+# Process data
 print(dataset)
 dataset = dataset.map(encode_function, batched=True, desc="Encoding dataset")
 print(dataset)
-# 过滤cutoff
+# Filter cutoff
 dataset = dataset.filter(lambda data_i: len(data_i["input_ids"]) <= 512, desc="Filtering dataset")
 print(dataset)
 # ------

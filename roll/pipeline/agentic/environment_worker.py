@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import copy
 import re
 from dataclasses import dataclass, field, asdict
@@ -51,7 +64,7 @@ def get_masks_and_scores(
 ):
     """
     input_ids: shape (bsz, seq_len)
-    all_scores: list[list[float], 存储每个env每轮的reward
+    all_scores: list[list[float], stores reward for each env per turn
     Get loss mask that only learns between <|im_start|>assistant and <|im_end|>. Currently only supports qwen.
     NOTE: important! This assumes that the input_ids starts with system and then user & assistant in alternative ways
     NOTE: important! input_ids is left pad
@@ -65,7 +78,7 @@ def get_masks_and_scores(
     non_prompt_mask = turn_indicators > 2  # learns everything after system prompt + user prompts
 
     # turn text: '<|im_start|>assistant\n<answer>Right</answer><|im_end|>'
-    # <|im_start|>assistant\n 应该mask掉才对，保留<|im_end|>
+    # <|im_start|>assistant\n should be masked, and keep <|im_end|>
     for idx, scores in enumerate(zip_longest(*all_scores, fillvalue=0)):
         turn_indicator = idx * 2 + 3  # 0: pad. 1: system. 2+2n: user. 3+2n: assistant
         turn_start_position = (input_ids == turn_start_token) & (turn_indicators == turn_indicator)
@@ -129,19 +142,20 @@ def left_pad_2_right(
 
 class EnvironmentWorker(Worker):
     """
-    1. 一个EnvironmentWorker(进程)持有一个env实例: 执行env.reset, env.step, 管理rollout的状态
-        group trajectory表达: group内的init state一致，依赖env_config 中的seed来控制, 一个group内env 对应episode的seed一致
-        不采用持有envs的原因是，envs需要管理一组env的交互，增加描述的复杂性
-    2. 持有infer_cluster ref, 用于async generate
-    3. run_rollout_loop, 持续rollout trajectory, 将done的trajectory回传到output_queue
+    1. One EnvironmentWorker (process) holds an env instance: executes `env.reset` and `env.step` to manage rollout states
+       Grouped trajectory representation: initial states within groups are consistent, controlled by seeds in `env_config`. Environments within a group share the same episode seed.
+       Not holding multiple environments (`envs`) avoids managing interactions between multiple environments, which reduces complexity of description.
+    2. Holds a reference of `infer_cluster` for async generation.
+    3. `run_rollout_loop` continuously generates trajectories and returns completed trajectories to `output_queue`
 
-    承担EnvStateManager的history收集功能
-    一个group内的env reset进度应该一致
+    Responsibilities:
+    - Collect historical data as part of `EnvStateManager`.
+    - Ensure environment resets within a group are synchronized.
 
-    TODO: env并行方式后续改成进程+线程并行：目的解决一个env占用一个进程对系统资源的开销
-          - 一个EnvironmentWorker持有n个EnvStateManager
-          - EnvStateManager管理一个env的rollout loop
-          - EnvStateManager.run_rollout_loop,运行在n个线程里
+    TODO: Change to hybrid process+thread parallelism: to reduce the overhead cost of one env occupying one process on system resources
+          - One `EnvironmentWorker` holds n `EnvStateManagers`
+          - `EnvStateManager` manages a single environment's rollout loop
+          - Run `EnvStateManager.run_rollout_loop` in n threads
     TODO: GiGPO: https://arxiv.org/abs/2505.10978
     """
 
@@ -276,7 +290,7 @@ class EnvironmentWorker(Worker):
         lm_output: DataProto = ray.get(self.generate_scheduler.generate_one_request.remote(data=gen_batch))
 
         if lm_output is not None:
-            # 未被abort
+            # not aborted
             gen_batch.meta_info.pop("generation_config")
             gen_batch.meta_info.pop("response_callback_fn")
             lm_input = lm_input.repeat(repeat_times=generation_config["num_return_sequences"])
@@ -285,16 +299,17 @@ class EnvironmentWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def run_rollout_loop(self, data: DataProto):
-        """
-        1. 每次调用run_rollout_loop,
-            会持续的play episode, 直到收到采集完成的command
-            需要重置seed, 确保每个group的seed一致
-            episode_id 置0
-        seed更新逻辑:
-            group_seed = seed + group_seed
-            episode_seed = group_seed + episode_id
+        """    
+        1. Episode Execution Loop:  
+           - Continuously runs episodes until a termination command is received via the input queue.  
+           - Resets the seed to ensure consistent seeding across groups and resets `episode_id` to 0 at the start.  
 
-        trajectory_id: f"{group_id}_{episode_id}_{episode_seed}"
+        2. Seed Management Logic:  
+           - group_seed = global_seed + env_group_seed
+           - episode_seed = group_seed + episode_id
+
+        3. Trajectory Identification:  
+           - Trajectory ID is formatted as `f"{group_id}_{episode_id}_{episode_seed}"` to uniquely identify each trajectory.  
         """
 
         self.start_input_queue_process()
@@ -379,9 +394,9 @@ class EnvironmentWorker(Worker):
 
     def formulate_rollouts(self):
         """
-        1. 每个env的trajectory 是一个rollout
-        2. 每个rollout 是一个List[Dict]
-        3. 每个Dict 是一个step的信息
+        1. Each env's trajectory is a rollout
+        2. Each rollout is a List[Dict]
+        3. Each Dict has information for one step
         """
         llm_input_texts, messages_list = self._format_messages(
             env_output=self.rollout_cache, prepare_for_update=True, use_raw_llm_response=False
@@ -436,7 +451,7 @@ class EnvironmentWorker(Worker):
         llm_inputs.batch["non_prompt_mask"] = non_prompt_mask
         llm_inputs.batch["response_mask"] = non_prompt_mask
         if self.pipeline_config.enable_response_mask:
-            # 只使用llm的response mask，不包含环境的state
+            # only use llm's response mask, not including environment's state
             llm_inputs.batch["response_mask"] = response_mask
         first_true_indices = non_prompt_mask.int().argmax(dim=1)
         no_true_mask = ~non_prompt_mask.any(dim=1)
@@ -601,7 +616,7 @@ class EnvironmentWorker(Worker):
                 )
             if "llm_raw_response" in content:
                 # yali: using the raw response will cause continuous crashes: https://aliyuque.antfin.com/mdl-team/traning/wmne4oyxg4dozwia
-                #       改成actions合理吗？
+                #       is it reasonable to change to actions?
                 messages.append(
                     {
                         "role": "assistant",
@@ -627,12 +642,12 @@ class EnvironmentWorker(Worker):
             else:
                 text += "<answer>"  # force the LLM to answer
 
-        # TODO: 应该没有必要，注意处理mask
+        # TODO: should not be necessary, pay attention to handle the mask
         text = text.replace("<|im_end|>\n", "<|im_end|>")
         return [text], [messages]
 
     def _init_prefix_lookup(self):
-        # TODO: 这里并不合理
+        # TODO: not reasonable here
         prefix_lookup = {}
         prefixes = {}
         env_config_lookup = {}

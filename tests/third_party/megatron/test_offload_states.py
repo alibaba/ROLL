@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import os
 from typing import Optional, List
 
@@ -210,7 +223,7 @@ class TurboModelCreator:
 
 """
 torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s tests/third_party/megatron/test_offload_states.py
--s 显示stdout/err
+-s: display stdout/err
 """
 
 
@@ -881,7 +894,7 @@ def run_model_fp32_optimizer(mca_model: TurboModelCreator, included_state, pin_m
 @pytest.mark.parametrize("optimizer_type", [None, "dist_optimizer", "fp16", "fp32"])
 def test_megatron_offload_states(included_state, pin_memory, non_blocking, optimizer_type):
     """
-    有四块非optimizer的显存未释放:
+    There are four blocks of non-optimizer GPU memory not released:
     /opt/conda/envs/python3.10.13/lib/python3.10/site-packages/transformer_engine/pytorch/module/base.py:58:get_workspace
     /root/.local/lib/python3.10/site-packages/megatron/core/tensor_parallel/layers.py:413:forward
     /root/.local/lib/python3.10/site-packages/megatron/core/models/gpt/gpt_model.py:249:forward

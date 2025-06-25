@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from typing import Dict, Optional, Type
 
 from vllm import LLMEngine, EngineArgs, envs
@@ -61,7 +74,7 @@ class LLMEngine073(LLMEngine):
                 parallel_config.worker_cls = \
                     "vllm.worker.multi_step_worker.MultiStepWorker"
         elif vllm_config.speculative_config:
-            # TODO: 投机采样
+            # TODO: Speculative sampling
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = \
                     "vllm.v1.worker.gpu_worker.Worker"
@@ -72,7 +85,7 @@ class LLMEngine073(LLMEngine):
                     "vllm.worker.worker.Worker"
         else:
             if envs.VLLM_USE_V1:
-                # TODO: 实现v1
+                # TODO: Implement v1
                 parallel_config.worker_cls = \
                     "vllm.v1.worker.gpu_worker.Worker"
             else:

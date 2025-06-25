@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import copy
 import itertools
 import queue
@@ -171,7 +184,7 @@ class GenerateScheduler:
 
     def get_available_dp_rank(self):
         while True:
-            # 负载均衡逻辑，期望各dp 正在处理的条数基本接近
+            # Load balancing logic, expecting the number of items being processed by each DP worker to be roughly equal.
             sorted_ranks = sorted(
                 self.load_balance_coordinator.keys(), key=lambda rank: (self.load_balance_coordinator[rank], rank)
             )
@@ -205,26 +218,26 @@ class GenerateScheduler:
         )
         self.cluster.start_server(data=DataProto(meta_info=data.meta_info), blocking=True)
 
-        # 分发数据至收到target rollout 完成
-        # 无限循环，把所有的response发送给dp worker
+        # Distribute the data until the target rollout is completed.
+        # Infinite loop that send all responses to the DP worker.
         send_request_count = 0
         request_refs = []
         data_index_counter = itertools.count()
         last_alive_check = time.time()
         while not self.is_completed:
 
-            # 探测dp worker是否存活，dp worker的server thread可能由于异常退出，造成hang
+            # Check if DP worker is still alive. The server thread of the DP worker might exit due to exceptions, causing a hang.
             current_time = time.time()
             if current_time - last_alive_check >= self.alive_check_interval:
                 self.cluster.add_request(command=GenerateRequestType.ALIVE_CHECK, data=DataProto())
                 last_alive_check = current_time
 
             if send_request_count < data.batch.batch_size[0]:
-                # 取一个可以发送request的dp worker
+                # Get an available DP worker that can send requests.
                 dp_rank = next(self.get_available_dp_rank())
 
-                # 还有数据需要发送, 取需要发送的数据
-                # request_id 全局递增，否则vllm/sglang scheduler状态不对
+                # There is still data to send, get the data required to be sent.
+                # request_id should increment globally, otherwise the state of vllm/sglang scheduler will be incorrect.
                 request_id = next(self.request_counter)
                 data_index = next(data_index_counter)
                 request_data = collate_fn([self.data[data_index]])
@@ -235,7 +248,7 @@ class GenerateScheduler:
                 ].item()
                 self.request_id_2_dp_rank[request_data.meta_info["request_id"]] = dp_rank
                 self.prompt_id_2_request_ids[prompt_id].add(request_data.meta_info["request_id"])
-                # 需要注意上面的调用顺序, report_response中会更新request_id索引dp_rank，所以这里需要最后add request_id
+                # Pay attention to the calling order above. report_response will update the request_id index for dp_rank, so you need to add request_id here.
                 request_data.meta_info["response_callback_fn"] = self.response_callback_fn
                 request_data.meta_info["generation_config"] = data.meta_info["generation_config"]
                 request_refs.append(
@@ -293,7 +306,7 @@ class GenerateScheduler:
     @ray.method(concurrency_group="single_thread")
     def report_response(self, data: DataProto):
         """
-        本质上也是维护了一个状态机
+        Maintain a state machine in essential.
         """
         request_id = data.meta_info["request_id"]
         prompt_id = self.request_id_2_prompt_id[request_id]
@@ -308,7 +321,8 @@ class GenerateScheduler:
         required_response_count = self.cluster.worker_config.generating_args.num_return_sequences
         self.prompt_id_2_request_ids[prompt_id].remove(data.meta_info["request_id"])
         if len(self.responses[prompt_id]) * self.response_batch_size >= required_response_count:
-            # 取已经完成的prompt_id，对应的request_ids，需要都取消
+            # Mark the prompt_id as completed and abort all associated request_ids
+            # Add the completed prompt_id to tracking, then abort its corresponding request_ids
             if prompt_id not in self.completed_count:
                 self.progress_bar.update(1)
             self.completed_count.add(prompt_id)
@@ -394,7 +408,7 @@ class DynamicSamplingScheduler:
         state: Dict[str, Any] = None,
     ):
         """
-        GenerateScheduler可以由多个实例，不再局限于单例
+        GenerateScheduler can have multiple instances, which no longer limited to a singleton.
         """
         self.actor_cluster = actor_cluster
         self.reward_clusters = reward_clusters
@@ -459,9 +473,9 @@ class DynamicSamplingScheduler:
 
     def get_batch(self, data: DataProto, batch_size: int) -> DataProto:
         """
-        从dataset里，按给定策略sample batch
-        1. 常规无过滤
-        2. 动态过滤
+        Sample batches from the dataset based on a given strategy.
+        1. Regular (no filtering)
+        2. Dynamic filtering
         """
         self.batch_size = batch_size
         self.reset_status()
@@ -497,13 +511,15 @@ class DynamicSamplingScheduler:
                 self.prompt_use_count += 1
                 self.running_prompts += 1
                 for req in request_data_list:
-                    # get a available worker, 需要控制max_running_request, 当前策略会始终保持worker的满载
+                    # Get an available worker, ensure max_running_requests is controlled, and maintain full utilization of workers.
+                    # This strategy dynamically assigns requests to workers while keeping them at maximum capacity.
                     request_id = ray.get(self.request_counter.get_value.remote())
                     req.meta_info["request_id"] = f"{request_id}"
                     req.meta_info["response_callback_fn"] = self.response_callback_fn
                     self.request_id_2_prompt_id[req.meta_info["request_id"]] = prompt_id
                     self.request_id_2_dp_rank[req.meta_info["request_id"]] = dp_rank
-                    self.prompt_id_2_request_ids[prompt_id].add(req.meta_info["request_id"])  # 用于replica情况
+                    # Track request IDs for replica scenarios (e.g., model replicas or task replicas)
+                    self.prompt_id_2_request_ids[prompt_id].add(req.meta_info["request_id"]) 
                     self.requests_buffers[req.meta_info["request_id"]] = req
                     ray.get(
                         self.actor_cluster.workers[dp_rank].add_request.remote(
@@ -522,7 +538,7 @@ class DynamicSamplingScheduler:
             f"used queries: {query_use_count}  query_filter_count: {self.query_filter_count} "
             f"response_filter_count: {self.response_filter_count}"
         )
-        # TODO: 这里 len(collect_data) > rollout_batch_size, 可以尝试动态扩大batch_size
+        # TODO: Here len(collect_data) > rollout_batch_size, you can try to dynamically expand the batch_size.
         batch = DataProto.concat(collect_data[: self.batch_size * num_return_sequences])
         batch.meta_info["metrics"] = {
             f"scheduler/query_filter_count": self.query_filter_count,
@@ -531,7 +547,7 @@ class DynamicSamplingScheduler:
             f"scheduler/query_use_count": query_use_count,
         }
 
-        # 统计全部response metrics
+        # Aggregate all response metrics.
         metrics = {}
         for domain, response_batches in self.response_cache.items():
             response_batch = DataProto.concat(response_batches[:])
@@ -548,8 +564,8 @@ class DynamicSamplingScheduler:
     @ray.method(concurrency_group="multi_thread")
     def report_response(self, data: DataProto):
         """
-        这里需要考虑多线程数据访问
-        data 返回可能有多条的
+        Consider multi-threaded data access here.
+        There may be multiple response entries.
         """
         try:
             request_id = data.meta_info["request_id"]
@@ -569,16 +585,16 @@ class DynamicSamplingScheduler:
             if not self.running:
                 return
 
-            # call reward
-            # reward worker得能支持单条数据计算, dynamic sampling对需要batch计算reward的需要注意...
-            # 多域的时候,llm as judge, 需要单独为reward worker分配gpu
+            # Call reward
+            # Reward worker must support single data calculation. For dynamic sampling, be aware of batch calculation for rewards.
+            # In multi-domain scenarios, LLM as judge requires separate GPU allocation for reward workers.
             rewards: DataProto = ray.get(reward_worker.compute_rewards.remote(batch))
             batch.union(rewards)
 
             response_buffers: List[DataProto] = []
             batch_expanded = [batch[[idx]] for idx in range(output_count)]
 
-            # response_filter, 不太需要response filter
+            # response filtering is optional
             for batch_item in batch_expanded:
                 if self.response_filter_fn(batch_item, self.pipeline_config):
                     response_buffers.append(batch_item)
@@ -706,7 +722,7 @@ class DynamicSamplingScheduler:
         return target_requests
 
     def check_worker_alive(self, cluster):
-        # 探测dp worker是否存活，dp worker的server thread可能由于异常退出，造成hang
+        # Check if DP worker is still alive. The server thread of the DP worker might exit due to exceptions, causing a hang.
         current_time = time.time()
         if current_time - self.last_alive_check >= self.alive_check_interval:
             cluster.add_request(command=GenerateRequestType.ALIVE_CHECK, data=DataProto())
@@ -727,7 +743,7 @@ class DynamicSamplingScheduler:
 
     def get_available_dp_rank(self):
         while True:
-            # 负载均衡逻辑，期望各dp 正在处理的条数基本接近
+            # Load balancing logic, expecting the number of items being processed by each DP worker to be roughly equal.
             sorted_ranks = sorted(
                 self.load_balance_coordinator.keys(), key=lambda rank: (self.load_balance_coordinator[rank], rank)
             )

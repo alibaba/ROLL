@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import copy
 import random
 from typing import Dict
@@ -9,9 +22,12 @@ from collections import defaultdict
 
 class BatchStratifiedSampler(Sampler):
     """
-    Batch分层抽样
-    batch的样本按指定的比例分布，如(a=0.5, b=0.3, c=0.2),
-    batch_size=10，int(0.5 * batch_size)的样本属于a, int(0.3 * batch_size)的样本属于b，(batch_size-len(a)-len(b))的样本属于c
+    Batch Stratified Sampling:
+        Ensures that each batch contains samples from different domains in a specified ratio.
+        Example: For domain ratios (a=0.5, b=0.3, c=0.2) and batch_size=10:
+            - 5 samples from domain 'a'
+            - 3 samples from domain 'b'
+            - 2 samples from domain 'c'
     """
 
     def __init__(self, dataset, domain_ratios: Dict, batch_size, drop_last=True):
@@ -24,7 +40,7 @@ class BatchStratifiedSampler(Sampler):
         self.domain_ratios = copy.deepcopy(domain_ratios)
         sum_values = sum(domain_ratios.values())
 
-        # 按domain分组样本索引
+        # Group sample indices by domain
         self.domain_indices = defaultdict(list)
         for idx in range(len(dataset)):
             self.domain_indices[dataset[idx]["domain"]].append(idx)
@@ -37,7 +53,7 @@ class BatchStratifiedSampler(Sampler):
         print(f"domain_indices count: {domain_indices_count}")
 
         self.domain_ratios = {key: value / sum_values for key, value in domain_ratios.items()}
-        # 计算每个domain在每个batch中的样本数
+        # Calculate number of samples per domain in each batch
         self.domain_batch_num = {}
         accumulated = 0
         domain_list = list(self.domain_ratios.keys())
@@ -68,7 +84,7 @@ class BatchStratifiedSampler(Sampler):
             np.random.shuffle(indices_np)
             shuffled[domain] = indices_np
 
-        # 扩展每个domain的索引以满足max_batch容量
+        # Expand indices to meet max batch capacity
         extended_indices = {}
         for domain, indices in shuffled.items():
             num = self.domain_batch_num[domain]
@@ -77,7 +93,7 @@ class BatchStratifiedSampler(Sampler):
             extended = np.tile(indices, repeat_times)[:total_required]
             extended_indices[domain] = extended
 
-        # 生成Batch
+        # Generate batches
         batches = []
         for i in range(self.total_batches):
             batch = []

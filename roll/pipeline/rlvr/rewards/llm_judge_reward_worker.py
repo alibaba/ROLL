@@ -34,7 +34,7 @@ class LLMJudgeRewardWorker(Worker):
         self.tokenizer = None
         self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
 
-        # LLM judge相关配置
+        # LLM judge related configuration
         self.judge_prompt = self.worker_config.judge_prompt if hasattr(self.worker_config, "judge_prompt") else None
         self.judge_prompt = prompt_maps[self.judge_prompt]
         self.judge_model_type = (

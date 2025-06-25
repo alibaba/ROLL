@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import json
 import os.path
 from typing import Any, Dict, List, Callable
@@ -107,7 +120,7 @@ class AgenticPipeline(BasePipeline):
 
     @torch.no_grad()
     def run(self):
-        # 计算tokens per second 系统吞吐
+        # Calculate tokens per second, which measures system throughput
         tps_timer = _Timer(window_size=5)
 
         for global_step in range(self.pipeline_config.max_steps):
@@ -191,8 +204,8 @@ class AgenticPipeline(BasePipeline):
                     metrics.update(reduce_metrics(old_log_probs.meta_info.pop("metrics", {})))
                 metrics["time/old_log_probs_values"] = cal_old_logpb_timer.last
 
-                # 要按group by处理reward
-                # 可以tag(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
+                # Group rewards by specified keys (e.g., env_type, traj_group_id, or rollout_batch).
+                # This ensures reward normalization and advantage calculation are applied within each group.
                 batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
                 with Timer(name="adv", logger=None) as timer:
                     grouping = self.pipeline_config.reward_normalization.grouping
@@ -228,7 +241,7 @@ class AgenticPipeline(BasePipeline):
                     batch = DataProto.concat(batch_list)
                     batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
                     batch.pop("prompt_id")
-                    # advantage是全局batch计算，还是group内计算？
+                    # Compute advantage estimates (e.g., GAE) across the entire batch or within groups?
                     batch = compute_advantage(
                         data=batch,
                         gamma=self.pipeline_config.gamma,
@@ -314,8 +327,8 @@ class AgenticPipeline(BasePipeline):
 
 
 def compute_data_metrics(batch):
-    # token_level_scores 是reward model给每个token的打分，可能经过了norm/clip
-    # score 为env的reward，raw value
+    # token_level_scores are scores given by reward model to each token, possibly after norm/clip
+    # score is the environment reward, which is the raw value
     sequence_score = batch.batch["scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
     advantages = batch.batch["advantages"]

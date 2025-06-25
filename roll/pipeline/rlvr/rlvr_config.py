@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional, Literal, List, Dict, Any
@@ -282,7 +295,7 @@ class RLVRConfig(BaseConfig):
                 self.critic.training_args.per_device_train_batch_size
                 * self.critic.training_args.gradient_accumulation_steps
         )
-        # 没有除dp_size，需要在分布式环境初始化后再除
+        # Not divided by dp_size yet, need to divide after distributed environment initialization
         self.actor_train.training_args.max_steps = max_steps * (
                 self.rollout_batch_size
                 * self.actor_infer.generating_args.num_return_sequences

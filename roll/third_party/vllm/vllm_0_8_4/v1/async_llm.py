@@ -1,3 +1,16 @@
+# Copyright (c) 2025, ALIBABA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import os
 import asyncio
 from typing import (Tuple, List, Dict, Optional, Union, Any,
@@ -74,7 +87,7 @@ class AsyncLLM084(AsyncLLM):
         self.reset_prefix_cache()
         self.collective_rpc(method="offload_states")
 
-    # 参数同步接口
+    # Parameter synchronization interface
     def setup_collective_group(self, *args, **kwargs):
         self.collective_rpc(method="setup_collective_group", args=args, kwargs=kwargs)
 
