@@ -38,7 +38,7 @@
 
 ### Sokoban 环境：离散动作的经典解谜任务
 1. 环境配置 SokobanEnvConfig
-```Python
+```python
 class SokobanEnvConfig:
     # 房间的尺寸 (行, 列)
     dim_room: Tuple[int, int] = (6, 6) 
@@ -68,7 +68,7 @@ class SokobanEnvConfig:
     action_lookup: Optional[Dict[int, str]] = field(
         default_factory=lambda: {1: "Up", 2: "Down", 3: "Left", 4: "Right"}
     )
-     # 允许通过dim_x, dim_y设置dim_room的兼容性字段
+    # 允许通过dim_x, dim_y设置dim_room的兼容性字段
     dim_x: Optional[int] = None
     dim_y: Optional[int] = None
     render_mode: str = "text"
@@ -77,12 +77,12 @@ class SokobanEnvConfig:
 2. 环境实现 SokobanEnv
 这是一个标准的强化学习环境实现，它继承了框架中的 BaseDiscreteActionEnv（用于离散动作环境的通用接口）和 GymSokobanEnv（Sokoban 游戏的核心逻辑）。
 - 定义工作空间：4个离散动作，ID从1开始 (1, 2, 3, 4)
-```Python
+```python
 self.ACTION_SPACE = gym.spaces.discrete.Discrete(4, start=1)
 ```
 
 - reset方法：生成一个新的Sokoban房间布局，并重置游戏内部状态
-```Python
+```python
 def reset(self, seed=None):
     try:
         # 使用all_seed确保房间生成的可复现性
@@ -107,7 +107,7 @@ def reset(self, seed=None):
 ``` 
 
 - step方法：根据智能体执行的动作更新环境状态。
-```Python
+```python
 def step(self, action: int):
     # 记录玩家旧位置，用于判断动作是否有效
     previous_pos = self.player_position
@@ -133,7 +133,7 @@ def step(self, action: int):
 ```
 
 - render方法：将当前环境状态渲染为文本或图像。
-```Python
+```python
 def render(self, mode=None):
     # 使用指定模式或默认模式
     render_mode = mode if mode is not None else self.render_mode 
@@ -150,7 +150,7 @@ def render(self, mode=None):
 ```
 
 3. 模块测试
-```Python
+```python
 import matplotlib.pyplot as plt
 # 创建一个Sokoban环境配置
 config = SokobanEnvConfig(dim_room=(6, 6), num_boxes=1, max_steps=100, search_depth=10)
@@ -174,7 +174,7 @@ while True:
     print(obs, reward, done, info)
 # 如果环境支持RGB数组渲染，则获取最终的游戏画面图像  
 np_img = env.get_image("rgb_array")
-# save the image
+# 保存图像
 plt.imsave("sokoban1.png", np_img)
 ```
 
@@ -185,7 +185,7 @@ WebShop 是一个模拟在线购物的任务环境，要求智能体根据自然
 下面重点讲解和Sokoban不同的地方：
 
 1. WebShop会解析环境中的可用动作，并将其转换为智能体可生成的文本字符串列表。
-```Python
+```python
 def get_available_actions(self):
     # 从底层WebShop模拟器获取原始可用操作信息
     # 与Sokoban的固定动作集不同，WebShop的动作空间是动态的。
@@ -203,7 +203,7 @@ def get_available_actions(self):
 ```
 
 2. WebShop的reset可指定会话ID和初始指令文本。
-```Python
+```python
 def reset(
     self, seed=None, session: Optional[Union[str, int]] = None, instruction_text: Optional[str] = None
 ) -> any:
@@ -217,12 +217,12 @@ def reset(
     obs, _ = WebAgentTextEnv.reset(self, session=session, instruction_text=instruction_text)
     
     # 准备渲染缓存：将初始指令添加到缓存，用于render方法
-  self.prepare_render_cache(WebAgentTextEnv.get_instruction_text(self))
+    self.prepare_render_cache(WebAgentTextEnv.get_instruction_text(self))
     return obs
 ```
 
 3. WebShop的action是一个自然语言文本字符串。
-```Python
+```python
 def step(self, action):
     # 调用父类WebAgentTextEnv的step，它解析并执行文本动作
     state, reward, done, info = WebAgentTextEnv.step(self, action)
@@ -276,4 +276,3 @@ def step(self, action):
    - WebShop 还有最大步数限制
 5. 不确定性/随机性：如果环境包含不确定性（如FrozenLake），确保其行为是可预测的概率分布，并能在 reset 中通过 seed 控制随机性。
 6. 可复现性：使用 seed 参数初始化随机数生成器，以确保每次运行环境时其行为都是可复现的。
-
