@@ -21,6 +21,7 @@ from roll.utils.constants import RAY_NAMESPACE
 from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
+from roll.utils.ray_utils import RayUtils
 
 logger = get_logger()
 
@@ -112,12 +113,9 @@ class Cluster:
                 env_vars["MASTER_ADDR"] = self.master_addr
                 env_vars["MASTER_PORT"] = str(self.master_port)
             if deploy_pg["gpu_rank"] is not None:
-                env_vars.update(
-                    {
-                        "CUDA_VISIBLE_DEVICES": ",".join(map(str, pg_zero_gpu_ranks)),
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    }
-                )
+                RayUtils.update_env_vars_for_visible_devices(
+                    env_vars=env_vars, 
+                    gpu_ranks=pg_zero_gpu_ranks)
             if "ROLL_LOG_DIR" in os.environ:
                 env_vars["ROLL_LOG_DIR"] = os.environ["ROLL_LOG_DIR"]
             env_vars.update(self.worker_config.system_envs)
