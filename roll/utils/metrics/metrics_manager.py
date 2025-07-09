@@ -94,8 +94,8 @@ class MetricsManager:
         response_length = response_mask.sum(-1).float()
         sequence_score = batch.batch["scores"]
 
-        max_score = torch.max(sequence_score).item()
-        min_score = torch.min(sequence_score).item()
+        max_score = 1
+        min_score = 0
         correct_mask = sequence_score == max_score
         incorrect_mask = sequence_score == min_score
 
