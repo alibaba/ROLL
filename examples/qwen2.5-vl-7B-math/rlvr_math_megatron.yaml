@@ -110,6 +110,7 @@ actor_infer:
     strategy_config:
       gpu_memory_utilization: 0.9
       block_size: 16
+      disable_mm_preprocessor_cache: true # RAM leak: https://github.com/vllm-project/vllm/issues/15085
   num_gpus_per_worker: 1
   device_mapping: list(range(0,16))
   infer_batch_size: 32
