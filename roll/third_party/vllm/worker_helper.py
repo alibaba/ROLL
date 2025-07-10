@@ -3,6 +3,7 @@ from typing import Tuple, Iterable
 
 import torch
 import torch.distributed as dist
+import vllm
 
 from roll.utils.collective import collective
 from roll.utils.functionals import get_dist_info_from_comm_plan
@@ -18,6 +19,7 @@ class WorkerHelper:
         super().__init__(*args, **kwargs)
         self.weight_loaded : bool = True
         self.kv_cache_loaded : bool = True
+        self.buffers = None
 
     def reload_model(self):
         if not self.weight_loaded:
@@ -35,11 +37,22 @@ class WorkerHelper:
         if not self.kv_cache_loaded:
             self.wake_up(["kv_cache"])
             self.kv_cache_loaded = True
+        if vllm.__version__ < "0.8.5" and  self.buffers is not None:
+            # https://github.com/vllm-project/vllm/issues/16564
+            model = self.model_runner.model
+            for name, buffer in model.named_buffers():
+                if name in self.buffers:
+                    buffer.data.copy_(self.buffers[name].data)
+            self.buffers = None
 
     def offload_states(self, level):
         assert (self.weight_loaded and self.kv_cache_loaded) or (not self.weight_loaded and not self.kv_cache_loaded)
         if not self.weight_loaded:
             return
+        if vllm.__version__ < "0.8.5" and level == 2:
+            # https://github.com/vllm-project/vllm/issues/16564
+            model = self.model_runner.model
+            self.buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
         self.sleep(level)
         self.weight_loaded = False
         self.kv_cache_loaded = False

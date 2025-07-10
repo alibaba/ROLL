@@ -158,6 +158,7 @@ actor_infer:
       gpu_memory_utilization: 0.85
       load_format: dummy
       tensor_parallel_size: 2
+      sleep_level: 2  # 2 will destroy model parameter and kv_cache after generate to save cpu memory, 1 will destroy kv_cache only.
   num_gpus_per_worker: 2
   device_mapping: list(range(0,24)) # device share with llm reward
   infer_batch_size: 1
