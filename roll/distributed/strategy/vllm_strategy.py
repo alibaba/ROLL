@@ -1,6 +1,7 @@
 import copy
 import gc
 import itertools
+import os
 import queue
 from concurrent import futures
 from typing import List, Optional, Union, Dict
@@ -75,6 +76,11 @@ class VllmStrategy(InferenceStrategy):
         )
         logger.info(f"vllm_config: {vllm_config}")
         assert not dist.is_initialized()
+
+        # set VLLM_PORT to avoid port conflict applied by vllm
+        vllm_port = self.worker.get_free_port()
+        os.environ["VLLM_PORT"] = str(vllm_port)
+
         if engine_mode == "sync":
             self.model = LLM(resource_placement_groups=self.worker_config.resource_placement_groups, **vllm_config)
             self.tokenizer = self.model.get_tokenizer()
