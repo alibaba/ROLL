@@ -62,19 +62,27 @@ def format_prompt(prompt, processor, use_image=True, prompt_image_token=None):
     return text
 
 
-def process_image(image: Image.Image, processor: ProcessorMixin):
+def process_image(images: List[Image.Image], processor: ProcessorMixin):
     # same as qwen2-vl image processor
     image_processor = processor.image_processor
-    height, width = image.height, image.width
-    resized_height, resized_width = smart_resize(
-        height,
-        width,
-        factor=image_processor.patch_size * image_processor.merge_size,
-        min_pixels=image_processor.min_pixels,
-        max_pixels=image_processor.max_pixels,
+    factor = (
+        image_processor.patch_size * image_processor.merge_size
+        if "Qwen" in image_processor.image_processor_type
+        else 28
     )
-    resized_image = image.resize((resized_width, resized_height), resample=image_processor.resample)
-    return resized_image
+
+    def resize_image(image):
+        height, width = image.height, image.width
+        resized_height, resized_width = smart_resize(
+            height,
+            width,
+            factor=factor,
+            min_pixels=image_processor.min_pixels,
+            max_pixels=image_processor.max_pixels,
+        )
+        return image.resize((resized_width, resized_height), resample=image_processor.resample)
+
+    return [resize_image(image) for image in images]
 
 
 def encode_function(data_i, processor, prompt_key, answer_key, image_key):
@@ -84,9 +92,9 @@ def encode_function(data_i, processor, prompt_key, answer_key, image_key):
         if image is None:
             image_flag[idx] = False
         try:
-            image_out = load_images(image if isinstance(image, (list, tuple)) else [image], timeout=None)[0]
+            image_out = load_images(image if isinstance(image, (list, tuple)) else [image], timeout=None)
         except Exception as e:
-            image_out = Image.new("RGB", (224, 224), (255, 255, 255))
+            image_out = [Image.new("RGB", (224, 224), (255, 255, 255))]
             logger.error(f"Failed to get image: {image}")
         # since infer-image use pil image as input while train-engine use
         # processed data, process image here to make them use same image
@@ -180,11 +188,12 @@ def get_dataloader(dataset, batch_size, data_collator):
 
 def get_extra_data_provider(model_name_or_path: str, processor=None):
     model_name_or_path = download_model(model_name_or_path)
-    config = AutoConfig.from_pretrained(model_name_or_path)
+    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
     if "qwen2" in config.model_type:
         import types
-        from transformers.models.qwen2_vl import Qwen2VLForConditionalGeneration
+
         from transformers import BatchFeature  # help define a object to accesss attr
+        from transformers.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
         dummy_self = BatchFeature(
             {
@@ -213,7 +222,19 @@ def get_extra_data_provider(model_name_or_path: str, processor=None):
             return {"position_ids": rope_index}
 
         return extra_data_provider
-    return None
+
+    def default_extra_data_provider(
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ):
+        bsz, seqlen = input_ids.shape
+        position_ids = torch.arange(seqlen, dtype=torch.long, device=input_ids.device)
+        position_ids = position_ids.unsqueeze(0).expand(bsz, -1)
+        if attention_mask is not None:
+            position_ids = position_ids.masked_fill(attention_mask == 0, 0)
+        return {"position_ids": position_ids}
+
+    return default_extra_data_provider
 
 
 class RLVRMathVLMPipeline(BasePipeline):
@@ -233,7 +254,8 @@ class RLVRMathVLMPipeline(BasePipeline):
         features = datasets.Features(
             {
                 # only support single image temporarily since sglang usage
-                "image": datasets.Image(decode=True),
+                # "image": datasets.Image(decode=True),
+                "image": datasets.Sequence(feature=datasets.Image(decode=True)),
                 "prompt": datasets.Value("string"),
                 "ground_truth": datasets.Value("string"),
                 # for text and multi-modal mixed data usage, indicating valid image
