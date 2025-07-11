@@ -16,6 +16,11 @@ class Worker084(WorkerHelper, Worker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+        weight_dict = weight
+        weight = torch.tensor(weight_dict["weight"], dtype=weight_dict["dtype"]).cuda()
+        super().update_parameter(parameter_name, weight, ranks_in_worker)
+
     def broadcast_bucket(self, src_pp_rank, meta_infos, bucket_size):
         RecvBucketManager.dict_to_meta(meta_infos)
         super().broadcast_bucket(src_pp_rank, meta_infos, bucket_size)
