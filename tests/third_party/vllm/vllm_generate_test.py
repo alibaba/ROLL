@@ -63,7 +63,6 @@ model = LLM(
     tensor_parallel_size=4,
     max_seq_len_to_capture=8192,
     num_scheduler_steps=1,
-    enforce_eager=True,
     disable_custom_all_reduce=True,
     enable_prefix_caching=False,
     trust_remote_code=True,

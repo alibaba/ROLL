@@ -40,7 +40,6 @@ def test():
         trust_remote_code=True,
         distributed_executor_backend="ray",
         disable_custom_all_reduce=True,
-        enforce_eager=True,
         enable_sleep_mode=True,
     )
 

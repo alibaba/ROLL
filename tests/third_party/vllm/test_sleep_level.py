@@ -45,7 +45,6 @@ def test_sleep_level():
         tensor_parallel_size=1,
         trust_remote_code=True,
         disable_custom_all_reduce=True,
-        enforce_eager=True,
         enable_sleep_mode=True,
     )
 

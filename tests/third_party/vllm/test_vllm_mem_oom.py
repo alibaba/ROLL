@@ -48,7 +48,6 @@ model = LLM(
     gpu_memory_utilization=0.8,
     tensor_parallel_size=1,
     trust_remote_code=True,
-    enforce_eager=True,
     load_format="dummy",
 )
 

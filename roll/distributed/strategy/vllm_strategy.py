@@ -64,7 +64,7 @@ class VllmStrategy(InferenceStrategy):
             {
                 "model": self.worker_config.model_args.model_name_or_path,
                 "dtype": dtype,
-                "enforce_eager": vllm_config.get("enforce_eager", True),
+                "enforce_eager": vllm_config.get("enforce_eager", False),
                 "trust_remote_code": True,
                 "seed": self.worker.pipeline_config.seed,
                 "disable_custom_all_reduce": vllm_config.get(

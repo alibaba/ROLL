@@ -98,7 +98,6 @@ actor_infer:
       gpu_memory_utilization: 0.8
       block_size: 16
       load_format: auto
-      enforce_eager: true
   device_mapping: list(range(0,8))
   infer_batch_size: 1
 

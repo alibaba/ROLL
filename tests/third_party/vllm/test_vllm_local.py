@@ -44,7 +44,6 @@ def test_vllm_with_load_offload():
         trust_remote_code=True,
         distributed_executor_backend="ray",
         disable_custom_all_reduce=True,
-        enforce_eager=False,
         enable_sleep_mode=True,
     )
 
