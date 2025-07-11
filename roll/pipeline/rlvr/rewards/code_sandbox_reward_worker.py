@@ -1,23 +1,21 @@
-from typing import Optional, Union
-import json
-import re
-import requests
-from typing import List, Dict, Any, Optional, Tuple
-import ray
-import torch
-from codetiming import Timer
-import traceback
-from tqdm import tqdm
-import numpy as np
-import signal
-import time
-import copy
+"""
+Code Sandbox Reward Worker for evaluating code solutions.
+
+This module provides functionality to test code solutions in a sandbox environment
+and compute rewards based on test case results.
+"""
+
 import asyncio
 import aiohttp
-import random
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
+import json
+import re
+import time
+import traceback
 import uuid
+from typing import Dict, List, Optional, Tuple, Union, Any
+
+import ray
+import torch
 
 from roll.pipeline.rlvr.rlvr_config import RewardConfig
 from roll.utils.local_code.evaluator import codegen_metrics
@@ -31,7 +29,13 @@ from roll.models.model_providers import default_tokenizer_provider
 from roll.utils.logging import get_logger
 
 
-def remove_entripoints(code, language="python"):
+def modified_text(text: str) -> str:
+    text = re.sub(r"(\n) +(?=\S|\n)", r"\1", text)
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip().replace(" \n", "\n")
+
+
+def remove_entrypoints(code: str, language: str = "python") -> str:
     if language == "python":
         if 'if __name__ == "__main__":' in code:
             next_line = code.index('if __name__ == "__main__":')
@@ -45,6 +49,7 @@ def remove_entripoints(code, language="python"):
             code = code[:next_line].strip()
     elif language == "go":
         code = code.replace("package main", "")
+
     if "# Example usage" in code:
         next_line = code.index("# Example usage")
         code = code[:next_line].strip()
@@ -54,49 +59,37 @@ def remove_entripoints(code, language="python"):
         cleaned_lines = [line for line in lines if line.startswith(" ") or line.startswith("def ")]
         while cleaned_lines and not cleaned_lines[-1].strip():
             cleaned_lines.pop()
-        code = "\n".join(cleaned_lines)
-        code = code + "\n"
+        code = "\n".join(cleaned_lines) + "\n"
+        
     return code
 
 
-def modified_text(text):
-    def remove_spaces_after_newlines(text):
-        return re.sub(r"(\n) +(?=\S|\n)", r"\1", text)
-
-    def remove_extra_spaces(text):
-        return re.sub(r" {2,}", " ", text)
-
-    return remove_extra_spaces(remove_spaces_after_newlines(text)).strip().replace(" \n", "\n")
-
-
 class CodeTester:
+    """
+    Class for testing code solutions using a sandbox api.
+    """
     def __init__(self, sandbox_url: str):
-        self.DEFAULT_TIMEOUT = 10
+        self.DEFAULT_TIMEOUT = 30
         self.SOLUTION_IMPORTS = {
             "python": "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\nfrom heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\nfrom random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\nfrom operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\nfrom typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\nimport bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\nimport operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(6*10**5)\n"
         }
         self.sandbox_url = sandbox_url
         self.logger = get_logger()
 
-    def check_format(self, prompt_id: str, text: str):
-        # 检查格式是否满足要求：回答中必须包含"</think>"和代码片段
-        has_think_tag = "</think>" in text
-        has_code_block = "```" in text
+    def check_format(self, prompt_id: str, text: str) -> Tuple[int, int]:
+        has_think_tag = 1 if "</think>" in text else 0
+        has_code_block = 1 if "```" in text else 0
+        return has_code_block, has_think_tag
 
-        format = 1 if has_think_tag and has_code_block else 0
-
-        if not has_think_tag:
-            self.logger.info(f"Response missing </think> tag: {prompt_id}")
-        if not has_code_block:
-            self.logger.info(f"Response missing code block: {prompt_id}")
-        return format
-
-    def extract_code_blocks(self, prompt, text: str, case_type: str = "input"):
-        """提取代码块"""
+    def extract_code_blocks(self, prompt: str, text: str, case_type: str = "input") -> Tuple[Optional[List[str]], Optional[List[str]], str]:
+        """
+        Extract code blocks from the response text.
+        """
         if "<|begin_of_solution|>" in text:
             text = text.split("<|begin_of_solution|>")[-1].strip()
         if "</think>" in text:
             text = text.split("</think>")[-1].strip()
+
         if "```" in text:
             code_pattern = r"```(cpp|python|python3|java|javascript|ruby|go)\s*\n*(.*?)```"
             matches = re.findall(code_pattern, text, re.DOTALL)
@@ -106,71 +99,101 @@ class CodeTester:
                 for lang, code in matches:
                     codes.append(code.strip())
                     langs.append(lang)
+
             if len(codes) == 0:
                 code_pattern = r"```\s*\n*(.*?)```"
                 matches = re.findall(code_pattern, text, re.DOTALL)
                 codes = [match.strip() for match in matches]
+                langs = ["python"] * len(codes)  # Default to Python
         elif len(text) > 4000:
             return None, None, "No code block found"
         else:
             codes = [text.strip()]
             langs = ["python"] * len(codes)
-        if codes is None or len(codes) == 0:
+            
+        if not codes:
             return None, None, "No code block found"
+
         if case_type != "input" and "```python\ndef " in prompt:
-            codes = [remove_entripoints(code, lang) for code, lang in zip(codes, langs)]
+            codes = [remove_entrypoints(code, lang) for code, lang in zip(codes, langs)]
+            
         return codes, langs, ""
 
-    def format_sandbox_test(self, test_code, code_language, case_type, test_cases) -> Optional[List[Dict]]:
-        """格式化sandbox测试用例"""
+    def format_sandbox_test(self, test_code: str, code_language: str, case_type: str, test_cases: List[Dict]) -> Tuple[Optional[List[Dict]], str]:
+        """
+        Format test cases for sandbox testing.
+        """
         test_cases_final = []
-        if code_language is None or code_language == "":
-            # TDO detect programming language
+
+        if not code_language:
             code_language = "python"
-        if len(test_cases) == 0:
+            
+        if not test_cases:
             return None, "test case is empty"
-        if case_type == "assert" or case_type == "pytest":
+            
+        if case_type == "text":
+            # Text-based test cases
+            for case in test_cases:
+                assert_code = case["assert_code"] if "assert_code" in case else case
+                case_code = self.SOLUTION_IMPORTS.get(code_language, "") + '\n' + assert_code
+                cur_test_code = f"\'\'\'{test_code}\'\'\'"
+                case_code = case_code.replace("{response}", cur_test_code)
+                
+                test_cases_final.append({
+                    "compile_timeout": self.DEFAULT_TIMEOUT,
+                    "run_timeout": self.DEFAULT_TIMEOUT,
+                    "code": case_code,
+                    "language": code_language,
+                    "stdin": "",
+                    "expected_stdout": ""
+                })
+        elif case_type in ("assert", "pytest"):
+            # Assert or pytest test cases
             if case_type == "pytest":
                 code_language = "pytest"
+                
             for case in test_cases:
                 assert_code = case["assert_code"] if "assert_code" in case else case
                 case_code = self.SOLUTION_IMPORTS.get(code_language, "") + test_code + "\n" + assert_code
-                test_cases_final.append(
-                    {
-                        "compile_timeout": self.DEFAULT_TIMEOUT,
-                        "run_timeout": self.DEFAULT_TIMEOUT,
-                        "code": case_code,
-                        "language": code_language,
-                        "stdin": "",
-                        "expected_stdout": "",
-                    }
-                )
+                
+                test_cases_final.append({
+                    "compile_timeout": self.DEFAULT_TIMEOUT,
+                    "run_timeout": self.DEFAULT_TIMEOUT,
+                    "code": case_code,
+                    "language": code_language,
+                    "stdin": "",
+                    "expected_stdout": "",
+                })
         else:
+            # Standard input/output test cases
             for test_case in test_cases:
                 try:
-                    test_cases_final.append(
-                        {
-                            "compile_timeout": self.DEFAULT_TIMEOUT,
-                            "run_timeout": self.DEFAULT_TIMEOUT,
-                            "code": self.SOLUTION_IMPORTS.get(code_language, "") + test_code,
-                            "language": code_language,
-                            "stdin": test_case["stdin"],
-                            "expected_stdout": test_case["expected_stdout"],
-                        }
-                    )
+                    test_cases_final.append({
+                        "compile_timeout": self.DEFAULT_TIMEOUT,
+                        "run_timeout": self.DEFAULT_TIMEOUT,
+                        "code": self.SOLUTION_IMPORTS.get(code_language, "") + test_code,
+                        "language": code_language,
+                        "stdin": test_case["stdin"],
+                        "expected_stdout": test_case["expected_stdout"],
+                    })
                 except Exception as e:
-                    print(e)
-                    print(traceback.format_exc())
-                    print(case)
+                    self.logger.error(f"Error formatting test case: {e}")
+                    self.logger.error(traceback.format_exc())
+                    
         return test_cases_final, ""
 
     async def process_single_test(
-        self, curid, session: aiohttp.ClientSession, test_case: Dict, max_retries: int = 3
-    ) -> Tuple[Dict, Dict]:
+        self, curid: str, session: aiohttp.ClientSession, test_case: Dict, max_retries: int = 3
+    ) -> Tuple[Dict, List[Dict]]:
+        """
+        Process a single test case using the sandbox.
+        """
         results = []
-        for i in range(2):
+        
+        for _ in range(2):
             retries = 0
             result = None
+            
             while retries < max_retries:
                 try:
                     headers = {
@@ -178,9 +201,11 @@ class CodeTester:
                         "Accept": "application/json",
                         "eagleeye-traceid": str(uuid.uuid4()),
                     }
+                    
                     async with session.post(self.sandbox_url, headers=headers, json=test_case) as response:
                         if response.status == 200:
                             result = await response.json()
+
                             if "status" in result and result["status"] == "SandboxError":
                                 error_msg = result.get("message", "Unknown sandbox error")
                                 self.logger.warning(f"curid: {curid}, Sandbox error: {error_msg}, retry: {retries+1}/{max_retries}")
@@ -204,15 +229,18 @@ class CodeTester:
                     self.logger.error(f"curid: {curid}, Sandbox error: {e}, retry: {retries+1}/{max_retries}")
                     retries += 1
                     await asyncio.sleep(1)
+                    
             if result:
                 results.append(result)
 
         return test_case, results
 
     async def sandbox_test_async(self, prompt_id: str, test_cases: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Run sandbox tests asynchronously.
+        """
         succeed_test_cases = []
         total_res = []
-        test_count = len(test_cases)
         concurrency_limit = 20
 
         connector = aiohttp.TCPConnector(
@@ -242,31 +270,41 @@ class CodeTester:
                         total_res.append(results)
                 except Exception as e:
                     self.logger.error(f"prompt_id: {prompt_id}, Task error: {e}")
+                    
         return succeed_test_cases, total_res
 
     def sandbox_test(self, prompt_id: str, test_cases: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
-        result = asyncio.run(self.sandbox_test_async(prompt_id, test_cases))
-        return result
+        """
+        Run sandbox tests (synchronous wrapper for async implementation).
+        """
+        return asyncio.run(self.sandbox_test_async(prompt_id, test_cases))
 
-    def sanbox_result_judge(self, test_cases: List[Dict], sandbox_results: List[Dict]) -> int:
-        """判断测试用例通过数量"""
+    def sanbox_result_judge(self, test_cases: List[Dict], sandbox_results: List[Dict]) -> Tuple[int, List[str]]:
+        """
+        Judge the results of sandbox tests.
+        """
         pass_test_number = 0
         error_types = []
+        
         for i, responses in enumerate(sandbox_results):
             flag = "[No Pass]"
+            
             for response in responses:
                 status = response["status"]
                 sanbox_output = ""
+                
                 if "expected_stdout" in test_cases[i]:
                     expected_output = test_cases[i].get("expected_stdout", "").strip()
                 else:
                     expected_output = test_cases[i].get("expected_output", "").strip()
+                    
                 if status == "Success":
                     sanbox_output = response.get("run_result", {}).get("stdout", "").strip()
                     if "User customization applied." in sanbox_output:
                         sanbox_output = sanbox_output.replace("User customization applied.", "").strip()
                     if "User customization module loaded!" in sanbox_output:
                         sanbox_output = sanbox_output.replace("User customization module loaded!", "").strip()
+                        
                     if "User" in sanbox_output:
                         if expected_output in sanbox_output:
                             flag = "[Pass]"
@@ -276,8 +314,10 @@ class CodeTester:
                         or modified_text(sanbox_output) == modified_text(expected_output)
                     ):
                         flag = "[Pass]"
+                        
                     if flag == "[No Pass]":
                         error_types.append("LogicError")
+                        
                 elif status == "Failed":
                     try:
                         stderr = response.get("run_result", {}).get("stderr", "").strip()
@@ -289,22 +329,26 @@ class CodeTester:
                             error_types.append(stderr)
                     except:
                         error_types.append("Others")
+                        
             if flag == "[Pass]":
                 pass_test_number += 1
+                
         error_types = list(set(error_types))
         return pass_test_number, error_types
 
     def single_code_test(
         self,
-        global_step,
-        prompt_id,
+        global_step: int,
+        prompt_id: str,
         code: str,
         case_type: str,
         test_cases: List[Dict],
         prompt: str = "",
         flag: int = 0,
-    ):
-        """单条代码测试"""
+    ) -> Dict:
+        """
+        Test a single code solution.
+        """
         info = {
             "global_step": global_step,
             "prompt_id": prompt_id,
@@ -317,49 +361,56 @@ class CodeTester:
             "pass_test_number": 0,
             "validation": 1,
             "format_validation": 0,
+            "have_think": 0,
             "error_info": [],
         }
 
-        # 判断格式是否满足要求
-        format_validation = self.check_format(prompt_id, code)
+        format_validation, have_think = self.check_format(prompt_id, code)
         info["format_validation"] = format_validation
+        info["have_think"] = have_think
+        
         start_time = time.time()
-        # 抽取代码片段
-        codes, code_langs, error_info = self.extract_code_blocks(prompt, code, case_type)
-        if error_info != "" or len(codes) == 0:
+        
+        if case_type == "text":
+            codes = [code.strip()]
+            code_langs = []
+            error_info = ""
+        else:
+            codes, code_langs, error_info = self.extract_code_blocks(prompt, code, case_type)
+            
+        if error_info or not codes:
             info["error_info"] = ["extract_code_blocks error"]
             return info
 
-        test_code = codes[0]
-        if len(code_langs) > 0:
-            code_language = code_langs[0]
+        test_code = codes[-1]
+        if code_langs:
+            code_language = code_langs[-1]
         else:
-            # TDO detect programming language
-            code_language = "python"
+            code_language = "python"  # Default to Python
 
-        # 格式化sandbox测试用例
         test_cases, error_info = self.format_sandbox_test(test_code, code_language, case_type, test_cases)
-        if error_info != "" or test_cases == None:
+        if error_info or test_cases is None:
             info["error_info"] = ["format_sandbox_test error"]
             return info
 
-        # 调用sandbox测试
         succeed_test_cases, responses = self.sandbox_test(prompt_id, test_cases)
-        if not responses or len(succeed_test_cases) == 0:
+        if not responses or not succeed_test_cases:
             info["error_info"] = ["sandbox error"]
             info["sanbox_responses"] = responses
             info["validation"] = 0
             return info
 
-        # 判断sandbox测试结果
         pass_test_number, error_types = self.sanbox_result_judge(succeed_test_cases, responses)
 
         time_duration = time.time() - start_time
         self.logger.debug(
-            f"prompt_id: {prompt_id}, total case number: {str(len(succeed_test_cases))} pass case number: {str(pass_test_number)} pass rate: {str(pass_test_number / len(succeed_test_cases))}, time: {time_duration}, detailed info: {error_info}"
+            f"prompt_id: {prompt_id}, total case number: {len(succeed_test_cases)} "
+            f"pass case number: {pass_test_number} "
+            f"pass rate: {pass_test_number / len(succeed_test_cases) if succeed_test_cases else 0}, "
+            f"time: {time_duration}, detailed info: {error_info}"
         )
 
-        pass_test_ratio = pass_test_number / len(succeed_test_cases) if len(succeed_test_cases) > 0 else 0
+        pass_test_ratio = pass_test_number / len(succeed_test_cases) if succeed_test_cases else 0
         info["test_code"] = test_code
         info["test_cases_info"] = test_cases
         info["sanbox_responses"] = responses
@@ -367,25 +418,32 @@ class CodeTester:
         info["pass_test_number"] = pass_test_number
         info["pass_test_ratio"] = pass_test_ratio
         info["error_info"] = error_types
+        
         return info
 
 
-
-def cal_http_sandbox(global_step, prompt_id, prompt, response, case_type, test_cases, url):
+def cal_http_sandbox(global_step: int, prompt_id: str, prompt: str, response: str, 
+                    case_type: str, test_cases: List[Dict], url: str) -> Tuple[int, Dict, str]:
+    """
+    Calculate rewards using HTTP sandbox.
+    """
     codetester = CodeTester(url)
     info = codetester.single_code_test(global_step, prompt_id, response, case_type, test_cases, prompt)
 
     validation = info.get("validation", 0)
     pass_test_ratio = info.get("pass_test_ratio", 0)
-
+    
+    error_info = info.get('error_info', [""])
+    error_info = error_info[0] if error_info else ""
+    
     if validation == 0:
-        return -1, info
-
+        return -1, info, error_info
+        
     correct = 1 if pass_test_ratio >= 1 else 0
-    return correct, info
+    return correct, info, error_info
 
 
-def run_assert_tests(code, test_cases, timeout=20):
+def run_assert_tests(code: str, test_cases: List[Dict], timeout: int = 20) -> bool:
     """
     Run assert-style test cases against the provided code.
     """
@@ -395,11 +453,10 @@ def run_assert_tests(code, test_cases, timeout=20):
     for test_case in test_cases:
         assert_code = test_case["assert_code"]
         
-        # Check if this is a assert-style test case (contains test_ functions)
         if "def test_" in assert_code:
             test_functions = []
             lines = assert_code.strip().split('\n')
-            for i, line in enumerate(lines):
+            for line in lines:
                 if line.strip().startswith("def test_"):
                     func_name = line.strip().split("(")[0].split("def ")[1]
                     test_functions.append(func_name)
@@ -411,7 +468,6 @@ def run_assert_tests(code, test_cases, timeout=20):
 
             full_code = f"{BASE_IMPORTS}\n{code}\n{assert_code}\n{test_runner}"
         else:
-            # Simple assert statement
             full_code = f"{BASE_IMPORTS}\n{code}\n{assert_code}"
         
         passed = codeexecute_check_correctness(full_code, timeout=timeout)
@@ -422,78 +478,197 @@ def run_assert_tests(code, test_cases, timeout=20):
     return all_passed
 
 
-def cal_local_test(prompt_id, response, test_cases, func_name=None, num_process_evaluate=4, timeout=20):
+def run_check_based_tests(extracted_code: str, test_cases: List[Dict], timeout: int = 60) -> Tuple[bool, float, Dict]:
     """
+    Run check-based test cases against the provided code.
+    """
+    import tempfile
+    import subprocess
+    
+    error_info = {}
+    test_case = test_cases[0]
+    
+    test_code_lines = [x for x in test_case['assert_code'].split("\n") if x != ""]
+    entry_point = test_case.get('entry_point', 'candidate')
+    import_prefix = test_case.get('import_prefix', '')
+    
+    solution = import_prefix + extracted_code
+    
+    all_passed = True
+    total_tests = len(test_code_lines) - 1 if len(test_code_lines) > 1 else 1
+    passed_tests = 0
+    
+    for i in range(1, len(test_code_lines)) if len(test_code_lines) > 1 else [0]:
+        cur_solution = solution
+        if len(test_code_lines) > 1:
+            cur_solution += "\n" + test_code_lines[0] + "\n" + test_code_lines[i]
+        else:
+            cur_solution += "\n" + test_code_lines[0]
+        cur_solution += f"\ncheck({entry_point})"
+        
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py') as temp_file:
+                temp_file.write(cur_solution)
+                temp_file.flush()
+                result = subprocess.run(
+                    ['python', temp_file.name],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
+                if result.returncode == 0:
+                    passed_tests += 1
+                else:
+                    all_passed = False
+                    error_info['no_pass_case'] = cur_solution
+                    error_info['error_message'] = result.stderr
+        except Exception as e:
+            all_passed = False
+            error_info['no_pass_case'] = cur_solution
+            error_info['error_message'] = str(e)
+    
+    pass_ratio = passed_tests / total_tests if total_tests > 0 else 0
+    return all_passed, pass_ratio, error_info
+
+
+def run_text_tests(response: str, test_cases: List[Dict]) -> Tuple[bool, Dict]:
+    """
+    Run text-based test cases against the provided response.
+    """
+    error_info = {}
+    all_passed = True
+    
+    for test_case in test_cases:
+        assert_code = test_case["assert_code"] if "assert_code" in test_case else test_case
+        quoted_response = f"\'\'\'{response}\'\'\'"
+        case_code = assert_code.replace("{response}", quoted_response)
+        cur_import = """import copy\nimport string\nimport math\nimport collections\nimport bisect\nimport heapq\nimport functools\nimport random\nimport itertools\nimport operator\nimport re\nimport numpy as np\nimport pandas as pd\nimport nltk"""
+        full_code = f"{cur_import}\n{case_code}"
+        
+        try:
+            exec(full_code)
+            passed = True
+        except AssertionError:
+            passed = False
+        except Exception as e:
+            print(f"Error executing test case: {e}")
+            passed = False
+            
+        if not passed:
+            error_info['no_pass_case'] = full_code
+            all_passed = False
+            break
+    
+    return all_passed, error_info
+
+
+def run_io_tests(extracted_code: str, test_cases: List[Dict], func_name: str = None, 
+                num_process_evaluate: int = 4, timeout: int = 60) -> bool:
+    """
+    Run input/output test cases against the provided code.
+    """
+    if func_name == "None":
+        func_name = ""
+        
+    evaluation_sample = json.dumps({
+        "inputs": [t["stdin"] for t in test_cases],
+        "outputs": [t["expected_stdout"] for t in test_cases],
+        "fn_name": func_name,
+    })
+    evaluation_sample = {"input_output": evaluation_sample}
+    
+    metrics, _, _ = codegen_metrics(
+        [evaluation_sample],
+        [[extracted_code]],
+        k_list=[1],
+        num_process_evaluate=num_process_evaluate,
+        timeout=timeout,
+        debug=False
+    )
+    return "pass@1" in metrics and metrics["pass@1"] == 100.0
+
+
+def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: str, 
+                  case_type: str, test_cases: List[Dict], func_name: str = None, 
+                  num_process_evaluate: int = 4, timeout: int = 60) -> Tuple[int, Dict, str]:
+    """
+    Calculate rewards using local testing.
+    
     Reference implementation from: https://github.com/LiveCodeBench/LiveCodeBench/tree/main/lcb_runner
     
-    Supports three testing modes:
+    Supports multiple testing modes:
     1. Input/output testing: Test cases contain stdin/expected_stdout pairs
     2. Assert testing: Test cases contain simple assert statements
+    3. Pytest testing: Test cases contain pytest-style test functions
+    4. Text testing: Test cases contain assert code that validates text responses
+    5. Check-based testing: Test cases contain import_prefix, test_code, and entry_point
     """
-    extracted_code = ""
+    from roll.utils.local_code.execute_utils import BASE_IMPORTS, codeexecute_check_correctness
+    
     info = {
+        "global_step": global_step,
         "prompt_id": prompt_id,
         "pass_test_ratio": 0,
+        "prompt_txt": prompt_txt,
         "origin_response": response,
         "test_code": response,
-        "format_validation": 1,
+        "format_validation": 0,
+        "have_think": 0,
         "validation": 1,
     }
     
-    extracted_code = extract_code_generation(response)
-    info["test_code"] = extracted_code
-    
-    is_assert_style = False
-    is_pytest_style = False
-    
-    if isinstance(test_cases, list) and len(test_cases) > 0:
-        if isinstance(test_cases[0], dict) and test_cases[0].get("assert_code", ""):
-            is_assert_style = True
-    
+    extracted_code = ""
+    if case_type != "text":
+        if "</think>" in response:
+            info['have_think'] = 1
+        if "```" in response:
+            info['format_validation'] = 1
+        extracted_code = extract_code_generation(response)
+        info["test_code"] = extracted_code
+        
     correct = 0
-    if is_assert_style:
-        # Handle simple assert test cases
+    if case_type == "check_based":
+        all_passed, pass_ratio, error_info = run_check_based_tests(extracted_code, test_cases, timeout)
+        info.update(error_info)
+        info["pass_test_ratio"] = pass_ratio
+        if all_passed:
+            correct = 1
+            
+    elif case_type == "text":
+        all_passed, error_info = run_text_tests(response, test_cases)
+        info.update(error_info)
+        if all_passed:
+            info["pass_test_ratio"] = 1
+            correct = 1
+            
+    elif case_type == "assert" or case_type == "pytest":
         all_passed = run_assert_tests(extracted_code, test_cases, timeout=timeout)
         if all_passed:
             info["pass_test_ratio"] = 1
             correct = 1
-    else:
-        # Handle traditional input/output test cases
-        if func_name == "None":
-            func_name = ""
             
-        evaluation_sample = json.dumps(
-            {
-                "inputs": [t["stdin"] for t in test_cases],
-                "outputs": [t["expected_stdout"] for t in test_cases],
-                "fn_name": func_name,
-            }
-        )
-        evaluation_sample = {"input_output": evaluation_sample}
-        
-        lcb_metrics, _, _ = codegen_metrics(
-            [evaluation_sample],
-            [[extracted_code]],
-            k_list=[1],
-            num_process_evaluate=num_process_evaluate,
-            timeout=timeout,
-            debug=False
-        )
-        
-        if "pass@1" in lcb_metrics and lcb_metrics["pass@1"] == 100.0:
+    else:
+        all_passed = run_io_tests(extracted_code, test_cases, func_name, 
+                                 num_process_evaluate, timeout)
+        if all_passed:
             info["pass_test_ratio"] = 1
             correct = 1
     
-    return correct, info
+    return correct, info, ""
 
 
 class CodeSandboxRewardWorker(Worker):
     """
-    (x)Reward Model 使用 AutoModelForSequenceClassification 协议
-    面向code的sandbox 单测的 reward model
+    Worker for computing rewards based on code sandbox testing.
     """
 
     def __init__(self, worker_config: RewardConfig):
+        """
+        Initialize the CodeSandboxRewardWorker.
+        
+        Args:
+            worker_config: Configuration for the worker
+        """
         super().__init__(worker_config=worker_config)
         self.worker_config = worker_config
         self.rank_info.dp_rank = self.rank_info.rank
@@ -503,25 +678,32 @@ class CodeSandboxRewardWorker(Worker):
 
         self.use_local = self.worker_config.use_local
         self.url = self.worker_config.code_url
-
         self.max_resp_len = 10000
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):
+        """
+        Initialize the worker with pipeline configuration.
+        
+        Args:
+            pipeline_config: Configuration for the pipeline
+        """
         pass
 
     @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, clear_cache=False)
-    def compute_rewards(self, data: DataProto):
+    def compute_rewards(self, data: DataProto) -> DataProto:
         """
-        return DataProto.from_dict(tensors={'rewards': rewards})
+        Compute rewards for code solutions.
         """
         global_step = data.meta_info.get("global_step", 0)
         verify_answer = []
+        error_infos = []
+        format_validations = []
+        have_thinks = []
 
         prompts_text_list = self.tokenizer.batch_decode(data.batch["prompts"], skip_special_tokens=True)
         response_text_list = self.tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=True)
 
-        cur_force_lcb = False
         for i, (prompt_id, prompt_txt, response, case_type, test_cases, test_case_function, tag) in enumerate(
             zip(
                 data.non_tensor_batch["id"],
@@ -533,20 +715,25 @@ class CodeSandboxRewardWorker(Worker):
                 data.non_tensor_batch["tag"],
             )
         ):
-            if "livecodebench" in tag:
-                cur_force_lcb = True
             if isinstance(test_cases, str):
                 test_cases = json.loads(test_cases)
-            if cur_force_lcb or self.use_local:
-                correct, info = cal_local_test(prompt_id, response, test_cases, test_case_function)
+                
+            if "livecodebench" in tag or self.use_local:
+                correct, info, error_info = cal_local_test(
+                    global_step, prompt_id, prompt_txt, response, case_type, test_cases, test_case_function
+                )
             else:
-                correct, info = cal_http_sandbox(
+                correct, info, error_info = cal_http_sandbox(
                     global_step, prompt_id, prompt_txt, response, case_type, test_cases, self.url
                 )
 
+            info['tag'] = tag
             self.logger.debug(f"{json.dumps(info, ensure_ascii=False)}")
 
+            error_infos.append(error_info)
             verify_answer.append(correct)
+            format_validations.append(info.get("format_validation", 0))
+            have_thinks.append(info.get("have_think", 0))
             
         token_level_rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float16)
         response_level_rewards = torch.tensor(verify_answer, dtype=torch.float16)
@@ -559,15 +746,4 @@ class CodeSandboxRewardWorker(Worker):
                 "scores": scores,
             }
         )
-
-        success_count = (scores == 1).sum().item()
-        fail_count = (scores == 0).sum().item()
-        invalid_count = (scores == -1).sum().item()
-        total_count = len(scores)
-
-        self.logger.info(
-            f"Batch results - Total: {total_count}, Success: {success_count}, "
-            f"Fail: {fail_count}, Invalid: {invalid_count}"
-        )
-
         return output

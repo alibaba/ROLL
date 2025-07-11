@@ -101,7 +101,7 @@ def evaluate_generations(
     generations_list: List[List[str]],
     debug: bool = False,
     num_process_evaluate: int = 16,
-    timeout=6,
+    timeout=60,
 ):
     """We take the list of code generations and try to compile them and the run
     their corresponding unit tests which are retrieved from the APPS dataset.
@@ -148,7 +148,7 @@ def codegen_metrics(
     generations_list,
     k_list=[1, 5, 10, 20, 40, 50, 75, 100, 125, 150, 200, 500, 1000],
     num_process_evaluate=16,
-    timeout=6,
+    timeout=60,
     debug=True,
 ):
     samples_linear = []
