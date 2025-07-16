@@ -148,7 +148,11 @@ def run_single_test(args):
         signal.alarm(timeout)
         faulthandler.enable()
         try:
-            output = method(*local_inputs)
+            try:
+                output = method(*local_inputs)
+            except TypeError as e:
+                class_method = getattr(tmp.__class__, method_name)
+                output = class_method(*local_inputs)
             raw_true_output = output
 
             raw_true_output_copy = json.dumps(output)
@@ -763,7 +767,7 @@ def reliability_guard(maximum_memory_bytes=None):
 
     import os
 
-    os.environ["OMP_NUM_THREADS"] = "1"
+    # os.environ["OMP_NUM_THREADS"] = "1"
 
     os.kill = None
     os.system = None

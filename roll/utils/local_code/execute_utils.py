@@ -9,6 +9,7 @@ import os
 import platform
 import signal
 import tempfile
+import sys
 
 BASE_IMPORTS = """from itertools import accumulate, chain, combinations, count, permutations, product, groupby, islice, repeat
 from copy import deepcopy
@@ -59,42 +60,49 @@ def codeexecute_check_correctness(check_program, timeout=3):
 
     if not result:
         result.append("timed out")
-
     return result[0] == "passed"
 
 
 def unsafe_execute(check_program, result, timeout):
+    import os
+    import shutil
+    import tempfile
+    import sys
 
-    with create_tempdir():
-
-        # These system calls are needed when cleaning up tempdir.
-        import os
-        import shutil
-
-        rmtree = shutil.rmtree
-        rmdir = os.rmdir
-        chdir = os.chdir
-
-        # Disable functionalities that can make destructive changes
-        # to the test.
+    original_rmtree = shutil.rmtree
+    original_rmdir = os.rmdir
+    original_chdir = os.chdir
+    original_unlink = os.unlink
+    def execute_with_restrictions():
+        temp_unlink = os.unlink
         reliability_guard()
-
-        # Run program.
-        try:
-            exec_globals = {}
-            with swallow_io():
-                with time_limit(timeout):
-                    exec(check_program, exec_globals)
-            result.append("passed")
-        except TimeoutException:
-            result.append("timed out")
-        except BaseException as e:
-            result.append(f"failed: {e}")
-
-        # Needed for cleaning up.
-        shutil.rmtree = rmtree
-        os.rmdir = rmdir
-        os.chdir = chdir
+        exec_globals = {}
+        with swallow_io():
+            with time_limit(timeout):
+                exec(check_program, exec_globals)
+        
+        return "passed"
+    
+    try:
+        with create_tempdir():
+            try:
+                result_value = execute_with_restrictions()
+                result.append(result_value)
+            except TimeoutException:
+                result.append("timed out")
+            except BaseException as e:
+                result.append(f"failed: {e}")
+            finally:
+                shutil.rmtree = original_rmtree
+                os.rmdir = original_rmdir
+                os.chdir = original_chdir
+                os.unlink = original_unlink
+    except Exception as e:
+        result.append(f"failed: Error in tempdir handling: {e}")
+        shutil.rmtree = original_rmtree
+        os.rmdir = original_rmdir
+        os.chdir = original_chdir
+        os.unlink = original_unlink
 
 
 @contextlib.contextmanager
