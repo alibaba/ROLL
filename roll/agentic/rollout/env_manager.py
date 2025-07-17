@@ -1,24 +1,25 @@
 import copy
 import re
 import time
+import random
 import traceback
 from contextlib import nullcontext
 from dataclasses import dataclass, field, asdict
 from itertools import zip_longest
-from threading import Thread, Lock
+from threading import Lock
 from typing import Dict, List, Optional, Union, Tuple
+from codetiming import Timer
 
 import PIL
 import numpy as np
 import ray
 import torch
 
-from ray.util.queue import Queue, Empty
 from tensordict import TensorDict
 from transformers import AutoTokenizer, PreTrainedTokenizer, ProcessorMixin
 
 from roll.agentic.env import REGISTERED_ENVS, REGISTERED_ENV_CONFIGS
-from roll.distributed.scheduler.generate_scheduler import GlobalCounter, RequestScheduler
+from roll.distributed.scheduler.generate_scheduler import RequestScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig, AgenticConfig
 from roll.utils.constants import RAY_NAMESPACE
@@ -109,8 +110,7 @@ class EnvManager:
                  env_config: Dict,
                  tokenizer: PreTrainedTokenizer,
                  generate_scheduler,
-                 input_queue: Queue,
-                 output_queue: Queue,
+                 output_queue,
                  thread_lock: Lock,
                  processor: Optional[ProcessorMixin] = None,
                  collator: Optional[callable] = None,
@@ -133,13 +133,12 @@ class EnvManager:
         self.collator = collator
         self.env_entry = None
         self.output_queue = output_queue
-        self.input_queue = input_queue
         self.mode = mode
         self.generate_scheduler: RequestScheduler = generate_scheduler
         self.rollout_cache = None
         self.group_seed = None
         self.episode_id = 0
-        self.process_input_queue_thread = None
+        self.current_step = -1
         self.running = False
         self.use_thread_lock = self.env_config.get("use_thread_lock", True) # 避免同时执行大量cpu操作, 可以通过env_config配置
         self.thread_lock = thread_lock if self.use_thread_lock else nullcontext()
@@ -158,12 +157,6 @@ class EnvManager:
         self.prefix_lookup = None
         self.env_config_lookup = None
         self._init_prefix_lookup()
-        self.request_counter = GlobalCounter.options(
-            name=f"EnvManagerRequestCounter",
-            get_if_exists=True,
-            namespace=RAY_NAMESPACE,
-        ).remote()
-        self.request_id: Optional[str] = None
 
     def reset(self):
         entry = self.env_entry
@@ -237,8 +230,6 @@ class EnvManager:
                                    in lm_input.non_tensor_batch else []))
         gen_batch.meta_info["generation_config"] = generation_config
         gen_batch.meta_info['response_callback_fn'] = self.generate_scheduler.report_response.remote
-        self.request_id = str(ray.get(self.request_counter.get_value.remote()))
-        gen_batch.meta_info["request_id"] = self.request_id
         gen_batch.meta_info["src_rank"] = self.env_config["env_id"]
         lm_output: DataProto = ray.get(self.generate_scheduler.generate_one_request.remote(data=gen_batch))
 
@@ -249,48 +240,53 @@ class EnvManager:
             lm_output.union(lm_input)
         return lm_output
 
-
-    def run_rollout_loop(self, data: DataProto):
-        """
-        1. 每次调用run_rollout_loop,
-            会持续的play episode, 直到收到采集完成的command
-            需要重置seed, 确保每个group的seed一致
-            episode_id 置0
-        seed更新逻辑:
-            group_seed = seed + group_seed
-            episode_seed = group_seed + episode_id
-
-        trajectory_id: f"{group_id}_{episode_id}_{episode_seed}"
-        """
-
-        self.start_input_queue_process()
+    def run_rollout_loop(self, current_step, seed):
+        assert not self.running
         self.running = True
+        is_sync_training: bool = current_step is not None
+        if is_sync_training:
+            self.current_step = current_step
+        assert self.current_step >= 0
         self.episode_id = 0
-
-        self.group_seed = data.meta_info['seed'] + self.env_entry['group_seed']
+        self.group_seed = seed + self.env_entry['group_seed']
         env_output = self.reset()
+        start_step = self.current_step
+
+        log_stats = {"generate_time": [], "step_time": [], "current_step": []}
 
         while self.running:
-            lm_output: DataProto = self.generate(env_output)
+            with Timer(name="generate", logger=None) as generate_timer:
+                lm_output: DataProto = self.generate(env_output)
+            if lm_output is None:
+                continue
+            log_stats["current_step"].append(self.current_step)
+            log_stats["generate_time"].append(generate_timer.last)
 
-            status = EnvStatus(truncated=True, terminated=True)
-            if lm_output is not None:
+            with Timer(name="step", logger=None) as step_timer:
                 status: EnvStatus = self.step(lm_output)
+            log_stats["step_time"].append(step_timer.last)
 
-            if status.done and self.running:
+            if status.done:
+                self.logger.debug(f"group_id: {self.env_config['group_id']} env_id: {self.env_config['env_id']} episode_id: {self.episode_id} start_step {start_step} gen_stats: {log_stats}")
+                log_stats = {"generate_time": [], "step_time": [], "current_step": []}
+
                 rollout: DataProto = self.formulate_rollouts()
-                traj_group_id = f"{self.env_entry['group_id']}_{self.episode_id}_{self.group_seed}"
-                rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id], dtype=object)
-                self.output_queue.put_nowait(rollout)
+                ray.get(self.output_queue.put.remote(self.env_entry['group_id'], self.episode_id, start_step, rollout))
                 self.rollout_cache = None
-                if self.episode_id >= self.worker_config.max_traj_per_env:
+                if not self.running or (is_sync_training and self.episode_id >= self.worker_config.max_traj_per_env):
                     self.logger.debug(
                         f"env_id: {self.env_config['env_id']} max_traj_per_env {self.worker_config.max_traj_per_env} reached, stopping rollout loop")
                     break
                 env_output = self.reset()
+                start_step = self.current_step
 
-        self.process_input_queue_thread.join()
+    def update_step(self, global_step):
+        # assume assignment of primitive type in python is atomic
+        self.current_step = global_step
 
+    def stop(self):
+        # assume assignment of primitive type in python is atomic
+        self.running = False
 
     def _init_prefix_lookup(self):
         # TODO: 这里并不合理
@@ -739,21 +735,3 @@ class EnvManager:
 
         llm_response = f"<think>{think_content}</think><answer>{action_content}</answer>" if self.pipeline_config.enable_think else f"<answer>{action_content}</answer>"
         return llm_response, actions
-
-    def start_input_queue_process(self):
-        def process_input_queue(input_queue):
-            while True:
-                try:
-                    command = input_queue.get_nowait()
-                except Empty:
-                    time.sleep(1)
-                    continue
-                if command == 'stop':
-                    self.logger.debug(f"{self.env_config['env_id']} stopped, episode_id: {self.episode_id}")
-                    self.running = False
-                    ray.get(self.generate_scheduler.abort_request.remote(DataProto(meta_info={"request_id": self.request_id})))
-                    self.request_id = None
-                    break
-
-        self.process_input_queue_thread = Thread(target=process_input_queue, args=(self.input_queue, ))
-        self.process_input_queue_thread.start()

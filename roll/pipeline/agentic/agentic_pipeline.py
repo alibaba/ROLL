@@ -69,14 +69,14 @@ class AgenticPipeline(BasePipeline):
                 worker_config=self.pipeline_config.critic,
             )
 
-        self.train_rollout_scheduler = RolloutScheduler(
+        self.train_rollout_scheduler = RolloutScheduler.remote(
             config=self.pipeline_config,
             env_manager_config=self.pipeline_config.train_env_manager,
             resource_manager=self.resource_manager,
             infer_cluster=self.actor_infer,
             mode="train",
         )
-        self.val_rollout_scheduler = RolloutScheduler(
+        self.val_rollout_scheduler = RolloutScheduler.remote(
             config=self.pipeline_config,
             env_manager_config=self.pipeline_config.val_env_manager,
             resource_manager=self.resource_manager,
@@ -121,6 +121,7 @@ class AgenticPipeline(BasePipeline):
                     self.critic.offload_states(blocking=True)
                 self.actor_train.offload_states(blocking=True)
 
+                ray.get(self.train_rollout_scheduler.suspend.remote(global_step))
                 model_update_metrics: Dict = self.model_update(global_step)
                 metrics.update(model_update_metrics)
 
@@ -129,7 +130,7 @@ class AgenticPipeline(BasePipeline):
 
                 if global_step % self.pipeline_config.eval_steps == 0:
                     batch.meta_info["is_offload_states"] = False
-                    eval_batch = self.val_rollout_scheduler.get_batch(batch, self.pipeline_config.val_batch_size)
+                    eval_batch = ray.get(self.val_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.val_batch_size))
                     eval_metrics = reduce_metrics(eval_batch.meta_info.get("metrics", {}))
                     eval_score = eval_batch.batch["scores"].sum(-1)
                     eval_metrics["score/mean"] = torch.mean(eval_score).detach().item()
@@ -149,9 +150,11 @@ class AgenticPipeline(BasePipeline):
                         )
                     del eval_batch
 
+                ray.get(self.train_rollout_scheduler.resume.remote(global_step))
+
                 with Timer(name="rollout", logger=None) as rollout_timer:
                     batch.meta_info["is_offload_states"] = True
-                    batch = self.train_rollout_scheduler.get_batch(batch, self.pipeline_config.rollout_batch_size)
+                    batch = ray.get(self.train_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
                     batch.non_tensor_batch.pop("frames")
                 metrics["time/rollout"] = rollout_timer.last
                 metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
@@ -310,6 +313,11 @@ class AgenticPipeline(BasePipeline):
             logger.info(f"pipeline step {global_step} finished")
             global_step += 1
             logger.info(f"epoch {global_step} finished")
+
+        ray.get(
+            self.train_rollout_scheduler.stop.remote(),
+            self.val_rollout_scheduler.stop.remote(),
+        )
         logger.info("pipeline complete!")
 
 

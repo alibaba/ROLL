@@ -84,6 +84,13 @@ class BaseConfig:
     rollout_batch_size: int = field(
         default=128, metadata={"help": "The number of samples to rollout in each inference batch."}
     )
+    async_generation_ratio: float = field(
+        default=0,
+        metadata={
+            "help": "The ratio of ahead generation requests in pipeline, "
+            "0 means synchronous pipeline. currently only integer is supported."
+        },
+    )
     val_batch_size: int = field(
         default=128,
         metadata={"help": "The number of samples to rollout in each val batch."})

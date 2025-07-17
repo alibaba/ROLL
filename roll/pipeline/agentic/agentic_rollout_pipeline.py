@@ -40,7 +40,7 @@ class AgenticRolloutPipeline(BasePipeline):
             worker_config=self.pipeline_config.actor_infer,
         )
 
-        self.rollout_scheduler = RolloutScheduler(
+        self.rollout_scheduler = RolloutScheduler.remote(
             config=self.pipeline_config,
             env_manager_config=self.pipeline_config.train_env_manager,
             resource_manager=self.resource_manager,
@@ -59,9 +59,12 @@ class AgenticRolloutPipeline(BasePipeline):
             batch: DataProto = DataProto()
             batch.meta_info = {"global_step": global_step}
 
+            ray.get(self.rollout_scheduler.suspend.remote(global_step))
+            ray.get(self.rollout_scheduler.resume.remote(global_step))
+
             with Timer(name="rollout", logger=None) as rollout_timer:
                 batch.meta_info["is_offload_states"] = True
-                batch = self.rollout_scheduler.get_batch(batch, self.pipeline_config.rollout_batch_size)
+                batch = ray.get(self.rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
                 if self.pipeline_config.render_save_dir:
                     self.executor.submit(
                         dump_rollout_render,
@@ -123,4 +126,5 @@ class AgenticRolloutPipeline(BasePipeline):
             logger.info(f"pipeline step {global_step} finished")
             global_step += 1
             logger.info(f"epoch {global_step} finished")
+        ray.get(self.rollout_scheduler.stop.remote())
         logger.info("pipeline complete!")

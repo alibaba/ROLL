@@ -1,10 +1,10 @@
 import copy
-from concurrent import futures
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 
-from ray.util.queue import Queue
+import ray
 from transformers import PreTrainedTokenizer
 
 from roll.agentic.rollout.env_manager import EnvManager
@@ -31,20 +31,17 @@ class EnvironmentWorker(Worker):
         self.env_managers: Dict[int, EnvManager] = {}
         self.tokenizer: Optional[PreTrainedTokenizer] = None
         self.env_configs: Dict[int, Dict] = worker_config.env_configs[self.rank]
-        self.thread_lock = Lock()
-        self.input_queue = None
+        self.thread_lock = threading.Lock()
         self.output_queue = None
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def initialize(self,
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
+    async def initialize(self,
                    pipeline_config,
                    generate_scheduler,
-                   input_queue: Queue,
-                   output_queue: Queue,
+                   output_queue,
                    collator: Optional[callable] = None,
                    mode: str = "train"):
         super().initialize(pipeline_config)
-        self.input_queue = input_queue
         self.output_queue = output_queue
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
@@ -54,28 +51,35 @@ class EnvironmentWorker(Worker):
                                                    env_config=env_config,
                                                    tokenizer=copy.deepcopy(self.tokenizer), # https://github.com/huggingface/tokenizers/issues/537
                                                    generate_scheduler=generate_scheduler,
-                                                   input_queue=input_queue,
                                                    output_queue=output_queue,
                                                    thread_lock=self.thread_lock,
                                                    processor=copy.deepcopy(self.processor),
                                                    collator=collator,
                                                    mode=mode)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def run_rollout_loop(self, data: DataProto):
-        """
-        thread pool 执行 EnvManager.run_rollout_loop()
-        """
-        with ThreadPoolExecutor(max_workers=len(self.env_managers)) as executor:
-            futures_list = [
-                executor.submit(env_manager.run_rollout_loop, data)
-                for env_id, env_manager in self.env_managers.items()
-            ]
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
+    async def run_rollout_loop(self, current_step, seed):
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=len(self.env_managers)) as pool:
+            try:
+                await asyncio.gather(
+                    *[
+                        loop.run_in_executor(pool, env_manager.run_rollout_loop, current_step, seed)
+                        for env_manager in self.env_managers.values()
+                    ]
+                )
+            except Exception as e:
+                self.logger.error(f"EnvManager run with except: {e}", exc_info=True)
+                ref = self.output_queue.put_exception.remote(e)
+                await asyncio.wrap_future(ref.future())
+                raise e
 
-            for future in as_completed(futures_list):
-                try:
-                    future.result()
-                except Exception as e:
-                    self.logger.error(f"EnvManager run with except: {e}", exc_info=True)
-                    self.output_queue.put(e)
-                    raise e
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
+    async def update_step(self, global_step):
+        for env_manager in self.env_managers.values():
+            env_manager.update_step(global_step)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
+    async def stop(self):
+        for env_manager in self.env_managers.values():
+            env_manager.stop()

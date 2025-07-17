@@ -57,6 +57,7 @@ class EnvManagerConfig(WorkerConfig):
             logger.warning("all env in one worker by default, you can set max_env_num_per_worker to scale env.")
         logger.info(f"max_env_num_per_worker: {self.max_env_num_per_worker}")
 
+        assert self.env_groups * self.group_size % self.max_env_num_per_worker == 0
         self.world_size = (self.env_groups * self.group_size + self.max_env_num_per_worker - 1) // self.max_env_num_per_worker
         self.env_configs: Optional[Dict[int, Dict[int, Dict]]] = None
         """
@@ -229,7 +230,10 @@ class AgenticConfig(BaseConfig):
 
         train_env_num = self.train_env_manager.env_groups * self.train_env_manager.group_size
         traj_per_env = (self.rollout_batch_size + train_env_num - 1) // train_env_num
-        if self.train_env_manager.max_traj_per_env < 0:
+        if self.async_generation_ratio > 0:
+            # force set max_traj_per_env when use async training
+            self.train_env_manager.max_traj_per_env = traj_per_env
+        elif self.train_env_manager.max_traj_per_env < 0:
             self.train_env_manager.max_traj_per_env = traj_per_env
         logger.info(f"train_env_manager.max_traj_per_env: {self.train_env_manager.max_traj_per_env}")
         assert self.train_env_manager.max_traj_per_env >= traj_per_env, f"max_traj_per_env must be >= {traj_per_env}"
@@ -274,6 +278,7 @@ class AgenticConfig(BaseConfig):
                 worker_rank = env_id // max_env_num_per_worker
                 env_configs[worker_rank][env_id] = entry
             done_groups += n_group
+        assert done_groups == env_manager_config.env_groups
         env_manager_config.env_configs = env_configs
 
     def set_max_steps(self, max_steps: int):
