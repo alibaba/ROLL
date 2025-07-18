@@ -198,10 +198,10 @@ class MegatronInferStrategy(InferenceStrategy):
 
         return output_tensor, partial(loss_func, data)
 
-    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
+    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
         pass
 
-    def broadcast_bucket(self, src_pp_rank, meta_infos, bucket_size):
+    def broadcast_bucket(self, model_update_name, src_pp_rank, meta_infos, bucket_size):
         raise NotImplementedError
 
     def load_states(self, include=None, non_blocking=False):
@@ -407,8 +407,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         return metrics
 
-    def model_update(self, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
-        comm_plan = self.model_update_comm_plan[self.worker.rank_info.pp_rank]
+    def model_update(self, model_update_name, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
+        comm_plan = self.model_update_comm_plan[model_update_name][self.worker.rank_info.pp_rank]
         broadcast_time_cost = 0
         with Timer("model_update_total") as timer_total:
             for meta_infos, buffer in self.model.all_gather_weights_as_hf_bucket(
@@ -418,7 +418,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 with Timer("broadcast") as timer_broadcast:
                     for p2p_tgt_device in p2p_tgt_devices:
                         p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
-                        ref = p2p_tgt_worker.update_parameter_in_bucket.remote(
+                        ref = p2p_tgt_worker.update_parameter_in_bucket.remote(model_update_name=model_update_name,
                             meta_infos=meta_infos, buffer=buffer, ranks_in_worker=[p2p_tgt_device["device"]["rank"]]
                         )
                         refs.append(ref)
@@ -430,6 +430,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     ):
                         for worker in tgt_workers:
                             ref = worker.broadcast_bucket.remote(
+                                model_update_name=model_update_name,
                                 src_pp_rank=self.worker.rank_info.pp_rank,
                                 meta_infos=meta_infos,
                                 bucket_size=buffer.numel() * buffer.element_size(),

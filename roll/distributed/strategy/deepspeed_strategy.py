@@ -149,8 +149,8 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         return self.model.module
 
     # 参数同步相关接口
-    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
-        comm_plan = self.model_update_comm_plan[src_pp_rank]
+    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
+        comm_plan = self.model_update_comm_plan[model_update_name][src_pp_rank]
         weight = torch.empty(shape, dtype=dtype, device="cuda")
         collective.broadcast(tensor=weight, src_rank=0, group_name=comm_plan["group_name"])
         param = self.model.get_parameter(parameter_name)
@@ -162,7 +162,7 @@ class DeepSpeedInferStrategy(InferenceStrategy):
                     param.data.copy_(weight)
         del weight
 
-    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+    def update_parameter(self, model_update_name, parameter_name, weight, ranks_in_worker):
         param = self.model.get_parameter(parameter_name)
         if not self.ds_config.is_zero3():
             param.data.copy_(weight)
@@ -374,7 +374,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         del lora_state_dict
         return lora_params
 
-    def model_update(self, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
+    def model_update(self, model_update_name, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
         model = self.unwrap_model()
         if is_lora := (self.worker_config.model_args.lora_target is not None):
             all_params = self.collect_lora_params()
@@ -382,7 +382,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         else:
             all_params = list(model.named_parameters())
 
-        comm_plan = self.model_update_comm_plan[self.worker.rank_info.pp_rank]
+        comm_plan = self.model_update_comm_plan[model_update_name][self.worker.rank_info.pp_rank]
         model = self.unwrap_model()
         broadcast_time_cost = 0
         with Timer("model_update_total") as timer_total:
@@ -395,6 +395,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                     for p2p_tgt_device in p2p_tgt_devices:
                         p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
                         ref = p2p_tgt_worker.update_parameter.remote(
+                            model_update_name=model_update_name,
                             parameter_name=param_name,
                             weight=param_weight,
                             ranks_in_worker=[p2p_tgt_device["device"]["rank"]],
@@ -409,6 +410,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                     ):
                         for worker in tgt_workers:
                             ref = worker.broadcast_parameter.remote(
+                                model_update_name=model_update_name,
                                 src_pp_rank=self.worker.rank_info.pp_rank,
                                 dtype=param_weight.dtype,
                                 shape=shape,
@@ -428,6 +430,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                             for p2p_tgt_device in p2p_tgt_devices:
                                 p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
                                 ref = p2p_tgt_worker.update_parameter.remote(
+                                    model_update_name=model_update_name,
                                     parameter_name=param_name,
                                     weight=param_weight,
                                     ranks_in_worker=[p2p_tgt_device["device"]["rank"]],
@@ -442,6 +445,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                             ):
                                 for worker in tgt_workers:
                                     ref = worker.broadcast_parameter.remote(
+                                        model_update_name=model_update_name,
                                         src_pp_rank=self.worker.rank_info.pp_rank,
                                         dtype=param_weight.dtype,
                                         shape=shape,

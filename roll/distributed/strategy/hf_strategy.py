@@ -132,33 +132,33 @@ class HfInferStrategy(InferenceStrategy):
         return self.model
 
     # 参数同步相关接口
-    def broadcast_bucket(self, src_pp_rank, meta_infos, bucket_size):
-        if src_pp_rank not in self.model_update_comm_plan:
+    def broadcast_bucket(self, model_update_name, src_pp_rank, meta_infos, bucket_size):
+        if src_pp_rank not in self.model_update_comm_plan[model_update_name]:
             return
-        comm_plan = self.model_update_comm_plan[src_pp_rank]
+        comm_plan = self.model_update_comm_plan[model_update_name][src_pp_rank]
         buffer = torch.empty(bucket_size, dtype=torch.int8, device="cuda")
         collective.broadcast(tensor=buffer, src_rank=0, group_name=comm_plan["group_name"])
-        self.update_parameter_in_bucket(meta_infos, buffer, [dist.get_rank()])
+        self.update_parameter_in_bucket(model_update_name, meta_infos, buffer, [dist.get_rank()])
 
-    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
+    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
         assert (
             self.worker_config.num_gpus_per_worker == 1
         ), "hf generate only support on device, please use vllm instead."
-        if src_pp_rank not in self.model_update_comm_plan:
+        if src_pp_rank not in self.model_update_comm_plan[model_update_name]:
             return
-        comm_plan = self.model_update_comm_plan[src_pp_rank]
+        comm_plan = self.model_update_comm_plan[model_update_name][src_pp_rank]
         weight = torch.empty(shape, dtype=dtype, device="cuda")
         collective.broadcast(tensor=weight, src_rank=0, group_name=comm_plan["group_name"])
-        self.update_parameter(parameter_name, weight, [dist.get_rank()])
+        self.update_parameter(model_update_name, parameter_name, weight, [dist.get_rank()])
 
-    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+    def update_parameter(self, model_update_name, parameter_name, weight, ranks_in_worker):
         if dist.get_rank() not in ranks_in_worker:
             return
         param = self.model.get_parameter(parameter_name)
         param.data.copy_(weight)
         del weight
 
-    def update_parameter_in_bucket(self, meta_infos, buffer, ranks_in_worker):
+    def update_parameter_in_bucket(self, model_update_name, meta_infos, buffer, ranks_in_worker):
         if dist.get_rank() not in ranks_in_worker:
             return
         from mcore_adapter.models.converter.convert_utils import RecvBucketManager
@@ -167,7 +167,7 @@ class HfInferStrategy(InferenceStrategy):
         named_params = self.recv_manager.process_bucket(meta_infos, buffer)
         del buffer
         for name, weight in named_params.items():
-            self.update_parameter(name, weight, ranks_in_worker)
+            self.update_parameter(model_update_name, name, weight, ranks_in_worker)
 
     # offload/load 相关接口
     def load_states(self, *args, **kwargs):
