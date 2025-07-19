@@ -1,0 +1,157 @@
+defaults:
+  - ../config/envs@_here_
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "personality_alignment_convo_single_qwen3_1b"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+render_save_dir: /data/oss_bucket_0/yali/output/render
+system_envs:
+  USE_MODELSCOPE: '1'
+
+track_with: wandb
+tracker_kwargs:
+ api_key:
+ project: personality_alignment
+ name: ${exp_name}_convo_single_qwen3_1b
+ notes: "personality_alignment_convo_single_qwen3_1b"
+ tags:
+   - personality_alignment
+   - roll
+   - qwen3
+
+
+# track_with: tensorboard
+# tracker_kwargs:
+#   log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban
+
+num_gpus_per_node: 1
+
+max_steps: 100
+save_steps: 10000
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+rollout_batch_size: 16
+val_batch_size: 16
+sequence_length: 4096
+
+reward_clip: 20
+advantage_clip: 10.0
+ppo_epochs: 1
+adv_estimator: "reinforce"
+#pg_clip: 0.1
+#dual_clip_loss: True
+init_kl_coef: 0.0
+whiten_advantages: true
+entropy_loss_coef: 0
+
+pretrain: Qwen/Qwen3-1.7B
+reward_pretrain: Qwen/Qwen3-1.7B
+
+actor_train:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
+    warmup_steps: 10
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    #strategy_name: deepspeed_train
+    #strategy_config: ${deepspeed_zero2}
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  device_mapping: list(range(0,1))
+  infer_batch_size: 1
+
+actor_infer:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: 32 # single-turn response length
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: 1
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.8
+      block_size: 16
+      load_format: auto
+  device_mapping: list(range(0,1))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,1))
+  infer_batch_size: 1
+
+critic:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    #strategy_name: deepspeed_train
+    #strategy_config: ${deepspeed_zero2}
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  device_mapping: list(range(0,1))
+  infer_batch_size: 1
+
+rewards: llm_judge
+
+
+enable_response_mask: True
+action_sep: "||"
+use_turn_scores: False # important to GAE when applying token-level rewards to token-level advantages. If False, will take the sum of scores as the reward for the last turn.
+enable_think: False # False -> no think RL
+max_actions_per_traj: 10
+reward_normalization:
+  grouping: tags # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
+  method: identity # asym_clip / identity / mean_std
+
