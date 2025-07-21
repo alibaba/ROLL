@@ -1,8 +1,10 @@
+import copy
 from typing import Any, Dict
 
 import torch
 from codetiming import Timer
 
+from roll.configs.worker_config import WorkerConfig, StrategyArguments
 from roll.pipeline.base_worker import ActorWorker
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
@@ -36,29 +38,42 @@ class ModelUpdatePipeline(BasePipeline):
             worker_config=self.pipeline_config.actor_infer,
         )
 
+        actor_attn_worker_config: WorkerConfig = copy.deepcopy(self.pipeline_config.actor_infer)
+        actor_attn_worker_config.strategy_args = StrategyArguments(strategy_name="hf_infer", strategy_config={})
+        actor_attn_worker_config.name = "actor_attn"
+        self.actor_attn: Any = Cluster(
+            name=actor_attn_worker_config.name,
+            worker_cls=ActorWorker,
+            resource_manager=self.resource_manager,
+            worker_config=actor_attn_worker_config,
+        )
+
         self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=True)
         self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=True)
+        self.actor_attn.initialize(pipeline_config=self.pipeline_config, blocking=True)
 
         self.set_model_update_pair(
             src_cluster=self.actor_train,
             tgt_cluster=self.actor_infer,
             frequency=self.pipeline_config.actor_train.model_update_frequency,
         )
-
-        self.stress_count = 1
+        self.set_model_update_pair(
+            src_cluster=self.actor_train,
+            tgt_cluster=self.actor_attn,
+            frequency=self.pipeline_config.actor_train.model_update_frequency,
+        )
 
     @torch.no_grad()
     def run(self):
         global_step = 0
         metric_list = []
 
-        for _ in range(self.stress_count):
-            with Timer() as timer:
-                model_update_metrics: Dict = self.model_update(global_step)
-            model_update_metrics["time/model_update"] = timer.last
+        with Timer() as timer:
+            model_update_metrics: Dict = self.model_update(global_step)
+        model_update_metrics["time/model_update"] = timer.last
 
-            metric_list.append(model_update_metrics)
-            global_step += 1
+        metric_list.append(model_update_metrics)
+        global_step += 1
 
         prompts = [
             "Compared with Google, Microsoft",
@@ -86,13 +101,16 @@ class ModelUpdatePipeline(BasePipeline):
             torch.cumsum(batch.batch["attention_mask"], dim=-1) - 1, min=0, max=None
         )
         generate_output: DataProto = self.actor_infer.generate(batch)
+        actor_attn_output: DataProto = self.actor_attn.generate(batch)
         prompt_ids = generate_output.batch["prompts"]
         response_ids = generate_output.batch["responses"]
+        attn_response_ids = actor_attn_output.batch["responses"]
         generate_res = []
         prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
         responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-        for prompt, response in zip(prompts, responses):
-            generate_res.append({"prompt": prompt, "response": response})
+        attn_responses = self.tokenizer.batch_decode(attn_response_ids, skip_special_tokens=True)
+        for prompt, response, attn_response in zip(prompts, responses, attn_responses):
+            generate_res.append({"prompt": prompt, "response": response, "attn_responses": attn_response})
         metric_list.append(generate_res)
 
         logger.info("pipeline complete!")
