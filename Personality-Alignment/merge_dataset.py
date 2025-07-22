@@ -27,13 +27,13 @@ def merge_datasets():
     # 读取原始数据集并替换output字段
     processed_count = 0
     try:
-        with open('dialogue_dataset_all_v2.jsonl', 'r', encoding='utf-8') as input_file, \
-             open('dialogue_dataset_all_v2_cleaned.jsonl', 'w', encoding='utf-8') as output_file:
+        with open('dialogue_dataset_all_v3.jsonl', 'r', encoding='utf-8') as input_file, \
+             open('dialogue_dataset_all_v3_nothink.jsonl', 'w', encoding='utf-8') as output_file:
             
             for line_num, line in enumerate(input_file):
                 try:
                     data = json.loads(line.strip())
-                    
+                    data['prompt'] += "/no_think"
                     # 检查是否有对应的cleaned_output
                     if line_num < len(cleaned_outputs):
                         data['output'] = cleaned_outputs[line_num]

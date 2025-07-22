@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 # 加载原始数据集
 data = []
-with open('/home/qlicv/AReaL/Personality-Alignment/dialogue_dataset_all_v2_cleaned.jsonl', 'r', encoding='utf-8') as f:
+with open('/home/zyangdm/ROLL/Personality-Alignment/dialogue_dataset_all_v3_nothink.jsonl', 'r', encoding='utf-8') as f:
     for line in f:
         data.append(json.loads(line))
 
@@ -150,7 +150,7 @@ new_data = process_data_batch(data, batch_size=BATCH_SIZE)
 
 # 保存新数据集
 print("保存新数据集...")
-with open('/home/qlicv/AReaL/Personality-Alignment/3_changed_dataset.jsonl', 'w', encoding='utf-8') as f:
+with open('/home/zyangdm/ROLL/Personality-Alignment/3_changed_dialogue_dataset_nothink.jsonl', 'w', encoding='utf-8') as f:
     json.dump(new_data, f, ensure_ascii=False, indent=2)
 
 print(f"处理完成！共生成 {len(new_data)} 条新数据")

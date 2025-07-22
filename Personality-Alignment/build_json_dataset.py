@@ -1,12 +1,18 @@
 import pandas as pd
-from src.utils.data_loader import load_data
 import json
 
+def load_data():
+    """Load all data splits from JSONL files"""
+    conversations = pd.read_json("conversations.jsonl", lines=True)
+    metadata = pd.read_json("metadata.jsonl", lines=True)
+    return {
+        "conversations": conversations,
+        "metadata": metadata
+    }
 
 def main():
     # Load all data splits
-    data = load_data(survey=True, conversations=True, metadata=True)
-    survey_df = data["survey"]
+    data = load_data()
     conversations_df = data["conversations"]
     metadata_df = data["metadata"]
 
@@ -19,23 +25,18 @@ def main():
         conversations_df["conversation_id"].isin(english_convo_ids)
     ]
 
-    # Build user_id to profile mapping
-    user_profiles = {}
-    for _, row in survey_df.iterrows():
-        user_profiles[row["user_id"]] = row.to_dict()
-
     # Build output dataset
     output = []
     for _, convo in english_conversations.iterrows():
         user_id = convo["user_id"]
-        profile = user_profiles.get(user_id, {})
         conversations = convo["conversation_history"]
         conversation_type = convo.get("conversation_type", "")
         output.append(
             {
                 "user_id": user_id,
-                "conversations": conversations,
                 "conversation_type": conversation_type,
+                "opening_prompt": convo["opening_prompt"],
+                "conversations": conversations,
             }
         )
 
