@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 # 加载原始数据集
 data = []
-with open('/home/zyangdm/ROLL/Personality-Alignment/dialogue_dataset_all_v3_nothink.jsonl', 'r', encoding='utf-8') as f:
+with open('/home/zyangdm/ROLL/Personality-Alignment/dialogue_dataset_all_v4.jsonl', 'r', encoding='utf-8') as f:
     for line in f:
         data.append(json.loads(line))
 
@@ -55,7 +55,7 @@ def generate_distractors_batch(prompts, correct_outputs, batch_size=8):
     all_distractors = []
     
     # 准备所有输入
-    all_inputs = [f"{prompt}\n错误答案：" for prompt in prompts]
+    all_inputs = [f"{prompt}\nplease generate a wrong answer based on correct output: {correct_output}" for prompt, correct_output in zip(prompts, correct_outputs)]
     
     # 分批处理
     for i in tqdm(range(0, len(all_inputs), batch_size), desc="Generating distractors"):
@@ -150,7 +150,7 @@ new_data = process_data_batch(data, batch_size=BATCH_SIZE)
 
 # 保存新数据集
 print("保存新数据集...")
-with open('/home/zyangdm/ROLL/Personality-Alignment/3_changed_dialogue_dataset_nothink.jsonl', 'w', encoding='utf-8') as f:
+with open('/home/zyangdm/ROLL/Personality-Alignment/changed_dialogue_dataset_v4.jsonl', 'w', encoding='utf-8') as f:
     json.dump(new_data, f, ensure_ascii=False, indent=2)
 
 print(f"处理完成！共生成 {len(new_data)} 条新数据")

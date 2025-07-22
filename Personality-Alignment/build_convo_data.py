@@ -84,7 +84,7 @@ def build_dataset(roleplay_path: str, profile_path: str, output_path: str):
                     conversation_history = format_conversation_history(history_str, record)
                     new_records.append(
                         {
-                            "qid": record.get("qid") or record.get("id") or f"r{line_idx}_{msg_idx}",
+                            "qid": f"{user_id}_{line_idx}_{msg_idx}",
                             "prompt": (
                                 "Now, you are required to simulate the person with profile below:\n"
                                 "[Profile Begin]\n"
