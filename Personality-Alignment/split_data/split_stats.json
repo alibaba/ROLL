@@ -1,0 +1,5671 @@
+{
+  "total_records": 19161,
+  "test_ratio": 0.2,
+  "random_split": {
+    "train": 15329,
+    "test": 3832,
+    "train_stats": {
+      "prompt_stats": {
+        "count": 15329,
+        "mean": 4580.76,
+        "median": 3679,
+        "min": 885,
+        "max": 33880,
+        "std": 2905.05
+      },
+      "output_stats": {
+        "count": 15329,
+        "mean": 73.3,
+        "median": 57,
+        "min": 1,
+        "max": 1311,
+        "std": 63.57
+      }
+    },
+    "test_stats": {
+      "prompt_stats": {
+        "count": 3832,
+        "mean": 4608.01,
+        "median": 3674.5,
+        "min": 1211,
+        "max": 36969,
+        "std": 2994.21
+      },
+      "output_stats": {
+        "count": 3832,
+        "mean": 74.27,
+        "median": 56.0,
+        "min": 2,
+        "max": 1119,
+        "std": 65.98
+      }
+    }
+  },
+  "user_based_split": {
+    "train": 15846,
+    "test": 3315,
+    "num_users": 1396,
+    "train_stats": {
+      "prompt_stats": {
+        "count": 15846,
+        "mean": 4515.8,
+        "median": 3630.0,
+        "min": 885,
+        "max": 36969,
+        "std": 2889.27
+      },
+      "output_stats": {
+        "count": 15846,
+        "mean": 73.78,
+        "median": 57.0,
+        "min": 1,
+        "max": 1311,
+        "std": 64.69
+      }
+    },
+    "test_stats": {
+      "prompt_stats": {
+        "count": 3315,
+        "mean": 4922.75,
+        "median": 3925,
+        "min": 1199,
+        "max": 25867,
+        "std": 3057.44
+      },
+      "output_stats": {
+        "count": 3315,
+        "mean": 72.14,
+        "median": 55,
+        "min": 3,
+        "max": 709,
+        "std": 60.95
+      }
+    }
+  },
+  "user_stats": {
+    "user0": {
+      "train": 3,
+      "test": 1
+    },
+    "user1": {
+      "train": 13,
+      "test": 3
+    },
+    "user4": {
+      "train": 8,
+      "test": 1
+    },
+    "user6": {
+      "train": 6,
+      "test": 1
+    },
+    "user2": {
+      "train": 15,
+      "test": 3
+    },
+    "user7": {
+      "train": 8,
+      "test": 2
+    },
+    "user3": {
+      "train": 11,
+      "test": 2
+    },
+    "user5": {
+      "train": 9,
+      "test": 2
+    },
+    "user8": {
+      "train": 6,
+      "test": 1
+    },
+    "user9": {
+      "train": 19,
+      "test": 4
+    },
+    "user11": {
+      "train": 7,
+      "test": 1
+    },
+    "user10": {
+      "train": 8,
+      "test": 1
+    },
+    "user12": {
+      "train": 1,
+      "test": 1
+    },
+    "user14": {
+      "train": 5,
+      "test": 1
+    },
+    "user13": {
+      "train": 8,
+      "test": 2
+    },
+    "user17": {
+      "train": 14,
+      "test": 3
+    },
+    "user19": {
+      "train": 16,
+      "test": 3
+    },
+    "user16": {
+      "train": 7,
+      "test": 1
+    },
+    "user24": {
+      "train": 14,
+      "test": 3
+    },
+    "user21": {
+      "train": 13,
+      "test": 3
+    },
+    "user25": {
+      "train": 5,
+      "test": 1
+    },
+    "user26": {
+      "train": 16,
+      "test": 3
+    },
+    "user22": {
+      "train": 13,
+      "test": 3
+    },
+    "user30": {
+      "train": 4,
+      "test": 1
+    },
+    "user23": {
+      "train": 15,
+      "test": 3
+    },
+    "user20": {
+      "train": 25,
+      "test": 6
+    },
+    "user28": {
+      "train": 8,
+      "test": 1
+    },
+    "user29": {
+      "train": 12,
+      "test": 2
+    },
+    "user33": {
+      "train": 8,
+      "test": 2
+    },
+    "user18": {
+      "train": 15,
+      "test": 3
+    },
+    "user32": {
+      "train": 16,
+      "test": 3
+    },
+    "user31": {
+      "train": 20,
+      "test": 4
+    },
+    "user35": {
+      "train": 7,
+      "test": 1
+    },
+    "user38": {
+      "train": 20,
+      "test": 4
+    },
+    "user40": {
+      "train": 14,
+      "test": 3
+    },
+    "user37": {
+      "train": 18,
+      "test": 4
+    },
+    "user44": {
+      "train": 21,
+      "test": 5
+    },
+    "user34": {
+      "train": 8,
+      "test": 1
+    },
+    "user41": {
+      "train": 12,
+      "test": 2
+    },
+    "user43": {
+      "train": 11,
+      "test": 2
+    },
+    "user42": {
+      "train": 6,
+      "test": 1
+    },
+    "user39": {
+      "train": 9,
+      "test": 2
+    },
+    "user45": {
+      "train": 12,
+      "test": 2
+    },
+    "user46": {
+      "train": 6,
+      "test": 1
+    },
+    "user47": {
+      "train": 12,
+      "test": 3
+    },
+    "user51": {
+      "train": 13,
+      "test": 3
+    },
+    "user50": {
+      "train": 12,
+      "test": 3
+    },
+    "user49": {
+      "train": 14,
+      "test": 3
+    },
+    "user52": {
+      "train": 16,
+      "test": 4
+    },
+    "user57": {
+      "train": 15,
+      "test": 3
+    },
+    "user61": {
+      "train": 10,
+      "test": 2
+    },
+    "user58": {
+      "train": 7,
+      "test": 1
+    },
+    "user59": {
+      "train": 8,
+      "test": 1
+    },
+    "user62": {
+      "train": 8,
+      "test": 1
+    },
+    "user55": {
+      "train": 7,
+      "test": 1
+    },
+    "user1017": {
+      "train": 25,
+      "test": 6
+    },
+    "user64": {
+      "train": 7,
+      "test": 1
+    },
+    "user53": {
+      "train": 13,
+      "test": 3
+    },
+    "user65": {
+      "train": 9,
+      "test": 2
+    },
+    "user60": {
+      "train": 10,
+      "test": 2
+    },
+    "user67": {
+      "train": 16,
+      "test": 3
+    },
+    "user66": {
+      "train": 8,
+      "test": 1
+    },
+    "user69": {
+      "train": 7,
+      "test": 1
+    },
+    "user70": {
+      "train": 12,
+      "test": 2
+    },
+    "user68": {
+      "train": 21,
+      "test": 5
+    },
+    "user63": {
+      "train": 12,
+      "test": 3
+    },
+    "user71": {
+      "train": 17,
+      "test": 4
+    },
+    "user72": {
+      "train": 9,
+      "test": 2
+    },
+    "user73": {
+      "train": 14,
+      "test": 3
+    },
+    "user74": {
+      "train": 9,
+      "test": 2
+    },
+    "user75": {
+      "train": 11,
+      "test": 2
+    },
+    "user77": {
+      "train": 11,
+      "test": 2
+    },
+    "user76": {
+      "train": 17,
+      "test": 4
+    },
+    "user79": {
+      "train": 16,
+      "test": 3
+    },
+    "user80": {
+      "train": 8,
+      "test": 1
+    },
+    "user82": {
+      "train": 12,
+      "test": 3
+    },
+    "user83": {
+      "train": 16,
+      "test": 3
+    },
+    "user78": {
+      "train": 6,
+      "test": 1
+    },
+    "user85": {
+      "train": 12,
+      "test": 2
+    },
+    "user90": {
+      "train": 10,
+      "test": 2
+    },
+    "user84": {
+      "train": 12,
+      "test": 2
+    },
+    "user89": {
+      "train": 16,
+      "test": 4
+    },
+    "user88": {
+      "train": 18,
+      "test": 4
+    },
+    "user91": {
+      "train": 17,
+      "test": 4
+    },
+    "user92": {
+      "train": 10,
+      "test": 2
+    },
+    "user94": {
+      "train": 12,
+      "test": 2
+    },
+    "user95": {
+      "train": 13,
+      "test": 3
+    },
+    "user93": {
+      "train": 18,
+      "test": 4
+    },
+    "user98": {
+      "train": 11,
+      "test": 2
+    },
+    "user97": {
+      "train": 13,
+      "test": 3
+    },
+    "user99": {
+      "train": 5,
+      "test": 1
+    },
+    "user96": {
+      "train": 11,
+      "test": 2
+    },
+    "user101": {
+      "train": 6,
+      "test": 1
+    },
+    "user100": {
+      "train": 24,
+      "test": 5
+    },
+    "user102": {
+      "train": 5,
+      "test": 1
+    },
+    "user103": {
+      "train": 15,
+      "test": 3
+    },
+    "user105": {
+      "train": 7,
+      "test": 1
+    },
+    "user104": {
+      "train": 14,
+      "test": 3
+    },
+    "user108": {
+      "train": 9,
+      "test": 2
+    },
+    "user107": {
+      "train": 6,
+      "test": 1
+    },
+    "user106": {
+      "train": 12,
+      "test": 3
+    },
+    "user110": {
+      "train": 1,
+      "test": 1
+    },
+    "user109": {
+      "train": 20,
+      "test": 5
+    },
+    "user111": {
+      "train": 16,
+      "test": 3
+    },
+    "user112": {
+      "train": 16,
+      "test": 3
+    },
+    "user118": {
+      "train": 14,
+      "test": 3
+    },
+    "user113": {
+      "train": 10,
+      "test": 2
+    },
+    "user114": {
+      "train": 11,
+      "test": 2
+    },
+    "user117": {
+      "train": 9,
+      "test": 2
+    },
+    "user119": {
+      "train": 20,
+      "test": 4
+    },
+    "user120": {
+      "train": 20,
+      "test": 5
+    },
+    "user122": {
+      "train": 16,
+      "test": 4
+    },
+    "user126": {
+      "train": 7,
+      "test": 1
+    },
+    "user124": {
+      "train": 15,
+      "test": 3
+    },
+    "user115": {
+      "train": 19,
+      "test": 4
+    },
+    "user125": {
+      "train": 9,
+      "test": 2
+    },
+    "user128": {
+      "train": 8,
+      "test": 2
+    },
+    "user131": {
+      "train": 10,
+      "test": 2
+    },
+    "user121": {
+      "train": 19,
+      "test": 4
+    },
+    "user129": {
+      "train": 20,
+      "test": 4
+    },
+    "user127": {
+      "train": 13,
+      "test": 3
+    },
+    "user116": {
+      "train": 28,
+      "test": 6
+    },
+    "user130": {
+      "train": 23,
+      "test": 5
+    },
+    "user132": {
+      "train": 10,
+      "test": 2
+    },
+    "user123": {
+      "train": 12,
+      "test": 3
+    },
+    "user135": {
+      "train": 15,
+      "test": 3
+    },
+    "user133": {
+      "train": 21,
+      "test": 5
+    },
+    "user134": {
+      "train": 24,
+      "test": 5
+    },
+    "user140": {
+      "train": 14,
+      "test": 3
+    },
+    "user139": {
+      "train": 12,
+      "test": 2
+    },
+    "user143": {
+      "train": 16,
+      "test": 4
+    },
+    "user142": {
+      "train": 12,
+      "test": 3
+    },
+    "user137": {
+      "train": 9,
+      "test": 2
+    },
+    "user144": {
+      "train": 6,
+      "test": 1
+    },
+    "user141": {
+      "train": 19,
+      "test": 4
+    },
+    "user138": {
+      "train": 44,
+      "test": 10
+    },
+    "user148": {
+      "train": 9,
+      "test": 2
+    },
+    "user150": {
+      "train": 16,
+      "test": 4
+    },
+    "user149": {
+      "train": 17,
+      "test": 4
+    },
+    "user153": {
+      "train": 5,
+      "test": 1
+    },
+    "user146": {
+      "train": 16,
+      "test": 3
+    },
+    "user147": {
+      "train": 9,
+      "test": 2
+    },
+    "user154": {
+      "train": 12,
+      "test": 2
+    },
+    "user156": {
+      "train": 7,
+      "test": 1
+    },
+    "user151": {
+      "train": 13,
+      "test": 3
+    },
+    "user152": {
+      "train": 8,
+      "test": 1
+    },
+    "user155": {
+      "train": 9,
+      "test": 2
+    },
+    "user158": {
+      "train": 11,
+      "test": 2
+    },
+    "user145": {
+      "train": 20,
+      "test": 4
+    },
+    "user160": {
+      "train": 13,
+      "test": 3
+    },
+    "user157": {
+      "train": 12,
+      "test": 3
+    },
+    "user161": {
+      "train": 1,
+      "test": 1
+    },
+    "user159": {
+      "train": 17,
+      "test": 4
+    },
+    "user162": {
+      "train": 6,
+      "test": 1
+    },
+    "user163": {
+      "train": 20,
+      "test": 4
+    },
+    "user164": {
+      "train": 13,
+      "test": 3
+    },
+    "user165": {
+      "train": 36,
+      "test": 9
+    },
+    "user166": {
+      "train": 11,
+      "test": 2
+    },
+    "user167": {
+      "train": 5,
+      "test": 1
+    },
+    "user168": {
+      "train": 8,
+      "test": 2
+    },
+    "user169": {
+      "train": 19,
+      "test": 4
+    },
+    "user170": {
+      "train": 10,
+      "test": 2
+    },
+    "user171": {
+      "train": 12,
+      "test": 3
+    },
+    "user172": {
+      "train": 8,
+      "test": 1
+    },
+    "user174": {
+      "train": 15,
+      "test": 3
+    },
+    "user173": {
+      "train": 16,
+      "test": 4
+    },
+    "user175": {
+      "train": 10,
+      "test": 2
+    },
+    "user176": {
+      "train": 9,
+      "test": 2
+    },
+    "user178": {
+      "train": 12,
+      "test": 2
+    },
+    "user188": {
+      "train": 6,
+      "test": 1
+    },
+    "user190": {
+      "train": 12,
+      "test": 3
+    },
+    "user179": {
+      "train": 9,
+      "test": 2
+    },
+    "user184": {
+      "train": 13,
+      "test": 3
+    },
+    "user186": {
+      "train": 7,
+      "test": 1
+    },
+    "user185": {
+      "train": 12,
+      "test": 3
+    },
+    "user181": {
+      "train": 13,
+      "test": 3
+    },
+    "user182": {
+      "train": 5,
+      "test": 1
+    },
+    "user192": {
+      "train": 6,
+      "test": 1
+    },
+    "user187": {
+      "train": 20,
+      "test": 4
+    },
+    "user183": {
+      "train": 16,
+      "test": 4
+    },
+    "user194": {
+      "train": 8,
+      "test": 1
+    },
+    "user198": {
+      "train": 7,
+      "test": 1
+    },
+    "user201": {
+      "train": 6,
+      "test": 1
+    },
+    "user193": {
+      "train": 12,
+      "test": 2
+    },
+    "user199": {
+      "train": 7,
+      "test": 1
+    },
+    "user191": {
+      "train": 8,
+      "test": 1
+    },
+    "user204": {
+      "train": 12,
+      "test": 2
+    },
+    "user189": {
+      "train": 25,
+      "test": 6
+    },
+    "user202": {
+      "train": 10,
+      "test": 2
+    },
+    "user203": {
+      "train": 6,
+      "test": 1
+    },
+    "user200": {
+      "train": 12,
+      "test": 3
+    },
+    "user211": {
+      "train": 11,
+      "test": 2
+    },
+    "user207": {
+      "train": 17,
+      "test": 4
+    },
+    "user197": {
+      "train": 8,
+      "test": 2
+    },
+    "user180": {
+      "train": 14,
+      "test": 3
+    },
+    "user209": {
+      "train": 8,
+      "test": 1
+    },
+    "user206": {
+      "train": 3,
+      "test": 1
+    },
+    "user210": {
+      "train": 9,
+      "test": 2
+    },
+    "user195": {
+      "train": 8,
+      "test": 2
+    },
+    "user220": {
+      "train": 8,
+      "test": 2
+    },
+    "user208": {
+      "train": 11,
+      "test": 2
+    },
+    "user205": {
+      "train": 9,
+      "test": 2
+    },
+    "user214": {
+      "train": 7,
+      "test": 1
+    },
+    "user218": {
+      "train": 9,
+      "test": 2
+    },
+    "user212": {
+      "train": 8,
+      "test": 1
+    },
+    "user213": {
+      "train": 11,
+      "test": 2
+    },
+    "user219": {
+      "train": 10,
+      "test": 2
+    },
+    "user221": {
+      "train": 9,
+      "test": 2
+    },
+    "user222": {
+      "train": 10,
+      "test": 2
+    },
+    "user223": {
+      "train": 3,
+      "test": 1
+    },
+    "user224": {
+      "train": 5,
+      "test": 1
+    },
+    "user225": {
+      "train": 5,
+      "test": 1
+    },
+    "user226": {
+      "train": 13,
+      "test": 3
+    },
+    "user227": {
+      "train": 7,
+      "test": 1
+    },
+    "user228": {
+      "train": 8,
+      "test": 1
+    },
+    "user229": {
+      "train": 8,
+      "test": 1
+    },
+    "user231": {
+      "train": 13,
+      "test": 3
+    },
+    "user232": {
+      "train": 9,
+      "test": 2
+    },
+    "user234": {
+      "train": 10,
+      "test": 2
+    },
+    "user230": {
+      "train": 8,
+      "test": 2
+    },
+    "user233": {
+      "train": 14,
+      "test": 3
+    },
+    "user236": {
+      "train": 20,
+      "test": 5
+    },
+    "user241": {
+      "train": 20,
+      "test": 5
+    },
+    "user240": {
+      "train": 19,
+      "test": 4
+    },
+    "user242": {
+      "train": 14,
+      "test": 3
+    },
+    "user239": {
+      "train": 11,
+      "test": 2
+    },
+    "user235": {
+      "train": 15,
+      "test": 3
+    },
+    "user238": {
+      "train": 14,
+      "test": 3
+    },
+    "user243": {
+      "train": 12,
+      "test": 2
+    },
+    "user244": {
+      "train": 8,
+      "test": 2
+    },
+    "user247": {
+      "train": 7,
+      "test": 1
+    },
+    "user248": {
+      "train": 13,
+      "test": 3
+    },
+    "user246": {
+      "train": 18,
+      "test": 4
+    },
+    "user245": {
+      "train": 12,
+      "test": 2
+    },
+    "user251": {
+      "train": 6,
+      "test": 1
+    },
+    "user249": {
+      "train": 14,
+      "test": 3
+    },
+    "user250": {
+      "train": 11,
+      "test": 2
+    },
+    "user256": {
+      "train": 2,
+      "test": 1
+    },
+    "user257": {
+      "train": 10,
+      "test": 2
+    },
+    "user254": {
+      "train": 11,
+      "test": 2
+    },
+    "user262": {
+      "train": 9,
+      "test": 2
+    },
+    "user252": {
+      "train": 12,
+      "test": 2
+    },
+    "user255": {
+      "train": 14,
+      "test": 3
+    },
+    "user265": {
+      "train": 15,
+      "test": 3
+    },
+    "user253": {
+      "train": 20,
+      "test": 4
+    },
+    "user260": {
+      "train": 12,
+      "test": 3
+    },
+    "user261": {
+      "train": 16,
+      "test": 3
+    },
+    "user267": {
+      "train": 6,
+      "test": 1
+    },
+    "user264": {
+      "train": 19,
+      "test": 4
+    },
+    "user271": {
+      "train": 13,
+      "test": 3
+    },
+    "user266": {
+      "train": 10,
+      "test": 2
+    },
+    "user270": {
+      "train": 16,
+      "test": 4
+    },
+    "user274": {
+      "train": 9,
+      "test": 2
+    },
+    "user268": {
+      "train": 11,
+      "test": 2
+    },
+    "user272": {
+      "train": 12,
+      "test": 3
+    },
+    "user273": {
+      "train": 20,
+      "test": 5
+    },
+    "user259": {
+      "train": 11,
+      "test": 2
+    },
+    "user277": {
+      "train": 15,
+      "test": 3
+    },
+    "user276": {
+      "train": 5,
+      "test": 1
+    },
+    "user263": {
+      "train": 16,
+      "test": 3
+    },
+    "user284": {
+      "train": 12,
+      "test": 3
+    },
+    "user280": {
+      "train": 1,
+      "test": 1
+    },
+    "user288": {
+      "train": 16,
+      "test": 3
+    },
+    "user282": {
+      "train": 14,
+      "test": 3
+    },
+    "user283": {
+      "train": 10,
+      "test": 2
+    },
+    "user278": {
+      "train": 10,
+      "test": 2
+    },
+    "user279": {
+      "train": 13,
+      "test": 3
+    },
+    "user275": {
+      "train": 3,
+      "test": 1
+    },
+    "user281": {
+      "train": 8,
+      "test": 1
+    },
+    "user289": {
+      "train": 6,
+      "test": 1
+    },
+    "user293": {
+      "train": 18,
+      "test": 4
+    },
+    "user258": {
+      "train": 10,
+      "test": 2
+    },
+    "user290": {
+      "train": 8,
+      "test": 2
+    },
+    "user292": {
+      "train": 9,
+      "test": 2
+    },
+    "user294": {
+      "train": 5,
+      "test": 1
+    },
+    "user295": {
+      "train": 19,
+      "test": 4
+    },
+    "user296": {
+      "train": 18,
+      "test": 4
+    },
+    "user297": {
+      "train": 12,
+      "test": 2
+    },
+    "user301": {
+      "train": 16,
+      "test": 4
+    },
+    "user298": {
+      "train": 15,
+      "test": 3
+    },
+    "user291": {
+      "train": 12,
+      "test": 3
+    },
+    "user299": {
+      "train": 11,
+      "test": 2
+    },
+    "user300": {
+      "train": 6,
+      "test": 1
+    },
+    "user285": {
+      "train": 16,
+      "test": 4
+    },
+    "user286": {
+      "train": 2,
+      "test": 1
+    },
+    "user303": {
+      "train": 12,
+      "test": 2
+    },
+    "user306": {
+      "train": 12,
+      "test": 3
+    },
+    "user304": {
+      "train": 8,
+      "test": 2
+    },
+    "user305": {
+      "train": 11,
+      "test": 2
+    },
+    "user308": {
+      "train": 13,
+      "test": 3
+    },
+    "user307": {
+      "train": 16,
+      "test": 4
+    },
+    "user309": {
+      "train": 10,
+      "test": 2
+    },
+    "user310": {
+      "train": 8,
+      "test": 1
+    },
+    "user311": {
+      "train": 8,
+      "test": 1
+    },
+    "user316": {
+      "train": 5,
+      "test": 1
+    },
+    "user315": {
+      "train": 8,
+      "test": 1
+    },
+    "user314": {
+      "train": 9,
+      "test": 2
+    },
+    "user313": {
+      "train": 10,
+      "test": 2
+    },
+    "user317": {
+      "train": 8,
+      "test": 2
+    },
+    "user319": {
+      "train": 7,
+      "test": 1
+    },
+    "user1024": {
+      "train": 10,
+      "test": 2
+    },
+    "user323": {
+      "train": 8,
+      "test": 2
+    },
+    "user318": {
+      "train": 10,
+      "test": 2
+    },
+    "user324": {
+      "train": 10,
+      "test": 2
+    },
+    "user325": {
+      "train": 10,
+      "test": 2
+    },
+    "user320": {
+      "train": 8,
+      "test": 2
+    },
+    "user326": {
+      "train": 7,
+      "test": 1
+    },
+    "user327": {
+      "train": 14,
+      "test": 3
+    },
+    "user328": {
+      "train": 9,
+      "test": 2
+    },
+    "user329": {
+      "train": 16,
+      "test": 3
+    },
+    "user331": {
+      "train": 12,
+      "test": 3
+    },
+    "user330": {
+      "train": 12,
+      "test": 3
+    },
+    "user332": {
+      "train": 15,
+      "test": 3
+    },
+    "user334": {
+      "train": 17,
+      "test": 4
+    },
+    "user335": {
+      "train": 22,
+      "test": 5
+    },
+    "user333": {
+      "train": 11,
+      "test": 2
+    },
+    "user336": {
+      "train": 12,
+      "test": 3
+    },
+    "user337": {
+      "train": 9,
+      "test": 2
+    },
+    "user338": {
+      "train": 8,
+      "test": 2
+    },
+    "user341": {
+      "train": 17,
+      "test": 4
+    },
+    "user340": {
+      "train": 11,
+      "test": 2
+    },
+    "user339": {
+      "train": 8,
+      "test": 1
+    },
+    "user342": {
+      "train": 3,
+      "test": 1
+    },
+    "user345": {
+      "train": 11,
+      "test": 2
+    },
+    "user343": {
+      "train": 7,
+      "test": 1
+    },
+    "user350": {
+      "train": 5,
+      "test": 1
+    },
+    "user348": {
+      "train": 6,
+      "test": 1
+    },
+    "user347": {
+      "train": 6,
+      "test": 1
+    },
+    "user349": {
+      "train": 6,
+      "test": 1
+    },
+    "user356": {
+      "train": 17,
+      "test": 4
+    },
+    "user354": {
+      "train": 7,
+      "test": 1
+    },
+    "user351": {
+      "train": 7,
+      "test": 1
+    },
+    "user344": {
+      "train": 23,
+      "test": 5
+    },
+    "user355": {
+      "train": 8,
+      "test": 1
+    },
+    "user353": {
+      "train": 12,
+      "test": 3
+    },
+    "user358": {
+      "train": 15,
+      "test": 3
+    },
+    "user360": {
+      "train": 16,
+      "test": 3
+    },
+    "user357": {
+      "train": 12,
+      "test": 3
+    },
+    "user365": {
+      "train": 12,
+      "test": 2
+    },
+    "user363": {
+      "train": 10,
+      "test": 2
+    },
+    "user366": {
+      "train": 6,
+      "test": 1
+    },
+    "user362": {
+      "train": 16,
+      "test": 4
+    },
+    "user368": {
+      "train": 11,
+      "test": 2
+    },
+    "user364": {
+      "train": 20,
+      "test": 4
+    },
+    "user372": {
+      "train": 10,
+      "test": 2
+    },
+    "user369": {
+      "train": 6,
+      "test": 1
+    },
+    "user371": {
+      "train": 12,
+      "test": 3
+    },
+    "user367": {
+      "train": 12,
+      "test": 2
+    },
+    "user374": {
+      "train": 8,
+      "test": 1
+    },
+    "user375": {
+      "train": 7,
+      "test": 1
+    },
+    "user373": {
+      "train": 20,
+      "test": 5
+    },
+    "user380": {
+      "train": 15,
+      "test": 3
+    },
+    "user389": {
+      "train": 20,
+      "test": 5
+    },
+    "user370": {
+      "train": 24,
+      "test": 5
+    },
+    "user378": {
+      "train": 2,
+      "test": 1
+    },
+    "user377": {
+      "train": 13,
+      "test": 3
+    },
+    "user376": {
+      "train": 5,
+      "test": 1
+    },
+    "user382": {
+      "train": 5,
+      "test": 1
+    },
+    "user379": {
+      "train": 10,
+      "test": 2
+    },
+    "user381": {
+      "train": 12,
+      "test": 3
+    },
+    "user383": {
+      "train": 17,
+      "test": 4
+    },
+    "user384": {
+      "train": 13,
+      "test": 3
+    },
+    "user385": {
+      "train": 8,
+      "test": 2
+    },
+    "user387": {
+      "train": 11,
+      "test": 2
+    },
+    "user390": {
+      "train": 12,
+      "test": 2
+    },
+    "user388": {
+      "train": 8,
+      "test": 2
+    },
+    "user386": {
+      "train": 25,
+      "test": 6
+    },
+    "user391": {
+      "train": 12,
+      "test": 3
+    },
+    "user392": {
+      "train": 26,
+      "test": 6
+    },
+    "user393": {
+      "train": 10,
+      "test": 2
+    },
+    "user395": {
+      "train": 13,
+      "test": 3
+    },
+    "user396": {
+      "train": 8,
+      "test": 2
+    },
+    "user394": {
+      "train": 21,
+      "test": 5
+    },
+    "user398": {
+      "train": 6,
+      "test": 1
+    },
+    "user397": {
+      "train": 9,
+      "test": 2
+    },
+    "user400": {
+      "train": 13,
+      "test": 3
+    },
+    "user399": {
+      "train": 22,
+      "test": 5
+    },
+    "user402": {
+      "train": 20,
+      "test": 4
+    },
+    "user403": {
+      "train": 15,
+      "test": 3
+    },
+    "user404": {
+      "train": 15,
+      "test": 3
+    },
+    "user405": {
+      "train": 8,
+      "test": 2
+    },
+    "user408": {
+      "train": 7,
+      "test": 1
+    },
+    "user409": {
+      "train": 6,
+      "test": 1
+    },
+    "user407": {
+      "train": 16,
+      "test": 4
+    },
+    "user413": {
+      "train": 18,
+      "test": 4
+    },
+    "user411": {
+      "train": 9,
+      "test": 2
+    },
+    "user412": {
+      "train": 7,
+      "test": 1
+    },
+    "user410": {
+      "train": 10,
+      "test": 2
+    },
+    "user414": {
+      "train": 9,
+      "test": 2
+    },
+    "user415": {
+      "train": 7,
+      "test": 1
+    },
+    "user418": {
+      "train": 7,
+      "test": 1
+    },
+    "user416": {
+      "train": 15,
+      "test": 3
+    },
+    "user420": {
+      "train": 5,
+      "test": 1
+    },
+    "user417": {
+      "train": 6,
+      "test": 1
+    },
+    "user419": {
+      "train": 13,
+      "test": 3
+    },
+    "user421": {
+      "train": 17,
+      "test": 4
+    },
+    "user423": {
+      "train": 11,
+      "test": 2
+    },
+    "user422": {
+      "train": 15,
+      "test": 3
+    },
+    "user424": {
+      "train": 13,
+      "test": 3
+    },
+    "user425": {
+      "train": 20,
+      "test": 5
+    },
+    "user427": {
+      "train": 7,
+      "test": 1
+    },
+    "user428": {
+      "train": 8,
+      "test": 2
+    },
+    "user429": {
+      "train": 12,
+      "test": 3
+    },
+    "user430": {
+      "train": 16,
+      "test": 4
+    },
+    "user431": {
+      "train": 17,
+      "test": 4
+    },
+    "user432": {
+      "train": 9,
+      "test": 2
+    },
+    "user433": {
+      "train": 12,
+      "test": 3
+    },
+    "user434": {
+      "train": 6,
+      "test": 1
+    },
+    "user439": {
+      "train": 10,
+      "test": 2
+    },
+    "user438": {
+      "train": 12,
+      "test": 3
+    },
+    "user437": {
+      "train": 9,
+      "test": 2
+    },
+    "user436": {
+      "train": 5,
+      "test": 1
+    },
+    "user441": {
+      "train": 19,
+      "test": 4
+    },
+    "user440": {
+      "train": 24,
+      "test": 5
+    },
+    "user443": {
+      "train": 8,
+      "test": 2
+    },
+    "user453": {
+      "train": 5,
+      "test": 1
+    },
+    "user448": {
+      "train": 14,
+      "test": 3
+    },
+    "user442": {
+      "train": 15,
+      "test": 3
+    },
+    "user447": {
+      "train": 12,
+      "test": 2
+    },
+    "user455": {
+      "train": 8,
+      "test": 1
+    },
+    "user444": {
+      "train": 15,
+      "test": 3
+    },
+    "user452": {
+      "train": 20,
+      "test": 4
+    },
+    "user449": {
+      "train": 10,
+      "test": 2
+    },
+    "user454": {
+      "train": 7,
+      "test": 1
+    },
+    "user446": {
+      "train": 13,
+      "test": 3
+    },
+    "user456": {
+      "train": 8,
+      "test": 2
+    },
+    "user458": {
+      "train": 8,
+      "test": 1
+    },
+    "user451": {
+      "train": 12,
+      "test": 2
+    },
+    "user462": {
+      "train": 8,
+      "test": 1
+    },
+    "user459": {
+      "train": 13,
+      "test": 3
+    },
+    "user467": {
+      "train": 8,
+      "test": 1
+    },
+    "user464": {
+      "train": 8,
+      "test": 1
+    },
+    "user465": {
+      "train": 8,
+      "test": 2
+    },
+    "user460": {
+      "train": 6,
+      "test": 1
+    },
+    "user457": {
+      "train": 10,
+      "test": 2
+    },
+    "user466": {
+      "train": 15,
+      "test": 3
+    },
+    "user470": {
+      "train": 11,
+      "test": 2
+    },
+    "user461": {
+      "train": 12,
+      "test": 3
+    },
+    "user469": {
+      "train": 9,
+      "test": 2
+    },
+    "user463": {
+      "train": 22,
+      "test": 5
+    },
+    "user474": {
+      "train": 8,
+      "test": 1
+    },
+    "user473": {
+      "train": 12,
+      "test": 2
+    },
+    "user468": {
+      "train": 6,
+      "test": 1
+    },
+    "user471": {
+      "train": 7,
+      "test": 1
+    },
+    "user476": {
+      "train": 8,
+      "test": 2
+    },
+    "user475": {
+      "train": 9,
+      "test": 2
+    },
+    "user478": {
+      "train": 8,
+      "test": 2
+    },
+    "user479": {
+      "train": 8,
+      "test": 1
+    },
+    "user480": {
+      "train": 9,
+      "test": 2
+    },
+    "user481": {
+      "train": 9,
+      "test": 2
+    },
+    "user477": {
+      "train": 26,
+      "test": 6
+    },
+    "user482": {
+      "train": 12,
+      "test": 3
+    },
+    "user485": {
+      "train": 8,
+      "test": 2
+    },
+    "user483": {
+      "train": 7,
+      "test": 1
+    },
+    "user486": {
+      "train": 12,
+      "test": 3
+    },
+    "user487": {
+      "train": 8,
+      "test": 2
+    },
+    "user488": {
+      "train": 14,
+      "test": 3
+    },
+    "user490": {
+      "train": 10,
+      "test": 2
+    },
+    "user491": {
+      "train": 15,
+      "test": 3
+    },
+    "user136": {
+      "train": 25,
+      "test": 6
+    },
+    "user489": {
+      "train": 49,
+      "test": 12
+    },
+    "user492": {
+      "train": 15,
+      "test": 3
+    },
+    "user494": {
+      "train": 10,
+      "test": 2
+    },
+    "user495": {
+      "train": 9,
+      "test": 2
+    },
+    "user496": {
+      "train": 7,
+      "test": 1
+    },
+    "user497": {
+      "train": 20,
+      "test": 5
+    },
+    "user499": {
+      "train": 6,
+      "test": 1
+    },
+    "user501": {
+      "train": 17,
+      "test": 4
+    },
+    "user500": {
+      "train": 8,
+      "test": 1
+    },
+    "user504": {
+      "train": 10,
+      "test": 2
+    },
+    "user507": {
+      "train": 8,
+      "test": 2
+    },
+    "user505": {
+      "train": 8,
+      "test": 1
+    },
+    "user508": {
+      "train": 14,
+      "test": 3
+    },
+    "user502": {
+      "train": 10,
+      "test": 2
+    },
+    "user506": {
+      "train": 8,
+      "test": 1
+    },
+    "user513": {
+      "train": 4,
+      "test": 1
+    },
+    "user511": {
+      "train": 6,
+      "test": 1
+    },
+    "user510": {
+      "train": 10,
+      "test": 2
+    },
+    "user509": {
+      "train": 23,
+      "test": 5
+    },
+    "user516": {
+      "train": 21,
+      "test": 5
+    },
+    "user542": {
+      "train": 17,
+      "test": 4
+    },
+    "user518": {
+      "train": 12,
+      "test": 2
+    },
+    "user512": {
+      "train": 16,
+      "test": 4
+    },
+    "user514": {
+      "train": 8,
+      "test": 2
+    },
+    "user520": {
+      "train": 6,
+      "test": 1
+    },
+    "user1027": {
+      "train": 15,
+      "test": 3
+    },
+    "user519": {
+      "train": 10,
+      "test": 2
+    },
+    "user521": {
+      "train": 5,
+      "test": 1
+    },
+    "user525": {
+      "train": 5,
+      "test": 1
+    },
+    "user522": {
+      "train": 7,
+      "test": 1
+    },
+    "user524": {
+      "train": 8,
+      "test": 1
+    },
+    "user517": {
+      "train": 12,
+      "test": 3
+    },
+    "user544": {
+      "train": 16,
+      "test": 3
+    },
+    "user527": {
+      "train": 15,
+      "test": 3
+    },
+    "user531": {
+      "train": 11,
+      "test": 2
+    },
+    "user532": {
+      "train": 15,
+      "test": 3
+    },
+    "user523": {
+      "train": 20,
+      "test": 5
+    },
+    "user528": {
+      "train": 6,
+      "test": 1
+    },
+    "user530": {
+      "train": 6,
+      "test": 1
+    },
+    "user529": {
+      "train": 1,
+      "test": 1
+    },
+    "user533": {
+      "train": 9,
+      "test": 2
+    },
+    "user526": {
+      "train": 12,
+      "test": 3
+    },
+    "user534": {
+      "train": 20,
+      "test": 4
+    },
+    "user535": {
+      "train": 19,
+      "test": 4
+    },
+    "user536": {
+      "train": 13,
+      "test": 3
+    },
+    "user538": {
+      "train": 6,
+      "test": 1
+    },
+    "user539": {
+      "train": 9,
+      "test": 2
+    },
+    "user540": {
+      "train": 11,
+      "test": 2
+    },
+    "user541": {
+      "train": 15,
+      "test": 3
+    },
+    "user537": {
+      "train": 14,
+      "test": 3
+    },
+    "user543": {
+      "train": 15,
+      "test": 3
+    },
+    "user545": {
+      "train": 14,
+      "test": 3
+    },
+    "user546": {
+      "train": 15,
+      "test": 3
+    },
+    "user547": {
+      "train": 8,
+      "test": 2
+    },
+    "user548": {
+      "train": 10,
+      "test": 2
+    },
+    "user549": {
+      "train": 6,
+      "test": 1
+    },
+    "user550": {
+      "train": 10,
+      "test": 2
+    },
+    "user551": {
+      "train": 13,
+      "test": 3
+    },
+    "user553": {
+      "train": 14,
+      "test": 3
+    },
+    "user554": {
+      "train": 7,
+      "test": 1
+    },
+    "user555": {
+      "train": 9,
+      "test": 2
+    },
+    "user556": {
+      "train": 12,
+      "test": 2
+    },
+    "user557": {
+      "train": 9,
+      "test": 2
+    },
+    "user567": {
+      "train": 8,
+      "test": 2
+    },
+    "user558": {
+      "train": 16,
+      "test": 4
+    },
+    "user559": {
+      "train": 8,
+      "test": 2
+    },
+    "user568": {
+      "train": 6,
+      "test": 1
+    },
+    "user560": {
+      "train": 11,
+      "test": 2
+    },
+    "user566": {
+      "train": 10,
+      "test": 2
+    },
+    "user563": {
+      "train": 11,
+      "test": 2
+    },
+    "user571": {
+      "train": 11,
+      "test": 2
+    },
+    "user570": {
+      "train": 12,
+      "test": 2
+    },
+    "user561": {
+      "train": 8,
+      "test": 2
+    },
+    "user569": {
+      "train": 17,
+      "test": 4
+    },
+    "user562": {
+      "train": 13,
+      "test": 3
+    },
+    "user575": {
+      "train": 6,
+      "test": 1
+    },
+    "user579": {
+      "train": 8,
+      "test": 2
+    },
+    "user578": {
+      "train": 5,
+      "test": 1
+    },
+    "user572": {
+      "train": 7,
+      "test": 1
+    },
+    "user580": {
+      "train": 16,
+      "test": 3
+    },
+    "user581": {
+      "train": 12,
+      "test": 2
+    },
+    "user573": {
+      "train": 20,
+      "test": 5
+    },
+    "user577": {
+      "train": 16,
+      "test": 3
+    },
+    "user583": {
+      "train": 14,
+      "test": 3
+    },
+    "user582": {
+      "train": 5,
+      "test": 1
+    },
+    "user576": {
+      "train": 17,
+      "test": 4
+    },
+    "user586": {
+      "train": 9,
+      "test": 2
+    },
+    "user584": {
+      "train": 20,
+      "test": 5
+    },
+    "user587": {
+      "train": 3,
+      "test": 1
+    },
+    "user588": {
+      "train": 8,
+      "test": 2
+    },
+    "user589": {
+      "train": 18,
+      "test": 4
+    },
+    "user574": {
+      "train": 11,
+      "test": 2
+    },
+    "user592": {
+      "train": 8,
+      "test": 2
+    },
+    "user591": {
+      "train": 14,
+      "test": 3
+    },
+    "user593": {
+      "train": 16,
+      "test": 4
+    },
+    "user596": {
+      "train": 12,
+      "test": 3
+    },
+    "user597": {
+      "train": 10,
+      "test": 2
+    },
+    "user604": {
+      "train": 9,
+      "test": 2
+    },
+    "user602": {
+      "train": 9,
+      "test": 2
+    },
+    "user601": {
+      "train": 10,
+      "test": 2
+    },
+    "user599": {
+      "train": 6,
+      "test": 1
+    },
+    "user594": {
+      "train": 6,
+      "test": 1
+    },
+    "user608": {
+      "train": 7,
+      "test": 1
+    },
+    "user607": {
+      "train": 12,
+      "test": 2
+    },
+    "user605": {
+      "train": 14,
+      "test": 3
+    },
+    "user609": {
+      "train": 21,
+      "test": 5
+    },
+    "user619": {
+      "train": 16,
+      "test": 4
+    },
+    "user621": {
+      "train": 13,
+      "test": 3
+    },
+    "user614": {
+      "train": 11,
+      "test": 2
+    },
+    "user613": {
+      "train": 13,
+      "test": 3
+    },
+    "user600": {
+      "train": 8,
+      "test": 1
+    },
+    "user617": {
+      "train": 12,
+      "test": 3
+    },
+    "user611": {
+      "train": 11,
+      "test": 2
+    },
+    "user618": {
+      "train": 12,
+      "test": 2
+    },
+    "user624": {
+      "train": 8,
+      "test": 2
+    },
+    "user606": {
+      "train": 16,
+      "test": 4
+    },
+    "user622": {
+      "train": 16,
+      "test": 3
+    },
+    "user598": {
+      "train": 19,
+      "test": 4
+    },
+    "user625": {
+      "train": 12,
+      "test": 3
+    },
+    "user616": {
+      "train": 19,
+      "test": 4
+    },
+    "user610": {
+      "train": 5,
+      "test": 1
+    },
+    "user623": {
+      "train": 23,
+      "test": 5
+    },
+    "user615": {
+      "train": 11,
+      "test": 2
+    },
+    "user631": {
+      "train": 6,
+      "test": 1
+    },
+    "user595": {
+      "train": 16,
+      "test": 3
+    },
+    "user628": {
+      "train": 12,
+      "test": 3
+    },
+    "user612": {
+      "train": 24,
+      "test": 5
+    },
+    "user626": {
+      "train": 14,
+      "test": 3
+    },
+    "user646": {
+      "train": 16,
+      "test": 3
+    },
+    "user620": {
+      "train": 11,
+      "test": 2
+    },
+    "user627": {
+      "train": 16,
+      "test": 3
+    },
+    "user632": {
+      "train": 9,
+      "test": 2
+    },
+    "user634": {
+      "train": 8,
+      "test": 2
+    },
+    "user635": {
+      "train": 12,
+      "test": 3
+    },
+    "user629": {
+      "train": 15,
+      "test": 3
+    },
+    "user603": {
+      "train": 8,
+      "test": 1
+    },
+    "user633": {
+      "train": 11,
+      "test": 2
+    },
+    "user636": {
+      "train": 7,
+      "test": 1
+    },
+    "user639": {
+      "train": 11,
+      "test": 2
+    },
+    "user641": {
+      "train": 5,
+      "test": 1
+    },
+    "user640": {
+      "train": 15,
+      "test": 3
+    },
+    "user637": {
+      "train": 8,
+      "test": 2
+    },
+    "user630": {
+      "train": 8,
+      "test": 2
+    },
+    "user638": {
+      "train": 13,
+      "test": 3
+    },
+    "user645": {
+      "train": 7,
+      "test": 1
+    },
+    "user643": {
+      "train": 5,
+      "test": 1
+    },
+    "user644": {
+      "train": 13,
+      "test": 3
+    },
+    "user647": {
+      "train": 13,
+      "test": 3
+    },
+    "user648": {
+      "train": 8,
+      "test": 2
+    },
+    "user649": {
+      "train": 9,
+      "test": 2
+    },
+    "user651": {
+      "train": 12,
+      "test": 2
+    },
+    "user652": {
+      "train": 7,
+      "test": 1
+    },
+    "user653": {
+      "train": 5,
+      "test": 1
+    },
+    "user655": {
+      "train": 26,
+      "test": 6
+    },
+    "user656": {
+      "train": 6,
+      "test": 1
+    },
+    "user659": {
+      "train": 5,
+      "test": 1
+    },
+    "user654": {
+      "train": 28,
+      "test": 6
+    },
+    "user657": {
+      "train": 15,
+      "test": 3
+    },
+    "user663": {
+      "train": 6,
+      "test": 1
+    },
+    "user660": {
+      "train": 12,
+      "test": 2
+    },
+    "user662": {
+      "train": 10,
+      "test": 2
+    },
+    "user666": {
+      "train": 10,
+      "test": 2
+    },
+    "user661": {
+      "train": 10,
+      "test": 2
+    },
+    "user667": {
+      "train": 11,
+      "test": 2
+    },
+    "user669": {
+      "train": 11,
+      "test": 2
+    },
+    "user668": {
+      "train": 27,
+      "test": 6
+    },
+    "user673": {
+      "train": 16,
+      "test": 4
+    },
+    "user676": {
+      "train": 14,
+      "test": 3
+    },
+    "user672": {
+      "train": 11,
+      "test": 2
+    },
+    "user664": {
+      "train": 16,
+      "test": 4
+    },
+    "user678": {
+      "train": 15,
+      "test": 3
+    },
+    "user683": {
+      "train": 8,
+      "test": 1
+    },
+    "user682": {
+      "train": 7,
+      "test": 1
+    },
+    "user665": {
+      "train": 8,
+      "test": 1
+    },
+    "user681": {
+      "train": 12,
+      "test": 3
+    },
+    "user687": {
+      "train": 12,
+      "test": 2
+    },
+    "user685": {
+      "train": 8,
+      "test": 1
+    },
+    "user674": {
+      "train": 18,
+      "test": 4
+    },
+    "user671": {
+      "train": 5,
+      "test": 1
+    },
+    "user679": {
+      "train": 17,
+      "test": 4
+    },
+    "user684": {
+      "train": 24,
+      "test": 6
+    },
+    "user688": {
+      "train": 20,
+      "test": 4
+    },
+    "user670": {
+      "train": 16,
+      "test": 4
+    },
+    "user677": {
+      "train": 18,
+      "test": 4
+    },
+    "user690": {
+      "train": 16,
+      "test": 4
+    },
+    "user680": {
+      "train": 4,
+      "test": 1
+    },
+    "user686": {
+      "train": 10,
+      "test": 2
+    },
+    "user692": {
+      "train": 12,
+      "test": 2
+    },
+    "user694": {
+      "train": 11,
+      "test": 2
+    },
+    "user691": {
+      "train": 17,
+      "test": 4
+    },
+    "user693": {
+      "train": 12,
+      "test": 3
+    },
+    "user689": {
+      "train": 11,
+      "test": 2
+    },
+    "user705": {
+      "train": 13,
+      "test": 3
+    },
+    "user699": {
+      "train": 8,
+      "test": 1
+    },
+    "user696": {
+      "train": 14,
+      "test": 3
+    },
+    "user698": {
+      "train": 5,
+      "test": 1
+    },
+    "user697": {
+      "train": 11,
+      "test": 2
+    },
+    "user700": {
+      "train": 10,
+      "test": 2
+    },
+    "user701": {
+      "train": 13,
+      "test": 3
+    },
+    "user695": {
+      "train": 23,
+      "test": 5
+    },
+    "user702": {
+      "train": 12,
+      "test": 2
+    },
+    "user703": {
+      "train": 7,
+      "test": 1
+    },
+    "user704": {
+      "train": 12,
+      "test": 3
+    },
+    "user706": {
+      "train": 10,
+      "test": 2
+    },
+    "user707": {
+      "train": 10,
+      "test": 2
+    },
+    "user708": {
+      "train": 8,
+      "test": 1
+    },
+    "user709": {
+      "train": 11,
+      "test": 2
+    },
+    "user1094": {
+      "train": 11,
+      "test": 2
+    },
+    "user711": {
+      "train": 12,
+      "test": 3
+    },
+    "user712": {
+      "train": 10,
+      "test": 2
+    },
+    "user710": {
+      "train": 5,
+      "test": 1
+    },
+    "user713": {
+      "train": 14,
+      "test": 3
+    },
+    "user725": {
+      "train": 12,
+      "test": 2
+    },
+    "user719": {
+      "train": 16,
+      "test": 4
+    },
+    "user715": {
+      "train": 11,
+      "test": 2
+    },
+    "user718": {
+      "train": 12,
+      "test": 2
+    },
+    "user721": {
+      "train": 8,
+      "test": 1
+    },
+    "user716": {
+      "train": 16,
+      "test": 3
+    },
+    "user720": {
+      "train": 7,
+      "test": 1
+    },
+    "user722": {
+      "train": 9,
+      "test": 2
+    },
+    "user717": {
+      "train": 11,
+      "test": 2
+    },
+    "user723": {
+      "train": 11,
+      "test": 2
+    },
+    "user724": {
+      "train": 5,
+      "test": 1
+    },
+    "user714": {
+      "train": 14,
+      "test": 3
+    },
+    "user726": {
+      "train": 8,
+      "test": 2
+    },
+    "user727": {
+      "train": 10,
+      "test": 2
+    },
+    "user728": {
+      "train": 15,
+      "test": 3
+    },
+    "user729": {
+      "train": 17,
+      "test": 4
+    },
+    "user730": {
+      "train": 17,
+      "test": 4
+    },
+    "user1162": {
+      "train": 17,
+      "test": 4
+    },
+    "user735": {
+      "train": 6,
+      "test": 1
+    },
+    "user733": {
+      "train": 8,
+      "test": 2
+    },
+    "user731": {
+      "train": 22,
+      "test": 5
+    },
+    "user739": {
+      "train": 20,
+      "test": 5
+    },
+    "user738": {
+      "train": 23,
+      "test": 5
+    },
+    "user740": {
+      "train": 10,
+      "test": 2
+    },
+    "user734": {
+      "train": 9,
+      "test": 2
+    },
+    "user744": {
+      "train": 3,
+      "test": 1
+    },
+    "user743": {
+      "train": 5,
+      "test": 1
+    },
+    "user742": {
+      "train": 11,
+      "test": 2
+    },
+    "user748": {
+      "train": 12,
+      "test": 2
+    },
+    "user741": {
+      "train": 13,
+      "test": 3
+    },
+    "user747": {
+      "train": 9,
+      "test": 2
+    },
+    "user746": {
+      "train": 14,
+      "test": 3
+    },
+    "user749": {
+      "train": 22,
+      "test": 5
+    },
+    "user732": {
+      "train": 3,
+      "test": 1
+    },
+    "user750": {
+      "train": 16,
+      "test": 4
+    },
+    "user737": {
+      "train": 9,
+      "test": 2
+    },
+    "user752": {
+      "train": 12,
+      "test": 2
+    },
+    "user751": {
+      "train": 6,
+      "test": 1
+    },
+    "user753": {
+      "train": 5,
+      "test": 1
+    },
+    "user756": {
+      "train": 8,
+      "test": 2
+    },
+    "user755": {
+      "train": 6,
+      "test": 1
+    },
+    "user754": {
+      "train": 10,
+      "test": 2
+    },
+    "user759": {
+      "train": 9,
+      "test": 2
+    },
+    "user793": {
+      "train": 18,
+      "test": 4
+    },
+    "user783": {
+      "train": 13,
+      "test": 3
+    },
+    "user758": {
+      "train": 12,
+      "test": 2
+    },
+    "user761": {
+      "train": 12,
+      "test": 3
+    },
+    "user762": {
+      "train": 6,
+      "test": 1
+    },
+    "user764": {
+      "train": 16,
+      "test": 4
+    },
+    "user766": {
+      "train": 7,
+      "test": 1
+    },
+    "user757": {
+      "train": 23,
+      "test": 5
+    },
+    "user768": {
+      "train": 12,
+      "test": 2
+    },
+    "user770": {
+      "train": 18,
+      "test": 4
+    },
+    "user767": {
+      "train": 8,
+      "test": 1
+    },
+    "user763": {
+      "train": 9,
+      "test": 2
+    },
+    "user760": {
+      "train": 9,
+      "test": 2
+    },
+    "user771": {
+      "train": 8,
+      "test": 2
+    },
+    "user769": {
+      "train": 9,
+      "test": 2
+    },
+    "user774": {
+      "train": 10,
+      "test": 2
+    },
+    "user780": {
+      "train": 10,
+      "test": 2
+    },
+    "user765": {
+      "train": 16,
+      "test": 4
+    },
+    "user773": {
+      "train": 20,
+      "test": 4
+    },
+    "user777": {
+      "train": 12,
+      "test": 3
+    },
+    "user779": {
+      "train": 7,
+      "test": 1
+    },
+    "user772": {
+      "train": 7,
+      "test": 1
+    },
+    "user781": {
+      "train": 6,
+      "test": 1
+    },
+    "user776": {
+      "train": 21,
+      "test": 5
+    },
+    "user778": {
+      "train": 15,
+      "test": 3
+    },
+    "user775": {
+      "train": 12,
+      "test": 3
+    },
+    "user782": {
+      "train": 14,
+      "test": 3
+    },
+    "user784": {
+      "train": 10,
+      "test": 2
+    },
+    "user786": {
+      "train": 8,
+      "test": 2
+    },
+    "user785": {
+      "train": 7,
+      "test": 1
+    },
+    "user787": {
+      "train": 13,
+      "test": 3
+    },
+    "user789": {
+      "train": 9,
+      "test": 2
+    },
+    "user788": {
+      "train": 9,
+      "test": 2
+    },
+    "user792": {
+      "train": 10,
+      "test": 2
+    },
+    "user790": {
+      "train": 13,
+      "test": 3
+    },
+    "user791": {
+      "train": 7,
+      "test": 1
+    },
+    "user794": {
+      "train": 10,
+      "test": 2
+    },
+    "user798": {
+      "train": 11,
+      "test": 2
+    },
+    "user795": {
+      "train": 7,
+      "test": 1
+    },
+    "user797": {
+      "train": 10,
+      "test": 2
+    },
+    "user800": {
+      "train": 14,
+      "test": 3
+    },
+    "user799": {
+      "train": 14,
+      "test": 3
+    },
+    "user1164": {
+      "train": 2,
+      "test": 1
+    },
+    "user801": {
+      "train": 8,
+      "test": 2
+    },
+    "user806": {
+      "train": 7,
+      "test": 1
+    },
+    "user803": {
+      "train": 11,
+      "test": 2
+    },
+    "user805": {
+      "train": 10,
+      "test": 2
+    },
+    "user812": {
+      "train": 11,
+      "test": 2
+    },
+    "user809": {
+      "train": 10,
+      "test": 2
+    },
+    "user815": {
+      "train": 16,
+      "test": 3
+    },
+    "user810": {
+      "train": 5,
+      "test": 1
+    },
+    "user813": {
+      "train": 19,
+      "test": 4
+    },
+    "user817": {
+      "train": 9,
+      "test": 2
+    },
+    "user808": {
+      "train": 7,
+      "test": 1
+    },
+    "user816": {
+      "train": 13,
+      "test": 3
+    },
+    "user822": {
+      "train": 9,
+      "test": 2
+    },
+    "user804": {
+      "train": 8,
+      "test": 2
+    },
+    "user802": {
+      "train": 12,
+      "test": 2
+    },
+    "user818": {
+      "train": 8,
+      "test": 2
+    },
+    "user828": {
+      "train": 12,
+      "test": 2
+    },
+    "user807": {
+      "train": 17,
+      "test": 4
+    },
+    "user827": {
+      "train": 18,
+      "test": 4
+    },
+    "user823": {
+      "train": 15,
+      "test": 3
+    },
+    "user824": {
+      "train": 9,
+      "test": 2
+    },
+    "user814": {
+      "train": 15,
+      "test": 3
+    },
+    "user811": {
+      "train": 12,
+      "test": 3
+    },
+    "user829": {
+      "train": 20,
+      "test": 4
+    },
+    "user826": {
+      "train": 15,
+      "test": 3
+    },
+    "user821": {
+      "train": 9,
+      "test": 2
+    },
+    "user820": {
+      "train": 14,
+      "test": 3
+    },
+    "user819": {
+      "train": 10,
+      "test": 2
+    },
+    "user842": {
+      "train": 8,
+      "test": 1
+    },
+    "user831": {
+      "train": 9,
+      "test": 2
+    },
+    "user825": {
+      "train": 15,
+      "test": 3
+    },
+    "user832": {
+      "train": 9,
+      "test": 2
+    },
+    "user835": {
+      "train": 11,
+      "test": 2
+    },
+    "user836": {
+      "train": 7,
+      "test": 1
+    },
+    "user837": {
+      "train": 8,
+      "test": 1
+    },
+    "user833": {
+      "train": 9,
+      "test": 2
+    },
+    "user838": {
+      "train": 8,
+      "test": 2
+    },
+    "user840": {
+      "train": 12,
+      "test": 3
+    },
+    "user841": {
+      "train": 14,
+      "test": 3
+    },
+    "user839": {
+      "train": 14,
+      "test": 3
+    },
+    "user846": {
+      "train": 6,
+      "test": 1
+    },
+    "user851": {
+      "train": 10,
+      "test": 2
+    },
+    "user844": {
+      "train": 14,
+      "test": 3
+    },
+    "user853": {
+      "train": 13,
+      "test": 3
+    },
+    "user849": {
+      "train": 20,
+      "test": 5
+    },
+    "user847": {
+      "train": 16,
+      "test": 4
+    },
+    "user850": {
+      "train": 7,
+      "test": 1
+    },
+    "user848": {
+      "train": 11,
+      "test": 2
+    },
+    "user855": {
+      "train": 22,
+      "test": 5
+    },
+    "user852": {
+      "train": 9,
+      "test": 2
+    },
+    "user858": {
+      "train": 8,
+      "test": 1
+    },
+    "user856": {
+      "train": 12,
+      "test": 3
+    },
+    "user863": {
+      "train": 1,
+      "test": 1
+    },
+    "user854": {
+      "train": 22,
+      "test": 5
+    },
+    "user860": {
+      "train": 8,
+      "test": 1
+    },
+    "user862": {
+      "train": 12,
+      "test": 2
+    },
+    "user859": {
+      "train": 7,
+      "test": 1
+    },
+    "user865": {
+      "train": 16,
+      "test": 4
+    },
+    "user857": {
+      "train": 16,
+      "test": 3
+    },
+    "user864": {
+      "train": 16,
+      "test": 4
+    },
+    "user867": {
+      "train": 12,
+      "test": 3
+    },
+    "user868": {
+      "train": 1,
+      "test": 1
+    },
+    "user866": {
+      "train": 10,
+      "test": 2
+    },
+    "user869": {
+      "train": 8,
+      "test": 2
+    },
+    "user872": {
+      "train": 6,
+      "test": 1
+    },
+    "user870": {
+      "train": 22,
+      "test": 5
+    },
+    "user879": {
+      "train": 10,
+      "test": 2
+    },
+    "user871": {
+      "train": 6,
+      "test": 1
+    },
+    "user878": {
+      "train": 5,
+      "test": 1
+    },
+    "user880": {
+      "train": 12,
+      "test": 3
+    },
+    "user882": {
+      "train": 10,
+      "test": 2
+    },
+    "user877": {
+      "train": 7,
+      "test": 1
+    },
+    "user883": {
+      "train": 8,
+      "test": 1
+    },
+    "user884": {
+      "train": 8,
+      "test": 2
+    },
+    "user881": {
+      "train": 16,
+      "test": 3
+    },
+    "user885": {
+      "train": 12,
+      "test": 2
+    },
+    "user874": {
+      "train": 20,
+      "test": 5
+    },
+    "user892": {
+      "train": 7,
+      "test": 1
+    },
+    "user889": {
+      "train": 8,
+      "test": 2
+    },
+    "user886": {
+      "train": 7,
+      "test": 1
+    },
+    "user894": {
+      "train": 10,
+      "test": 2
+    },
+    "user890": {
+      "train": 4,
+      "test": 1
+    },
+    "user895": {
+      "train": 8,
+      "test": 1
+    },
+    "user888": {
+      "train": 18,
+      "test": 4
+    },
+    "user911": {
+      "train": 6,
+      "test": 1
+    },
+    "user898": {
+      "train": 8,
+      "test": 2
+    },
+    "user887": {
+      "train": 16,
+      "test": 3
+    },
+    "user902": {
+      "train": 7,
+      "test": 1
+    },
+    "user891": {
+      "train": 12,
+      "test": 3
+    },
+    "user893": {
+      "train": 12,
+      "test": 2
+    },
+    "user896": {
+      "train": 2,
+      "test": 1
+    },
+    "user900": {
+      "train": 7,
+      "test": 1
+    },
+    "user899": {
+      "train": 12,
+      "test": 2
+    },
+    "user901": {
+      "train": 8,
+      "test": 2
+    },
+    "user905": {
+      "train": 8,
+      "test": 2
+    },
+    "user897": {
+      "train": 9,
+      "test": 2
+    },
+    "user904": {
+      "train": 12,
+      "test": 3
+    },
+    "user903": {
+      "train": 12,
+      "test": 3
+    },
+    "user1086": {
+      "train": 8,
+      "test": 1
+    },
+    "user910": {
+      "train": 8,
+      "test": 2
+    },
+    "user908": {
+      "train": 13,
+      "test": 3
+    },
+    "user906": {
+      "train": 8,
+      "test": 2
+    },
+    "user907": {
+      "train": 4,
+      "test": 1
+    },
+    "user909": {
+      "train": 8,
+      "test": 1
+    },
+    "user917": {
+      "train": 7,
+      "test": 1
+    },
+    "user914": {
+      "train": 7,
+      "test": 1
+    },
+    "user916": {
+      "train": 12,
+      "test": 3
+    },
+    "user918": {
+      "train": 12,
+      "test": 3
+    },
+    "user915": {
+      "train": 10,
+      "test": 2
+    },
+    "user923": {
+      "train": 18,
+      "test": 4
+    },
+    "user922": {
+      "train": 5,
+      "test": 1
+    },
+    "user919": {
+      "train": 10,
+      "test": 2
+    },
+    "user926": {
+      "train": 11,
+      "test": 2
+    },
+    "user924": {
+      "train": 16,
+      "test": 3
+    },
+    "user921": {
+      "train": 14,
+      "test": 3
+    },
+    "user927": {
+      "train": 6,
+      "test": 1
+    },
+    "user920": {
+      "train": 13,
+      "test": 3
+    },
+    "user928": {
+      "train": 16,
+      "test": 4
+    },
+    "user935": {
+      "train": 5,
+      "test": 1
+    },
+    "user995": {
+      "train": 16,
+      "test": 4
+    },
+    "user931": {
+      "train": 23,
+      "test": 5
+    },
+    "user948": {
+      "train": 11,
+      "test": 2
+    },
+    "user943": {
+      "train": 7,
+      "test": 1
+    },
+    "user944": {
+      "train": 5,
+      "test": 1
+    },
+    "user925": {
+      "train": 8,
+      "test": 1
+    },
+    "user938": {
+      "train": 12,
+      "test": 3
+    },
+    "user936": {
+      "train": 11,
+      "test": 2
+    },
+    "user939": {
+      "train": 24,
+      "test": 6
+    },
+    "user934": {
+      "train": 7,
+      "test": 1
+    },
+    "user952": {
+      "train": 10,
+      "test": 2
+    },
+    "user933": {
+      "train": 8,
+      "test": 2
+    },
+    "user994": {
+      "train": 14,
+      "test": 3
+    },
+    "user963": {
+      "train": 6,
+      "test": 1
+    },
+    "user932": {
+      "train": 10,
+      "test": 2
+    },
+    "user940": {
+      "train": 13,
+      "test": 3
+    },
+    "user955": {
+      "train": 10,
+      "test": 2
+    },
+    "user929": {
+      "train": 10,
+      "test": 2
+    },
+    "user937": {
+      "train": 5,
+      "test": 1
+    },
+    "user960": {
+      "train": 20,
+      "test": 5
+    },
+    "user961": {
+      "train": 18,
+      "test": 4
+    },
+    "user930": {
+      "train": 11,
+      "test": 2
+    },
+    "user957": {
+      "train": 7,
+      "test": 1
+    },
+    "user964": {
+      "train": 16,
+      "test": 4
+    },
+    "user966": {
+      "train": 11,
+      "test": 2
+    },
+    "user941": {
+      "train": 13,
+      "test": 3
+    },
+    "user958": {
+      "train": 6,
+      "test": 1
+    },
+    "user949": {
+      "train": 12,
+      "test": 3
+    },
+    "user968": {
+      "train": 11,
+      "test": 2
+    },
+    "user950": {
+      "train": 16,
+      "test": 4
+    },
+    "user967": {
+      "train": 8,
+      "test": 2
+    },
+    "user947": {
+      "train": 5,
+      "test": 1
+    },
+    "user953": {
+      "train": 9,
+      "test": 2
+    },
+    "user956": {
+      "train": 11,
+      "test": 2
+    },
+    "user942": {
+      "train": 10,
+      "test": 2
+    },
+    "user962": {
+      "train": 13,
+      "test": 3
+    },
+    "user959": {
+      "train": 7,
+      "test": 1
+    },
+    "user976": {
+      "train": 11,
+      "test": 2
+    },
+    "user974": {
+      "train": 6,
+      "test": 1
+    },
+    "user975": {
+      "train": 28,
+      "test": 6
+    },
+    "user971": {
+      "train": 21,
+      "test": 5
+    },
+    "user965": {
+      "train": 9,
+      "test": 2
+    },
+    "user970": {
+      "train": 5,
+      "test": 1
+    },
+    "user969": {
+      "train": 7,
+      "test": 1
+    },
+    "user973": {
+      "train": 7,
+      "test": 1
+    },
+    "user980": {
+      "train": 8,
+      "test": 2
+    },
+    "user972": {
+      "train": 9,
+      "test": 2
+    },
+    "user982": {
+      "train": 5,
+      "test": 1
+    },
+    "user981": {
+      "train": 12,
+      "test": 3
+    },
+    "user984": {
+      "train": 9,
+      "test": 2
+    },
+    "user978": {
+      "train": 12,
+      "test": 2
+    },
+    "user989": {
+      "train": 9,
+      "test": 2
+    },
+    "user983": {
+      "train": 12,
+      "test": 2
+    },
+    "user977": {
+      "train": 9,
+      "test": 2
+    },
+    "user991": {
+      "train": 5,
+      "test": 1
+    },
+    "user986": {
+      "train": 5,
+      "test": 1
+    },
+    "user990": {
+      "train": 14,
+      "test": 3
+    },
+    "user985": {
+      "train": 13,
+      "test": 3
+    },
+    "user987": {
+      "train": 10,
+      "test": 2
+    },
+    "user979": {
+      "train": 15,
+      "test": 3
+    },
+    "user993": {
+      "train": 9,
+      "test": 2
+    },
+    "user997": {
+      "train": 11,
+      "test": 2
+    },
+    "user1001": {
+      "train": 28,
+      "test": 6
+    },
+    "user999": {
+      "train": 12,
+      "test": 3
+    },
+    "user996": {
+      "train": 6,
+      "test": 1
+    },
+    "user1003": {
+      "train": 13,
+      "test": 3
+    },
+    "user1005": {
+      "train": 16,
+      "test": 3
+    },
+    "user992": {
+      "train": 11,
+      "test": 2
+    },
+    "user1011": {
+      "train": 12,
+      "test": 3
+    },
+    "user1007": {
+      "train": 13,
+      "test": 3
+    },
+    "user1004": {
+      "train": 11,
+      "test": 2
+    },
+    "user1010": {
+      "train": 16,
+      "test": 4
+    },
+    "user1009": {
+      "train": 12,
+      "test": 2
+    },
+    "user1008": {
+      "train": 32,
+      "test": 7
+    },
+    "user1012": {
+      "train": 3,
+      "test": 1
+    },
+    "user1014": {
+      "train": 12,
+      "test": 3
+    },
+    "user1015": {
+      "train": 10,
+      "test": 2
+    },
+    "user1016": {
+      "train": 6,
+      "test": 1
+    },
+    "user1019": {
+      "train": 11,
+      "test": 2
+    },
+    "user1022": {
+      "train": 13,
+      "test": 3
+    },
+    "user1021": {
+      "train": 7,
+      "test": 1
+    },
+    "user1020": {
+      "train": 12,
+      "test": 3
+    },
+    "user1023": {
+      "train": 8,
+      "test": 2
+    },
+    "user1025": {
+      "train": 12,
+      "test": 2
+    },
+    "user1026": {
+      "train": 12,
+      "test": 2
+    },
+    "user1028": {
+      "train": 14,
+      "test": 3
+    },
+    "user1029": {
+      "train": 10,
+      "test": 2
+    },
+    "user1030": {
+      "train": 8,
+      "test": 1
+    },
+    "user1032": {
+      "train": 10,
+      "test": 2
+    },
+    "user1036": {
+      "train": 9,
+      "test": 2
+    },
+    "user1034": {
+      "train": 17,
+      "test": 4
+    },
+    "user1037": {
+      "train": 11,
+      "test": 2
+    },
+    "user1033": {
+      "train": 13,
+      "test": 3
+    },
+    "user1045": {
+      "train": 12,
+      "test": 2
+    },
+    "user1035": {
+      "train": 8,
+      "test": 1
+    },
+    "user1039": {
+      "train": 14,
+      "test": 3
+    },
+    "user1038": {
+      "train": 9,
+      "test": 2
+    },
+    "user1040": {
+      "train": 9,
+      "test": 2
+    },
+    "user1031": {
+      "train": 16,
+      "test": 4
+    },
+    "user1042": {
+      "train": 7,
+      "test": 1
+    },
+    "user1041": {
+      "train": 8,
+      "test": 1
+    },
+    "user1044": {
+      "train": 14,
+      "test": 3
+    },
+    "user1043": {
+      "train": 11,
+      "test": 2
+    },
+    "user1048": {
+      "train": 10,
+      "test": 2
+    },
+    "user1049": {
+      "train": 14,
+      "test": 3
+    },
+    "user1047": {
+      "train": 7,
+      "test": 1
+    },
+    "user1046": {
+      "train": 4,
+      "test": 1
+    },
+    "user1051": {
+      "train": 10,
+      "test": 2
+    },
+    "user1052": {
+      "train": 6,
+      "test": 1
+    },
+    "user1054": {
+      "train": 12,
+      "test": 3
+    },
+    "user1058": {
+      "train": 2,
+      "test": 1
+    },
+    "user1050": {
+      "train": 7,
+      "test": 1
+    },
+    "user1053": {
+      "train": 11,
+      "test": 2
+    },
+    "user1056": {
+      "train": 13,
+      "test": 3
+    },
+    "user1057": {
+      "train": 12,
+      "test": 2
+    },
+    "user1055": {
+      "train": 8,
+      "test": 1
+    },
+    "user1061": {
+      "train": 6,
+      "test": 1
+    },
+    "user1068": {
+      "train": 12,
+      "test": 2
+    },
+    "user1064": {
+      "train": 14,
+      "test": 3
+    },
+    "user1095": {
+      "train": 12,
+      "test": 2
+    },
+    "user1002": {
+      "train": 12,
+      "test": 2
+    },
+    "user1071": {
+      "train": 5,
+      "test": 1
+    },
+    "user1062": {
+      "train": 5,
+      "test": 1
+    },
+    "user1067": {
+      "train": 13,
+      "test": 3
+    },
+    "user1069": {
+      "train": 10,
+      "test": 2
+    },
+    "user1066": {
+      "train": 10,
+      "test": 2
+    },
+    "user1073": {
+      "train": 6,
+      "test": 1
+    },
+    "user1074": {
+      "train": 8,
+      "test": 2
+    },
+    "user1070": {
+      "train": 16,
+      "test": 4
+    },
+    "user1065": {
+      "train": 10,
+      "test": 2
+    },
+    "user1078": {
+      "train": 10,
+      "test": 2
+    },
+    "user1081": {
+      "train": 22,
+      "test": 5
+    },
+    "user1079": {
+      "train": 9,
+      "test": 2
+    },
+    "user1075": {
+      "train": 9,
+      "test": 2
+    },
+    "user1060": {
+      "train": 11,
+      "test": 2
+    },
+    "user1089": {
+      "train": 8,
+      "test": 1
+    },
+    "user1076": {
+      "train": 6,
+      "test": 1
+    },
+    "user1077": {
+      "train": 20,
+      "test": 5
+    },
+    "user1072": {
+      "train": 11,
+      "test": 2
+    },
+    "user1085": {
+      "train": 14,
+      "test": 3
+    },
+    "user1082": {
+      "train": 17,
+      "test": 4
+    },
+    "user1063": {
+      "train": 16,
+      "test": 3
+    },
+    "user1080": {
+      "train": 12,
+      "test": 3
+    },
+    "user1084": {
+      "train": 12,
+      "test": 3
+    },
+    "user1083": {
+      "train": 13,
+      "test": 3
+    },
+    "user1091": {
+      "train": 21,
+      "test": 5
+    },
+    "user1087": {
+      "train": 15,
+      "test": 3
+    },
+    "user1092": {
+      "train": 8,
+      "test": 2
+    },
+    "user1093": {
+      "train": 8,
+      "test": 2
+    },
+    "user1090": {
+      "train": 4,
+      "test": 1
+    },
+    "user1097": {
+      "train": 12,
+      "test": 2
+    },
+    "user1098": {
+      "train": 9,
+      "test": 2
+    },
+    "user1096": {
+      "train": 3,
+      "test": 1
+    },
+    "user1100": {
+      "train": 12,
+      "test": 3
+    },
+    "user1102": {
+      "train": 10,
+      "test": 2
+    },
+    "user1101": {
+      "train": 12,
+      "test": 2
+    },
+    "user1107": {
+      "train": 20,
+      "test": 5
+    },
+    "user1099": {
+      "train": 13,
+      "test": 3
+    },
+    "user1105": {
+      "train": 15,
+      "test": 3
+    },
+    "user1103": {
+      "train": 12,
+      "test": 3
+    },
+    "user1106": {
+      "train": 14,
+      "test": 3
+    },
+    "user1109": {
+      "train": 11,
+      "test": 2
+    },
+    "user1108": {
+      "train": 13,
+      "test": 3
+    },
+    "user1165": {
+      "train": 8,
+      "test": 2
+    },
+    "user1104": {
+      "train": 19,
+      "test": 4
+    },
+    "user1111": {
+      "train": 8,
+      "test": 2
+    },
+    "user1110": {
+      "train": 12,
+      "test": 2
+    },
+    "user1112": {
+      "train": 13,
+      "test": 3
+    },
+    "user1113": {
+      "train": 8,
+      "test": 2
+    },
+    "user1115": {
+      "train": 8,
+      "test": 2
+    },
+    "user1116": {
+      "train": 8,
+      "test": 1
+    },
+    "user1114": {
+      "train": 16,
+      "test": 3
+    },
+    "user1117": {
+      "train": 10,
+      "test": 2
+    },
+    "user1118": {
+      "train": 13,
+      "test": 3
+    },
+    "user1119": {
+      "train": 10,
+      "test": 2
+    },
+    "user1120": {
+      "train": 8,
+      "test": 1
+    },
+    "user1122": {
+      "train": 1,
+      "test": 1
+    },
+    "user1121": {
+      "train": 12,
+      "test": 2
+    },
+    "user1123": {
+      "train": 7,
+      "test": 1
+    },
+    "user1124": {
+      "train": 11,
+      "test": 2
+    },
+    "user1128": {
+      "train": 8,
+      "test": 1
+    },
+    "user1129": {
+      "train": 5,
+      "test": 1
+    },
+    "user1126": {
+      "train": 9,
+      "test": 2
+    },
+    "user1125": {
+      "train": 6,
+      "test": 1
+    },
+    "user1127": {
+      "train": 18,
+      "test": 4
+    },
+    "user1131": {
+      "train": 15,
+      "test": 3
+    },
+    "user1133": {
+      "train": 8,
+      "test": 2
+    },
+    "user1132": {
+      "train": 10,
+      "test": 2
+    },
+    "user1134": {
+      "train": 8,
+      "test": 1
+    },
+    "user1130": {
+      "train": 12,
+      "test": 2
+    },
+    "user1135": {
+      "train": 18,
+      "test": 4
+    },
+    "user1136": {
+      "train": 20,
+      "test": 4
+    },
+    "user1138": {
+      "train": 7,
+      "test": 1
+    },
+    "user1139": {
+      "train": 14,
+      "test": 3
+    },
+    "user1140": {
+      "train": 12,
+      "test": 2
+    },
+    "user1137": {
+      "train": 16,
+      "test": 4
+    },
+    "user1142": {
+      "train": 10,
+      "test": 2
+    },
+    "user1141": {
+      "train": 15,
+      "test": 3
+    },
+    "user1145": {
+      "train": 10,
+      "test": 2
+    },
+    "user1146": {
+      "train": 23,
+      "test": 5
+    },
+    "user1144": {
+      "train": 15,
+      "test": 3
+    },
+    "user1149": {
+      "train": 5,
+      "test": 1
+    },
+    "user1150": {
+      "train": 11,
+      "test": 2
+    },
+    "user1148": {
+      "train": 4,
+      "test": 1
+    },
+    "user1151": {
+      "train": 8,
+      "test": 1
+    },
+    "user1152": {
+      "train": 16,
+      "test": 3
+    },
+    "user1154": {
+      "train": 11,
+      "test": 2
+    },
+    "user1153": {
+      "train": 13,
+      "test": 3
+    },
+    "user1155": {
+      "train": 12,
+      "test": 2
+    },
+    "user1159": {
+      "train": 12,
+      "test": 3
+    },
+    "user1156": {
+      "train": 6,
+      "test": 1
+    },
+    "user1158": {
+      "train": 2,
+      "test": 1
+    },
+    "user1157": {
+      "train": 14,
+      "test": 3
+    },
+    "user1160": {
+      "train": 13,
+      "test": 3
+    },
+    "user1161": {
+      "train": 20,
+      "test": 5
+    },
+    "user1169": {
+      "train": 12,
+      "test": 2
+    },
+    "user1170": {
+      "train": 11,
+      "test": 2
+    },
+    "user1168": {
+      "train": 8,
+      "test": 2
+    },
+    "user1171": {
+      "train": 9,
+      "test": 2
+    },
+    "user1172": {
+      "train": 10,
+      "test": 2
+    },
+    "user1174": {
+      "train": 9,
+      "test": 2
+    },
+    "user1175": {
+      "train": 10,
+      "test": 2
+    },
+    "user1173": {
+      "train": 25,
+      "test": 6
+    },
+    "user1176": {
+      "train": 8,
+      "test": 1
+    },
+    "user1177": {
+      "train": 20,
+      "test": 5
+    },
+    "user1178": {
+      "train": 12,
+      "test": 2
+    },
+    "user1179": {
+      "train": 6,
+      "test": 1
+    },
+    "user1180": {
+      "train": 10,
+      "test": 2
+    },
+    "user1181": {
+      "train": 15,
+      "test": 3
+    },
+    "user1182": {
+      "train": 16,
+      "test": 3
+    },
+    "user1183": {
+      "train": 18,
+      "test": 4
+    },
+    "user1184": {
+      "train": 9,
+      "test": 2
+    },
+    "user1185": {
+      "train": 11,
+      "test": 2
+    },
+    "user1188": {
+      "train": 7,
+      "test": 1
+    },
+    "user1189": {
+      "train": 12,
+      "test": 2
+    },
+    "user1191": {
+      "train": 5,
+      "test": 1
+    },
+    "user1190": {
+      "train": 8,
+      "test": 1
+    },
+    "user1193": {
+      "train": 11,
+      "test": 2
+    },
+    "user1192": {
+      "train": 17,
+      "test": 4
+    },
+    "user1203": {
+      "train": 17,
+      "test": 4
+    },
+    "user1196": {
+      "train": 13,
+      "test": 3
+    },
+    "user1198": {
+      "train": 8,
+      "test": 2
+    },
+    "user1197": {
+      "train": 8,
+      "test": 1
+    },
+    "user1204": {
+      "train": 6,
+      "test": 1
+    },
+    "user1200": {
+      "train": 12,
+      "test": 2
+    },
+    "user1199": {
+      "train": 7,
+      "test": 1
+    },
+    "user1202": {
+      "train": 9,
+      "test": 2
+    },
+    "user1195": {
+      "train": 11,
+      "test": 2
+    },
+    "user1208": {
+      "train": 12,
+      "test": 2
+    },
+    "user1214": {
+      "train": 6,
+      "test": 1
+    },
+    "user1207": {
+      "train": 16,
+      "test": 3
+    },
+    "user1205": {
+      "train": 7,
+      "test": 1
+    },
+    "user1217": {
+      "train": 8,
+      "test": 1
+    },
+    "user1223": {
+      "train": 6,
+      "test": 1
+    },
+    "user1226": {
+      "train": 5,
+      "test": 1
+    },
+    "user1210": {
+      "train": 11,
+      "test": 2
+    },
+    "user1224": {
+      "train": 10,
+      "test": 2
+    },
+    "user1231": {
+      "train": 8,
+      "test": 1
+    },
+    "user1235": {
+      "train": 10,
+      "test": 2
+    },
+    "user1194": {
+      "train": 13,
+      "test": 3
+    },
+    "user1215": {
+      "train": 11,
+      "test": 2
+    },
+    "user1222": {
+      "train": 9,
+      "test": 2
+    },
+    "user1225": {
+      "train": 12,
+      "test": 2
+    },
+    "user1209": {
+      "train": 5,
+      "test": 1
+    },
+    "user1206": {
+      "train": 13,
+      "test": 3
+    },
+    "user1216": {
+      "train": 6,
+      "test": 1
+    },
+    "user1230": {
+      "train": 20,
+      "test": 4
+    },
+    "user1233": {
+      "train": 6,
+      "test": 1
+    },
+    "user1220": {
+      "train": 12,
+      "test": 2
+    },
+    "user1219": {
+      "train": 10,
+      "test": 2
+    },
+    "user1238": {
+      "train": 9,
+      "test": 2
+    },
+    "user1236": {
+      "train": 5,
+      "test": 1
+    },
+    "user1218": {
+      "train": 18,
+      "test": 4
+    },
+    "user1228": {
+      "train": 12,
+      "test": 2
+    },
+    "user1229": {
+      "train": 8,
+      "test": 2
+    },
+    "user1213": {
+      "train": 9,
+      "test": 2
+    },
+    "user1212": {
+      "train": 18,
+      "test": 4
+    },
+    "user1243": {
+      "train": 7,
+      "test": 1
+    },
+    "user1241": {
+      "train": 12,
+      "test": 2
+    },
+    "user1221": {
+      "train": 24,
+      "test": 6
+    },
+    "user1245": {
+      "train": 9,
+      "test": 2
+    },
+    "user1248": {
+      "train": 7,
+      "test": 1
+    },
+    "user1246": {
+      "train": 6,
+      "test": 1
+    },
+    "user1255": {
+      "train": 16,
+      "test": 3
+    },
+    "user1260": {
+      "train": 7,
+      "test": 1
+    },
+    "user1254": {
+      "train": 8,
+      "test": 1
+    },
+    "user1253": {
+      "train": 7,
+      "test": 1
+    },
+    "user1240": {
+      "train": 1,
+      "test": 1
+    },
+    "user1234": {
+      "train": 7,
+      "test": 1
+    },
+    "user1249": {
+      "train": 12,
+      "test": 2
+    },
+    "user1259": {
+      "train": 14,
+      "test": 3
+    },
+    "user1211": {
+      "train": 13,
+      "test": 3
+    },
+    "user1251": {
+      "train": 10,
+      "test": 2
+    },
+    "user1239": {
+      "train": 15,
+      "test": 3
+    },
+    "user1266": {
+      "train": 23,
+      "test": 5
+    },
+    "user1265": {
+      "train": 11,
+      "test": 2
+    },
+    "user1267": {
+      "train": 12,
+      "test": 2
+    },
+    "user1242": {
+      "train": 11,
+      "test": 2
+    },
+    "user1257": {
+      "train": 19,
+      "test": 4
+    },
+    "user1258": {
+      "train": 12,
+      "test": 2
+    },
+    "user1262": {
+      "train": 9,
+      "test": 2
+    },
+    "user1271": {
+      "train": 14,
+      "test": 3
+    },
+    "user1269": {
+      "train": 6,
+      "test": 1
+    },
+    "user1268": {
+      "train": 11,
+      "test": 2
+    },
+    "user1272": {
+      "train": 9,
+      "test": 2
+    },
+    "user1201": {
+      "train": 6,
+      "test": 1
+    },
+    "user1264": {
+      "train": 10,
+      "test": 2
+    },
+    "user1250": {
+      "train": 11,
+      "test": 2
+    },
+    "user1187": {
+      "train": 20,
+      "test": 5
+    },
+    "user1247": {
+      "train": 28,
+      "test": 7
+    },
+    "user1270": {
+      "train": 5,
+      "test": 1
+    },
+    "user1261": {
+      "train": 8,
+      "test": 1
+    },
+    "user1256": {
+      "train": 23,
+      "test": 5
+    },
+    "user1263": {
+      "train": 12,
+      "test": 3
+    },
+    "user1252": {
+      "train": 9,
+      "test": 2
+    },
+    "user1273": {
+      "train": 11,
+      "test": 2
+    },
+    "user1274": {
+      "train": 11,
+      "test": 2
+    },
+    "user1277": {
+      "train": 11,
+      "test": 2
+    },
+    "user1278": {
+      "train": 5,
+      "test": 1
+    },
+    "user1237": {
+      "train": 21,
+      "test": 5
+    },
+    "user1275": {
+      "train": 15,
+      "test": 3
+    },
+    "user1276": {
+      "train": 18,
+      "test": 4
+    },
+    "user1279": {
+      "train": 6,
+      "test": 1
+    },
+    "user1280": {
+      "train": 24,
+      "test": 5
+    },
+    "user1281": {
+      "train": 9,
+      "test": 2
+    },
+    "user1282": {
+      "train": 16,
+      "test": 4
+    },
+    "user1283": {
+      "train": 8,
+      "test": 1
+    },
+    "user1227": {
+      "train": 16,
+      "test": 3
+    },
+    "user1285": {
+      "train": 9,
+      "test": 2
+    },
+    "user1284": {
+      "train": 15,
+      "test": 3
+    },
+    "user1286": {
+      "train": 17,
+      "test": 4
+    },
+    "user1287": {
+      "train": 5,
+      "test": 1
+    },
+    "user1291": {
+      "train": 16,
+      "test": 3
+    },
+    "user1288": {
+      "train": 15,
+      "test": 3
+    },
+    "user1289": {
+      "train": 13,
+      "test": 3
+    },
+    "user1290": {
+      "train": 5,
+      "test": 1
+    },
+    "user1293": {
+      "train": 10,
+      "test": 2
+    },
+    "user1297": {
+      "train": 10,
+      "test": 2
+    },
+    "user1481": {
+      "train": 10,
+      "test": 2
+    },
+    "user1292": {
+      "train": 1,
+      "test": 1
+    },
+    "user1295": {
+      "train": 12,
+      "test": 3
+    },
+    "user1294": {
+      "train": 12,
+      "test": 2
+    },
+    "user1296": {
+      "train": 12,
+      "test": 2
+    },
+    "user1298": {
+      "train": 21,
+      "test": 5
+    },
+    "user1299": {
+      "train": 12,
+      "test": 3
+    },
+    "user1300": {
+      "train": 19,
+      "test": 4
+    },
+    "user515": {
+      "train": 8,
+      "test": 2
+    },
+    "user1302": {
+      "train": 13,
+      "test": 3
+    },
+    "user1303": {
+      "train": 11,
+      "test": 2
+    },
+    "user1304": {
+      "train": 17,
+      "test": 4
+    },
+    "user1305": {
+      "train": 8,
+      "test": 1
+    },
+    "user1307": {
+      "train": 13,
+      "test": 3
+    },
+    "user1310": {
+      "train": 12,
+      "test": 3
+    },
+    "user1311": {
+      "train": 10,
+      "test": 2
+    },
+    "user1309": {
+      "train": 9,
+      "test": 2
+    },
+    "user1308": {
+      "train": 8,
+      "test": 2
+    },
+    "user1312": {
+      "train": 13,
+      "test": 3
+    },
+    "user1313": {
+      "train": 7,
+      "test": 1
+    },
+    "user1314": {
+      "train": 10,
+      "test": 2
+    },
+    "user1315": {
+      "train": 7,
+      "test": 1
+    },
+    "user1316": {
+      "train": 15,
+      "test": 3
+    },
+    "user1317": {
+      "train": 20,
+      "test": 4
+    },
+    "user1318": {
+      "train": 10,
+      "test": 2
+    },
+    "user1321": {
+      "train": 13,
+      "test": 3
+    },
+    "user1320": {
+      "train": 6,
+      "test": 1
+    },
+    "user1319": {
+      "train": 4,
+      "test": 1
+    },
+    "user1322": {
+      "train": 8,
+      "test": 1
+    },
+    "user1323": {
+      "train": 2,
+      "test": 1
+    },
+    "user1326": {
+      "train": 8,
+      "test": 1
+    },
+    "user1324": {
+      "train": 9,
+      "test": 2
+    },
+    "user1329": {
+      "train": 8,
+      "test": 2
+    },
+    "user1331": {
+      "train": 12,
+      "test": 2
+    },
+    "user1328": {
+      "train": 8,
+      "test": 1
+    },
+    "user1333": {
+      "train": 12,
+      "test": 2
+    },
+    "user1336": {
+      "train": 2,
+      "test": 1
+    },
+    "user1334": {
+      "train": 8,
+      "test": 1
+    },
+    "user1338": {
+      "train": 14,
+      "test": 3
+    },
+    "user1337": {
+      "train": 10,
+      "test": 2
+    },
+    "user1341": {
+      "train": 9,
+      "test": 2
+    },
+    "user1325": {
+      "train": 8,
+      "test": 2
+    },
+    "user1332": {
+      "train": 13,
+      "test": 3
+    },
+    "user1342": {
+      "train": 14,
+      "test": 3
+    },
+    "user1340": {
+      "train": 6,
+      "test": 1
+    },
+    "user1365": {
+      "train": 8,
+      "test": 2
+    },
+    "user1348": {
+      "train": 11,
+      "test": 2
+    },
+    "user1345": {
+      "train": 11,
+      "test": 2
+    },
+    "user1346": {
+      "train": 14,
+      "test": 3
+    },
+    "user1350": {
+      "train": 8,
+      "test": 1
+    },
+    "user1335": {
+      "train": 12,
+      "test": 3
+    },
+    "user1349": {
+      "train": 8,
+      "test": 2
+    },
+    "user1351": {
+      "train": 11,
+      "test": 2
+    },
+    "user1354": {
+      "train": 5,
+      "test": 1
+    },
+    "user1357": {
+      "train": 12,
+      "test": 2
+    },
+    "user1356": {
+      "train": 16,
+      "test": 3
+    },
+    "user1355": {
+      "train": 6,
+      "test": 1
+    },
+    "user1352": {
+      "train": 12,
+      "test": 3
+    },
+    "user1344": {
+      "train": 9,
+      "test": 2
+    },
+    "user1361": {
+      "train": 8,
+      "test": 1
+    },
+    "user1364": {
+      "train": 15,
+      "test": 3
+    },
+    "user1363": {
+      "train": 10,
+      "test": 2
+    },
+    "user1358": {
+      "train": 8,
+      "test": 2
+    },
+    "user1362": {
+      "train": 8,
+      "test": 1
+    },
+    "user1372": {
+      "train": 16,
+      "test": 4
+    },
+    "user1330": {
+      "train": 12,
+      "test": 3
+    },
+    "user1360": {
+      "train": 12,
+      "test": 3
+    },
+    "user1359": {
+      "train": 5,
+      "test": 1
+    },
+    "user1368": {
+      "train": 7,
+      "test": 1
+    },
+    "user1366": {
+      "train": 17,
+      "test": 4
+    },
+    "user1377": {
+      "train": 12,
+      "test": 2
+    },
+    "user1376": {
+      "train": 11,
+      "test": 2
+    },
+    "user1374": {
+      "train": 9,
+      "test": 2
+    },
+    "user1373": {
+      "train": 16,
+      "test": 3
+    },
+    "user1371": {
+      "train": 11,
+      "test": 2
+    },
+    "user1386": {
+      "train": 7,
+      "test": 1
+    },
+    "user1387": {
+      "train": 12,
+      "test": 3
+    },
+    "user1369": {
+      "train": 10,
+      "test": 2
+    },
+    "user1367": {
+      "train": 13,
+      "test": 3
+    },
+    "user1381": {
+      "train": 11,
+      "test": 2
+    },
+    "user1383": {
+      "train": 24,
+      "test": 6
+    },
+    "user1390": {
+      "train": 12,
+      "test": 2
+    },
+    "user1389": {
+      "train": 2,
+      "test": 1
+    },
+    "user1385": {
+      "train": 8,
+      "test": 1
+    },
+    "user1380": {
+      "train": 2,
+      "test": 1
+    },
+    "user1388": {
+      "train": 8,
+      "test": 1
+    },
+    "user1396": {
+      "train": 6,
+      "test": 1
+    },
+    "user1391": {
+      "train": 2,
+      "test": 1
+    },
+    "user1395": {
+      "train": 8,
+      "test": 1
+    },
+    "user1370": {
+      "train": 7,
+      "test": 1
+    },
+    "user1378": {
+      "train": 1,
+      "test": 1
+    },
+    "user1384": {
+      "train": 19,
+      "test": 4
+    },
+    "user1379": {
+      "train": 15,
+      "test": 3
+    },
+    "user1393": {
+      "train": 10,
+      "test": 2
+    },
+    "user1394": {
+      "train": 1,
+      "test": 1
+    },
+    "user1402": {
+      "train": 1,
+      "test": 1
+    },
+    "user1412": {
+      "train": 13,
+      "test": 3
+    },
+    "user1419": {
+      "train": 8,
+      "test": 1
+    },
+    "user1399": {
+      "train": 12,
+      "test": 3
+    },
+    "user1398": {
+      "train": 20,
+      "test": 4
+    },
+    "user1415": {
+      "train": 10,
+      "test": 2
+    },
+    "user1422": {
+      "train": 12,
+      "test": 2
+    },
+    "user1429": {
+      "train": 10,
+      "test": 2
+    },
+    "user1418": {
+      "train": 12,
+      "test": 3
+    },
+    "user1420": {
+      "train": 6,
+      "test": 1
+    },
+    "user1433": {
+      "train": 10,
+      "test": 2
+    },
+    "user1434": {
+      "train": 20,
+      "test": 5
+    },
+    "user1410": {
+      "train": 20,
+      "test": 5
+    },
+    "user1409": {
+      "train": 6,
+      "test": 1
+    },
+    "user1436": {
+      "train": 16,
+      "test": 3
+    },
+    "user1432": {
+      "train": 25,
+      "test": 6
+    },
+    "user1437": {
+      "train": 5,
+      "test": 1
+    },
+    "user1392": {
+      "train": 2,
+      "test": 1
+    },
+    "user1439": {
+      "train": 10,
+      "test": 2
+    },
+    "user1414": {
+      "train": 9,
+      "test": 2
+    },
+    "user1441": {
+      "train": 5,
+      "test": 1
+    },
+    "user1406": {
+      "train": 8,
+      "test": 1
+    },
+    "user1411": {
+      "train": 5,
+      "test": 1
+    },
+    "user1442": {
+      "train": 9,
+      "test": 2
+    },
+    "user1444": {
+      "train": 16,
+      "test": 4
+    },
+    "user1446": {
+      "train": 9,
+      "test": 2
+    },
+    "user1443": {
+      "train": 5,
+      "test": 1
+    },
+    "user1445": {
+      "train": 6,
+      "test": 1
+    },
+    "user1400": {
+      "train": 10,
+      "test": 2
+    },
+    "user1448": {
+      "train": 8,
+      "test": 1
+    },
+    "user1447": {
+      "train": 16,
+      "test": 3
+    },
+    "user1453": {
+      "train": 7,
+      "test": 1
+    },
+    "user1456": {
+      "train": 11,
+      "test": 2
+    },
+    "user1450": {
+      "train": 5,
+      "test": 1
+    },
+    "user1458": {
+      "train": 5,
+      "test": 1
+    },
+    "user1452": {
+      "train": 14,
+      "test": 3
+    },
+    "user1451": {
+      "train": 14,
+      "test": 3
+    },
+    "user1479": {
+      "train": 16,
+      "test": 3
+    },
+    "user1457": {
+      "train": 18,
+      "test": 4
+    },
+    "user1454": {
+      "train": 12,
+      "test": 2
+    },
+    "user1461": {
+      "train": 5,
+      "test": 1
+    },
+    "user1459": {
+      "train": 13,
+      "test": 3
+    },
+    "user1460": {
+      "train": 6,
+      "test": 1
+    },
+    "user1464": {
+      "train": 25,
+      "test": 6
+    },
+    "user1463": {
+      "train": 8,
+      "test": 1
+    },
+    "user1465": {
+      "train": 13,
+      "test": 3
+    },
+    "user1462": {
+      "train": 6,
+      "test": 1
+    },
+    "user1425": {
+      "train": 5,
+      "test": 1
+    },
+    "user1466": {
+      "train": 20,
+      "test": 4
+    },
+    "user1467": {
+      "train": 12,
+      "test": 3
+    },
+    "user1469": {
+      "train": 6,
+      "test": 1
+    },
+    "user1468": {
+      "train": 16,
+      "test": 4
+    },
+    "user1401": {
+      "train": 8,
+      "test": 2
+    },
+    "user1470": {
+      "train": 15,
+      "test": 3
+    },
+    "user1405": {
+      "train": 14,
+      "test": 3
+    },
+    "user1435": {
+      "train": 17,
+      "test": 4
+    },
+    "user1431": {
+      "train": 19,
+      "test": 4
+    },
+    "user1471": {
+      "train": 8,
+      "test": 2
+    },
+    "user1424": {
+      "train": 9,
+      "test": 2
+    },
+    "user1472": {
+      "train": 12,
+      "test": 2
+    },
+    "user1473": {
+      "train": 5,
+      "test": 1
+    },
+    "user1474": {
+      "train": 5,
+      "test": 1
+    },
+    "user1475": {
+      "train": 15,
+      "test": 3
+    },
+    "user1404": {
+      "train": 11,
+      "test": 2
+    },
+    "user1476": {
+      "train": 16,
+      "test": 4
+    },
+    "user1430": {
+      "train": 8,
+      "test": 1
+    },
+    "user1477": {
+      "train": 8,
+      "test": 2
+    },
+    "user1480": {
+      "train": 12,
+      "test": 3
+    },
+    "user1483": {
+      "train": 17,
+      "test": 4
+    },
+    "user1484": {
+      "train": 6,
+      "test": 1
+    },
+    "user1485": {
+      "train": 18,
+      "test": 4
+    },
+    "user1486": {
+      "train": 16,
+      "test": 4
+    },
+    "user1487": {
+      "train": 12,
+      "test": 3
+    },
+    "user1488": {
+      "train": 12,
+      "test": 3
+    },
+    "user1489": {
+      "train": 5,
+      "test": 1
+    },
+    "user1490": {
+      "train": 17,
+      "test": 4
+    },
+    "user1491": {
+      "train": 9,
+      "test": 2
+    },
+    "user1495": {
+      "train": 12,
+      "test": 3
+    },
+    "user1493": {
+      "train": 18,
+      "test": 4
+    },
+    "user1492": {
+      "train": 13,
+      "test": 3
+    },
+    "user1497": {
+      "train": 20,
+      "test": 5
+    },
+    "user1498": {
+      "train": 16,
+      "test": 3
+    },
+    "user1499": {
+      "train": 18,
+      "test": 4
+    },
+    "user27": {
+      "train": 0,
+      "test": 1
+    },
+    "user312": {
+      "train": 0,
+      "test": 1
+    },
+    "user321": {
+      "train": 0,
+      "test": 1
+    }
+  }
+}

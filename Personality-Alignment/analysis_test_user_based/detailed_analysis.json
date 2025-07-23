@@ -1,0 +1,49 @@
+{
+  "basic_stats": {
+    "total_records": 3315,
+    "total_users": 1396,
+    "prompt_stats": {
+      "mean": 4922.750527903469,
+      "median": 3925,
+      "min": 1199,
+      "max": 25867,
+      "std": 3057.4388270670706,
+      "percentiles": {
+        "25": 2894.0,
+        "75": 5936.0,
+        "95": 11143.599999999995,
+        "99": 16169.600000000002
+      }
+    },
+    "output_stats": {
+      "mean": 72.14268476621417,
+      "median": 55,
+      "min": 3,
+      "max": 709,
+      "std": 60.95382343100927,
+      "percentiles": {
+        "25": 36.0,
+        "75": 85.5,
+        "95": 184.29999999999973,
+        "99": 311.8600000000001
+      }
+    }
+  },
+  "user_level_stats": {
+    "avg_samples_per_user": 2.3746418338108883,
+    "median_samples_per_user": 2.0,
+    "min_samples": 1,
+    "max_samples": 12,
+    "user_prompt_length_std": 2234.04605397033,
+    "user_output_length_std": 50.06319429092093
+  },
+  "outlier_analysis": {
+    "prompt_outliers": 199,
+    "output_outliers": 248,
+    "prompt_outlier_ratio": 0.060030165912518856,
+    "output_outlier_ratio": 0.07481146304675716
+  },
+  "correlation": {
+    "prompt_output_correlation": 0.0825888885401623
+  }
+}

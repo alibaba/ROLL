@@ -3,6 +3,7 @@ import random
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict, Tuple
+import statistics
 
 
 def load_dataset(file_path: str) -> List[Dict]:
@@ -29,6 +30,44 @@ def parse_qid(qid: str) -> Tuple[str, int, int]:
     line_idx = int(parts[-2])
     msg_idx = int(parts[-1])
     return user_id, line_idx, msg_idx
+
+
+def calculate_prompt_stats(records: List[Dict]) -> Dict:
+    """计算prompt长度统计信息"""
+    prompt_lengths = []
+    output_lengths = []
+
+    for record in records:
+        prompt = record.get("prompt", "")
+        output = record.get("output", "")
+
+        prompt_lengths.append(len(prompt))
+        output_lengths.append(len(output))
+
+    if not prompt_lengths:
+        return {
+            "prompt_stats": {"count": 0, "mean": 0, "median": 0, "min": 0, "max": 0, "std": 0},
+            "output_stats": {"count": 0, "mean": 0, "median": 0, "min": 0, "max": 0, "std": 0},
+        }
+
+    return {
+        "prompt_stats": {
+            "count": len(prompt_lengths),
+            "mean": round(statistics.mean(prompt_lengths), 2),
+            "median": round(statistics.median(prompt_lengths), 2),
+            "min": min(prompt_lengths),
+            "max": max(prompt_lengths),
+            "std": round(statistics.stdev(prompt_lengths) if len(prompt_lengths) > 1 else 0, 2),
+        },
+        "output_stats": {
+            "count": len(output_lengths),
+            "mean": round(statistics.mean(output_lengths), 2),
+            "median": round(statistics.median(output_lengths), 2),
+            "min": min(output_lengths),
+            "max": max(output_lengths),
+            "std": round(statistics.stdev(output_lengths) if len(output_lengths) > 1 else 0, 2),
+        },
+    }
 
 
 def random_split(records: List[Dict], test_ratio: float = 0.2, seed: int = 42) -> Tuple[List[Dict], List[Dict]]:
@@ -116,6 +155,23 @@ def split_dataset(input_file: str, output_dir: str = ".", test_ratio: float = 0.
     train_random, test_random = random_split(records, test_ratio, seed)
     print(f"Random split - Train: {len(train_random)}, Test: {len(test_random)}")
 
+    # 计算随机划分的prompt长度统计
+    train_random_stats = calculate_prompt_stats(train_random)
+    test_random_stats = calculate_prompt_stats(test_random)
+
+    print(
+        f"Train set prompt stats - Mean: {train_random_stats['prompt_stats']['mean']}, "
+        f"Median: {train_random_stats['prompt_stats']['median']}, "
+        f"Min: {train_random_stats['prompt_stats']['min']}, "
+        f"Max: {train_random_stats['prompt_stats']['max']}"
+    )
+    print(
+        f"Test set prompt stats - Mean: {test_random_stats['prompt_stats']['mean']}, "
+        f"Median: {test_random_stats['prompt_stats']['median']}, "
+        f"Min: {test_random_stats['prompt_stats']['min']}, "
+        f"Max: {test_random_stats['prompt_stats']['max']}"
+    )
+
     # 保存随机划分结果
     save_dataset(train_random, output_path / "train_random.jsonl")
     save_dataset(test_random, output_path / "test_random.jsonl")
@@ -124,6 +180,23 @@ def split_dataset(input_file: str, output_dir: str = ".", test_ratio: float = 0.
     print("\n=== User-based Split ===")
     train_user, test_user = user_based_split(records, test_ratio)
     print(f"User-based split - Train: {len(train_user)}, Test: {len(test_user)}")
+
+    # 计算按用户划分的prompt长度统计
+    train_user_stats = calculate_prompt_stats(train_user)
+    test_user_stats = calculate_prompt_stats(test_user)
+
+    print(
+        f"Train set prompt stats - Mean: {train_user_stats['prompt_stats']['mean']}, "
+        f"Median: {train_user_stats['prompt_stats']['median']}, "
+        f"Min: {train_user_stats['prompt_stats']['min']}, "
+        f"Max: {train_user_stats['prompt_stats']['max']}"
+    )
+    print(
+        f"Test set prompt stats - Mean: {test_user_stats['prompt_stats']['mean']}, "
+        f"Median: {test_user_stats['prompt_stats']['median']}, "
+        f"Min: {test_user_stats['prompt_stats']['min']}, "
+        f"Max: {test_user_stats['prompt_stats']['max']}"
+    )
 
     # 统计用户信息
     user_stats = defaultdict(lambda: {"train": 0, "test": 0})
@@ -146,8 +219,19 @@ def split_dataset(input_file: str, output_dir: str = ".", test_ratio: float = 0.
     stats = {
         "total_records": len(records),
         "test_ratio": test_ratio,
-        "random_split": {"train": len(train_random), "test": len(test_random)},
-        "user_based_split": {"train": len(train_user), "test": len(test_user), "num_users": len(user_stats)},
+        "random_split": {
+            "train": len(train_random),
+            "test": len(test_random),
+            "train_stats": train_random_stats,
+            "test_stats": test_random_stats,
+        },
+        "user_based_split": {
+            "train": len(train_user),
+            "test": len(test_user),
+            "num_users": len(user_stats),
+            "train_stats": train_user_stats,
+            "test_stats": test_user_stats,
+        },
         "user_stats": dict(user_stats),
     }
 

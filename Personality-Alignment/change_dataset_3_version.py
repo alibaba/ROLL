@@ -43,7 +43,7 @@ def load_qwen3_8b(model_path="Qwen/Qwen3-8B", device_map="auto", quantize=False)
 model_path = "Qwen/Qwen3-8B"
 model, tokenizer = load_qwen3_8b(model_path=model_path, device_map="auto", quantize=False)
 
-def generate_distractors_batch(prompts, correct_outputs, batch_size=8):
+def generate_distractors_batch(correct_outputs, batch_size=8):
     """
     真正的批量生成干扰项
     
@@ -55,8 +55,8 @@ def generate_distractors_batch(prompts, correct_outputs, batch_size=8):
     all_distractors = []
     
     # 准备所有输入
-    all_inputs = [f"{prompt}\nplease generate a wrong answer based on correct output: {correct_output}" for prompt, correct_output in zip(prompts, correct_outputs)]
-    
+    all_inputs = [f"please generate a distract wrong output as similar to correct output as you can based on correct output: {correct_output}. You can try change objects, use wrong logic, generate a non-relative output and so on. /no_think" for correct_output in correct_outputs]
+
     # 分批处理
     for i in tqdm(range(0, len(all_inputs), batch_size), desc="Generating distractors"):
         batch_inputs = all_inputs[i:i+batch_size]
@@ -103,13 +103,13 @@ def process_data_batch(data, batch_size=8):
     批量处理数据
     """
     # 提取所有需要的信息
-    prompts = [item['prompt'] + "/no_think" for item in data]
+    #prompts = [item['prompt'] for item in data]
     correct_outputs = [item['output'] for item in data]
     qids = [item['qid'] for item in data]
     
     print("开始批量生成干扰项...")
     # 批量生成所有干扰项
-    distractors = generate_distractors_batch(prompts, correct_outputs, batch_size)
+    distractors = generate_distractors_batch(correct_outputs, batch_size)
     
     print("构建新数据集...")
     # 构建新数据集
@@ -150,7 +150,7 @@ new_data = process_data_batch(data, batch_size=BATCH_SIZE)
 
 # 保存新数据集
 print("保存新数据集...")
-with open('/home/zyangdm/ROLL/Personality-Alignment/changed_dialogue_dataset_v4.jsonl', 'w', encoding='utf-8') as f:
+with open('/home/zyangdm/ROLL/Personality-Alignment/changed_dialogue_dataset_v4_promax.jsonl', 'w', encoding='utf-8') as f:
     json.dump(new_data, f, ensure_ascii=False, indent=2)
 
 print(f"处理完成！共生成 {len(new_data)} 条新数据")
