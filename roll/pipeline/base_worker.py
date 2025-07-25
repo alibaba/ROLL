@@ -16,6 +16,7 @@ from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_actor_model_provider, default_value_model_provider, \
     default_reward_model_provider
+from roll.utils.checkpoint_manager import download_model
 from roll.utils.context_managers import state_offload_manger
 from roll.utils.functionals import (
     append_to_dict,
@@ -48,7 +49,7 @@ class ActorWorker(Worker):
         self.strategy.initialize(model_provider=default_actor_model_provider)
         self.tokenizer = self.strategy.tokenizer
         if self.pipeline_config.resume_from_checkpoint:
-            load_dir = self.pipeline_config.resume_from_checkpoint
+            load_dir = download_model(self.pipeline_config.resume_from_checkpoint)
             self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
         self.logger.info(f"{self.worker_name} initialized")
 
@@ -406,7 +407,7 @@ class CriticWorker(Worker):
         self.tokenizer = self.strategy.tokenizer
 
         if self.pipeline_config.resume_from_checkpoint:
-            load_dir = os.path.join(self.pipeline_config.resume_from_checkpoint, self.cluster_name)
+            load_dir = os.path.join(download_model(self.pipeline_config.resume_from_checkpoint), self.cluster_name)
             self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
 
         self.logger.info(f"{self.worker_name} initialized")

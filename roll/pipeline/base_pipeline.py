@@ -8,7 +8,7 @@ from transformers import set_seed
 from roll.distributed.executor.model_update_group import ModelUpdateGroup
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.scheduler.resource_manager import ResourceManager
-from roll.utils.checkpoint_manager import CheckpointManager
+from roll.utils.checkpoint_manager import CheckpointManager, download_model
 from roll.utils.functionals import reduce_metrics
 from roll.utils.logging import get_logger
 from roll.utils.tracking import create_tracker
@@ -39,7 +39,7 @@ class BasePipeline:
         self.resume_futures = []
 
         if self.pipeline_config.resume_from_checkpoint:
-            self.resume_from_checkpoint = self.pipeline_config.resume_from_checkpoint
+            self.resume_from_checkpoint = download_model(self.pipeline_config.resume_from_checkpoint)
 
             logger.info(f"resume_from_checkpoint: {self.resume_from_checkpoint}")
             load_dir = os.path.join(self.resume_from_checkpoint, "pipeline")
