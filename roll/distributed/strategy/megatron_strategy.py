@@ -567,7 +567,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             state_dict = dist_checkpointing.load(sharded_state_dict, optimizer_checkpoint, load_strategy)
         else:
             state_dict = torch.load(
-                os.path.join(optimizer_checkpoint, OPTIMIZER_NAME), map_location=self.megatron_train_args.device
+                os.path.join(optimizer_checkpoint, OPTIMIZER_NAME), map_location=self.megatron_train_args.device,
+                weights_only=False
             )
         self.optimizer.load_state_dict(state_dict)
 
@@ -585,7 +586,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         rng_file = os.path.join(load_dir, RNG_STATE_DIR, f"rng_state_{dist.get_rank()}.pth")
         if os.path.exists(rng_file):
             logger.info(f"Loading rng states from {rng_file}")
-            checkpoint_rng_state = torch.load(rng_file)
+            checkpoint_rng_state = torch.load(rng_file, weights_only=False)
             random.setstate(checkpoint_rng_state["random_rng_state"])
             np.random.set_state(checkpoint_rng_state["np_rng_state"])
             torch.set_rng_state(checkpoint_rng_state["torch_rng_state"])
