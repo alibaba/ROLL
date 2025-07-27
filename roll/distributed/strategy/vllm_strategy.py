@@ -234,7 +234,8 @@ class VllmStrategy(InferenceStrategy):
                         lora_requests=lora_requests,
                     )
                 elif command == GenerateRequestType.ABORT:
-                    raise NotImplementedError()
+                    request_id = batch.meta_info["request_id"]
+                    self.model.abort_request(request_id=request_id)
                 elif command == GenerateRequestType.STOP:
                     self.model.abort_request(request_id=list(self.request_metas.keys()))
                     self.request_metas.clear()
@@ -252,11 +253,6 @@ class VllmStrategy(InferenceStrategy):
 
     def add_request(self, command, data: DataProto):
         self.command_queue.put((command, data))
-
-    def abort_request(self, data: DataProto):
-        request_ids = data.meta_info["request_id"]
-        for request_id in request_ids:
-            self.model.abort_request(request_id=request_id)
 
     async def async_generate(self, batch: DataProto, generation_config: Dict) -> torch.Tensor:
         # TODO: refactor async_generate interface. not supported now!

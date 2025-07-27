@@ -155,25 +155,18 @@ class EnvGroupQueue:
 class RolloutScheduler:
     """
     Usage:
-        sync:
-            rollout_scheduler = RolloutScheduler()
-            while True:
-                model_update()
-                ray.get(rollout_scheduler.get_batch.remote())
-                rollout()
-            ray.get(rollout_scheduler.stop.remote())
-
-        async:
-            rollout_scheduler = RolloutScheduler()
-            while True:
-                ray.get(rollout_scheduler.suspend.remote())
-                model_update()
-                ray.get(rollout_scheduler.resume.remote())
-                ray.get(rollout_scheduler.get_batch.remote())
-                rollout()
-            ray.get(rollout_scheduler.stop.remote())
-
-        sync and async (train and val) can exist simultaneously
+        actor_infer
+        train_rollout_scheduler = RolloutScheduler(actor_infer)
+        val_rollout_scheduler = RolloutScheduler(actor_infer)
+        while True:
+            ray.get(train_rollout_scheduler.suspend.remote()) # not neccessary in sync traing
+            model_update()
+            ray.get(train_rollout_scheduler.resume.remote()) # not neccessary in sync traing
+            if val:
+                ray.get(val_rollout_scheduler.get_batch.remote())
+            ray.get(train_rollout_scheduler.get_batch.remote())
+            rollout()
+        ray.get(train_rollout_scheduler.stop.remote()) # not neccessary in sync traing
     """
     def __init__(self, config, env_manager_config: EnvManagerConfig, resource_manager, infer_cluster, mode, collator=None):
         self.config = config
@@ -217,83 +210,102 @@ class RolloutScheduler:
         self.running = False
         self.rollout_refs = None # only used by async training
 
-    async def start(self):
-        if self.running:
-            return
-        assert self.rollout_refs is None
-        self.running = True
-
-        if self.config.async_generation_ratio > 0:
-            data = DataProto()
-            data.meta_info["global_step"] = 0
-            data.meta_info["is_offload_states"] = False
-            await asyncio.gather(
-                *[
-                    asyncio.wrap_future(ref.obj_ref.future())
-                    for ref in self.infer_cluster.start_server(data, blocking=False)
-                ]
-            )
-            self.alive_check_task = self.alive_check()
-
-            if self.mode == "train":
-                seed = self.config.seed
-                self.rollout_refs: List[ray.ObjectRef] = self.es_manager.run_rollout_loop(None, seed, blocking=False)
-
-    async def stop(self):
-        if self.running == False:
-            raise ValueError("rollout scheduler is not initialized")
-
-        self.running = False
-
-        if self.config.async_generation_ratio > 0:
-            if self.mode == "train":
-                assert self.rollout_refs is not None
-                await asyncio.gather(
-                    *[asyncio.wrap_future(ref.future()) for ref in self.es_manager.stop(blocking=False)],
-                    *self.rollout_refs,
-                )
-            await asyncio.gather(
-                self.alive_check_task,
-                *[asyncio.wrap_future(ref.obj_ref.future()) for ref in self.infer_cluster.stop_server(data=DataProto(), blocking=False)],
-            )
-
-    async def suspend(self, global_step):
-        if self.config.async_generation_ratio == 0 or self.mode != "train":
-            return
-        await self.generate_scheduler.suspend.remote()
-
-    async def resume(self, global_step):
-        if self.config.async_generation_ratio == 0 or self.mode != "train":
-            return
-        await asyncio.gather(
-            *[
-                asyncio.wrap_future(ref.future())
-                for ref in self.es_manager.update_step(global_step, blocking=False)
-            ]
-        )
-        await self.generate_scheduler.resume.remote()
-
-    async def get_batch(self, data: DataProto, batch_size):
-        global_step = data.meta_info["global_step"]
-        if not self.running:
-            await self.start()
-
-        if self.config.async_generation_ratio == 0 or self.mode != "train":
-            if self.config.async_generation_ratio == 0:
-                assert self.running
-                await asyncio.gather(
-                    *[
-                        asyncio.wrap_future(ref.obj_ref.future())
-                        for ref in self.infer_cluster.start_server(data, blocking=False)
-                    ]
-                )
-                self.alive_check_task = self.alive_check()
+    async def _start_env_manager(self, global_step):
+        assert self.running
+        if self.config.async_generation_ratio > 0 and self.mode == "train" and self.rollout_refs is None:
+            # async training will only call es_manager.run_rollout_loop once
+            seed = self.config.seed
+            self.rollout_refs: List[ray.ObjectRef] = self.es_manager.run_rollout_loop(None, seed, blocking=False)
+        elif self.config.async_generation_ratio == 0 or self.mode != "train":
+            # sync and async val will call es_manager.run_rollout_loop every time get_batch called
             assert self.rollout_refs is None
             if self.mode == "train":
                 seed = random.randint(0, 1000000)
             else:
                 seed = self.config.seed
-            rollout_refs: List[ray.ObjectRef] = self.es_manager.run_rollout_loop(global_step, seed, blocking=False)
+            self.rollout_refs: List[ray.ObjectRef] = self.es_manager.run_rollout_loop(global_step, seed, blocking=False)
+
+    async def _stop_env_manager(self):
+        assert self.running # generate_scheudler should be running to avoid block env manager
+        # TODO should dry env_output_queue periodically to avoid block env manager
+        await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in self.es_manager.stop(blocking=False)])
+        await self.generate_scheduler.abort_request.remote()
+        await asyncio.gather(*self.rollout_refs)
+        self.rollout_refs = None
+
+    async def stop(self):
+        """
+        Stop env manager for async training, called by user!!!
+        """
+        if self.config.async_generation_ratio > 0 and self.mode == "train" and self.rollout_refs is not None:
+            await self._stop_env_manager()
+            await self._stop_server()
+
+    async def _stop_server(self):
+        if not self.running:
+            return
+        self.running = False
+        stop_server_tasks = [
+            asyncio.wrap_future(ref.obj_ref.future())
+            for ref in self.infer_cluster.stop_server(blocking=False)
+        ]
+        if self.config.async_generation_ratio == 0 or self.mode == "train":
+            await asyncio.gather(
+                self.alive_check_task,
+            )
+        gen_metrics = await asyncio.gather(*stop_server_tasks)
+        gen_metrics = gen_metrics[0]
+        return gen_metrics.meta_info.pop("metrics", {})
+
+    async def suspend(self, global_step):
+        if self.config.async_generation_ratio == 0 or self.mode != "train":
+            return {}
+
+        if not self.running:
+            return {}
+        # self.running will be set to False in self._stop_server
+
+        await self.generate_scheduler.suspend.remote()
+        return await self._stop_server()
+
+    async def _start_server(self, global_step):
+        if self.running:
+            return
+        self.running = True
+        data = DataProto()
+        data.meta_info["global_step"] = global_step
+        data.meta_info["is_offload_states"] = self.config.async_generation_ratio == 0
+        await asyncio.gather(
+            *[
+                asyncio.wrap_future(ref.obj_ref.future())
+                for ref in self.infer_cluster.start_server(data, blocking=False)
+            ],
+        )
+        if self.config.async_generation_ratio == 0 or self.mode == "train":
+            self.alive_check_task = self.alive_check()
+
+    async def resume(self, global_step):
+        if self.config.async_generation_ratio == 0 or self.mode != "train":
+            return
+
+        if self.running:
+            return
+        # self.running will be set to True in self._start_server
+
+        await asyncio.gather(
+            self._start_server(global_step),
+            *[
+                asyncio.wrap_future(ref.future())
+                for ref in self.es_manager.update_step(global_step, blocking=False)
+            ],
+        )
+        await self.generate_scheduler.resume.remote()
+
+    async def get_batch(self, data: DataProto, batch_size):
+        global_step = data.meta_info["global_step"]
+
+        await self._start_server(global_step)
+        await self._start_env_manager(global_step)
 
         ref = self.env_output_queue.get_batch.remote(batch_size)
         data_batch: List[DataProto] = await asyncio.wrap_future(ref.future())
@@ -302,27 +314,12 @@ class RolloutScheduler:
         batch = DataProto.concat(data_batch)
 
         if self.config.async_generation_ratio == 0 or self.mode != "train":
-            assert self.rollout_refs is None
-            # TODO: abort running requests?
-            await asyncio.gather(
-                *[asyncio.wrap_future(ref.future()) for ref in self.es_manager.stop(blocking=False)],
-                *rollout_refs
-            )
-            if self.config.async_generation_ratio == 0:
-                assert self.running
-                await self.stop() # only set self.running to False
-                assert not self.running
-                stop_server_tasks = [
-                    asyncio.wrap_future(ref.obj_ref.future())
-                    for ref in self.infer_cluster.stop_server(blocking=False)
-                ]
-                await asyncio.gather(
-                    asyncio.wrap_future(self.env_output_queue.clear.remote(batch_size).future()),
-                    self.alive_check_task,
-                )
-                gen_metrics = await asyncio.gather(*stop_server_tasks)
-                gen_metrics = gen_metrics[0]
-                metrics.update(gen_metrics.meta_info.pop("metrics", {}))
+            await self._stop_env_manager()
+            # clear extra trajectories
+            await self.env_output_queue.clear.remote(batch_size)
+            # also stop server in async val, assume train_rollout_manager is suspended
+            actor_infer_metrics = await self._stop_server()
+            metrics.update(actor_infer_metrics)
 
         batch.meta_info["metrics"] = metrics
         return batch

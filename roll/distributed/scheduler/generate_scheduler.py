@@ -824,7 +824,7 @@ class RequestScheduler:
         else:
             fut.set_result(data)
 
-    async def _abort_request(self):
+    async def abort_request(self):
         futures = []
         for i in range(self.infer_cluster.world_size):
             if len(self.inflight_requests[i]) == 0:
@@ -845,12 +845,14 @@ class RequestScheduler:
             await self.suspend_notifier.wait()
 
     async def suspend(self):
-        assert not self.need_suspend
+        if self.need_suspend:
+            return
         self.suspend_notifier.clear()
         self.need_suspend = True
-        await self._abort_request()
+        await self.abort_request()
 
     def resume(self):
-        # assert self.need_suspend == True
+        if not self.need_suspend:
+            return
         self.need_suspend = False
         self.suspend_notifier.set()

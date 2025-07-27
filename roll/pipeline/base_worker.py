@@ -358,10 +358,6 @@ class ActorWorker(Worker):
                     raise Exception("thread server has stopped unexpectedly. check stderr for more info.")
             output = DataProto(meta_info={"request_counts": len(self.response_call_back_fns)})
             return output
-        elif command == GenerateRequestType.ABORT:
-            # must abort request synchronously
-            self.strategy.abort_request(data)
-            return
         elif command == GenerateRequestType.ADD:
             assert "response_callback_fn" in data.meta_info, "response_callback_fn is not in data.meta_info"
             is_num_return_sequences_expand = data.meta_info.get("is_num_return_sequences_expand", False)
@@ -386,7 +382,6 @@ class ActorWorker(Worker):
         data.meta_info["eos_token_id"] = self.tokenizer.eos_token_id
         data.meta_info["pad_token_id"] = self.tokenizer.pad_token_id
         response_call_back_fn = self.response_call_back_fns.pop(data.meta_info["request_id"])
-        # TODO: "memory leak"
         self.response_callback_refs.append(response_call_back_fn(data))
 
 
