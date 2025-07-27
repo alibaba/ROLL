@@ -16,6 +16,39 @@ def load_dataset(file_path: str) -> List[Dict]:
     return records
 
 
+def filter_dataset(records: List[Dict]) -> List[Dict]:
+    """
+    过滤数据集，去除不符合要求的数据
+    - 去除 prompt length > 7000 的数据
+    - 去除 output length > 500 或 < 10 的数据
+    """
+    filtered_records = []
+    filtered_count = 0
+
+    for record in records:
+        prompt = record.get("prompt", "")
+        output = record.get("output", "")
+
+        prompt_len = len(prompt)
+        output_len = len(output)
+
+        # 检查是否符合过滤条件
+        if prompt_len > 7000 or output_len > 500 or output_len < 10:
+            filtered_count += 1
+            continue
+
+        filtered_records.append(record)
+
+    print(f"Original records: {len(records)}")
+    print(f"Filtered out records: {filtered_count}")
+    print(f"Remaining records: {len(filtered_records)}")
+    print(f"Filter criteria:")
+    print(f"  - Removed prompt length > 7000")
+    print(f"  - Removed output length > 500 or < 10")
+
+    return filtered_records
+
+
 def save_dataset(records: List[Dict], file_path: str):
     """保存数据集"""
     with open(file_path, "w", encoding="utf-8") as f:
@@ -132,7 +165,7 @@ def user_based_split(records: List[Dict], test_ratio: float = 0.2) -> Tuple[List
     return train_records, test_records
 
 
-def split_dataset(input_file: str, output_dir: str = ".", test_ratio: float = 0.2, seed: int = 42):
+def split_dataset(base_dir, input_file: str, output_dir: str = ".", test_ratio: float = 0.2, seed: int = 42):
     """
     划分数据集的主函数
 
@@ -142,9 +175,17 @@ def split_dataset(input_file: str, output_dir: str = ".", test_ratio: float = 0.
         test_ratio: 测试集比例
         seed: 随机种子
     """
+    input_file = base_dir + input_file
+    output_dir = base_dir + output_dir
     print(f"Loading dataset from {input_file}...")
     records = load_dataset(input_file)
     print(f"Total records: {len(records)}")
+
+    # 过滤数据集
+    print("\n=== Filtering Dataset ===")
+    records = filter_dataset(records)
+    # 把过滤数据集也保存到当前目录
+    save_dataset(records, output_dir + "/filtered_dataset.jsonl")
 
     # 创建输出目录
     output_path = Path(output_dir)
@@ -219,6 +260,11 @@ def split_dataset(input_file: str, output_dir: str = ".", test_ratio: float = 0.
     stats = {
         "total_records": len(records),
         "test_ratio": test_ratio,
+        "filter_info": {
+            "prompt_max_length": 7000,
+            "output_min_length": 10,
+            "output_max_length": 500,
+        },
         "random_split": {
             "train": len(train_random),
             "test": len(test_random),
@@ -249,7 +295,8 @@ def split_dataset(input_file: str, output_dir: str = ".", test_ratio: float = 0.
 
 if __name__ == "__main__":
     # 使用示例
-    input_file = "dialogue_dataset_all_v4.jsonl"  # 输入文件
-    output_dir = "split_data"  # 输出目录
+    base_dir = "/project/hdtaccuracy/Personality-Alignment/"
+    input_file = "dialogue_dataset_all_v5_summarized.jsonl"  # 输入文件
+    output_dir = "split_data_v5_filtered"  # 输出目录
 
-    split_dataset(input_file, output_dir, test_ratio=0.2, seed=42)
+    split_dataset(base_dir, input_file, output_dir, test_ratio=0.2, seed=42)

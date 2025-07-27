@@ -26,9 +26,9 @@ def parse_qid(qid: str):
     return user_id, line_idx, msg_idx
 
 
-def analyze_length_distribution(records, output_dir="analysis_results"):
+def analyze_length_distribution(records, base_dir, output_dir="analysis_results"):
     """分析数据长度分布"""
-    output_path = Path(output_dir)
+    output_path = Path(base_dir) / output_dir
     output_path.mkdir(exist_ok=True)
 
     # 收集长度数据
@@ -299,13 +299,14 @@ def analyze_length_distribution(records, output_dir="analysis_results"):
 
 if __name__ == "__main__":
     # 分析原始数据
-    input_file = "dialogue_dataset_all_v4.jsonl"
+    base_dir = "/project/hdtaccuracy/Personality-Alignment/"
+    input_file = base_dir + "dialogue_dataset_all_v5_summarized.jsonl"  # 输入文件
     print("正在分析原始数据集...")
     records = load_dataset(input_file)
     analyze_length_distribution(records, "original_data_analysis")
 
     # 如果存在划分后的数据，也进行分析
-    split_dir = Path("split_data")
+    split_dir = Path(base_dir) / "split_data_v5"
     if split_dir.exists():
         for split_file in [
             "train_random.jsonl",
@@ -316,4 +317,4 @@ if __name__ == "__main__":
             if (split_dir / split_file).exists():
                 print(f"\n正在分析 {split_file}...")
                 split_records = load_dataset(split_dir / split_file)
-                analyze_length_distribution(split_records, f"analysis_{split_file.replace('.jsonl', '')}")
+                analyze_length_distribution(split_records, base_dir, f"analysis_{split_file.replace('.jsonl', '')}")

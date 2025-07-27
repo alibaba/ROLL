@@ -1,23 +1,23 @@
 #!/bin/bash
-
 # LLM Generation Script
 # 使用说明：./run_llm_gen.sh
-
+pip install openai
+cd /home/szhangfa/ROLL/Personality-Alignment/eval
 set -e  # 遇到错误时退出
 
 # 默认配置
-DEFAULT_MODEL_PATH="Qwen/Qwen3-8B"
+DEFAULT_MODEL_PATH="/project/hdtaccuracy/models/base/Qwen3-8B/"
 DEFAULT_DEVICE="auto"
-DEFAULT_BATCH_SIZE=32
-DEFAULT_MAX_LIMIT=32
-DEFAULT_OUTPUT_FILE="qwen_results.jsonl"
+DEFAULT_BATCH_SIZE=32  # 降低默认批处理大小以避免OOM
+DEFAULT_MAX_LIMIT=20000
+DEFAULT_OUTPUT_FILE="qwen_base_results.jsonl"
 
 # 可配置参数
 MODEL_PATH=${MODEL_PATH:-$DEFAULT_MODEL_PATH}
-LORA_PATH=${LORA_PATH:-"/home/zyangdm/LLaMA-Factory/saves/qwen3-8b/lora_ppo"}
+LORA_PATH=${LORA_PATH:-""}
 DEVICE=${DEVICE:-$DEFAULT_DEVICE}
 BATCH_SIZE=${BATCH_SIZE:-$DEFAULT_BATCH_SIZE}
-PROMPTS_FILE=${PROMPTS_FILE:-"/home/zyangdm/ROLL/Personality-Alignment/dialogue_dataset_all_v2_nothink.jsonl"}
+PROMPTS_FILE=${PROMPTS_FILE:-"/project/hdtaccuracy/Personality-Alignment/dialogue_dataset_all_v5_summarized.jsonl"}
 OUTPUT_FILE=${OUTPUT_FILE:-$DEFAULT_OUTPUT_FILE}
 MAX_LIMIT=${MAX_LIMIT:-$DEFAULT_MAX_LIMIT}
 

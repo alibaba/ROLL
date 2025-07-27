@@ -30,12 +30,14 @@ def load_qwen3_8b(model_path="Qwen/Qwen3-8B", device_map="auto", quantize=False)
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        device_map=device_map,
+        # device_map="cuda:0",
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     )
+    model = model.eval()  # 设置为评估模式
+    model.to("cuda:0")
 
     return model, tokenizer
 
@@ -287,7 +289,12 @@ def format_conversation_history(history_str: str, record: dict) -> str:
 
 
 def build_dataset(
-    roleplay_path: str, profile_path: str, output_path: str, use_summarization: bool = True, batch_size: int = 8
+    base_path,
+    roleplay_path: str,
+    profile_path: str,
+    output_path: str,
+    use_summarization: bool = True,
+    batch_size: int = 32,
 ):
     """
     构建数据集
@@ -299,6 +306,8 @@ def build_dataset(
     use_summarization: 是否使用总结功能
     batch_size: 批量处理大小
     """
+    profile_path = base_path + profile_path
+    roleplay_path = base_path + roleplay_path
     profiles = load_profiles(profile_path)
 
     # 第一步：统计总行数（用于进度显示）
@@ -442,6 +451,11 @@ def build_dataset(
 
     # 写出新数据集
     print("🔄 第六步：保存数据集...")
+    output_path = base_path + output_path
+    if not Path(output_path).parent.exists():
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    print(f"📂 输出路径：{output_path}")
+
     with open(output_path, "w", encoding="utf-8") as out_f:
         progress_bar = tqdm(new_records, desc="保存数据")
         for rec in progress_bar:
@@ -457,7 +471,9 @@ def build_dataset(
 
 if __name__ == "__main__":
     # 可以通过 use_summarization 参数控制是否启用总结功能
+    base_path = "/project/hdtaccuracy/Personality-Alignment/"
     build_dataset(
+        base_path,
         "roleplay_dataset_en_new.jsonl",
         "profile.json",
         "dialogue_dataset_all_v5_summarized.jsonl",

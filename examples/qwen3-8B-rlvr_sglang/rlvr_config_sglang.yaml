@@ -1,0 +1,148 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+# ========= 基础信息 =========
+exp_name: "qwen3-8B-rlvr-llmjudge-h800-8gpu"
+seed: 42
+logging_dir: ./logs
+output_dir: ./output
+num_gpus_per_node: 8      # 8×H800
+
+track_with: wandb
+tracker_kwargs:
+ api_key: dce12064d30900b2cc538f73e82997de5aafbb96
+ project: roll_peralign
+ notes: roll_peralign
+ tags:
+   - rlvr
+   - baseline
+  
+# ========= 训练控制 =========
+max_steps: 1000
+save_steps: 100
+logging_steps: 1
+eval_steps: 50
+resume_from_checkpoint: false
+
+# ========= RL 超参 =========
+rollout_batch_size: 64
+prompt_length: 2048
+response_length: 1024
+num_return_sequences_in_group: 8
+ppo_epochs: 1
+adv_estimator: "reinforce"
+value_clip: 0.5
+reward_clip: 10
+whiten_advantages: true
+
+# ========= 预训练权重 =========
+pretrain: Qwen/Qwen3-8B
+reward_pretrain: Qwen/Qwen3-8B            # critic 初始权重
+
+# ========= 验证集 =========
+validation:
+  data_args:
+    template: qwen2_5
+    file_name:
+      - data/val_llm_judge.jsonl
+  generating_args:
+    top_p: 0.9
+    top_k: 50
+    num_beams: 1
+    temperature: 0.7
+    num_return_sequences: 1
+
+# ========= Actor（训练） =========
+actor_train:
+  model_args:
+    dtype: bf16
+    disable_gradient_checkpointing: false
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0.0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 32
+    warmup_steps: 20
+    num_train_epochs: 3
+  data_args:
+    template: qwen2_5
+    file_name:
+      - data/train_llm_judge.jsonl
+    domain_interleave_probs:
+      llm_judge: 1.0          # 只抽样此域
+    dataset_dir: data
+    messages: messages
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 2       # 4 GPU = 2 TP × 2 PP
+      pipeline_model_parallel_size: 2
+      virtual_pipeline_model_parallel_size: 1
+  device_mapping: [0, 1, 2, 3]            # GPU0‑3
+  infer_batch_size: 2
+
+# ========= Actor（推理/采样） =========
+actor_infer:
+  model_args:
+    dtype: bf16
+    disable_gradient_checkpointing: true
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.95
+    top_k: 100
+    num_beams: 1
+    temperature: 0.95
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: sglang
+    strategy_config:
+      mem_fraction_static: 0.7
+  num_gpus_per_worker: 1
+  device_mapping: [4]                     # GPU4
+  infer_batch_size: 1
+
+# ========= Reference =========
+reference:
+  model_args:
+    dtype: bf16
+    disable_gradient_checkpointing: true
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+  device_mapping: [5]                     # GPU5
+  infer_batch_size: 1
+
+# ========= Reward =========
+rewards:
+  llm_judge:
+    worker_cls: roll.pipeline.rlvr.rewards.llm_judge_reward_worker.LLMJudgeRewardWorker
+    judge_prompt: Qwen2.5-7B-Instruct-RLVR-prompt
+    judge_model_type: inference
+    tag_included: [RLVR]
+    model_args:
+      model_name_or_path: virtuoussy/Qwen2.5-7B-Instruct-RLVR
+      dtype: bf16
+      attn_implementation: fa2
+      disable_gradient_checkpointing: true
+    generating_args:
+      max_new_tokens: 128
+      top_p: 0.8
+      top_k: 50
+      temperature: 0.8
+      num_beams: 1
+      num_return_sequences: 1
+    data_args:
+      template: qwen2_5
+    strategy_args:
+      strategy_name: hf_infer
+    device_mapping: [6, 7]                # GPU6‑7，独立占用
+    world_size: 2
+    infer_batch_size: 4
