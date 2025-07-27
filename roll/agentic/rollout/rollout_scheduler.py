@@ -33,10 +33,10 @@ class GroupQueue:
 
     async def put(self, episode_id, start_step, rollout):
         if episode_id not in self.groups:
-            if len(self.groups) >= self.max_group_num:
-                self.inprogress.clear()
-                while len(self.groups) >= self.max_group_num:
-                    await self.inprogress.wait()
+            while episode_id not in self.groups and len(self.groups) >= self.max_group_num:
+                if self.inprogress.is_set():
+                    self.inprogress.clear()
+                await self.inprogress.wait()
             if episode_id not in self.groups:
                 self.groups[episode_id] = []
         self.groups[episode_id].append(rollout)
@@ -80,6 +80,10 @@ class EnvGroupQueue:
                 if group_id not in self.group_queue:
                     self.group_queue[group_id] = GroupQueue(self.progress_bar, env_manager_config.group_size, max_group_num)
 
+        # for debug
+        self.total = 0
+        self.waiting = 0
+
     def clear(self, batch_size):
         self.progress_bar = tqdm(total=batch_size, desc=f"{self.mode} rollout progress(trajectory)", mininterval=self.env_manager_config.max_traj_per_env)
         assert self.wait_task is None
@@ -100,7 +104,10 @@ class EnvGroupQueue:
             raise self.exception
 
     async def put(self, group_id, episode_id, start_step, rollout: DataProto):
+        self.waiting += 1
         await self.group_queue[group_id].put(episode_id, start_step, rollout)
+        self.waiting -= 1
+        self.total += 1
 
     async def get_batch(self, batch_size) -> List[DataProto]:
         """
@@ -127,6 +134,7 @@ class EnvGroupQueue:
                         d = done.pop()
                         group_rollout = await d
                         assert len(group_rollout) == self.group_size
+                        self.total -= len(group_rollout)
                         ret.extend(group_rollout)
                     assert (done and len(ret) >= batch_size) or (not done and len(ret) <= batch_size)
                     if done:
