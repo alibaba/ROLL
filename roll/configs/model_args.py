@@ -4,8 +4,45 @@ from typing import Any, Dict, Literal, Optional
 import torch
 
 
+# Borrowed from: https://github.com/hiyouga/LLaMA-Factory/blob/main/src/llamafactory/hparams/finetuning_args.py
 @dataclass
-class ModelArguments:
+class LoraArguments:
+    r"""
+    Arguments pertaining to the LoRA training.
+    """
+
+    additional_target: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Name(s) of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint."
+        },
+    )
+    lora_alpha: Optional[int] = field(
+        default=None,
+        metadata={"help": "The scale factor for LoRA fine-tuning (default: lora_rank * 2)."},
+    )
+    lora_dropout: Optional[float] = field(
+        default=0.0,
+        metadata={"help": "Dropout rate for the LoRA fine-tuning."},
+    )
+    lora_rank: Optional[int] = field(
+        default=8,
+        metadata={"help": "The intrinsic dimension for LoRA fine-tuning."},
+    )
+    lora_target: str = field(
+        default=None,
+        metadata={
+            "help": (
+                "Name(s) of target modules to apply LoRA. "
+                "Use commas to separate multiple modules. "
+                "Use `all` to specify all the linear modules."
+            )
+        },
+    )
+
+
+@dataclass
+class ModelArguments(LoraArguments):
     r"""
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune.
     """
@@ -59,6 +96,17 @@ class ModelArguments:
     )
 
     def __post_init__(self):
+        def split_arg(arg):
+            if isinstance(arg, str):
+                return [item.strip() for item in arg.split(",")]
+            return arg
+        self.lora_alpha = self.lora_alpha or self.lora_rank * 2
+        if self.lora_target is not None and not any(c in self.lora_target for c in ["*", "$", "|", "("]):
+            # split when lora_target is not regex expression
+            self.lora_target = split_arg(self.lora_target)
+        self.freeze_module_prefix: Optional[list[str]] = split_arg(self.freeze_module_prefix)
+        self.additional_target: Optional[list[str]] = split_arg(self.additional_target)
+
         dtype_mapping = {
             "fp32": torch.float32,
             "bf16": torch.bfloat16,

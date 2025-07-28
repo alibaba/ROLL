@@ -41,6 +41,15 @@ from roll.utils.logging import get_logger
 logger = get_logger()
 
 
+def is_lora_training(pipeline_config: RLVRConfig) -> bool:
+    if pipeline_config.actor_train.model_args.lora_target is None:
+        return False
+    assert pipeline_config.actor_train.strategy_args.strategy_name == "deepspeed_train", (
+        "LoRA only supports deepspeed_train"
+    )
+    return True
+
+
 def format_prompt(prompt, processor, use_image=True, prompt_image_token=None):
     question_template = "{Question}  Output the thinking process in <think> </think> and final answer (number) in <answer> </answer> tags."
     messages = [
@@ -241,6 +250,7 @@ class RLVRMathVLMPipeline(BasePipeline):
     def __init__(self, pipeline_config: RLVRConfig):
         super().__init__(pipeline_config)
         self.pipeline_config = pipeline_config
+        self.is_lora = is_lora_training(self.pipeline_config)
 
         self.processor = default_processor_provider(self.pipeline_config.actor_train.model_args)
         # set max_pixels to avoid image token num is larger than prompt length
@@ -301,12 +311,14 @@ class RLVRMathVLMPipeline(BasePipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_infer,
         )
-        self.reference: Any = Cluster(
-            name=self.pipeline_config.reference.name,
-            worker_cls=self.pipeline_config.reference.worker_cls,
-            resource_manager=self.resource_manager,
-            worker_config=self.pipeline_config.reference,
-        )
+        # use unwrapped model as reference for lora training
+        if not self.is_lora:
+            self.reference: Any = Cluster(
+                name=self.pipeline_config.reference.name,
+                worker_cls=self.pipeline_config.reference.worker_cls,
+                resource_manager=self.resource_manager,
+                worker_config=self.pipeline_config.reference,
+            )
         self.rewards: Dict[str, Any] = {
             key: Cluster(
                 name=f"reward-{key}",
@@ -342,7 +354,8 @@ class RLVRMathVLMPipeline(BasePipeline):
         ray.get(refs)
 
         refs = []
-        refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=False))
+        if not self.is_lora:
+            refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=False))
         refs.extend(self.reward.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
 
@@ -437,9 +450,16 @@ class RLVRMathVLMPipeline(BasePipeline):
                         )
 
                     with Timer(name="cal_ref_log_probs_reward", logger=None) as cal_timer:
-                        ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(
-                            batch, blocking=False
-                        )
+                        if self.is_lora:
+                            batch.meta_info["disable_adapter"] = True
+                            batch.meta_info["is_offload_states"] = False
+                            ref_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(
+                                batch, blocking=False
+                            )
+                        else:
+                            ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(
+                                batch, blocking=False
+                            )
                         rewards_refs: List[ray.ObjectRef] = self.reward.compute_rewards(batch, blocking=False)
 
                         ref_log_probs = DataProto.materialize_concat(data_refs=ref_log_probs_refs)
@@ -453,6 +473,8 @@ class RLVRMathVLMPipeline(BasePipeline):
                     metrics["time/ref_log_probs_values_reward"] = cal_timer.last
 
                     with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
+                        if self.is_lora:
+                            batch.meta_info["disable_adapter"] = False
                         batch.meta_info["is_offload_states"] = False
                         if self.pipeline_config.adv_estimator == "gae":
                             values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)

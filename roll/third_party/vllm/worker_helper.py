@@ -93,15 +93,18 @@ class WorkerHelper:
         collective.broadcast(tensor=buffer, src_rank=0, group_name=comm_plan["group_name"])
         WorkerHelper.update_parameter_in_bucket(self, meta_infos, buffer, [dist.get_rank()])
 
-    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
+    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name, is_lora=False):
         if src_pp_rank not in self.model_update_comm_plan:
             return
         comm_plan = self.model_update_comm_plan[src_pp_rank]
         weight = torch.empty(shape, dtype=dtype, device="cuda")
         collective.broadcast(tensor=weight, src_rank=0, group_name=comm_plan["group_name"])
-        WorkerHelper.update_parameter(self, parameter_name, weight, [dist.get_rank()])
+        WorkerHelper.update_parameter(self, parameter_name, weight, [dist.get_rank()], is_lora=is_lora)
 
-    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+    def update_parameter(self, parameter_name, weight, ranks_in_worker, is_lora=False):
+        if is_lora:
+            self.lora_params[parameter_name] = weight
+            return
         if dist.get_rank() not in ranks_in_worker:
             return
         self.load_weights([(parameter_name, weight)])

@@ -1,0 +1,97 @@
+defaults:
+  - ../../../../examples/config/deepspeed_zero@_here_
+  - ../../../../examples/config/deepspeed_zero2@_here_
+  - ../../../../examples/config/deepspeed_zero3@_here_
+  - ../../../../examples/config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "generate_baseline"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+track_with: stdout
+
+rollout_batch_size: 128
+prompt_length: 128
+response_length: 64
+
+lora_target: o_proj,q_proj,k_proj,v_proj
+
+pretrain: Qwen/Qwen2.5-7B-Instruct
+
+
+actor_train:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    lora_target: ${lora_target}
+    model_type: ~
+  training_args:
+    learning_rate: 5.0e-7
+    weight_decay: 0
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
+    warmup_steps: 5
+    num_train_epochs: 1
+  data_args:
+    template: qwen2_5
+    file_name: data/comparison_gpt4_data_zh.json
+    dataset_dir: data
+    prompt: instruction
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+    max_samples: ${rollout_batch_size}
+  strategy_args:
+    strategy_name: deepspeed_train
+    strategy_config: ${deepspeed_zero3}
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2
+
+
+actor_infer:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    lora_target: ${lora_target}
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: 1
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2
+
+reference:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 5.0e-7
+    weight_decay: 0
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
+    warmup_steps: 5
+    num_train_epochs: 1
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: deepspeed_train
+    strategy_config: ${deepspeed_zero3}
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2

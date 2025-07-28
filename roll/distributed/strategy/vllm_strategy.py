@@ -1,30 +1,31 @@
+import asyncio
 import copy
 import gc
 import itertools
 import os
 import queue
 from concurrent import futures
-from typing import List, Optional, Union, Dict
-import asyncio
+from typing import Dict, List, Optional, Union
 
 import ray
 import torch
 import torch.distributed as dist
 from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
-from mcore_adapter.models.converter.convert_utils import RecvBucketManager
-from vllm import SamplingParams, RequestOutput
+from vllm import RequestOutput, SamplingParams
+from vllm.lora.request import LoRARequest
 from vllm.utils import random_uuid
 
+from mcore_adapter.models.converter.convert_utils import RecvBucketManager
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy
-from roll.third_party.vllm import LLM
-from roll.third_party.vllm import AsyncLLM
+from roll.third_party.vllm import LLM, AsyncLLM
 from roll.utils.collective import collective
-from roll.utils.functionals import concatenate_input_and_output, GenerateRequestType
+from roll.utils.functionals import GenerateRequestType, concatenate_input_and_output
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
+
 
 logger = get_logger()
 
@@ -74,6 +75,15 @@ class VllmStrategy(InferenceStrategy):
                 "load_format": vllm_config.get("load_format", "dummy"),  # use model update passed value
             }
         )
+        self.is_lora = self.worker_config.model_args.lora_target is not None
+        if self.is_lora:
+            lora_kwargs = {
+                "enable_lora": True,
+                "max_loras": 1,
+                "max_lora_rank": self.worker_config.model_args.lora_rank,
+            }
+            vllm_config.update(lora_kwargs)
+            vllm_config["load_format"] = "auto"  # enables vLLM to load the base model for add_lora
         logger.info(f"vllm_config: {vllm_config}")
         assert not dist.is_initialized()
 
@@ -131,7 +141,23 @@ class VllmStrategy(InferenceStrategy):
                 input_ids=input_ids, attention_mask=attention_mask
             )
 
-        vllm_outputs = self.model.generate(sampling_params=sampling_params, use_tqdm=False, **vllm_input_args)
+        lora_requests = None
+        if self.is_lora:
+            batch_size = len(input_ids)
+            lora_int_ids = list(self.model.llm_engine.list_loras())
+            if len(lora_int_ids) > 0:
+                lora_int_id = lora_int_ids[0]
+                lora_requests = [
+                    LoRARequest(
+                        lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="dummy_lora_path"
+                    )
+                ] * batch_size
+        vllm_outputs = self.model.generate(
+            sampling_params=sampling_params,
+            use_tqdm=False,
+            lora_request=lora_requests,
+            **vllm_input_args,
+        )
 
         # (bs * num_return_sequences, max_response_len)
         output_ids = gather_outputs_to_pad_tensor(
@@ -189,10 +215,24 @@ class VllmStrategy(InferenceStrategy):
                     else:
                         prompt_token_ids = gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
                         multi_modal_data = None
-                    self.model.add_requests(request_ids=[request_id],
-                                            prompt_token_ids=prompt_token_ids,
-                                            sampling_params=sampling_params,
-                                            multi_modal_data=multi_modal_data)
+                    lora_requests = None
+                    if self.is_lora:
+                        batch_size = len(prompt_token_ids)
+                        lora_int_ids = list(self.model.llm_engine.list_loras())
+                        if len(lora_int_ids) > 0:
+                            lora_int_id = lora_int_ids[0]
+                            lora_requests = [
+                                LoRARequest(
+                                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="dummy_lora_path"
+                                )
+                            ] * batch_size
+                    self.model.add_requests(
+                        request_ids=[request_id],
+                        prompt_token_ids=prompt_token_ids,
+                        sampling_params=sampling_params,
+                        multi_modal_data=multi_modal_data,
+                        lora_requests=lora_requests,
+                    )
                 elif command == GenerateRequestType.ABORT:
                     request_id = batch.meta_info["request_id"]
                     self.model.abort_request(request_id=request_id)
@@ -265,17 +305,20 @@ class VllmStrategy(InferenceStrategy):
     def setup_collective_group(self, comm_plan, backend="nccl"):
         self.model.setup_collective_group(comm_plan=comm_plan, backend=backend, rank_in_cluster=self.worker.rank)
 
-    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
-        self.model.broadcast_parameter(src_pp_rank, dtype, shape, parameter_name)
+    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name, is_lora=False):
+        self.model.broadcast_parameter(src_pp_rank, dtype, shape, parameter_name, is_lora)
 
     def broadcast_bucket(self, src_pp_rank, meta_infos, bucket_size):
         self.model.broadcast_bucket(src_pp_rank, meta_infos, bucket_size)
 
-    def update_parameter(self, parameter_name, weight, ranks_in_worker):
-        self.model.update_parameter(parameter_name, weight, ranks_in_worker)
+    def update_parameter(self, parameter_name, weight, ranks_in_worker, is_lora=False):
+        self.model.update_parameter(parameter_name, weight, ranks_in_worker, is_lora)
 
     def update_parameter_in_bucket(self, meta_infos, buffer, ranks_in_worker):
         self.model.update_parameter_in_bucket(meta_infos, buffer, ranks_in_worker)
+
+    def add_lora(self, peft_config):
+        self.model.add_lora(peft_config)
 
 
 def gather_unpadded_input_ids(input_ids: torch.Tensor, attention_mask: torch.Tensor):

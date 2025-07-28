@@ -1,7 +1,8 @@
 import os
-from typing import Optional, List
+from typing import List, Optional
 
 import torch
+from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -83,11 +84,27 @@ def freeze_model(model, model_args: "ModelArguments"):
     if model_args.freeze_module_prefix is None:
         return
 
-    prefixes = model_args.freeze_module_prefix.split(",")
+    prefixes = model_args.freeze_module_prefix
     logger.info(f"Freeze model with prefix: {prefixes}")
     for name, param in model.named_parameters():
         if any(name.startswith(prefix) for prefix in prefixes):
             param.requires_grad_(False)
+
+
+def setup_lora_training(config, model, model_args: "ModelArguments", is_trainable: Optional[bool] = False):
+    model.enable_input_require_grads()
+    if is_trainable:
+        target_modules = model_args.lora_target
+        lora_config = {
+            "task_type": TaskType.CAUSAL_LM,
+            "r": model_args.lora_rank,
+            "target_modules": target_modules,
+            "lora_alpha": model_args.lora_alpha,
+            "lora_dropout": model_args.lora_dropout,
+            "modules_to_save": model_args.additional_target,
+        }
+        model = get_peft_model(model, LoraConfig(**lora_config))
+    return model
 
 
 def load_model(
@@ -105,6 +122,8 @@ def load_model(
         setattr(config, "_attn_implementation", model_args.attn_implementation)
     if not is_trainable:
         setattr(config, "use_cache", True)
+    else:
+        setattr(config, "use_cache", False)
     if model_args.moe_aux_loss_coef is not None:
         setattr(config, "router_aux_loss_coef", model_args.moe_aux_loss_coef)
         setattr(config, "output_router_logits", is_trainable)
@@ -125,7 +144,10 @@ def load_model(
     if not model_args.disable_gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-    freeze_model(model, model_args)
+    if model_args.lora_target is None:
+        freeze_model(model, model_args)
+    else:
+        model = setup_lora_training(config, model, model_args, is_trainable)
 
     if add_valuehead:
         from trl import AutoModelForCausalLMWithValueHead
@@ -246,7 +268,10 @@ def patch_model(model, config, use_mcore):
                 model_chunk.forward = types.MethodType(forward_patch, model_chunk)
     else:
         if "qwen2_vl" == model_type or "qwen2_5_vl" == model_type:
-            ori_forward = type(model).forward
+            if is_peft_model := (getattr(model, "peft_config", None) is not None):
+                ori_forward = type(model.get_base_model()).forward
+            else:
+                ori_forward = type(model).forward
 
             def _handle_missing_visual(self, inputs_embeds: "torch.FloatTensor"):
                 mock_pixel_values = torch.zeros(
@@ -314,7 +339,10 @@ def patch_model(model, config, use_mcore):
                 )
 
         if forward_patch is not None:
-            model.forward = types.MethodType(forward_patch, model)
+            if is_peft_model:
+                model.get_base_model().forward = types.MethodType(forward_patch, model.get_base_model())
+            else:
+                model.forward = types.MethodType(forward_patch, model)
 
 
 def default_actor_model_provider(

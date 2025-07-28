@@ -1,11 +1,13 @@
 import os
-from typing import Iterable, Tuple, List, Dict, Type, Optional, Union, Any
 import time
-import torch
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
+
 import cloudpickle
-from vllm import LLM, SamplingParams, EngineArgs, LLMEngine, envs
-from vllm.config import CompilationConfig, PoolerConfig, TaskOption, HfOverrides
+import torch
+from vllm import LLM, EngineArgs, LLMEngine, SamplingParams, envs
+from vllm.config import CompilationConfig, HfOverrides, PoolerConfig, TaskOption
 from vllm.core.scheduler import Scheduler
+from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
 
@@ -128,40 +130,42 @@ class Llm073(LLM):
                 output_list.append(request_output)
         return output_list
 
-    def add_requests(self, prompt_token_ids: List[List[int]],
-                     request_ids: List[int] | None,
-                     sampling_params: SamplingParams,
-                     multi_modal_data: List[int] | None):
+    def add_requests(
+        self,
+        prompt_token_ids: List[List[int]],
+        request_ids: List[int] | None,
+        sampling_params: SamplingParams,
+        multi_modal_data: List[int] | None,
+        lora_requests: List[LoRARequest] | None,
+    ):
         assert len(prompt_token_ids) == len(request_ids)
         if multi_modal_data:
             assert len(multi_modal_data) == len(request_ids)
-        for i, (token_ids, request_id)in enumerate(zip(prompt_token_ids, request_ids)):
+        for i, (token_ids, request_id) in enumerate(zip(prompt_token_ids, request_ids)):
             if request_id is None:
                 request_id = next(self.request_counter)
+            lora_request = lora_requests[i] if lora_requests is not None else None
             if multi_modal_data:
                 preprocessed_inputs = self.llm_engine.input_preprocessor.preprocess(
-                    prompt={
-                        "prompt_token_ids": token_ids,
-                        "multi_modal_data": multi_modal_data[i]
-                    },
+                    prompt={"prompt_token_ids": token_ids, "multi_modal_data": multi_modal_data[i]},
                     request_id=request_id,
-                    lora_request=None,
+                    lora_request=lora_request,
                     prompt_adapter_request=None,
                 )
-                processed_inputs = self.llm_engine.input_processor(
-                    preprocessed_inputs)
+                processed_inputs = self.llm_engine.input_processor(preprocessed_inputs)
             else:
                 processed_inputs = {
                     "type": "token",
                     "prompt_token_ids": token_ids
                 }
-            self.llm_engine._add_processed_request(request_id=request_id,
-                                                   processed_inputs=processed_inputs,
-                                                   params=sampling_params,
-                                                   arrival_time=time.time(),
-                                                   lora_request=None,
-                                                   prompt_adapter_request=None
-                                                )
+            self.llm_engine._add_processed_request(
+                request_id=request_id,
+                processed_inputs=processed_inputs,
+                params=sampling_params,
+                arrival_time=time.time(),
+                lora_request=lora_request,
+                prompt_adapter_request=None,
+            )
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         self.llm_engine.abort_request(request_id)
@@ -184,3 +188,6 @@ class Llm073(LLM):
 
     def update_parameter_in_bucket(self, *args, **kwargs):
         self.collective_rpc(method="update_parameter_in_bucket", args=args, kwargs=kwargs)
+
+    def add_lora(self, *args, **kwargs):
+        self.collective_rpc(method="add_lora", args=args, kwargs=kwargs)
