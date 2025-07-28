@@ -104,6 +104,7 @@ class EnvGroupQueue:
             raise self.exception
 
     async def put(self, group_id, episode_id, start_step, rollout: DataProto):
+        assert group_id in self.group_queue
         self.waiting += 1
         await self.group_queue[group_id].put(episode_id, start_step, rollout)
         self.waiting -= 1
@@ -142,6 +143,7 @@ class EnvGroupQueue:
                 self.pending_gets.update(pending)
 
             assert self.wait_task is None
+            self._check_exception()
             self.wait_task = asyncio.create_task(wait_a_episode())
             try:
                 await self.wait_task
@@ -282,7 +284,7 @@ class RolloutScheduler:
             ],
         )
         if self.config.async_generation_ratio == 0 or self.mode == "train":
-            self.alive_check_task = self.alive_check()
+            self.alive_check_task = asyncio.create_task(self.alive_check())
 
     async def resume(self, global_step):
         if self.config.async_generation_ratio == 0 or self.mode != "train":
