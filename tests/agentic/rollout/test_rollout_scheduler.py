@@ -1,9 +1,10 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import time
+import threading
+import sys
 import ray
 
-from roll.agentic.rollout.rollout_scheduler import EnvGroupQueue, GroupQueue
+from roll.agentic.rollout.rollout_scheduler import GroupQueueManager
 
 TEST_EXCEPTION = False
 
@@ -13,26 +14,25 @@ class AgenticConfig:
 class EnvManagerConfig:
     pass
 
-async def async_test_EnvGroupQueue_grpo():
-    rollout_batch_size = 16
-
+async def async_test_GroupQueueManager(rollout_batch_size, async_generation_ratio):
+    print(f">>>>>>>>>>>>>>>>>>>>>>>> TEST rollout_batch_size {rollout_batch_size} async_generation_ratio {async_generation_ratio}")
     config = AgenticConfig()
-    config.async_generation_ratio = 2
+    config.async_generation_ratio = async_generation_ratio
 
     env_manager_config = EnvManagerConfig()
     env_manager_config.world_size = 1
     env_manager_config.env_groups = 2
-    env_manager_config.group_size = 8
-    env_manager_config.max_env_num_per_worker = 16
+    env_manager_config.group_size = 8 # grpo
+    train_env_num = env_manager_config.env_groups * env_manager_config.group_size
+    env_manager_config.max_env_num_per_worker = train_env_num
     env_manager_config.env_configs = {0: {0: {"group_id": 0}, 1: {"group_id": 1}}}
 
-    train_env_num = env_manager_config.env_groups * env_manager_config.group_size
     traj_per_env = (rollout_batch_size + train_env_num - 1) // train_env_num
     env_manager_config.max_traj_per_env = traj_per_env
 
     env_num = env_manager_config.world_size * env_manager_config.max_env_num_per_worker
 
-    env_output_queue = EnvGroupQueue.options(
+    env_output_queue = GroupQueueManager.options(
         max_concurrency = env_num + 1
     ).remote(
         config,
@@ -40,30 +40,50 @@ async def async_test_EnvGroupQueue_grpo():
         "train"
     )
 
-    quit = False
+    current_step = 0
+    stoped_threads = 0
+    barrier = threading.Barrier(env_num + 1)
 
     def run_rollout_loop(thread_id, group_id, output_queue):
+        nonlocal stoped_threads
         if TEST_EXCEPTION:
             raise Exception("test exception")
 
         episode_id = 0
-        while not quit:
-            rollout = None
-            ray.get(output_queue.put.remote(group_id, episode_id, 0, rollout))
-            episode_id += 1
-        print(f">>>>>>>>>>>>>>>>>>>>>> rollout loop {thread_id} finish")
-
-    async def get_batch():
-        nonlocal quit
         for i in range(10):
-            print(f">>>>>>>>>>>>>>>>>>>>>> iter {i}")
-            await env_output_queue.get_batch.remote(rollout_batch_size)
-        quit = True
-        for i in range(10):
-            await env_output_queue.clear.remote(16)
-            await asyncio.sleep(1)
+            if async_generation_ratio == 0:
+                barrier.wait()
+            rollout = current_step
+            for j in range(env_manager_config.max_traj_per_env):
+                ray.get(output_queue.put.remote(group_id, episode_id, 0, rollout))
+                episode_id += 1
+            if async_generation_ratio == 0:
+                barrier.wait()
+        stoped_threads += 1
 
-    get_batch_task = asyncio.create_task(get_batch())
+    async def rollout():
+        nonlocal current_step
+        try:
+            for i in range(10):
+                current_step = i
+                if async_generation_ratio == 0:
+                    barrier.wait()
+                batch = await env_output_queue.get_batch.remote(rollout_batch_size)
+                print(f"batch on step({current_step}): {batch}")
+                if rollout_batch_size >= env_num and rollout_batch_size % env_num == 0: 
+                    assert all((current_step - rollout) <= async_generation_ratio for rollout in batch), f"current_step - rollout_step exceed async_generation_ratio"
+                if async_generation_ratio == 0:
+                    env_output_queue.prepare_clear.remote()
+                    barrier.wait()
+                    env_output_queue.clear.remote(rollout_batch_size)
+                await asyncio.sleep(1)
+            env_output_queue.prepare_clear.remote()
+            # unblock all run_rollout_loop threads
+            # cannot call env_output_queue.clear here (otherwise must wait all threads are finished)
+        except Exception as e:
+            sys.exit(f"ERROR rollout get exception: {e}")
+
+    rollout_task = asyncio.create_task(rollout())
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         loop = asyncio.get_event_loop()
@@ -82,11 +102,34 @@ async def async_test_EnvGroupQueue_grpo():
             ref = env_output_queue.put_exception.remote(e)
             await asyncio.wrap_future(ref.future())
 
-    await get_batch_task
+    await rollout_task
 
-def test_EnvGroupQueue_grpo():
+def test_GroupQueueManager():
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(async_test_EnvGroupQueue_grpo())
+
+    # env_num is 16
+
+    # test BoundedGroupQueue
+    loop.run_until_complete(async_test_GroupQueueManager(16, 2))
+    loop.run_until_complete(async_test_GroupQueueManager(8, 2))
+    # do not test batch_size 12, because 12 % group_size != 0
+    loop.run_until_complete(async_test_GroupQueueManager(24, 2))
+    loop.run_until_complete(async_test_GroupQueueManager(32, 2))
+
+    loop.run_until_complete(async_test_GroupQueueManager(16, 7))
+    loop.run_until_complete(async_test_GroupQueueManager(8, 7))
+
+    # test PipeGroupQueu
+    loop.run_until_complete(async_test_GroupQueueManager(16, 1))
+    loop.run_until_complete(async_test_GroupQueueManager(8, 1))
+    loop.run_until_complete(async_test_GroupQueueManager(24, 1))
+    loop.run_until_complete(async_test_GroupQueueManager(32, 1))
+
+    # test sync training
+    loop.run_until_complete(async_test_GroupQueueManager(16, 0))
+    loop.run_until_complete(async_test_GroupQueueManager(8, 0))
+    loop.run_until_complete(async_test_GroupQueueManager(24, 0))
+    loop.run_until_complete(async_test_GroupQueueManager(32, 0))
 
 if __name__ == "__main__":
-    test_EnvGroupQueue_grpo()
+    test_GroupQueueManager()
