@@ -526,8 +526,9 @@ class CriticWorker(Worker):
         with Timer("do_checkpoint") as total_timer:
             ckpt_id = f"checkpoint-{global_step}"
             save_dir = os.path.join(self.pipeline_config.output_dir, self.worker_name, ckpt_id, self.cluster_name)
+            critic_save_dir = os.path.join(self.pipeline_config.output_dir, self.worker_name, ckpt_id)
             self.logger.info(f"save checkpoint-{global_step} to {save_dir}")
-            exec_metrics: Dict = self.strategy.save_checkpoint(save_dir, global_step, ckpt_id)
+            exec_metrics: Dict = self.strategy.save_checkpoint(save_dir, global_step, ckpt_id, local_state_path=critic_save_dir)
 
         metrics = {
             f"time/{self.cluster_name}/do_checkpoint/total": total_timer.last,

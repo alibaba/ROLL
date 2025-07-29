@@ -482,8 +482,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         RotaryEmbedding.forward.cache_clear()
         torch.cuda.empty_cache()
 
-    def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", **kwargs):
+    def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", local_state_path=None, **kwargs):
         logger.info(f"save_dir: {save_dir}")
+        if local_state_path is None:
+            local_state_path = save_dir
         with Timer("load") as load_timer:
             self.load_states()
 
@@ -540,9 +542,9 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         torch.save(rng_states, rgn_path)
 
         if self.worker_config.checkpoint_config.get("async_upload", True):
-            self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=save_dir)
+            self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=local_state_path)
         else:
-            self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=save_dir)
+            self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=local_state_path)
 
         metrics = {
             "load": load_timer.last,
