@@ -633,8 +633,6 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
 
     expanded_sample_mask = final_sample_mask.unsqueeze(-1).expand_as(response_mask)
     final_response_mask = response_mask * expanded_sample_mask
-    if final_response_mask.sum() == 0:
-        final_response_mask = data.batch["response_mask"][:, 1:].clone()
     mask_metrics["actor/final_mask_ratio"] = final_sample_mask.mean().item()
     mask_metrics["actor/samples_used"] = final_sample_mask.sum().item()
     mask_metrics["actor/samples_total"] = float(batch_size)

@@ -478,6 +478,23 @@ class RLVRPipeline(BasePipeline):
                     metrics_mgr.add_metric("time/compute_advantage", compute_advantage_timer.last)
 
                 batch = DataProto.concat(batch_list)
+
+                if batch.batch["final_response_mask"].sum() == 0:
+                    logger.info("Warning: final_response_mask.sum() == 0! Current step will be skipped.")
+                    # metrics_mgr.clear_metrics()
+                    metrics_mgr.add_metric("mask/final_mask_sum_eq_0", 1)
+                    metrics = metrics_mgr.get_metrics()
+                    # do ckpt
+                    self.state.step = global_step
+                    self.state.log_history.append(metrics)
+                    for domain, scheduler in self.generate_schedulers.items():
+                        self.state.kv[f"scheduler_state_{domain}"] = ray.get(scheduler.get_scheduler_state.remote())
+                    self.do_checkpoint(global_step=global_step)
+                    self.tracker.log(values=metrics, step=global_step)
+                    continue
+                else:
+                    metrics_mgr.add_metric("mask/final_mask_sum_eq_0", 0)
+
                 batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
                 batch.pop("prompt_id")
 
