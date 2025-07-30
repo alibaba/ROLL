@@ -124,6 +124,7 @@ class DataCollatorWithPaddingForMM:
     max_length: Optional[int] = None
     pad_to_multiple_of: Optional[int] = None
     padded_keys: List[str] = field(default_factory=lambda: ["input_ids", "attention_mask", "labels"])
+    extra_unpadded_keys: List[str] = field(default_factory=lambda: [])
     return_tensors: str = "pt"
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -174,6 +175,9 @@ class DataCollatorWithPaddingForMM:
                 )
             if self.answer_key:
                 un_padded_features[self.answer_key].append(feature[self.answer_key])
+            if self.extra_unpadded_keys:
+                for key in self.extra_unpadded_keys:
+                    un_padded_features[key].append(feature[key])
 
         batch = pad_without_fast_tokenizer_warning(
             self.tokenizer,
