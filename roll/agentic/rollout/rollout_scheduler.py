@@ -123,7 +123,7 @@ class PipeGroupQueue(GroupQueue):
         while target is None:
             for (episode_id, rollouts) in self.groups.items():
                 if len(rollouts) >= self.group_size:
-                    target = min(episode_id, target) if target is not None else episode_id 
+                    target = min(episode_id, target) if target is not None else episode_id
             if target is None:
                 self.completed.clear()
                 await self.completed.wait()
@@ -420,7 +420,8 @@ class RolloutScheduler:
             await self._stop_env_manager(batch_size)
             # stop server in both async val and sync training, assume train_rollout_manager is suspended or stopped
             actor_infer_metrics = await self._stop_server()
-            metrics.update(actor_infer_metrics)
+            if self.mode == "train":
+                metrics.update(actor_infer_metrics)
 
         batch.meta_info["metrics"] = metrics
         return batch

@@ -160,14 +160,14 @@ custom_envs:
 
 train_env_manager:
   format_penalty: -0.05
-  env_groups: 64
+  num_env_groups: 64
   group_size: 1
   tags: [WebShopEnv]
-  n_groups: [64] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  num_groups_partition: [64] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 val_env_manager:
-  env_groups: 64
+  num_env_groups: 64
   group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
   tags: [WebShopEnv]
-  n_groups: [64] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  num_groups_partition: [64] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 

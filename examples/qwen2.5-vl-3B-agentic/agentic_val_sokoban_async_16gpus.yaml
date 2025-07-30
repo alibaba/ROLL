@@ -39,6 +39,8 @@ checkpoint_config:
 
 num_gpus_per_node: 8
 
+async_generation_ratio: 1
+
 max_steps: 1024
 save_steps: 10000
 logging_steps: 1
@@ -111,7 +113,7 @@ actor_infer:
       load_format: auto
       limit_mm_per_prompt:
         image: ${max_actions_per_traj}
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(8,16))
 
 reference:
   model_args:

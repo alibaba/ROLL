@@ -3,9 +3,10 @@ import shutil
 import subprocess
 from datetime import datetime
 from multiprocessing import Pool
-from typing import List
+from typing import List, Callable
 
 from codetiming import Timer
+import torch
 
 from roll.agentic.utils import dump_frames_as_gif
 from roll.utils.logging import get_logger
@@ -39,3 +40,26 @@ def dump_rollout_render(save_dir, step, frames: List[List], env_ids: List, tags:
         except Exception as e:
             logger.error(f"dump rollout render failed: {e}")
     logger.info(f"dump_rollout_render_cost: {timer.last}")
+
+def get_score_normalize_fn(rn_cfg) -> Callable:
+    grouping, method = rn_cfg.grouping, rn_cfg.method
+    if method == "mean_std":
+        norm_func = lambda x: (
+            (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + 1e-6)
+            if x.std(dim=-1, keepdim=True).abs().max() > 1e-6
+            else torch.zeros_like(x)
+        )  # stable to bf16 than x.std()
+    elif method == "mean":
+        norm_func = lambda x: (x - x.mean(dim=-1, keepdim=True))
+    elif method == "asym_clip":
+        norm_func = lambda x: (
+            (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + 1e-6)
+            if x.std(dim=-1, keepdim=True).abs().max() > 1e-6
+            else torch.zeros_like(x)
+        ).clamp(min=-1, max=3)
+    elif method == "identity":
+        norm_func = lambda x: x
+    else:
+        raise ValueError(f"Invalid normalization method: {method}")
+
+    return norm_func

@@ -21,15 +21,6 @@ def all_seed(seed):
         np.random.set_state(np_random_state)
 
 
-def register_resolvers():
-    try:
-        OmegaConf.register_new_resolver("mul", lambda x, y: x * y)
-        OmegaConf.register_new_resolver("int_div", lambda x, y: int(float(x) / float(y)))
-        OmegaConf.register_new_resolver("not", lambda x: not x)
-    except:
-        pass  # already registered
-
-
 print_only_once = False
 
 

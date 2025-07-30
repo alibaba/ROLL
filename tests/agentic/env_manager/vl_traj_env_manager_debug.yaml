@@ -1,0 +1,59 @@
+
+rollout_batch_size: 32
+sequence_length: 8192
+pretrain: Qwen/Qwen2.5-VL-3B-Instruct
+
+use_turn_scores: False # important to GAE when applying token-level rewards to token-level advantages. If False, will take the sum of scores as the reward for the last turn.
+all_response_pattern: ^(.*)$
+action_pattern: <answer>(.*?)</answer>
+think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
+user_prompt_no_think_format: <answer> [your answer] </answer>
+user_prompt_think_format: <think> [Your thoughts] </think> <answer> [your answer] </answer>
+added_text_no_think: <answer>
+added_text_think: <think>
+
+max_tokens_per_step: 128
+max_actions_per_traj: 10
+
+train_env_manager:
+  format_penalty: -0.15 # sokoban env penalty_for_step=-0.1
+  max_env_num_per_worker: 1
+  num_env_groups: 1
+  # under the same group, the env config and env seed are ensured to be equal
+  group_size: 1
+  tags: [SimpleSokoban]
+  num_groups_partition: [1] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  llm_proxy:
+    proxy_type: random
+#  llm_proxy:
+#    proxy_type: openai
+#    proxy_config:
+#      base_url: https://offline-whale-wave.alibaba-inc.com/api/v2/services/aigc/text-generation/v1/chat/completions
+#      api_key: U91RQVCIEV
+#      model_name: Qwen2.5-72B-Instruct-Chatflow
+
+custom_envs:
+  SimpleSokoban:
+    env_type: sokoban
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    #added_text: ${added_text_no_think}
+    added_text: ""
+    env_config: # keys should be a subset of SokobanConfig
+      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+#      action_pattern: ${all_response_pattern}
+      action_pattern: ${action_pattern}
+      max_steps: ${max_actions_per_traj}
+      dim_x: 6
+      dim_y: 6
+      num_boxes: 1
+      render_mode: "rgb_array"
+
+actor_infer:
+  generating_args:
+    max_new_tokens: 128 # single-turn response length
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: 1

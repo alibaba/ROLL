@@ -552,3 +552,41 @@ def default_value_model_provider(
     model_args.model_name_or_path = old_model_name_or_path
 
     return model
+
+
+def get_extra_data_provider(model_name_or_path: str, processor=None):
+    model_name_or_path = download_model(model_name_or_path)
+    config = AutoConfig.from_pretrained(model_name_or_path)
+    if "qwen2" in config.model_type:
+        import types
+        from transformers.models.qwen2_vl import Qwen2VLForConditionalGeneration
+        from transformers import BatchFeature  # help define a object to accesss attr
+
+        dummy_self = BatchFeature(
+            {
+                "config": BatchFeature(
+                    {
+                        "vision_config": BatchFeature({"spatial_merge_size": processor.image_processor.merge_size}),
+                        "image_token_id": processor.tokenizer.convert_tokens_to_ids("<|image_pad|>"),
+                        "video_token_id": processor.tokenizer.convert_tokens_to_ids("<|video_pad|>"),
+                        "vision_start_token_id": processor.tokenizer.convert_tokens_to_ids("<|vision_start|>"),
+                    }
+                )
+            }
+        )
+        get_rope_index = types.MethodType(Qwen2VLForConditionalGeneration.get_rope_index, dummy_self)
+
+        def extra_data_provider(
+            input_ids: torch.LongTensor,
+            image_grid_thw: Optional[torch.LongTensor] = None,
+            video_grid_thw: Optional[torch.LongTensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+        ):
+            rope_index = get_rope_index(input_ids, image_grid_thw, video_grid_thw, attention_mask)[0]
+            # (3, bsz, seqlen) -> (bsz, 3, seqlen) to put it into DataProto,
+            # transpose it batck to (3, bsz, seqlen) before forward for model
+            rope_index = rope_index.transpose(0, 1)
+            return {"position_ids": rope_index}
+
+        return extra_data_provider
+    return None

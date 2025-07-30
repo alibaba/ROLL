@@ -1,9 +1,11 @@
 from typing import Optional, List, Dict
 from dataclasses import dataclass, field
 
+from roll.agentic.env.base import BaseEnvConfig
+
 
 @dataclass
-class FrozenLakeEnvConfig:
+class FrozenLakeEnvConfig(BaseEnvConfig):
     """Configuration for FrozenLake environment"""
 
     # Map config
@@ -14,7 +16,6 @@ class FrozenLakeEnvConfig:
     render_mode: str = "text"
 
     # Mappings
-    action_map: Dict[int, int] = field(default_factory=lambda: {1: 0, 2: 1, 3: 2, 4: 3})
     map_lookup: Dict[bytes, int] = field(
         default_factory=lambda: {b"P": 0, b"F": 1, b"H": 2, b"G": 3}
     )  # b'' string is used for vectorization in numpy
@@ -30,4 +31,17 @@ class FrozenLakeEnvConfig:
             "√": "player on goal",
         }
     )
-    action_lookup: Dict[int, str] = field(default_factory=lambda: {1: "Left", 2: "Down", 3: "Right", 4: "Up"})
+    action_lookup: Dict[int, str] = field(default_factory=lambda: {0: "Left", 1: "Down", 2: "Right", 3: "Up"})
+
+    max_steps: int = 100
+    env_instruction: str = "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
+    action_pattern: str = r"<answer>(.*?)</answer>"
+    special_token_list: Optional[List[str]] = field(default_factory=lambda: ["<think>", "</think>", "<answer>",
+                                                                             "</answer>", "<|im_start|>", "<|im_end|>"])
+
+    def __post_init__(self):
+        grid_vocab_str = "\nThe meaning of each symbol in the state is:\n" + ", ".join(
+            [f"{k}: {v}" for k, v in self.grid_vocab.items()])
+        action_lookup_str = "\nYour available actions are:\n" + ", ".join(
+            [f"{v}" for k, v in self.action_lookup.items()])
+        self.env_instruction = self.env_instruction + grid_vocab_str + action_lookup_str

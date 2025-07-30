@@ -39,6 +39,8 @@ checkpoint_config:
 
 num_gpus_per_node: 8
 
+async_generation_ratio: 1
+
 max_steps: 1024
 save_steps: 10000
 logging_steps: 1
@@ -72,7 +74,7 @@ actor_train:
     learning_rate: 1.0e-6
     weight_decay: 0
     per_device_train_batch_size: 2
-    gradient_accumulation_steps: 64
+    gradient_accumulation_steps: 128
     warmup_steps: 10
     lr_scheduler_type: cosine
   data_args:
@@ -87,7 +89,7 @@ actor_train:
       expert_model_parallel_size: 1
       use_distributed_optimizer: true
       recompute_granularity: full
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(0,4))
   infer_batch_size: 2
 
 actor_infer:
@@ -111,7 +113,7 @@ actor_infer:
       load_format: auto
       limit_mm_per_prompt:
         image: ${max_actions_per_traj}
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(4,8))
 
 reference:
   model_args:
@@ -124,7 +126,7 @@ reference:
   strategy_args:
     strategy_name: hf_infer
     strategy_config: ~
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(0,4))
   infer_batch_size: 2
 
 
