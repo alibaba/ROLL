@@ -14,7 +14,6 @@ from ray.util.timer import _Timer
 
 from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
-from roll.datasets.dataset import get_dataset
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.generate_scheduler import DynamicSamplingScheduler
 from roll.distributed.scheduler.protocol import DataProto
