@@ -64,7 +64,7 @@ class RewardConfig(WorkerConfig):
     )
     reward_type: str = field(default=None, metadata={"help": "The type of the reward."})
     response_length_penalty_coef: float = field(default=0.0, metadata={"help": "The coefficient of the response length penalty."})
-    
+
     tag_included: List[str] = field(default_factory=list, metadata={"help": "The tags of the domain."})
     query_filter_config: RewardFilterConfig = field(
         default_factory=RewardFilterConfig,
@@ -111,6 +111,12 @@ class RLVRConfig(BaseConfig):
     )
     max_additional_running_prompts: int = field(
         default=16, metadata={"help": "The additional number of running prompts, beyond batch_size."}
+    )
+    save_logging_board_dir: str = field(
+        default=None, metadata={"help": "saving directory of logging board_metrics"}
+    )
+    rollout_dump_dir: str = field(
+        default=None, metadata={"help": "saving actor_infer rollout to this dir"}
     )
 
     # role related

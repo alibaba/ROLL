@@ -21,6 +21,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
+from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
 from roll.utils.functionals import (
     RunningMoments,
     agg_loss,
@@ -385,6 +386,7 @@ class RLVRPipeline(BasePipeline):
                         )
                         domain_batches[domain] = domain_batch
                     generate_output = DataProto.concat([domain_batch for domain_batch in domain_batches.values()])
+                    dump_rollout_to_specific_path(self.pipeline_config.rollout_dump_dir, global_step, generate_output, self.tokenizer)
                     generate_output.meta_info.pop("is_offload_states", None)
 
                     for reward_cluster in self.rewards.values():
