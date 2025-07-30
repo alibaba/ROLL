@@ -41,15 +41,16 @@ logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
 
-rollout_batch_size: 512
-val_batch_size: 1024
+rollout_batch_size: 64
+val_batch_size: 64
 sequence_length: 8192
 
 reward_clip: 20
-advantage_clip: 10.0
+advantage_clip: 0.2 # 0.1-0.3
 ppo_epochs: 1
 adv_estimator: "reinforce"
-#pg_clip: 0.1
+pg_clip: 0.1
+max_grad_norm: 1.0
 #dual_clip_loss: True
 init_kl_coef: 0.0
 whiten_advantages: true
@@ -67,14 +68,21 @@ actor_train:
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 2
-    gradient_accumulation_steps: 32
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 4
     warmup_steps: 10
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero2}
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      context_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+      max_grad_norm: ${max_grad_norm}
   device_mapping: list(range(0,8))
   infer_batch_size: 1
 
@@ -84,7 +92,7 @@ actor_infer:
     disable_gradient_checkpointing: true
     dtype: bf16
   generating_args:
-    max_new_tokens: 32 # single-turn response length
+    max_new_tokens: 1024 # single-turn response length
     top_p: 0.99
     top_k: 100
     num_beams: 1
@@ -125,51 +133,6 @@ reward_normalization:
   method: identity # asym_clip / identity / mean_std
 
 custom_envs:
-  SimpleSokoban:
-    env_type: sokoban
-    max_actions_per_traj:  ${max_actions_per_traj} # used in environment state manager to control the actual max actions executed per trajectory
-    max_steps_per_traj: ${max_actions_per_traj}
-    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
-    max_tokens: 100 # used to curate llm prompt "max words", not used for rollout
-    env_config: # keys should be a subset of SokobanConfig
-      dim_x: 6
-      dim_y: 6
-      num_boxes: 1
-      max_steps: ${max_actions_per_traj}
-  LargerSokoban:
-    env_type: sokoban
-    max_actions_per_traj:  ${max_actions_per_traj}
-    max_steps_per_traj: ${max_actions_per_traj}
-    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
-    max_tokens: 100
-    env_config:
-      dim_x: 8
-      dim_y: 8
-      num_boxes: 2
-      max_steps: ${max_actions_per_traj}
-      search_depth: 10
-  SokobanDifferentGridVocab:
-    env_type: sokoban
-    max_actions_per_traj:  ${max_actions_per_traj}
-    max_steps_per_traj: ${max_actions_per_traj}
-    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
-    max_tokens: 100
-    env_config: # keys should be a subset of SokobanConfig
-      search_depth: 30
-      dim_x: 6
-      dim_y: 6
-      num_boxes: 1
-      max_steps: ${max_actions_per_traj}
-      grid_lookup: { 0: "W", 1: ".", 2: "G", 3: "C", 4: "B", 5: "A", 6: "@" }
-      grid_vocab: { "W": "wall", ".": "empty", "G": "target", "C": "box on target", "B": "box", "A": "player", "@": "player on target" }
-  FrozenLake:
-    env_type: frozen_lake
-    max_actions_per_traj:  ${max_actions_per_traj}
-    max_steps_per_traj: ${max_actions_per_traj}
-    env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
-    max_tokens: 100
-    env_config:
-      is_slippery: false
   WebShopEnv:
     env_type: webshop
     max_actions_per_traj:  ${max_actions_per_traj}
