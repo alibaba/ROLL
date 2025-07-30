@@ -232,6 +232,9 @@ class RLVRConfig(BaseConfig):
     loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", "seq-mean-token-sum-norm"] = (
         field(default="seq-mean-token-sum", metadata={"help": "Loss aggregation mode"})
     )
+    importance_sampling: Literal["token", "seq"] = (
+        field(default="token", metadata={"help": "policy importance sampling"})
+    )
     val_greedy: bool = field(default=False, metadata={"help": "Use greedy for validation"})
     val_n_sample: int = field(default=1, metadata={"help": "Number of samples for validation"})
     max_len_mask: bool = field(default=False)
