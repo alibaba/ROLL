@@ -1,42 +1,44 @@
 import json
 import os
+from collections import OrderedDict
 
 from transformers import AutoConfig as HfAutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from ...constants import MCA_CONFIG_NAME
 from ...utils import get_logger
-from ..model_config import McaModelConfig
-from ..qwen2_vl import Qwen2VLConfig
-from ..qwen2_5_vl import Qwen2_5_VLConfig
+from ..model_config import McaModelConfig, MLAMcaModelConfig
 
 
 logger = get_logger(__name__)
 
 
-CONFIG_MAPPING_NAMES = {
-    "llama": McaModelConfig,
-    "qwen2": McaModelConfig,
-    "qwen3": McaModelConfig,
-    "qwen2_moe": McaModelConfig,
-    "qwen3_moe": McaModelConfig,
-    "qwen2_vl": Qwen2VLConfig,
-    "qwen2_5_vl": Qwen2_5_VLConfig,
-}
+CONFIG_MAPPING = OrderedDict()
 
 
-def get_config_cls(model_type) -> McaModelConfig:
-    cls = CONFIG_MAPPING_NAMES.get(model_type, None)
+def register_config(model_type, cls=None):
+    def decorator(cls):
+        if model_type in CONFIG_MAPPING:
+            logger.warning(f"Config for model type {model_type} already registered, overriding!")
+        CONFIG_MAPPING[model_type] = cls
+        return cls
+
+    if cls is not None:
+        return decorator(cls)
+    return decorator
+
+
+def get_config_cls(model_type) -> "McaModelConfig":
+    cls = CONFIG_MAPPING.get(model_type)
     if cls is None:
+        if model_type in ("llama", "qwen2", "qwen3", "qwen2_moe", "qwen3_moe"):
+            return McaModelConfig
+        if model_type in ("deepseek_v3",):
+            return MLAMcaModelConfig
         logger.warning(f"No config found for model type {model_type}, use McaModelConfig!")
         cls = McaModelConfig
     return cls
 
-def register_config(model_type, config_cls):
-    cls = CONFIG_MAPPING_NAMES.get(model_type, None)
-    if cls is not None:
-        logger.warning(f"Config for model type {model_type} already registered, set {cls} to {config_cls}!")
-    CONFIG_MAPPING_NAMES[model_type] = config_cls
 
 class AutoConfig:
     @classmethod

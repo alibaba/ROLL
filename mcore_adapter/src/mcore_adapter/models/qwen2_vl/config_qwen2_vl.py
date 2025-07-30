@@ -3,9 +3,11 @@ from typing import Optional
 
 from transformers import PretrainedConfig
 
+from ..auto.config_auto import register_config
 from ..model_config import McaModelConfig
 
 
+@register_config("qwen2_vl")
 @dataclass
 class Qwen2VLConfig(McaModelConfig):
     vision_start_token_id: int = 151652

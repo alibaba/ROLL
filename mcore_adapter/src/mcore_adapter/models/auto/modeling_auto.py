@@ -1,5 +1,6 @@
 import json
 import os
+from collections import OrderedDict
 
 from transformers import AutoConfig as HfAutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
@@ -7,36 +8,35 @@ from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 from ...constants import MCA_CONFIG_NAME
 from ...utils import get_logger
 from ..model_factory import McaGPTModel, VirtualModels
-from ..qwen2_5_vl import Qwen2_5_VLModel
-from ..qwen2_vl import Qwen2VLModel
 
 
 logger = get_logger(__name__)
 
 
-MODEL_MAPPING_NAMES = {
-    "llama": McaGPTModel,
-    "qwen2": McaGPTModel,
-    "qwen3": McaGPTModel,
-    "qwen2_moe": McaGPTModel,
-    "qwen3_moe": McaGPTModel,
-    "qwen2_vl": Qwen2VLModel,
-    "qwen2_5_vl": Qwen2_5_VLModel,
-}
+MODEL_MAPPING = OrderedDict()
 
 
-def get_model_cls(model_type) -> McaGPTModel:
-    cls = MODEL_MAPPING_NAMES.get(model_type, None)
+def register_model(model_type, cls=None):
+    def decorator(cls):
+        if model_type in MODEL_MAPPING:
+            logger.warning(f"Model for model type {model_type} already registered, overriding!")
+        MODEL_MAPPING[model_type] = cls
+        return cls
+
+    if cls is not None:
+        return decorator(cls)
+    return decorator
+
+
+def get_model_cls(model_type) -> "McaGPTModel":
+    cls = MODEL_MAPPING.get(model_type)
     if cls is None:
+        if model_type in ("llama", "qwen2", "qwen3", "qwen2_moe", "qwen3_moe"):
+            return McaGPTModel
         logger.warning(f"No model found for model type {model_type}, use McaGPTModel!")
         cls = McaGPTModel
     return cls
 
-def register_model(model_type, model_cls):
-    cls = MODEL_MAPPING_NAMES.get(model_type, None)
-    if cls is not None:
-        logger.warning(f"Model for model type {model_type} already registered, set {cls} to {model_cls}!")
-    MODEL_MAPPING_NAMES[model_type] = model_cls
 
 class AutoModel:
     @classmethod

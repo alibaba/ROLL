@@ -266,7 +266,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
             config=config,
             transformer_layer_spec=transformer_layer_spec,
             vocab_size=config.padded_vocab_size,
-            max_sequence_length=config.max_position_embeddings,
+            max_sequence_length=config.max_sequence_length,
             pre_process=pre_process,
             post_process=post_process,
             parallel_output=True,
@@ -274,6 +274,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
             position_embedding_type=config.position_embedding_type,
             rotary_percent=config.rotary_percent,
             rotary_base=config.rotary_base,
+            mtp_block_spec=kwargs.get("mtp_block_spec", None),
         )
         for param in self.parameters():
             tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
