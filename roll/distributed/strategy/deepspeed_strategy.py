@@ -277,6 +277,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             attention_mask = data.batch["attention_mask"]
             position_ids = data.batch["position_ids"]
             forward_args = data.meta_info.get("forward_args", {})
+            # TODO: The offload option may be integrated into the pipeline config in the future.
             is_offload_optimizer_states_in_train_step = data.meta_info.get("is_offload_optimizer_states_in_train_step", True)
             if position_ids.dim() == 3:
                 # qwen2vl mrope, maybe use a placeholder and let model generate position_ids

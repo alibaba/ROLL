@@ -19,6 +19,7 @@ from megatron.core.models.common.embeddings import RotaryEmbedding
 from megatron.core.optimizer import OptimizerConfig, MegatronOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.transformer.moe.moe_utils import clear_aux_losses_tracker, reduce_aux_losses_tracker_across_ranks
+from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
@@ -132,6 +133,7 @@ class MegatronInferStrategy(InferenceStrategy):
         self.model.eval()
         batch_size = batch.batch.batch_size[0]
         micro_batch_size = batch.meta_info["micro_batch_size"]
+        output_on_all_tp_ranks = batch.meta_info.get("output_on_all_tp_ranks", False)
         num_microbatches = max(batch_size // micro_batch_size, 1)
         micro_batches = batch.chunk(chunks=num_microbatches)
         data_iterator = [iter(micro_batches) for _ in range(len(self.model))]
@@ -149,9 +151,9 @@ class MegatronInferStrategy(InferenceStrategy):
         results = collate_fn_to_dict_list(losses_reduced)
 
         if not (
-            self.worker.rank_info.tp_rank == 0
-            and self.worker.rank_info.cp_rank == 0
-            and self.worker.rank_info.is_pipeline_last_stage
+                (self.worker.rank_info.tp_rank == 0 or output_on_all_tp_ranks)
+                and self.worker.rank_info.cp_rank == 0
+                and self.worker.rank_info.is_pipeline_last_stage
         ):
             return None
         return results
@@ -235,6 +237,10 @@ class MegatronInferStrategy(InferenceStrategy):
             entropy = context_parallel_gather(entropy, parallel_dim=1)
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
         return entropy
+
+    def op_compute_logits(self, logits: torch.Tensor):
+        full_logits = gather_from_tensor_model_parallel_region(logits)
+        return full_logits
 
 
 class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
@@ -357,7 +363,6 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         mini_batch_size = self.worker_config.training_args.per_device_train_batch_size
         num_microbatches = batch.batch.batch_size[0] // self.worker_config.training_args.per_device_train_batch_size
         is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
-
         assert (
             num_microbatches == self.megatron_train_args.gradient_accumulation_steps
         ), f"num_microbatches={num_microbatches} gradient_accumulation_steps={self.megatron_train_args.gradient_accumulation_steps}"
@@ -393,7 +398,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         metrics = {}
         for mini_metrics in metrics_tensors:
             append_to_dict(metrics, mini_metrics)
-        
+
         metrics.update({self.worker_config.name + "/" + "grad_norm": grad_norm})
 
         if self.model.config.num_moe_experts is not None and self.model.config.num_moe_experts > 1:

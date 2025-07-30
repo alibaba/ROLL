@@ -1,0 +1,77 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "distill_megatron"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/oss_bucket_0/chuye/roll/distill/models/megatron_dp_pp
+
+track_with: ml_tracker
+
+save_steps: 100
+logging_steps: 1
+resume_from_checkpoint: false
+
+student_pretrain: Qwen/Qwen2.5-7B-Instruct
+teacher_pretrain: Qwen/Qwen2.5-14B-Instruct
+
+# distill config
+distill_loss_weight: 0.85
+kd_objective: forward_kl
+distill_on_prompt: True
+
+sequence_length: 1024
+max_grad_norm: 1.0
+
+student:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 2.0e-5
+    lr_scheduler_type: constant
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 1
+    warmup_steps: 0
+    num_train_epochs: 1
+    max_steps: 1000
+
+  data_args:
+    template: qwen2_5
+    file_name:
+      - data/GSM8K_zh.json  #https://huggingface.co/datasets/meta-math/GSM8K_zh
+    preprocessing_num_workers: 16
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  device_mapping: list(range(0,8))
+
+teacher:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      bf16: true
+  device_mapping: list(range(0,8))
+
+system_envs:
+  RAY_PROFILING: "0"

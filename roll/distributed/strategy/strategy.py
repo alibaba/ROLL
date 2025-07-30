@@ -139,6 +139,9 @@ class InferenceStrategy(ABC):
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
         return entropy
 
+    def op_compute_logits(self, logits: torch.Tensor):
+        return logits
+
 
 class TrainStrategy(InferenceStrategy):
     def __init__(self, worker: "Worker"):
