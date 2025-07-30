@@ -277,6 +277,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             attention_mask = data.batch["attention_mask"]
             position_ids = data.batch["position_ids"]
             forward_args = data.meta_info.get("forward_args", {})
+            is_offload_optimizer_states_in_train_step = data.meta_info.get("is_offload_optimizer_states_in_train_step", True)
             if position_ids.dim() == 3:
                 # qwen2vl mrope, maybe use a placeholder and let model generate position_ids
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
@@ -308,7 +309,8 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                 # global_grad_norm is calculated in optimizer.step thus put it
                 # into metrics after optimizer.step
                 metrics.update({self.worker_config.name + "/" + "grad_norm": self.model.get_global_grad_norm().item()})
-                self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
+                if is_offload_optimizer_states_in_train_step:
+                    self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
         return metrics
 
     def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", **kwargs):

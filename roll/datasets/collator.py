@@ -41,6 +41,50 @@ def collate_fn_to_dict_list(data_list: list[dict]) -> dict:
 
 
 @dataclass
+class DataCollatorWithPaddingForDPO:
+    tokenizer: PreTrainedTokenizerBase
+    max_length: Optional[int] = None
+    return_tensors: str = "pt"
+
+    def pad_sequences(self, sequences: List[List[int]], pad_value: int = 0) -> torch.Tensor:
+        padded = [seq + [pad_value] * (self.max_length - len(seq)) for seq in sequences]
+        return torch.tensor(padded)
+
+    def concatenated_inputs(self, chosen_ids, c_mask, reject_ids, r_mask, prompt_id_lens):
+        origin_batch_size = len(prompt_id_lens)
+        input_ids = torch.stack((chosen_ids, reject_ids), dim=1).view(2 * origin_batch_size, -1)
+        att_masks = torch.stack((c_mask, r_mask), dim=1).view(2 * origin_batch_size, -1)
+        prompt_id_lens = torch.stack((prompt_id_lens, prompt_id_lens), dim=1).view(2 * origin_batch_size)
+        return input_ids, att_masks, prompt_id_lens
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        chosen_ids = []
+        c_mask = []
+        reject_ids = []
+        r_mask = []
+        prompt_ids_lens = []
+
+        for item in batch:
+            chosen_ids.append(item["chosen_ids"])
+            c_mask.append(item["c_mask"])
+            reject_ids.append(item["reject_ids"])
+            r_mask.append(item["r_mask"])
+            prompt_ids_lens.append(item["prompt_ids_lens"])
+
+        chosen_ids = self.pad_sequences(chosen_ids, pad_value=self.tokenizer.pad_token_id)
+        c_mask = self.pad_sequences(c_mask)
+        reject_ids = self.pad_sequences(reject_ids, pad_value=self.tokenizer.pad_token_id)
+        r_mask = self.pad_sequences(r_mask)
+        prompt_ids_lens = torch.tensor(prompt_ids_lens)
+
+        input_ids, attention_mask, prompt_id_lens = self.concatenated_inputs(
+            chosen_ids, c_mask, reject_ids, r_mask, prompt_ids_lens
+        )
+        position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "prompt_id_lens": prompt_id_lens, "position_ids": position_ids}
+
+
+@dataclass
 class DataCollatorWithPaddingForPaddedKeys:
     tokenizer: PreTrainedTokenizerBase
     padding: Union[bool, str, PaddingStrategy] = True

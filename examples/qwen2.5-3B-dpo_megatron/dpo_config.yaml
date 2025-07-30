@@ -1,0 +1,106 @@
+defaults:
+  - ../config/envs@_here_
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen2.5-3B-dpo-config"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+system_envs:
+  USE_MODELSCOPE: '1'
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
+
+#track_with: wandb
+#tracker_kwargs:
+#  api_key:
+#  project: roll_examples
+#  notes: roll_examples
+#  tags:
+#    - dpo
+#    - baseline
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: /data/oss_bucket_0/rl_examples/llm/tensorboard/roll_exp/dpo
+
+
+max_steps: 500
+save_steps: 500
+logging_steps: 1
+eval_steps: 100
+resume_from_checkpoint: false
+
+sequence_length: 512
+train_batch_size: 64
+val_batch_size: 64
+
+# local_rank: -1
+num_nodes: 1
+num_gpus_per_node: 8
+
+pretrain: Qwen/Qwen2.5-3B-Instruct
+
+chosen_key: chosen
+rejected_key: rejected
+
+validation:
+  data_args:
+    template: qwen2_5
+    file_name: data/comparison_gpt4_data_zh.json
+
+actor_train:
+  model_args:
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    lr_scheduler_type: constant
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 16
+    gradient_accumulation_steps: 1
+    warmup_steps: 20
+    num_train_epochs: 10
+  data_args:
+    template: qwen2_5_dpo
+    file_name:
+      - data/comparison_gpt4_data_zh.json
+    dataset_dir: data
+    preprocessing_num_workers: 1
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  device_mapping: list(range(0,8))
+  infer_batch_size: 16
+
+reference:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+  device_mapping: list(range(0,8))
+  infer_batch_size: 16

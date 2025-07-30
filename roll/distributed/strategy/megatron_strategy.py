@@ -356,6 +356,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         mini_batch_size = self.worker_config.training_args.per_device_train_batch_size
         num_microbatches = batch.batch.batch_size[0] // self.worker_config.training_args.per_device_train_batch_size
+        is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
 
         assert (
             num_microbatches == self.megatron_train_args.gradient_accumulation_steps
@@ -377,7 +378,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         # 只有step的时候需要load optimizer states
         self.load_states(include=[OffloadStateType.optimizer_states])
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
-        self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
+        if is_offload_optimizer_states_in_train_step:
+            self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
 
         if update_successful:
             self.scheduler.step()
