@@ -14,6 +14,7 @@ from transformers import (
     PreTrainedTokenizer,
     TrainingArguments,
 )
+from transformers.dynamic_module_utils import get_cached_module_file
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import is_fsdp_enabled
 
@@ -25,15 +26,26 @@ except Exception as e:
     mca_TrainingArguments = None
 
 from roll.configs import ModelArguments
-from roll.utils.checkpoint_manager import download_model
+from roll.utils.checkpoint_manager import download_model, file_lock_context
 from roll.utils.logging import get_logger
 
 
 logger = get_logger()
 
 
+def prepare_automap_files(model_path: str):
+    python_files = []
+    for file_name in os.listdir(model_path):
+        if file_name.endswith(".py") and os.path.isfile(os.path.join(model_path, file_name)):
+            python_files.append(file_name)
+    with file_lock_context(model_path):
+        for file_name in python_files:
+            get_cached_module_file(model_path, file_name)
+
+
 def default_tokenizer_provider(model_args: "ModelArguments"):
     model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_name_or_path)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_or_path,
         use_fast=True,
@@ -46,6 +58,7 @@ def default_tokenizer_provider(model_args: "ModelArguments"):
 
 def default_processor_provider(model_args: "ModelArguments"):
     model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_name_or_path)
     try:
         processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
     except Exception as e:
@@ -116,6 +129,7 @@ def load_model(
     modified from llamafactory
     """
     model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_args.model_name_or_path)
     init_kwargs = {"trust_remote_code": True, **model_args.model_config_kwargs}
     config = AutoConfig.from_pretrained(model_name_or_path, **init_kwargs)
     if model_args.attn_implementation is not None and model_args.attn_implementation != "auto":
@@ -354,6 +368,7 @@ def default_actor_model_provider(
     config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_args.model_name_or_path)
     if (
         mca_TrainingArguments is not None
         and training_args is not None
@@ -413,6 +428,7 @@ def default_reward_model_provider(
     """
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_args.model_name_or_path)
 
     if (
         mca_TrainingArguments is not None
@@ -486,6 +502,7 @@ def default_value_model_provider(
     """
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_args.model_name_or_path)
 
     if (
         mca_TrainingArguments is not None
