@@ -12,12 +12,10 @@ from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
 
-
-from roll.third_party.vllm.vllm_0_8_4.llm_engine import LLMEngine084
+from roll.third_party.vllm.vllm_0_10_0.llm_engine import LLMEngine0100
 from roll.utils.send_recv_utils import SendBucketManager
 
-
-class Llm084(LLM):
+class Llm0100(LLM):
 
     def __init__(
         self,
@@ -105,7 +103,7 @@ class Llm084(LLM):
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
-            hf_overrides=hf_overrides,
+            # hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
@@ -114,7 +112,7 @@ class Llm084(LLM):
         engine_args.resource_placement_groups = resource_placement_groups
 
         # Create the Engine (autoselects V0 vs V1)
-        self.llm_engine = LLMEngine084.from_engine_args(
+        self.llm_engine = LLMEngine0100.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
         self.engine_class = type(self.llm_engine)
 

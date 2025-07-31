@@ -106,7 +106,6 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
         for rank in range(self.parallel_config.world_size):
             pg = placement_group[rank]['placement_group']
             gpu_rank = placement_group[rank]['gpu_rank']
-            # TODO do not override other options in PYTORCH_CUDA_ALLOC_CONF
             runtime_env = RuntimeEnv(env_vars=RayUtils.get_vllm_run_time_env_vars(gpu_rank))
             assert current_platform.ray_device_key == "GPU"
             # NV+AMD GPUs, and Intel XPUs

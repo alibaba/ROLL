@@ -23,7 +23,7 @@ class RayUtils:
             device_type = GPUUtils.get_device_type()
         if DeviceType.NVIDIA == device_type:
             env_vars = {
-                # "RAY_DEBUG": "legacy"
+                # "RAY_DEBUG": "legacy",
                 "TORCHINDUCTOR_COMPILE_THREADS": "2",
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 "NCCL_CUMEM_ENABLE": "0",   # https://github.com/NVIDIA/nccl/issues/1234
@@ -31,8 +31,20 @@ class RayUtils:
             }
         elif DeviceType.AMD == device_type:
             env_vars = {
+                # These VLLM related enviroment variables are related to backend. maybe used afterwards.
+                # "VLLM_USE_TRITON_FLASH_ATTN":"0",
+                # "VLLM_ROCM_USE_AITER":"1",
+                # "VLLM_ROCM_USE_AITER_MOE":"1",
+                # "VLLM_ROCM_USE_AITER_ASMMOE":"1",
+                # "VLLM_ROCM_USE_AITER_PAGED_ATTN":"1",
+                # "RAY_DEBUG": "legacy",
+                "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
+                "VLLM_USE_V1":"0",
                 "TORCHINDUCTOR_COMPILE_THREADS": "2",
                 "PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True",
+                # "NCCL_DEBUG_SUBSYS":"INIT,COLL",
+                # "NCCL_DEBUG":"INFO",
+                # "NCCL_DEBUG_FILE":"rccl.%h.%p.log",
             }
         elif DeviceType.UNKNOWN == device_type:
             env_vars = {
@@ -55,6 +67,7 @@ class RayUtils:
             visible_devices_env_vars = {
                 "HIP_VISIBLE_DEVICES": ",".join(map(str, gpu_ranks)),
                 "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",
             }
         else:
             visible_devices_env_vars = {
@@ -73,3 +86,30 @@ class RayUtils:
         if DeviceType.NVIDIA == device_type or DeviceType.UNKNOWN == device_type:
             return os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
         return []
+    
+    @staticmethod
+    def get_vllm_run_time_env_vars(
+        gpu_rank:str,
+        device_type: DeviceType | None = None) -> dict:
+        env_vars = {}
+        if device_type is None:
+            device_type = GPUUtils.get_device_type()
+        if DeviceType.NVIDIA == device_type:
+            env_vars={
+                    "PYTORCH_CUDA_ALLOC_CONF" : "",
+                    "CUDA_VISIBLE_DEVICES": f"{gpu_rank}",
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                }
+        elif DeviceType.AMD == device_type:
+            env_vars={
+                    "PYTORCH_CUDA_ALLOC_CONF" : "",
+                    "HIP_VISIBLE_DEVICES": f"{gpu_rank}",
+                    "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
+                    "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",
+                    # "NCCL_DEBUG_SUBSYS":"INIT,COLL",
+                    # "NCCL_DEBUG":"INFO",
+                    # "NCCL_DEBUG_FILE":"rccl.%h.%p.log",
+                    # "NCCL_P2P_DISABLE":"1",
+            }
+        get_logger().info(f"gpu is {device_type}, ray custom runtime env_vars: {env_vars}")
+        return env_vars
