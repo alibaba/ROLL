@@ -215,8 +215,9 @@ class MetricsManager:
         metrics[f"{prefix}/token_level_rewards_mean/min"] = torch.min(sequence_reward_mean).detach().item()
 
         metrics[f"{prefix}/advantages/mean"] = masked_mean(advantages, response_mask).detach().item()
-        metrics[f"{prefix}/advantages/max"] = torch.max(advantages[response_mask]).detach().item()
-        metrics[f"{prefix}/advantages/min"] = torch.min(advantages[response_mask]).detach().item()
+        if torch.any(response_mask):
+            metrics[f"{prefix}/advantages/max"] = torch.max(advantages[response_mask]).detach().item()
+            metrics[f"{prefix}/advantages/min"] = torch.min(advantages[response_mask]).detach().item()
 
         correct_mask_expanded = correct_mask.unsqueeze(-1).expand_as(response_mask)
         correct_response_mask = response_mask & correct_mask_expanded
@@ -251,8 +252,9 @@ class MetricsManager:
             )
 
         metrics[f"{prefix}/raw_advantages/mean"] = masked_mean(raw_advantages, response_mask).detach().item()
-        metrics[f"{prefix}/raw_advantages/max"] = torch.max(raw_advantages[response_mask]).detach().item()
-        metrics[f"{prefix}/raw_advantages/min"] = torch.min(raw_advantages[response_mask]).detach().item()
+        if torch.any(response_mask):
+            metrics[f"{prefix}/raw_advantages/max"] = torch.max(raw_advantages[response_mask]).detach().item()
+            metrics[f"{prefix}/raw_advantages/min"] = torch.min(raw_advantages[response_mask]).detach().item()
 
         if torch.any(correct_response_mask):
             metrics[f"{prefix}/right_response/raw_advantages/mean"] = (
@@ -283,14 +285,16 @@ class MetricsManager:
             )
 
         metrics[f"{prefix}/returns/mean"] = masked_mean(returns, response_mask).detach().item()
-        metrics[f"{prefix}/returns/max"] = torch.max(returns[response_mask]).detach().item()
-        metrics[f"{prefix}/returns/min"] = torch.min(returns[response_mask]).detach().item()
+        if torch.any(response_mask):
+            metrics[f"{prefix}/returns/max"] = torch.max(returns[response_mask]).detach().item()
+            metrics[f"{prefix}/returns/min"] = torch.min(returns[response_mask]).detach().item()
 
         if "values" in batch.batch.keys():
             values = batch.batch["values"]
             metrics[f"{prefix}/values/mean"] = masked_mean(values, response_mask).detach().item()
-            metrics[f"{prefix}/values/max"] = torch.max(values[response_mask]).detach().item()
-            metrics[f"{prefix}/values/min"] = torch.min(values[response_mask]).detach().item()
+            if torch.any(response_mask):
+                metrics[f"{prefix}/values/max"] = torch.max(values[response_mask]).detach().item()
+                metrics[f"{prefix}/values/min"] = torch.min(values[response_mask]).detach().item()
 
         self.add_metrics(metrics)
         return metrics

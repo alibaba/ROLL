@@ -481,7 +481,6 @@ class RLVRPipeline(BasePipeline):
 
                 if batch.batch["final_response_mask"].sum() == 0:
                     logger.info("Warning: final_response_mask.sum() == 0! Current step will be skipped.")
-                    # metrics_mgr.clear_metrics()
                     metrics_mgr.add_metric("mask/final_mask_sum_eq_0", 1)
                     metrics = metrics_mgr.get_metrics()
                     # do ckpt

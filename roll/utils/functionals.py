@@ -689,6 +689,10 @@ def compute_advantage(
 ):
     if response_mask is None:
         response_mask = data.batch["response_mask"][:, 1:]
+    if response_mask.sum() == 0:
+        whiten_rewards = False
+        whiten_advantages = False
+        logger.info("Warning: domain final_response_mask.sum() == 0! All masked_whiten will be skipped.")
 
     token_level_rewards = data.batch["token_level_rewards"].float()
     if whiten_rewards:
