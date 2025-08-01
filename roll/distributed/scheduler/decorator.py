@@ -12,6 +12,7 @@ from typing import Tuple, List, Dict
 from more_itertools import chunked
 import ray
 import torch
+import asyncio
 
 from roll.distributed.scheduler.protocol import DataProto, ObjectRefWrap
 from roll.utils.logging import get_logger
@@ -31,6 +32,7 @@ class Dispatch(Enum):
     ALL_TO_ALL = auto()
     DP_MP_COMPUTE = auto()
     DP_MP_DISPATCH_FIRST = auto()
+    DP_MP_DISPATCH_FIRST_COLLECT_ALL = auto()
 
 
 class Execute(Enum):
@@ -201,6 +203,10 @@ predefined_dispatch_mode_fn = {
         "dispatch_fn": dispatch_dp_mp_dispatch_first,
         "collect_fn": collect_dp_mp_compute,
     },
+    Dispatch.DP_MP_DISPATCH_FIRST_COLLECT_ALL: {
+        "dispatch_fn": dispatch_dp_mp_dispatch_first,
+        "collect_fn": collect_all_to_all,
+    }
 }
 
 
@@ -259,27 +265,49 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, clear_
     _check_execute_mode(execute_mode)
 
     def decorator(func):
-        @wraps(func)
-        def inner(*args, **kwargs):
-            try:
-                result = func(*args, **kwargs)
-                if clear_cache:
-                    try:
-                        torch._C._cuda_clearCublasWorkspaces()
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                    except Exception as oe:
-                        pass
-
-            except Exception as e:
-                logger.error(str(e))
-                logger.error(traceback.format_exc())
-                raise e
-            return result
-
+        is_async = asyncio.iscoroutinefunction(func)
         attrs = {"dispatch_mode": dispatch_mode, "execute_mode": execute_mode}
-        setattr(inner, BIND_WORKER_METHOD_FLAG, attrs)
+        if is_async:
+            @wraps(func)
+            async def inner_async(*args, **kwargs):
+                try:
+                    result = await func(*args, **kwargs)
+                    if clear_cache:
+                        try:
+                            torch._C._cuda_clearCublasWorkspaces()
+                            gc.collect()
+                            torch.cuda.empty_cache()
+                        except Exception as oe:
+                            pass
 
-        return inner
+                except Exception as e:
+                    logger.error(str(e))
+                    logger.error(traceback.format_exc())
+                    raise e
+                return result
+
+            setattr(inner_async, BIND_WORKER_METHOD_FLAG, attrs)
+            return inner_async
+        else:
+            @wraps(func)
+            def inner(*args, **kwargs):
+                try:
+                    result = func(*args, **kwargs)
+                    if clear_cache:
+                        try:
+                            torch._C._cuda_clearCublasWorkspaces()
+                            gc.collect()
+                            torch.cuda.empty_cache()
+                        except Exception as oe:
+                            pass
+
+                except Exception as e:
+                    logger.error(str(e))
+                    logger.error(traceback.format_exc())
+                    raise e
+                return result
+
+            setattr(inner, BIND_WORKER_METHOD_FLAG, attrs)
+            return inner
 
     return decorator

@@ -19,9 +19,11 @@ model_download_registry: Dict[str, Any] = {}
 model_download_registry["HUGGINGFACE_HUB"] = snapshot_download
 try:
     from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
+
     model_download_registry["MODELSCOPE"] = ms_snapshot_download
 except Exception as e:
     logger.error(e)
+
 
 @contextlib.contextmanager
 def file_lock_context(lock_path: str):

@@ -1,122 +1,68 @@
 custom_env:
   SimpleSokoban:
     env_type: sokoban
-    max_actions_per_traj: 10 # used in environment state manager to control the actual max actions executed per trajectory
-    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>"
-    max_tokens: 100 # used to curate llm prompt "max words", not used for rollout
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    added_text: ${added_text_no_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+    use_thread_lock: true
     env_config: # keys should be a subset of SokobanConfig
+      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${action_pattern}
+      max_steps: ${max_actions_per_traj}
       dim_x: 6
       dim_y: 6
       num_boxes: 1
-      max_steps: 100
-
   LargerSokoban:
     env_type: sokoban
-    max_actions_per_traj: 10
-    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>"
-    max_tokens: 100
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    added_text: ${added_text_no_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+    use_thread_lock: true
     env_config:
+      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${action_pattern}
       dim_x: 8
       dim_y: 8
       num_boxes: 2
-      max_steps: 100
       search_depth: 10
-  
   SokobanDifferentGridVocab:
     env_type: sokoban
-    max_actions_per_traj: 10
-    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>"
-    max_tokens: 100
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    added_text: ${added_text_no_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+    use_thread_lock: true
     env_config: # keys should be a subset of SokobanConfig
+      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${action_pattern}
       search_depth: 30
       dim_x: 6
       dim_y: 6
       num_boxes: 1
-      max_steps: 100
-      grid_lookup: {0: "W", 1: ".", 2: "G", 3: "C", 4: "B", 5: "A", 6: "@"}
-      grid_vocab: {"W": "wall", ".": "empty", "G": "target", "C": "box on target", "B": "box", "A": "player", "@": "player on target"}
-
-  VisualSimpleSokoban:
-    env_type: sokoban
-    max_actions_per_traj: 10
-    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>"
-    max_tokens: 100
-    env_config: # keys should be a subset of SokobanConfig
-      dim_x: 6
-      dim_y: 6
-      num_boxes: 1
-      max_steps: 100
-      render_mode: "rgb_array"
-
-  # Alfworld:
-  #   env_type: alfworld
-  #   env_instruction: "You are solving the Alfworld puzzle. "
-  #   env_config: null
-
-  Countdown:
-    env_type: countdown
-    max_actions_per_traj: 1
-    env_instruction: "You are solving the Countdown puzzle. You should use the num list to create an equation that equals the target. Example answer format: <think> To find an equation using [3, 5, 2] to get 4. Let's check 2 + 5 = 7, 7 - 3 = 4. So the answer is 2 + 5 - 3 = 4. </think><answer>2 + 5 - 3</answer>"
-    max_tokens: 100
-    env_config: null
-
-  Bandit:
-    env_type: bandit
-    max_actions_per_traj: 1
-    env_instruction: ""
-    max_tokens: 100
-    env_config: 
-      lo_arm_name: "Phoenix"
-      hi_arm_name: "Dragon"
-
-  BanditTest:
-    env_type: bandit
-    max_actions_per_traj: 1
-    env_instruction: ""
-    max_tokens: 100
-    env_config: 
-      lo_arm_name: "Trader"
-      hi_arm_name: "Librarian"
-
+      max_steps: ${max_actions_per_traj}
+      grid_lookup: { 0: "W", 1: ".", 2: "G", 3: "C", 4: "B", 5: "A", 6: "@" }
+      grid_vocab: { "W": "wall", ".": "empty", "G": "target", "C": "box on target", "B": "box", "A": "player", "@": "player on target" }
   FrozenLake:
     env_type: frozen_lake
-    max_actions_per_traj: 10
-#    env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. Example answer format: <think>To forbid the hole and go to the target, I should go left then go up.</think><answer>Left || Up</answer>"
-    env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be a sequence of actions, like <answer>Right || Right || Up</answer>"
-    max_tokens: 100
-    env_config: null
-
-  MetamathQA:
-    env_type: metamathqa
-    max_actions_per_traj: 1
-    env_instruction: "You are solving Math problems. "
-    max_tokens: 100
-    env_config: null
-
-  WebShop:
-    env_type: webshop
-    max_actions_per_traj: 30
-    env_instruction: "You are browsing an online shop. Based on the instruction, find the product that matches the production description. You need to iteratively take action, read the website and decide what action to take next until finding the product. Available actions depends on the page: in the search page you can search keywords, in the search result page you can click an item url or click[next >] to navigate to next page, in the product page you can click[description] or click[features] to see the details, click[blue] or click[x-large] to choose size and colors, click[buy now] when you decided to buy the product, click[back to search] to return to search page. Example process: I need a gingko light and 20x20 pillow cover that is hand painted. First search[gingko light 20x20 pillow cover hand painted], answer format: <answer>search[blanket with fleece throw]</answer>. Valid answer is search[<keywords>] or click[<clickable>]."
-    # env_instruction: >
-    #   You are browsing an online shop. Based on the instruction, find the product 
-    #   that matches the production description. You need to iteratively take 
-    #   actions(search or click) in the browser to find the final product. Example 
-    #   process: 
-    #   Instruction: Find me machine wash men's t-shirts with long sleeve with color: black, and size: xx-large big tall, and price lower than 50.00 dollars
-    #   WebShop [SEP] Instruction: [SEP] Find me machine wash men's t-shirts with long sleeve with color: black, and size: xx-large big tall, and price lower than 50.00 dollars [SEP] Search
-    #   Available actions: ['search[<content>]']
-    #   <answer>search[machine wash men's t-shirts with long sleeve]</answer>
-    #   Instruction: [SEP] Find me machine wash men's t-shirts with long sleeve with color: black, and size: xx-large big tall, and price lower than 50.00 dollars [SEP] Back to Search [SEP] Page 1 (Total results: 50) [SEP] Next > [SEP] B09QQP3356 [SEP] HAUKLIE Men's Sports Waffle Ribbed Polo Shirts Summer Short Sleeve Cotton Muscle Quarter-Zip Henley T-Shirt Tunics Tops [SEP] $10.99 [SEP] B09Q8RD8YN [SEP] Bungo Stray Anime Dogs Anime Character, Long Sleeve, Sweatshirt, Hoodie, T shirt [SEP] $19.99 [SEP] B09QGK5XHZ [SEP] WENKOMG1 Men's Long Sleeve Undershirt with Mask Turtleneck Hooded T-Shirt Solid Color Workout Tops Zipper Side Slit Shirts Slim Fit Sweatshirt Spring/Summer Tee Shirts(Gray,) [SEP] $8.39 [SEP] B09QQJJ3KM [SEP] One Lucky Teacher St Patrick Day Shamrock Tee Teachers Custom Personalized Unisex T-Shirts Long Sleeve Hoodie Sweatshirt Gifts [SEP] $100.0 [SEP] B09S3BN15C [SEP] Mens Linen Shirt,Men's Striped Shirts Casual Short Sleeve Button Down Shirts Regular Fit Hawaiian Shirts Beach Tees Tops [SEP] $3.78 to $11.38 [SEP] B09ND9DP7J [SEP] InterestPrint Gold Horse Pattern Men's 2-Piece Sleepwear Set, Long Sleeve Shirt with Pants Loungewear [SEP] $43.59 [SEP] B09T756KQ5 [SEP] WENKOMG1 Men's Crewneck Goth Tee Shirts Skull Print Tops Spring/Summer Long Sleeve Sports T-Shirt Baggy Y2K Soft Streetwear [SEP] $4.09 to $8.09 [SEP] B09Q67H373 [SEP] JSPOYOU 2022 Newly T-Shirt for Mens Funny 3D Graphics Pattern Crewneck Short Sleeve Tees Big and Tall Summer Casual Comfy Top [SEP] $1.99 to $8.99 [SEP] B09R9YCM6R [SEP] XXBR Summer T-shirts for Mens, Soldier Short Sleeve 3D Street Vintage Printed Shirt Slim Fit Muscle Casual Tee Tops [SEP] $8.98 to $11.99 [SEP] B09KLQLLT2 [SEP] Long Sleeve Superhero T Shirt Tank Top Mens Compression Shirt Men Workout Fitness Gym Shirt [SEP] $19.99
-    #   Available actions: ['click[back to search]', 'click[next >]', 'click[b09qqp3356]', 'click[b09q8rd8yn]', 'click[b09qgk5xhz]', 'click[b09qqjj3km]', 'click[b09s3bn15c]', 'click[b09nd9dp7j]', 'click[b09t756kq5]', 'click[b09q67h373]', 'click[b09r9ycm6r]', 'click[b09klqllt2]']
-    #   <answer>click[b09klqllt2]</answer>
-    #   Instruction: [SEP] Find me machine wash men's t-shirts with long sleeve with color: black, and size: xx-large big tall, and price lower than 50.00 dollars [SEP] Back to Search [SEP] < Prev [SEP] color [SEP] black | blue [SEP] blue [SEP] blue | red [SEP] bronze [SEP] brown [SEP] gold [SEP] green [SEP] red [SEP] red | blue [SEP] yellow [SEP] grey | red [SEP] size [SEP] small [SEP] medium [SEP] large [SEP] x-large [SEP] xx-large [SEP] Long Sleeve Superhero T Shirt Tank Top Mens Compression Shirt Men Workout Fitness Gym Shirt [SEP] Price: $19.99 [SEP] Rating: N.A. [SEP] Description [SEP] Features [SEP] Reviews [SEP] Buy Now
-    #   Available actions: ['click[back to search]', 'click[< prev]', 'click[description]', 'click[features]', 'click[reviews]', 'click[buy now]', 'click[black | blue]', 'click[blue]', 'click[blue | red]', 'click[bronze]', 'click[brown]', 'click[gold]', 'click[green]', 'click[red]', 'click[red | blue]', 'click[yellow]', 'click[grey | red]', 'click[small]', 'click[medium]', 'click[large]', 'click[x-large]', 'click[xx-large]']
-    #   <answer>click[black | blue]</answer>
-    #   Instruction: [SEP] Find me machine wash men's t-shirts with long sleeve with color: black, and size: xx-large big tall, and price lower than 50.00 dollars [SEP] Back to Search [SEP] < Prev [SEP] color [SEP] black | blue [SEP] blue [SEP] blue | red [SEP] bronze [SEP] brown [SEP] gold [SEP] green [SEP] red [SEP] red | blue [SEP] yellow [SEP] grey | red [SEP] size [SEP] small [SEP] medium [SEP] large [SEP] x-large [SEP] xx-large [SEP] Long Sleeve Superhero T Shirt Tank Top Mens Compression Shirt Men Workout Fitness Gym Shirt [SEP] Price: $19.99 [SEP] Rating: N.A. [SEP] Description [SEP] Features [SEP] Reviews [SEP] Buy Now
-    #   Available actions: ['click[back to search]', 'click[< prev]', 'click[description]', 'click[features]', 'click[reviews]', 'click[buy now]', 'click[black | blue]', 'click[blue]', 'click[blue | red]', 'click[bronze]', 'click[brown]', 'click[gold]', 'click[green]', 'click[red]', 'click[red | blue]', 'click[yellow]', 'click[grey | red]', 'click[small]', 'click[medium]', 'click[large]', 'click[x-large]', 'click[xx-large]']
-    #   <answer>click[xx-large]</answer>
-    #   Instruction: [SEP] Find me machine wash men's t-shirts with long sleeve with color: black, and size: xx-large big tall, and price lower than 50.00 dollars [SEP] Back to Search [SEP] < Prev [SEP] color [SEP] black | blue [SEP] blue [SEP] blue | red [SEP] bronze [SEP] brown [SEP] gold [SEP] green [SEP] red [SEP] red | blue [SEP] yellow [SEP] grey | red [SEP] size [SEP] small [SEP] medium [SEP] large [SEP] x-large [SEP] xx-large [SEP] Long Sleeve Superhero T Shirt Tank Top Mens Compression Shirt Men Workout Fitness Gym Shirt [SEP] Price: $19.99 [SEP] Rating: N.A. [SEP] Description [SEP] Features [SEP] Reviews [SEP] Buy Now
-    #   Available actions: ['click[back to search]', 'click[< prev]', 'click[description]', 'click[features]', 'click[reviews]', 'click[buy now]', 'click[black | blue]', 'click[blue]', 'click[blue | red]', 'click[bronze]', 'click[brown]', 'click[gold]', 'click[green]', 'click[red]', 'click[red | blue]', 'click[yellow]', 'click[grey | red]', 'click[small]', 'click[medium]', 'click[large]', 'click[x-large]', 'click[xx-large]']
-    #   <answer>click[buy now]</answer>
-    max_tokens: 100
-    env_config: null
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    added_text: ${added_text_no_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+    use_thread_lock: true
+    env_config:
+      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${action_pattern}
+      is_slippery: false
+  FrozenLakeThink:
+    env_type: frozen_lake
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_think_format}
+    added_text: ${added_text_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+    use_thread_lock: true
+    env_config:
+      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${think_action_pattern}
+      is_slippery: false

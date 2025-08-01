@@ -16,6 +16,7 @@ from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_actor_model_provider, default_value_model_provider, \
     default_reward_model_provider
+from roll.utils.checkpoint_manager import download_model
 from roll.utils.context_managers import state_offload_manger
 from roll.utils.functionals import (
     append_to_dict,
@@ -48,7 +49,7 @@ class ActorWorker(Worker):
         self.strategy.initialize(model_provider=default_actor_model_provider)
         self.tokenizer = self.strategy.tokenizer
         if self.pipeline_config.resume_from_checkpoint:
-            load_dir = self.pipeline_config.resume_from_checkpoint
+            load_dir = download_model(self.pipeline_config.resume_from_checkpoint)
             self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
         self.logger.info(f"{self.worker_name} initialized")
 
@@ -165,6 +166,9 @@ class ActorWorker(Worker):
         """
         解决dp generate的长尾问题，async+ load balance
         """
+        if self.thread_server is not None:
+            return
+
         global_step = data.meta_info.get("global_step", 0)
         is_offload_states = data.meta_info.get("is_offload_states", True)
 
@@ -190,10 +194,10 @@ class ActorWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL_ONE)
     def stop_server(self, data: DataProto = None):
-        if not hasattr(self, "thread_server"):
-            raise ValueError("server is not initialized")
+        if self.thread_server == None:
+            return
 
-        self.strategy.add_request(command=GenerateRequestType.STOP, data=data)
+        self.strategy.add_request(command=GenerateRequestType.STOP, data=None)
         self.thread_server.join()
         self.thread_server = None
         self.response_call_back_fns.clear()
@@ -398,7 +402,7 @@ class CriticWorker(Worker):
         self.tokenizer = self.strategy.tokenizer
 
         if self.pipeline_config.resume_from_checkpoint:
-            load_dir = os.path.join(self.pipeline_config.resume_from_checkpoint, self.cluster_name)
+            load_dir = os.path.join(download_model(self.pipeline_config.resume_from_checkpoint), self.cluster_name)
             self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
 
         self.logger.info(f"{self.worker_name} initialized")
@@ -522,8 +526,9 @@ class CriticWorker(Worker):
         with Timer("do_checkpoint") as total_timer:
             ckpt_id = f"checkpoint-{global_step}"
             save_dir = os.path.join(self.pipeline_config.output_dir, self.worker_name, ckpt_id, self.cluster_name)
+            critic_save_dir = os.path.join(self.pipeline_config.output_dir, self.worker_name, ckpt_id)
             self.logger.info(f"save checkpoint-{global_step} to {save_dir}")
-            exec_metrics: Dict = self.strategy.save_checkpoint(save_dir, global_step, ckpt_id)
+            exec_metrics: Dict = self.strategy.save_checkpoint(save_dir, global_step, ckpt_id, local_state_path=critic_save_dir)
 
         metrics = {
             f"time/{self.cluster_name}/do_checkpoint/total": total_timer.last,

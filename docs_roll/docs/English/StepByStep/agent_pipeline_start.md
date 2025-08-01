@@ -108,8 +108,8 @@ The `AgenticConfig` (defined in `roll/pipeline/agentic/agentic_config.py`) is a 
 * `ppo_epochs`, `init_kl_coef`, `adv_estimator`, `gamma`, `lambd` – PPO and RL algorithm parameters.  
 * `custom_envs` – A dictionary defining custom environments available to the pipeline, including their type, instructions, and specific configurations.  
 * `train_env_manager` / `val_env_manager` settings:  
-  * `env_groups`, `group_size` – For managing parallel environments.  
-  * `tags`, `n_groups` – To select and apportion environments from `custom_envs`.  
+  * `num_env_groups`, `group_size` – For managing parallel environments.  
+  * `tags`, `num_groups_partition` – To select and apportion environments from `custom_envs`.  
 * Worker-specific settings under `actor_train`, `actor_infer`, etc.:  
   * `model_args` – Model architecture, dtype (e.g., bf16), attention type (e.g., flash_attn).  
   * `training_args` – Learning rate, batch size, gradient accumulation.  

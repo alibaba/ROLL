@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
-from pkg_resources import packaging
+from packaging.version import Version as PkgVersion
 
 
 if TYPE_CHECKING:
@@ -220,9 +220,9 @@ def te_grouped_moe_available():
             else:
                 return version("transformer-engine")
 
-        return packaging.version.Version(get_te_version_str())
+        return PkgVersion(get_te_version_str())
 
-    return get_te_version() >= packaging.version.Version("1.9.0.dev0")
+    return get_te_version() >= PkgVersion("1.9.0.dev0")
 
 
 @dataclass

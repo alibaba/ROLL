@@ -38,51 +38,18 @@ from roll.utils.functionals import (
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
 
+from .rlvr_vlm_pipeline import format_prompt, process_images, get_extra_data_provider
+
 logger = get_logger()
 
 
-def format_prompt(prompt, processor, use_image=True, prompt_image_token=None):
-    question_template = "{Question}  Output the thinking process in <think> </think> and final answer (number) in <answer> </answer> tags."
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": question_template.format(Question=prompt)},
-            ]
-            if use_image and not prompt_image_token
-            else [
-                {"type": "text", "text": question_template.format(Question=prompt)}
-            ],  # image_token has been included in prompt
-        }
-    ]
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    if prompt_image_token:
-        text = text.replace(prompt_image_token, "<|vision_start|><|image_pad|><|vision_end|>")
-    return text
-
-
-def process_image(images: List[Image.Image], processor: ProcessorMixin):
-    # same as qwen2-vl image processor
-    image_processor = processor.image_processor
-    factor = (
-        image_processor.patch_size * image_processor.merge_size
-        if "Qwen" in image_processor.image_processor_type
-        else 28
+def is_lora_training(pipeline_config: RLVRConfig) -> bool:
+    if pipeline_config.actor_train.model_args.lora_target is None:
+        return False
+    assert pipeline_config.actor_train.strategy_args.strategy_name == "deepspeed_train", (
+        "LoRA only supports deepspeed_train"
     )
-
-    def resize_image(image):
-        height, width = image.height, image.width
-        resized_height, resized_width = smart_resize(
-            height,
-            width,
-            factor=factor,
-            min_pixels=image_processor.min_pixels,
-            max_pixels=image_processor.max_pixels,
-        )
-        return image.resize((resized_width, resized_height), resample=image_processor.resample)
-
-    return [resize_image(image) for image in images]
+    return True
 
 
 def encode_function(data_i, processor, prompt_key, answer_key, image_key):
@@ -98,7 +65,7 @@ def encode_function(data_i, processor, prompt_key, answer_key, image_key):
             logger.error(f"Failed to get image: {image}")
         # since infer-image use pil image as input while train-engine use
         # processed data, process image here to make them use same image
-        image_out = process_image(image_out, processor)
+        image_out = process_images(image_out, processor)
         image_list.append(image_out)
     text_list = []
     for idx, instruct in enumerate(data_i[prompt_key]):
@@ -186,61 +153,14 @@ def get_dataloader(dataset, batch_size, data_collator):
     return dataloader
 
 
-def get_extra_data_provider(model_name_or_path: str, processor=None):
-    model_name_or_path = download_model(model_name_or_path)
-    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
-    if "qwen2" in config.model_type:
-        import types
-
-        from transformers import BatchFeature  # help define a object to accesss attr
-        from transformers.models.qwen2_vl import Qwen2VLForConditionalGeneration
-
-        dummy_self = BatchFeature(
-            {
-                "config": BatchFeature(
-                    {
-                        "vision_config": BatchFeature({"spatial_merge_size": processor.image_processor.merge_size}),
-                        "image_token_id": processor.tokenizer.convert_tokens_to_ids("<|image_pad|>"),
-                        "video_token_id": processor.tokenizer.convert_tokens_to_ids("<|video_pad|>"),
-                        "vision_start_token_id": processor.tokenizer.convert_tokens_to_ids("<|vision_start|>"),
-                    }
-                )
-            }
-        )
-        get_rope_index = types.MethodType(Qwen2VLForConditionalGeneration.get_rope_index, dummy_self)
-
-        def extra_data_provider(
-            input_ids: torch.LongTensor,
-            image_grid_thw: Optional[torch.LongTensor] = None,
-            video_grid_thw: Optional[torch.LongTensor] = None,
-            attention_mask: Optional[torch.Tensor] = None,
-        ):
-            rope_index = get_rope_index(input_ids, image_grid_thw, video_grid_thw, attention_mask)[0]
-            # (3, bsz, seqlen) -> (bsz, 3, seqlen) to put it into DataProto,
-            # transpose it batck to (3, bsz, seqlen) before forward for model
-            rope_index = rope_index.transpose(0, 1)
-            return {"position_ids": rope_index}
-
-        return extra_data_provider
-
-    def default_extra_data_provider(
-        input_ids: torch.LongTensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ):
-        bsz, seqlen = input_ids.shape
-        position_ids = torch.arange(seqlen, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).expand(bsz, -1)
-        if attention_mask is not None:
-            position_ids = position_ids.masked_fill(attention_mask == 0, 0)
-        return {"position_ids": position_ids}
-
-    return default_extra_data_provider
-
-
 class RLVRMathVLMPipeline(BasePipeline):
+    """This pipeline is deprecated and use `RLVRPipeline` instead"""
+
     def __init__(self, pipeline_config: RLVRConfig):
+        logger.warning(f"`{self.__class__.__name__}` is deprecated, and use `RLVRPipeline` instead")
         super().__init__(pipeline_config)
         self.pipeline_config = pipeline_config
+        self.is_lora = is_lora_training(self.pipeline_config)
 
         self.processor = default_processor_provider(self.pipeline_config.actor_train.model_args)
         # set max_pixels to avoid image token num is larger than prompt length
@@ -268,7 +188,7 @@ class RLVRMathVLMPipeline(BasePipeline):
             self.pipeline_config.actor_train.data_args, encode_function, self.processor, features, get_eval=False
         )
         val_dataset = None
-        if self.pipeline_config.validation.data_args:
+        if self.pipeline_config.validation and self.pipeline_config.validation.data_args:
             val_dataset = get_dataset(
                 self.pipeline_config.validation.data_args, encode_function, self.processor, features, get_eval=True
             )
@@ -301,12 +221,14 @@ class RLVRMathVLMPipeline(BasePipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_infer,
         )
-        self.reference: Any = Cluster(
-            name=self.pipeline_config.reference.name,
-            worker_cls=self.pipeline_config.reference.worker_cls,
-            resource_manager=self.resource_manager,
-            worker_config=self.pipeline_config.reference,
-        )
+        # use unwrapped model as reference for lora training
+        if not self.is_lora:
+            self.reference: Any = Cluster(
+                name=self.pipeline_config.reference.name,
+                worker_cls=self.pipeline_config.reference.worker_cls,
+                resource_manager=self.resource_manager,
+                worker_config=self.pipeline_config.reference,
+            )
         self.rewards: Dict[str, Any] = {
             key: Cluster(
                 name=f"reward-{key}",
@@ -342,7 +264,8 @@ class RLVRMathVLMPipeline(BasePipeline):
         ray.get(refs)
 
         refs = []
-        refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=False))
+        if not self.is_lora:
+            refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=False))
         refs.extend(self.reward.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
 
@@ -437,9 +360,16 @@ class RLVRMathVLMPipeline(BasePipeline):
                         )
 
                     with Timer(name="cal_ref_log_probs_reward", logger=None) as cal_timer:
-                        ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(
-                            batch, blocking=False
-                        )
+                        if self.is_lora:
+                            batch.meta_info["disable_adapter"] = True
+                            batch.meta_info["is_offload_states"] = False
+                            ref_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(
+                                batch, blocking=False
+                            )
+                        else:
+                            ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(
+                                batch, blocking=False
+                            )
                         rewards_refs: List[ray.ObjectRef] = self.reward.compute_rewards(batch, blocking=False)
 
                         ref_log_probs = DataProto.materialize_concat(data_refs=ref_log_probs_refs)
@@ -453,6 +383,8 @@ class RLVRMathVLMPipeline(BasePipeline):
                     metrics["time/ref_log_probs_values_reward"] = cal_timer.last
 
                     with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
+                        if self.is_lora:
+                            batch.meta_info["disable_adapter"] = False
                         batch.meta_info["is_offload_states"] = False
                         if self.pipeline_config.adv_estimator == "gae":
                             values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)

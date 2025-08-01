@@ -1,6 +1,7 @@
 import math
 import os
 import random
+import shutil
 import sys
 import time
 import warnings
@@ -449,6 +450,8 @@ class McaTrainer(Trainer):
             params_dtype=params_dtype,
             use_distributed_optimizer=self.args.use_distributed_optimizer,
             clip_grad=self.args.max_grad_norm,
+            optimizer_cpu_offload=self.args.optimizer_cpu_offload,
+            optimizer_offload_fraction=self.args.optimizer_offload_fraction,
         )
         self.optimizer = get_megatron_optimizer(config, self.models_wrapped)
         return self.optimizer

@@ -125,12 +125,14 @@ class ModelUpdateGroup:
                 comm_plan_args["src_pp_rank"] = pp_rank
                 comm_plan_args["src_rank"] = src_rank
                 pp_comm_plan_args[src_rank] = comm_plan_args
-                ref = group_master_worker.setup_collective_group.remote(comm_plan={src_rank: comm_plan_args})
+                ref = group_master_worker.setup_collective_group.remote(model_update_name=self.model_update_name,
+                                                                        comm_plan={src_rank: comm_plan_args})
                 refs.append(ref)
 
             print(f"pp_rank: {pp_rank} pp_comm_plan_args: {json.dumps(pp_comm_plan_args)}")
             for tgt_worker in self.tgt_cluster.workers:
-                ref = tgt_worker.setup_collective_group.remote(comm_plan=pp_comm_plan_args)
+                ref = tgt_worker.setup_collective_group.remote(model_update_name=self.model_update_name,
+                                                               comm_plan=pp_comm_plan_args)
                 refs.append(ref)
             ray.get(refs)
 
@@ -144,6 +146,7 @@ class ModelUpdateGroup:
                 for src_rank, tgt_devices in pp_comm_plan.items():
                     src_cluster = self.src_cluster.rank2worker[src_rank]
                     ref = src_cluster.start_model_update.remote(
+                        model_update_name=self.model_update_name,
                         tgt_workers=self.tgt_cluster.workers,
                         broadcast_tgt_devices=tgt_devices,
                         p2p_tgt_devices=self.p2p_comm_plan[pp_rank][src_rank],

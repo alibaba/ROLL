@@ -35,12 +35,14 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 ## 📢 News
 
-| 📣   Updates                                                                                                       |
-|:-------------------------------------------------------------------------------------------------------------------|
-| **[06/25/2025]** 🎉 Support thread env for env scaling and support qwen2.5 VL agentic pipeline.                    |
-| **[06/13/2025]** 🎉 Support Qwen2.5 VL rlvr pipeline and upgrade mcore to 0.12 version.                            |
-| **[06/09/2025]** 🎉 ROLL tech report is now available! Access the report [here](https://arxiv.org/abs/2506.06122). |
-| **[05/30/2025]** 🎉 Training RLVR and Agentic RL with ROLL is now available! Explore the new capabilities.         |
+| 📣   Updates                                                                                                                                                                                                                                                                                              |
+|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **[07/31/2025]** 🎉 Refactor agentic rl design. Support agentic rl [async training](examples/qwen2.5-0.5B-agentic/agent_val_frozen_lake_async.yaml). Explore the new capabilities!                                                                                                                        |
+| **[07/31/2025]** 🎉 Support [DistillPipeline](examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh)/[DpoPipeline](examples/qwen2.5-3B-dpo_megatron/run_dpo_pipeline.sh). Support [lora](examples/qwen2.5-7B-rlvr_megatron/rlvr_lora_zero3.yaml). Support [GSPO](https://arxiv.org/abs/2507.18071) |
+| **[06/25/2025]** 🎉 Support thread env for env scaling and support qwen2.5 VL agentic pipeline.                                                                                                                                                                                                           |
+| **[06/13/2025]** 🎉 Support Qwen2.5 VL rlvr pipeline and upgrade mcore to 0.12 version.                                                                                                                                                                                                                   |
+| **[06/09/2025]** 🎉 ROLL tech report is now available! Access the report [here](https://arxiv.org/abs/2506.06122).                                                                                                                                                                                        |
+| **[05/30/2025]** 🎉 Training RLVR and Agentic RL with ROLL is now available! Explore the new capabilities.                                                                                                                                                                                                |
 ---
 
 ## 🗺️ Architecture at a Glance
@@ -157,6 +159,9 @@ We are continuously working to expand ROLL's capabilities:
 
 ---
 
+## 🏆 Notable work based on ROLL
+- [RecGPT](https://www.arxiv.org/abs/2507.22879): a next-generation, LLM-driven framework that places user intent at the core of recommender systems, fostering a more sustainable and mutually beneficial ecosystem.
+
 ## 🙏 Citation and Acknowledgement
 
 ROLL is inspired by the design of OpenRLHF, VeRL, Nemo-Aligner, and RAGEN.
@@ -172,12 +177,11 @@ The following repositories have been used in ROLL, either in their close-to-orig
 If you use ROLL in your research or project, please consider citing us:
 
 ```bibtex
-@misc{roll2025alibaba,
-  author = {ROLL Team and Other ROLL Contributors},
-  title = {Reinforcement Learning Optimization for Large-Scale Learning: An Efficient and User-Friendly Scaling Library},
-  year = {2025},
-  journal = {arXiv preprint arXiv: 2506.06122},
-  url = {https://arxiv.org/abs/2506.06122}
+@article{wang2025reinforcement,
+  title={Reinforcement Learning Optimization for Large-Scale Learning: An Efficient and User-Friendly Scaling Library},
+  author={Wang, Weixun and Xiong, Shaopan and Chen, Gengru and Gao, Wei and Guo, Sheng and He, Yancheng and Huang, Ju and Liu, Jiaheng and Li, Zhendong and Li, Xiaoyang and others},
+  journal={arXiv preprint arXiv:2506.06122},
+  year={2025}
 }
 ```
 

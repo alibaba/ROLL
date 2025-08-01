@@ -241,19 +241,19 @@ class SgLangStrategy(InferenceStrategy):
             self.model.release_memory_state = True
 
     # 参数同步相关接口
-    def setup_collective_group(self, comm_plan, backend="nccl"):
+    def setup_collective_group(self, model_update_name, comm_plan, backend="nccl"):
         self.model.setup_collective_group(comm_plan=comm_plan, backend=backend, rank_in_cluster=self.worker.rank)
 
-    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
+    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
         self.model.broadcast_parameter(src_pp_rank, dtype, shape, parameter_name)
 
-    def broadcast_bucket(self, src_pp_rank, meta_infos, bucket_size):
+    def broadcast_bucket(self, model_update_name, src_pp_rank, meta_infos, bucket_size):
         self.model.broadcast_bucket(src_pp_rank, meta_infos, bucket_size)
 
-    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+    def update_parameter(self, model_update_name, parameter_name, weight, ranks_in_worker):
         self.model.update_parameter(parameter_name, weight, ranks_in_worker)
 
-    def update_parameter_in_bucket(self, meta_infos, buffer, ranks_in_worker):
+    def update_parameter_in_bucket(self, model_update_name, meta_infos, buffer, ranks_in_worker):
         self.model.update_parameter_in_bucket(meta_infos, buffer, ranks_in_worker)
 
     def load_states(self, *args, **kwargs):

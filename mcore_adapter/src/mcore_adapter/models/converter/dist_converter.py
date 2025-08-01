@@ -115,6 +115,17 @@ te_moe_config = DistParallelConfig(
 )
 
 
+mtp_config = DistParallelConfig(
+    duplicated_weights=[
+        ".enorm.weight",
+        ".hnorm.weight",
+        ".final_layernorm.weight",
+    ],
+    column_parallel_weights=[
+        ".eh_proj.weight",
+    ],
+)
+
 dist_configs: Dict[str, List[DistParallelConfig]] = {}
 
 
@@ -156,6 +167,45 @@ register_dist_config(
         default_dist_config,
         DistParallelConfig(module_prefix="vision_model.", pre_process_weights=["*"], duplicated_weights=["*"]),
     ],
+)
+
+register_dist_config(
+    "deepseek_v3",
+    DistParallelConfig(
+        pre_process_weights=["embedding.word_embeddings.weight"],
+        post_process_weights=["output_layer.weight", "decoder.final_layernorm.weight"],
+        duplicated_weights=[
+            ".self_attention.q_layernorm.weight",
+            ".input_layernorm.weight",
+            "decoder.final_layernorm.weight",
+            ".pre_mlp_layernorm.weight",
+            ".self_attention.kv_layernorm.weight",
+            ".mlp.router.weight",
+            ".mlp.router.expert_bias",
+            ".mlp.linear_fc1.layer_norm_weight",
+            ".self_attention.linear_q_up_proj.layer_norm_weight",
+            ".self_attention.linear_kv_up_proj.layer_norm_weight",
+        ],
+        column_parallel_weights=[
+            "embedding.word_embeddings.weight",
+            "output_layer.weight",
+            ".self_attention.linear_q_down_proj.weight",
+            ".self_attention.linear_q_up_proj.weight",
+            ".self_attention.linear_kv_down_proj.weight",
+            ".self_attention.linear_kv_up_proj.weight",
+        ],
+        row_parallel_weights=[
+            ".self_attention.linear_proj.weight",
+            ".mlp.shared_experts.linear_fc2.weight",
+            ".linear_fc2.weight",
+            ".mlp.linear_fc2.weight",
+        ],
+        swiglu_weights=[
+            ".mlp.shared_experts.linear_fc1.weight",
+            ".linear_fc1.weight",
+            ".mlp.linear_fc1.weight",
+        ],
+    ).merge_configs(mtp_config),
 )
 
 
@@ -220,6 +270,15 @@ class DistModuleConverter:
             if self.pipeline_model_parallel_rank is None:
                 return True
             if self.name_match(weight_name, self.config.pre_process_weights):
+                # mtp use embedding weights in last stage
+                if self.mca_config.mtp_num_layers:
+                    is_last_pp_stage = self.pipeline_model_parallel_rank == (
+                        self.mca_config.pipeline_model_parallel_size - 1
+                    ) and self.virtual_pipeline_model_parallel_rank == (
+                        (self.mca_config.virtual_pipeline_model_parallel_size or 1) - 1
+                    )
+                    if is_last_pp_stage:
+                        return True
                 return self.pipeline_model_parallel_rank == 0 and self.virtual_pipeline_model_parallel_rank == 0
             if self.name_match(weight_name, self.config.post_process_weights):
                 return self.pipeline_model_parallel_rank == (

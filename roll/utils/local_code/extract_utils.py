@@ -17,4 +17,4 @@ def extract_code_generation(model_output: str):
             solutions = re.findall(r"```(.*?)```", model_output, re.DOTALL)
             if len(solutions) == 0:
                 return ""
-            return solutions[0]
+            return solutions[-1]

@@ -1,7 +1,8 @@
 import os
-from typing import Optional, List
+from typing import List, Optional
 
 import torch
+from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -13,6 +14,7 @@ from transformers import (
     PreTrainedTokenizer,
     TrainingArguments,
 )
+from transformers.dynamic_module_utils import get_cached_module_file
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import is_fsdp_enabled
 
@@ -24,15 +26,26 @@ except Exception as e:
     mca_TrainingArguments = None
 
 from roll.configs import ModelArguments
-from roll.utils.checkpoint_manager import download_model
+from roll.utils.checkpoint_manager import download_model, file_lock_context
 from roll.utils.logging import get_logger
 
 
 logger = get_logger()
 
 
+def prepare_automap_files(model_path: str):
+    python_files = []
+    for file_name in os.listdir(model_path):
+        if file_name.endswith(".py") and os.path.isfile(os.path.join(model_path, file_name)):
+            python_files.append(file_name)
+    with file_lock_context(model_path):
+        for file_name in python_files:
+            get_cached_module_file(model_path, file_name)
+
+
 def default_tokenizer_provider(model_args: "ModelArguments"):
     model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_name_or_path)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_or_path,
         use_fast=True,
@@ -45,6 +58,7 @@ def default_tokenizer_provider(model_args: "ModelArguments"):
 
 def default_processor_provider(model_args: "ModelArguments"):
     model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_name_or_path)
     try:
         processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
     except Exception as e:
@@ -83,11 +97,27 @@ def freeze_model(model, model_args: "ModelArguments"):
     if model_args.freeze_module_prefix is None:
         return
 
-    prefixes = model_args.freeze_module_prefix.split(",")
+    prefixes = model_args.freeze_module_prefix
     logger.info(f"Freeze model with prefix: {prefixes}")
     for name, param in model.named_parameters():
         if any(name.startswith(prefix) for prefix in prefixes):
             param.requires_grad_(False)
+
+
+def setup_lora_training(config, model, model_args: "ModelArguments", is_trainable: Optional[bool] = False):
+    model.enable_input_require_grads()
+    if is_trainable:
+        target_modules = model_args.lora_target
+        lora_config = {
+            "task_type": TaskType.CAUSAL_LM,
+            "r": model_args.lora_rank,
+            "target_modules": target_modules,
+            "lora_alpha": model_args.lora_alpha,
+            "lora_dropout": model_args.lora_dropout,
+            "modules_to_save": model_args.additional_target,
+        }
+        model = get_peft_model(model, LoraConfig(**lora_config))
+    return model
 
 
 def load_model(
@@ -99,12 +129,15 @@ def load_model(
     modified from llamafactory
     """
     model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_args.model_name_or_path)
     init_kwargs = {"trust_remote_code": True, **model_args.model_config_kwargs}
     config = AutoConfig.from_pretrained(model_name_or_path, **init_kwargs)
     if model_args.attn_implementation is not None and model_args.attn_implementation != "auto":
         setattr(config, "_attn_implementation", model_args.attn_implementation)
     if not is_trainable:
         setattr(config, "use_cache", True)
+    else:
+        setattr(config, "use_cache", False)
     if model_args.moe_aux_loss_coef is not None:
         setattr(config, "router_aux_loss_coef", model_args.moe_aux_loss_coef)
         setattr(config, "output_router_logits", is_trainable)
@@ -125,7 +158,10 @@ def load_model(
     if not model_args.disable_gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-    freeze_model(model, model_args)
+    if model_args.lora_target is None:
+        freeze_model(model, model_args)
+    else:
+        model = setup_lora_training(config, model, model_args, is_trainable)
 
     if add_valuehead:
         from trl import AutoModelForCausalLMWithValueHead
@@ -246,7 +282,10 @@ def patch_model(model, config, use_mcore):
                 model_chunk.forward = types.MethodType(forward_patch, model_chunk)
     else:
         if "qwen2_vl" == model_type or "qwen2_5_vl" == model_type:
-            ori_forward = type(model).forward
+            if is_peft_model := (getattr(model, "peft_config", None) is not None):
+                ori_forward = type(model.get_base_model()).forward
+            else:
+                ori_forward = type(model).forward
 
             def _handle_missing_visual(self, inputs_embeds: "torch.FloatTensor"):
                 mock_pixel_values = torch.zeros(
@@ -314,7 +353,10 @@ def patch_model(model, config, use_mcore):
                 )
 
         if forward_patch is not None:
-            model.forward = types.MethodType(forward_patch, model)
+            if is_peft_model:
+                model.get_base_model().forward = types.MethodType(forward_patch, model.get_base_model())
+            else:
+                model.forward = types.MethodType(forward_patch, model)
 
 
 def default_actor_model_provider(
@@ -326,6 +368,7 @@ def default_actor_model_provider(
     config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_args.model_name_or_path)
     if (
         mca_TrainingArguments is not None
         and training_args is not None
@@ -385,6 +428,7 @@ def default_reward_model_provider(
     """
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_args.model_name_or_path)
 
     if (
         mca_TrainingArguments is not None
@@ -458,6 +502,7 @@ def default_value_model_provider(
     """
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
+    prepare_automap_files(model_args.model_name_or_path)
 
     if (
         mca_TrainingArguments is not None
@@ -507,3 +552,41 @@ def default_value_model_provider(
     model_args.model_name_or_path = old_model_name_or_path
 
     return model
+
+
+def get_extra_data_provider(model_name_or_path: str, processor=None):
+    model_name_or_path = download_model(model_name_or_path)
+    config = AutoConfig.from_pretrained(model_name_or_path)
+    if "qwen2" in config.model_type:
+        import types
+        from transformers.models.qwen2_vl import Qwen2VLForConditionalGeneration
+        from transformers import BatchFeature  # help define a object to accesss attr
+
+        dummy_self = BatchFeature(
+            {
+                "config": BatchFeature(
+                    {
+                        "vision_config": BatchFeature({"spatial_merge_size": processor.image_processor.merge_size}),
+                        "image_token_id": processor.tokenizer.convert_tokens_to_ids("<|image_pad|>"),
+                        "video_token_id": processor.tokenizer.convert_tokens_to_ids("<|video_pad|>"),
+                        "vision_start_token_id": processor.tokenizer.convert_tokens_to_ids("<|vision_start|>"),
+                    }
+                )
+            }
+        )
+        get_rope_index = types.MethodType(Qwen2VLForConditionalGeneration.get_rope_index, dummy_self)
+
+        def extra_data_provider(
+            input_ids: torch.LongTensor,
+            image_grid_thw: Optional[torch.LongTensor] = None,
+            video_grid_thw: Optional[torch.LongTensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+        ):
+            rope_index = get_rope_index(input_ids, image_grid_thw, video_grid_thw, attention_mask)[0]
+            # (3, bsz, seqlen) -> (bsz, 3, seqlen) to put it into DataProto,
+            # transpose it batck to (3, bsz, seqlen) before forward for model
+            rope_index = rope_index.transpose(0, 1)
+            return {"position_ids": rope_index}
+
+        return extra_data_provider
+    return None

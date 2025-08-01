@@ -93,3 +93,6 @@ class AsyncLLM084(AsyncLLM):
         if envs.VLLM_USE_V1:
             SendBucketManager.meta_to_dict(meta_infos)
         self.collective_rpc(method="update_parameter_in_bucket", args=(meta_infos, buffer, ranks_in_worker))
+
+    def add_lora(self, *args, **kwargs):
+        self.collective_rpc(method="add_lora", args=args, kwargs=kwargs)

@@ -72,7 +72,7 @@ actor_infer:
       gpu_memory_utilization: 0.8
       block_size: 16
       max_model_len: 6000
-      tensor_parallel_size: 2
+      tensor_parallel_size: 1
 #    strategy_name: hf_infer
 #    strategy_config: ~
   device_mapping: list(range(0,8))

@@ -84,6 +84,13 @@ class BaseConfig:
     rollout_batch_size: int = field(
         default=128, metadata={"help": "The number of samples to rollout in each inference batch."}
     )
+    async_generation_ratio: float = field(
+        default=0,
+        metadata={
+            "help": "The ratio of ahead generation requests in pipeline, "
+            "0 means synchronous pipeline. currently only integer is supported."
+        },
+    )
     val_batch_size: int = field(
         default=128,
         metadata={"help": "The number of samples to rollout in each val batch."})
@@ -215,11 +222,12 @@ class BaseConfig:
             if isinstance(attribute, WorkerConfig):
                 if attribute.device_mapping is not None:
                     total_devices.extend(attribute.device_mapping)
-        max_gpu_num = max(total_devices) + 1
-        if max_gpu_num <= self.num_gpus_per_node:
-            self.num_nodes = 1
-        else:
-            self.num_nodes = (max_gpu_num + self.num_gpus_per_node - 1) // self.num_gpus_per_node
+        if len(total_devices) > 0:
+            max_gpu_num = max(total_devices) + 1
+            if max_gpu_num <= self.num_gpus_per_node:
+                self.num_nodes = 1
+            else:
+                self.num_nodes = (max_gpu_num + self.num_gpus_per_node - 1) // self.num_gpus_per_node
 
 
     def set_max_steps(self, max_steps: int):

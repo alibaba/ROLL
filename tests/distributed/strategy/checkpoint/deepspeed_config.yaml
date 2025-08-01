@@ -1,0 +1,60 @@
+defaults:
+  - ../../../../examples/config/deepspeed_zero@_here_
+  - ../../../../examples/config/deepspeed_zero2@_here_
+  - ../../../../examples/config/deepspeed_zero3@_here_
+  - ../../../../examples/config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "deepspeed_train_checkpoint_debug"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+checkpoint_config:
+  type: file_system
+  output_dir: local/tmp/ckpt
+
+track_with: stdout
+
+save_steps: 1
+rollout_batch_size: 512
+prompt_length: 128
+response_length: 512
+# resume_from_checkpoint: local/tmp/ckpt
+pretrain: /data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct
+
+lora_target: o_proj,q_proj,k_proj,v_proj
+
+actor_train:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    lora_target: ${lora_target}
+    model_type: ~
+  training_args:
+    learning_rate: 5.0e-7
+    weight_decay: 0
+    per_device_train_batch_size: 4
+    gradient_accumulation_steps: 8
+    warmup_steps: 5
+    num_train_epochs: 1
+  data_args:
+    template: qwen2_5
+    file_name: data/comparison_gpt4_data_zh.json
+    dataset_dir: data
+    prompt: instruction
+    interleave_probs: "1.0"
+    max_samples: 4096
+  strategy_args:
+    strategy_name: deepspeed_train
+    strategy_config: ${deepspeed_zero3}
+  device_mapping: list(range(0,8))
+
+actor_infer:
+  generating_args:
+    num_return_sequences: 1

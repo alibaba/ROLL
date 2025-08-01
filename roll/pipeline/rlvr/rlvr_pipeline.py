@@ -20,20 +20,31 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
+from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
 from roll.utils.functionals import (
-    compute_advantage,
-    reduce_metrics,
     RunningMoments,
-    get_sample_level_mask,
-    reward_postprocess,
-    compute_token_reward,
     agg_loss,
+    compute_advantage,
+    compute_token_reward,
+    get_sample_level_mask,
+    reduce_metrics,
+    reward_postprocess,
 )
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 
+
 logger = get_logger()
+
+
+def is_lora_training(pipeline_config: RLVRConfig) -> bool:
+    if pipeline_config.actor_train.model_args.lora_target is None:
+        return False
+    assert pipeline_config.actor_train.strategy_args.strategy_name == "deepspeed_train", (
+        "LoRA only supports deepspeed_train"
+    )
+    return True
 
 
 def preprocess_dataset(dataset, prompt_len, encode_function, num_proc):
@@ -112,6 +123,7 @@ class RLVRPipeline(BasePipeline):
     def __init__(self, pipeline_config: RLVRConfig):
         super().__init__(pipeline_config)
         self.pipeline_config = pipeline_config
+        self.is_lora = is_lora_training(self.pipeline_config)
 
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
 
@@ -196,12 +208,14 @@ class RLVRPipeline(BasePipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_infer,
         )
-        self.reference: Any = Cluster(
-            name=self.pipeline_config.reference.name,
-            worker_cls=self.pipeline_config.reference.worker_cls,
-            resource_manager=self.resource_manager,
-            worker_config=self.pipeline_config.reference,
-        )
+        # use unwrapped model as reference for lora training
+        if not self.is_lora:
+            self.reference: Any = Cluster(
+                name=self.pipeline_config.reference.name,
+                worker_cls=self.pipeline_config.reference.worker_cls,
+                resource_manager=self.resource_manager,
+                worker_config=self.pipeline_config.reference,
+            )
         if self.pipeline_config.adv_estimator == "gae":
             self.critic: Any = Cluster(
                 name=self.pipeline_config.critic.name,
@@ -282,7 +296,8 @@ class RLVRPipeline(BasePipeline):
         refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
 
-        refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True))
+        if not self.is_lora:
+            refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True))
         refs = []
         for key, cluster in self.rewards.items():
             refs.extend(cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
@@ -370,6 +385,7 @@ class RLVRPipeline(BasePipeline):
                         )
                         domain_batches[domain] = domain_batch
                     generate_output = DataProto.concat([domain_batch for domain_batch in domain_batches.values()])
+                    dump_rollout_to_specific_path(self.pipeline_config.rollout_dump_dir, global_step, generate_output, self.tokenizer)
                     generate_output.meta_info.pop("is_offload_states", None)
 
                     for reward_cluster in self.rewards.values():
@@ -381,13 +397,20 @@ class RLVRPipeline(BasePipeline):
                 batch = generate_output
 
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
-                    ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
+                    if self.is_lora:
+                        batch.meta_info["disable_adapter"] = True
+                        batch.meta_info["is_offload_states"] = False
+                        ref_log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
+                    else:
+                        ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
                     metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
                     ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
                     batch = batch.union(ref_log_probs)
                 metrics_mgr.add_metric("time/ref_log_probs_values", cal_ref_log_probs_timer.last)
 
                 with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
+                    if self.is_lora:
+                        batch.meta_info["disable_adapter"] = False
                     batch.meta_info["is_offload_states"] = False
                     if self.pipeline_config.adv_estimator == "gae":
                         values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)

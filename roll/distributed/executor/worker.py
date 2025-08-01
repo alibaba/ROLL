@@ -202,3 +202,9 @@ class Worker:
             self.strategy.update_parameter_in_bucket(*args, **kwargs)
         else:
             self.logger.warning("worker has not strategy")
+
+    def add_lora(self, *args, **kwargs):
+        if getattr(self, "strategy", None) is not None:
+            self.strategy.add_lora(*args, **kwargs)
+        else:
+            self.logger.warning("worker has not strategy")

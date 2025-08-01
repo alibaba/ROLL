@@ -15,3 +15,9 @@ DIST_OPTIMIZER_DIR = "dist_optimizer"
 RNG_STATE_DIR = "rng_state"
 
 CACHE_PATH = os.path.join(os.path.expanduser("~"), ".cache", "roll")
+
+
+class GenerateStopReason(enum.Enum):
+    FINISH = enum.auto()
+    ABORT = enum.auto()
+    MAX_LENGTH = enum.auto()
