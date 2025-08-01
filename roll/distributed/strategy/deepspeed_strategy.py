@@ -1,33 +1,36 @@
 import os
 from collections import defaultdict
+from contextlib import nullcontext
+from dataclasses import asdict
 from datetime import timedelta
-from typing import Callable, Tuple, Dict
+from typing import Callable, Dict, Tuple
 
 import deepspeed
+import ray
 import torch
 import torch.distributed as dist
-import ray
 from codetiming import Timer
-from deepspeed.ops.adam import FusedAdam, DeepSpeedCPUAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.zero import GatheredParameters
 from deepspeed.runtime.zero.offload_config import OffloadStateTypeEnum
-from roll.utils.collective import collective
+from peft import get_peft_model_state_dict
 from tqdm import tqdm
-from transformers import get_scheduler
+from transformers import get_scheduler, set_seed
 from transformers.integrations import HfDeepSpeedConfig
-from transformers import set_seed
 
 from roll.datasets.collator import collate_fn_to_dict_list
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
-from roll.models.model_providers import default_tokenizer_provider, default_processor_provider
 from roll.models.func_providers import log_probs_forward_step_func
+from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
 from roll.third_party.deepspeed.offload_states_patch import bind_deepspeed_offload_states_func
+from roll.utils.collective import collective
 from roll.utils.deepspeed_utils import get_optimizer_grouped_parameters
 from roll.utils.functionals import append_to_dict, log_probs_from_logits
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
+
 
 logger = get_logger()
 
@@ -91,38 +94,41 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         micro_batch_size = batch.meta_info["micro_batch_size"]
         num_microbatches = max(batch_size // micro_batch_size, 1)
         micro_batches = batch.chunk(chunks=num_microbatches)
+        disable_adapter = batch.meta_info.get("disable_adapter", False)
+        adapter_context = self.unwrap_model().disable_adapter() if disable_adapter else nullcontext()
         losses_reduced = []
-        for data in micro_batches:
-            input_ids = data.batch["input_ids"]
-            attention_mask = data.batch["attention_mask"]
-            position_ids = data.batch["position_ids"]
-            forward_args = data.meta_info.get("forward_args", {})
-            if position_ids.dim() == 3:
-                # qwen2vl mrope, maybe use a placeholder and let model generate position_ids
-                position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
-            if "multi_modal_inputs" in data.non_tensor_batch:
-                multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
-                multi_modal_data = defaultdict(list)
-                # mm inputs of some samples would be empty to allow text and mm
-                # mixed data
-                for sample_mm_inputs in multi_modal_inputs:
-                    for key in sample_mm_inputs.keys():
-                        multi_modal_data[key].append(sample_mm_inputs[key])
-                for key in multi_modal_data.keys():
-                    assert key not in forward_args
-                    # DataProto.to('cuda') in upper frame not work for non_tensor_batch
-                    forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
-                forward_args.update({"force_vit_image": True})
-            # set use_cache=False manually for the same reason as HfInferStrategy
-            output = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                use_cache=False,
-                **forward_args,
-            )
-            loss, loss_reduced = forward_func(data, output.logits)
-            losses_reduced.append(loss_reduced)
+        with adapter_context:
+            for data in micro_batches:
+                input_ids = data.batch["input_ids"]
+                attention_mask = data.batch["attention_mask"]
+                position_ids = data.batch["position_ids"]
+                forward_args = data.meta_info.get("forward_args", {})
+                if position_ids.dim() == 3:
+                    # qwen2vl mrope, maybe use a placeholder and let model generate position_ids
+                    position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
+                if "multi_modal_inputs" in data.non_tensor_batch:
+                    multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
+                    multi_modal_data = defaultdict(list)
+                    # mm inputs of some samples would be empty to allow text and mm
+                    # mixed data
+                    for sample_mm_inputs in multi_modal_inputs:
+                        for key in sample_mm_inputs.keys():
+                            multi_modal_data[key].append(sample_mm_inputs[key])
+                    for key in multi_modal_data.keys():
+                        assert key not in forward_args
+                        # DataProto.to('cuda') in upper frame not work for non_tensor_batch
+                        forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
+                    forward_args.update({"force_vit_image": True})
+                # set use_cache=False manually for the same reason as HfInferStrategy
+                output = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                    **forward_args,
+                )
+                loss, loss_reduced = forward_func(data, output.logits)
+                losses_reduced.append(loss_reduced)
         results = collate_fn_to_dict_list(losses_reduced)
         return results
 
@@ -143,8 +149,8 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         return self.model.module
 
     # 参数同步相关接口
-    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
-        comm_plan = self.model_update_comm_plan[src_pp_rank]
+    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
+        comm_plan = self.model_update_comm_plan[model_update_name][src_pp_rank]
         weight = torch.empty(shape, dtype=dtype, device="cuda")
         collective.broadcast(tensor=weight, src_rank=0, group_name=comm_plan["group_name"])
         param = self.model.get_parameter(parameter_name)
@@ -156,7 +162,7 @@ class DeepSpeedInferStrategy(InferenceStrategy):
                     param.data.copy_(weight)
         del weight
 
-    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+    def update_parameter(self, model_update_name, parameter_name, weight, ranks_in_worker):
         param = self.model.get_parameter(parameter_name)
         if not self.ds_config.is_zero3():
             param.data.copy_(weight)
@@ -271,6 +277,8 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             attention_mask = data.batch["attention_mask"]
             position_ids = data.batch["position_ids"]
             forward_args = data.meta_info.get("forward_args", {})
+            # TODO: The offload option may be integrated into the pipeline config in the future.
+            is_offload_optimizer_states_in_train_step = data.meta_info.get("is_offload_optimizer_states_in_train_step", True)
             if position_ids.dim() == 3:
                 # qwen2vl mrope, maybe use a placeholder and let model generate position_ids
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
@@ -302,16 +310,19 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                 # global_grad_norm is calculated in optimizer.step thus put it
                 # into metrics after optimizer.step
                 metrics.update({self.worker_config.name + "/" + "grad_norm": self.model.get_global_grad_norm().item()})
-                self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
+                if is_offload_optimizer_states_in_train_step:
+                    self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
         return metrics
 
-    def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", **kwargs):
+    def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", local_state_path=None, **kwargs):
         """
         save ckpt/hf model/tokenizer to local dir
         save_dir/actor_train/{hf files}
         save_dir/actor_train/checkpoint/{checkpoint files}
         """
         logger.info(f"save_dir: {save_dir}")
+        if local_state_path is None:
+            local_state_path = save_dir
 
         with Timer("load") as load_timer:
             self.load_states()
@@ -341,9 +352,9 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         self.model.save_checkpoint(save_dir, tag=tag, **kwargs)
 
         if self.worker_config.checkpoint_config.get("async_upload", True):
-            self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=save_dir)
+            self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=local_state_path)
         else:
-            self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=save_dir)
+            self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=local_state_path)
 
         metrics = {
             "load": load_timer.last,
@@ -354,14 +365,33 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         logger.info(f"load checkpoint from {load_dir}")
         self.model.load_checkpoint(load_dir, tag=tag, **kwargs)
 
-    def model_update(self, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
-        comm_plan = self.model_update_comm_plan[self.worker.rank_info.pp_rank]
+    def collect_lora_params(self):
+        peft_model = self.unwrap_model()
+        if not self.ds_config.is_zero3():
+            lora_state_dict = get_peft_model_state_dict(peft_model)
+            return lora_state_dict
+        adapter_name = "default"
+        state_dict = peft_model.state_dict()
+        lora_state_dict = {k: state_dict[k] for k in state_dict if ("lora_" in k and adapter_name in k)}
+        lora_params = []
+        for name, param in lora_state_dict.items():
+            lora_params.append((name.replace(f".{adapter_name}", ""), peft_model.get_parameter(name)))
+        del lora_state_dict
+        return lora_params
+
+    def model_update(self, model_update_name, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
+        model = self.unwrap_model()
+        if is_lora := (self.worker_config.model_args.lora_target is not None):
+            all_params = self.collect_lora_params()
+            peft_config = model.peft_config.get("default", None)
+        else:
+            all_params = list(model.named_parameters())
+
+        comm_plan = self.model_update_comm_plan[model_update_name][self.worker.rank_info.pp_rank]
         model = self.unwrap_model()
         broadcast_time_cost = 0
         with Timer("model_update_total") as timer_total:
-            for param_name, param in tqdm(
-                model.named_parameters(), desc="weight update progress", total=len(list(model.named_parameters()))
-            ):
+            for param_name, param in tqdm(all_params, desc="weight update progress", total=len(all_params)):
                 shape = param.shape if not self.ds_config.is_zero3() else param.ds_shape
                 if not self.ds_config.is_zero3():
 
@@ -370,9 +400,11 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                     for p2p_tgt_device in p2p_tgt_devices:
                         p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
                         ref = p2p_tgt_worker.update_parameter.remote(
+                            model_update_name=model_update_name,
                             parameter_name=param_name,
                             weight=param_weight,
                             ranks_in_worker=[p2p_tgt_device["device"]["rank"]],
+                            is_lora=is_lora,
                         )
                         refs.append(ref)
 
@@ -383,10 +415,12 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                     ):
                         for worker in tgt_workers:
                             ref = worker.broadcast_parameter.remote(
+                                model_update_name=model_update_name,
                                 src_pp_rank=self.worker.rank_info.pp_rank,
                                 dtype=param_weight.dtype,
                                 shape=shape,
                                 parameter_name=param_name,
+                                is_lora=is_lora,
                             )
                             refs.append(ref)
                     if len(broadcast_tgt_devices) > 0:
@@ -401,9 +435,11 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                             for p2p_tgt_device in p2p_tgt_devices:
                                 p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
                                 ref = p2p_tgt_worker.update_parameter.remote(
+                                    model_update_name=model_update_name,
                                     parameter_name=param_name,
                                     weight=param_weight,
                                     ranks_in_worker=[p2p_tgt_device["device"]["rank"]],
+                                    is_lora=is_lora,
                                 )
                                 refs.append(ref)
 
@@ -414,10 +450,12 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                             ):
                                 for worker in tgt_workers:
                                     ref = worker.broadcast_parameter.remote(
+                                        model_update_name=model_update_name,
                                         src_pp_rank=self.worker.rank_info.pp_rank,
                                         dtype=param_weight.dtype,
                                         shape=shape,
                                         parameter_name=param_name,
+                                        is_lora=is_lora,
                                     )
                                     refs.append(ref)
                             if len(broadcast_tgt_devices) > 0:
@@ -427,8 +465,25 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                             ray.get(refs)
                         broadcast_time_cost += timer_broadcast.last
 
+            if is_lora:
+                with Timer("add_lora") as timer_add_lora:
+                    if (
+                        self.worker.rank_info.tp_rank == 0
+                        and self.worker.rank_info.cp_rank == 0
+                        and self.worker.rank_info.dp_rank == 0
+                    ):
+                        refs = []
+                        for worker in tgt_workers:
+                            ref = worker.add_lora.remote(peft_config=asdict(peft_config))
+                            refs.append(ref)
+                        ray.get(refs)
+
         metrics = {
-            "all_gather": timer_total.last - broadcast_time_cost,
             "broadcast": broadcast_time_cost,
         }
+        if is_lora:
+            metrics["all_gather"] = timer_total.last - broadcast_time_cost - timer_add_lora.last
+            metrics["add_lora"] = timer_add_lora.last
+        else:
+            metrics["all_gather"] = timer_total.last - broadcast_time_cost
         return metrics

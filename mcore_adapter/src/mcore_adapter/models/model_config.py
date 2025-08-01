@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 import torch
 import torch.nn.functional as F
-from megatron.core.transformer import TransformerConfig
+from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from transformers import AutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
@@ -179,7 +179,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         default=10000,
         metadata={"help": "Base period for rotary position embeddings. Defaults to 10000."},
     )
-    max_position_embeddings: int = field(
+    max_sequence_length: int = field(
         default=0,
         metadata={"help": "Maximum size of sequence. This is used for positional embedding"},
     )
@@ -275,3 +275,16 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 self.account_for_loss_in_pipeline_split == other.account_for_loss_in_pipeline_split,
             ]
         )
+
+
+@dataclass
+class MLAMcaModelConfig(McaModelConfig, MLATransformerConfig):
+    multi_latent_attention: Optional[bool] = field(
+        default=True,
+        metadata={
+            "help": "Whether use mla"
+        }
+    )
+
+    def __post_init__(self):
+        super().__post_init__()

@@ -5,6 +5,7 @@ from megatron.core import mpu
 from megatron.core.transformer.attention import SelfAttention
 from torch import nn
 
+from ..auto.modeling_auto import register_model
 from ..model_factory import McaGPTModel
 from ..model_utils import ModuleUtilsMixin
 from .config_qwen2_vl import Qwen2VLConfig
@@ -188,6 +189,7 @@ class Qwen2VLBaseModel(McaGPTModel):
         return module_spec
 
 
+@register_model("qwen2_vl")
 class Qwen2VLModel(Qwen2VLBaseModel, ModuleUtilsMixin):
     config_class = Qwen2VLConfig
 

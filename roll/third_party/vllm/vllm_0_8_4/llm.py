@@ -1,16 +1,16 @@
 import os
-from typing import Iterable, Optional, List, Dict, Any, Union
 import queue
-import time 
-import torch
+import time
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import cloudpickle
-
-from vllm import LLM, SamplingParams, EngineArgs, envs
+import torch
+from vllm import LLM, EngineArgs, SamplingParams, envs
+from vllm.config import CompilationConfig
+from vllm.engine.arg_utils import HfOverrides, PoolerConfig, TaskOption
+from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
-from vllm.config import CompilationConfig
-from vllm.engine.arg_utils import (HfOverrides, PoolerConfig, TaskOption)
 
 from roll.third_party.vllm.vllm_0_8_4.llm_engine import LLMEngine084
 from roll.utils.send_recv_utils import SendBucketManager
@@ -153,6 +153,7 @@ class Llm084(LLM):
         request_ids: List[int] | None,
         sampling_params: SamplingParams,
         multi_modal_data: List[int] | None,
+        lora_requests: List[LoRARequest] | None,
     ):
         assert len(prompt_token_ids) == len(request_ids)
         if multi_modal_data:
@@ -160,16 +161,17 @@ class Llm084(LLM):
         for i, (token_ids, request_id)in enumerate(zip(prompt_token_ids, request_ids)):
             if request_id is None:
                 request_id = next(self.request_counter)
+            lora_request = lora_requests[i] if lora_requests is not None else None
             if multi_modal_data:
                 # in v1, input_preprocessor is in engine.processor
                 processor = getattr(self.llm_engine, "processor", None)
                 input_preprocessor = processor.input_preprocessor if processor else self.llm_engine.input_preprocessor
                 preprocessed_inputs = input_preprocessor.preprocess(
                     prompt={"prompt_token_ids": token_ids, "multi_modal_data": multi_modal_data[i]},
-                    lora_request=None,
+                    lora_request=lora_request,
                     prompt_adapter_request=None,
                 )
-                 # in v1, engine does not use a input_processor
+                # in v1, engine does not use a input_processor
                 processed_inputs = (
                     self.llm_engine.input_processor(preprocessed_inputs)
                     if hasattr(self.llm_engine, "input_processor")
@@ -180,13 +182,14 @@ class Llm084(LLM):
                     "type": "token",
                     "prompt_token_ids": token_ids
                 }
-            self.llm_engine._add_processed_request(request_id=request_id,
-                                                   processed_inputs=processed_inputs,
-                                                   params=sampling_params,
-                                                   arrival_time=time.time(),
-                                                   lora_request=None,
-                                                   prompt_adapter_request=None
-                                                )
+            self.llm_engine._add_processed_request(
+                request_id=request_id,
+                processed_inputs=processed_inputs,
+                params=sampling_params,
+                arrival_time=time.time(),
+                lora_request=lora_request,
+                prompt_adapter_request=None,
+            )
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         self.llm_engine.abort_request(request_id)
@@ -223,3 +226,6 @@ class Llm084(LLM):
             # Newer version of vllm support efficient serilization of torch.Tensor.
             buffer = buffer.cpu().tolist()
         self.collective_rpc(method="update_parameter_in_bucket", args=(meta_infos, buffer, ranks_in_worker))
+
+    def add_lora(self, *args, **kwargs):
+        self.collective_rpc(method="add_lora", args=args, kwargs=kwargs)

@@ -45,7 +45,7 @@ class ModelUpdatePipeline(BasePipeline):
             frequency=self.pipeline_config.actor_train.model_update_frequency,
         )
 
-        self.stress_count = 10
+        self.stress_count = 1
 
     @torch.no_grad()
     def run(self):

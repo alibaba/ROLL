@@ -1,11 +1,13 @@
 import argparse
 
-from dacite import from_dict
+from dacite import from_dict, Config
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
 from roll.distributed.scheduler.initialize import init
-from roll.pipeline.agentic.agentic_config import AgenticConfig
+from roll.pipeline.distill.distill_config import DistillConfig
+
+from roll.pipeline.distill.distill_pipeline import DistillPipeline
 
 
 def main():
@@ -21,12 +23,11 @@ def main():
 
     print(OmegaConf.to_yaml(cfg, resolve=True))
 
-    ppo_config = from_dict(data_class=AgenticConfig, data=OmegaConf.to_container(cfg, resolve=True))
+    distill_config = from_dict(data_class=DistillConfig, data=OmegaConf.to_container(cfg, resolve=True))
 
     init()
-    from roll.pipeline.agentic.agentic_vlm_pipeline import AgenticVLMPipeline
 
-    pipeline = AgenticVLMPipeline(pipeline_config=ppo_config)
+    pipeline = DistillPipeline(pipeline_config=distill_config)
 
     pipeline.run()
 

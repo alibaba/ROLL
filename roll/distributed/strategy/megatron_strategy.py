@@ -19,6 +19,7 @@ from megatron.core.models.common.embeddings import RotaryEmbedding
 from megatron.core.optimizer import OptimizerConfig, MegatronOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.transformer.moe.moe_utils import clear_aux_losses_tracker, reduce_aux_losses_tracker_across_ranks
+from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
@@ -132,6 +133,7 @@ class MegatronInferStrategy(InferenceStrategy):
         self.model.eval()
         batch_size = batch.batch.batch_size[0]
         micro_batch_size = batch.meta_info["micro_batch_size"]
+        output_on_all_tp_ranks = batch.meta_info.get("output_on_all_tp_ranks", False)
         num_microbatches = max(batch_size // micro_batch_size, 1)
         micro_batches = batch.chunk(chunks=num_microbatches)
         data_iterator = [iter(micro_batches) for _ in range(len(self.model))]
@@ -149,9 +151,9 @@ class MegatronInferStrategy(InferenceStrategy):
         results = collate_fn_to_dict_list(losses_reduced)
 
         if not (
-            self.worker.rank_info.tp_rank == 0
-            and self.worker.rank_info.cp_rank == 0
-            and self.worker.rank_info.is_pipeline_last_stage
+                (self.worker.rank_info.tp_rank == 0 or output_on_all_tp_ranks)
+                and self.worker.rank_info.cp_rank == 0
+                and self.worker.rank_info.is_pipeline_last_stage
         ):
             return None
         return results
@@ -198,10 +200,10 @@ class MegatronInferStrategy(InferenceStrategy):
 
         return output_tensor, partial(loss_func, data)
 
-    def broadcast_parameter(self, src_pp_rank, dtype, shape, parameter_name):
+    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
         pass
 
-    def broadcast_bucket(self, src_pp_rank, meta_infos, bucket_size):
+    def broadcast_bucket(self, model_update_name, src_pp_rank, meta_infos, bucket_size):
         raise NotImplementedError
 
     def load_states(self, include=None, non_blocking=False):
@@ -235,6 +237,10 @@ class MegatronInferStrategy(InferenceStrategy):
             entropy = context_parallel_gather(entropy, parallel_dim=1)
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
         return entropy
+
+    def op_compute_logits(self, logits: torch.Tensor):
+        full_logits = gather_from_tensor_model_parallel_region(logits)
+        return full_logits
 
 
 class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
@@ -356,7 +362,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         mini_batch_size = self.worker_config.training_args.per_device_train_batch_size
         num_microbatches = batch.batch.batch_size[0] // self.worker_config.training_args.per_device_train_batch_size
-
+        is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
         assert (
             num_microbatches == self.megatron_train_args.gradient_accumulation_steps
         ), f"num_microbatches={num_microbatches} gradient_accumulation_steps={self.megatron_train_args.gradient_accumulation_steps}"
@@ -377,7 +383,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         # 只有step的时候需要load optimizer states
         self.load_states(include=[OffloadStateType.optimizer_states])
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
-        self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
+        if is_offload_optimizer_states_in_train_step:
+            self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
 
         if update_successful:
             self.scheduler.step()
@@ -391,7 +398,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         metrics = {}
         for mini_metrics in metrics_tensors:
             append_to_dict(metrics, mini_metrics)
-        
+
         metrics.update({self.worker_config.name + "/" + "grad_norm": grad_norm})
 
         if self.model.config.num_moe_experts is not None and self.model.config.num_moe_experts > 1:
@@ -407,8 +414,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         return metrics
 
-    def model_update(self, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
-        comm_plan = self.model_update_comm_plan[self.worker.rank_info.pp_rank]
+    def model_update(self, model_update_name, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
+        comm_plan = self.model_update_comm_plan[model_update_name][self.worker.rank_info.pp_rank]
         broadcast_time_cost = 0
         with Timer("model_update_total") as timer_total:
             for meta_infos, buffer in self.model.all_gather_weights_as_hf_bucket(
@@ -418,7 +425,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 with Timer("broadcast") as timer_broadcast:
                     for p2p_tgt_device in p2p_tgt_devices:
                         p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
-                        ref = p2p_tgt_worker.update_parameter_in_bucket.remote(
+                        ref = p2p_tgt_worker.update_parameter_in_bucket.remote(model_update_name=model_update_name,
                             meta_infos=meta_infos, buffer=buffer, ranks_in_worker=[p2p_tgt_device["device"]["rank"]]
                         )
                         refs.append(ref)
@@ -430,6 +437,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     ):
                         for worker in tgt_workers:
                             ref = worker.broadcast_bucket.remote(
+                                model_update_name=model_update_name,
                                 src_pp_rank=self.worker.rank_info.pp_rank,
                                 meta_infos=meta_infos,
                                 bucket_size=buffer.numel() * buffer.element_size(),
@@ -474,8 +482,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         RotaryEmbedding.forward.cache_clear()
         torch.cuda.empty_cache()
 
-    def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", **kwargs):
+    def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", local_state_path=None, **kwargs):
         logger.info(f"save_dir: {save_dir}")
+        if local_state_path is None:
+            local_state_path = save_dir
         with Timer("load") as load_timer:
             self.load_states()
 
@@ -532,9 +542,9 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         torch.save(rng_states, rgn_path)
 
         if self.worker_config.checkpoint_config.get("async_upload", True):
-            self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=save_dir)
+            self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=local_state_path)
         else:
-            self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=save_dir)
+            self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=local_state_path)
 
         metrics = {
             "load": load_timer.last,
@@ -566,7 +576,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             state_dict = dist_checkpointing.load(sharded_state_dict, optimizer_checkpoint, load_strategy)
         else:
             state_dict = torch.load(
-                os.path.join(optimizer_checkpoint, OPTIMIZER_NAME), map_location=self.megatron_train_args.device
+                os.path.join(optimizer_checkpoint, OPTIMIZER_NAME), map_location=self.megatron_train_args.device,
+                weights_only=False
             )
         self.optimizer.load_state_dict(state_dict)
 
@@ -584,7 +595,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         rng_file = os.path.join(load_dir, RNG_STATE_DIR, f"rng_state_{dist.get_rank()}.pth")
         if os.path.exists(rng_file):
             logger.info(f"Loading rng states from {rng_file}")
-            checkpoint_rng_state = torch.load(rng_file)
+            checkpoint_rng_state = torch.load(rng_file, weights_only=False)
             random.setstate(checkpoint_rng_state["random_rng_state"])
             np.random.set_state(checkpoint_rng_state["np_rng_state"])
             torch.set_rng_state(checkpoint_rng_state["torch_rng_state"])

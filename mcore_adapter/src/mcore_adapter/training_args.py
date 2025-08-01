@@ -257,6 +257,13 @@ class MegatronArguments(DistributingParallelArguments):
     )
 
     optimizer: str = field(default="adam", metadata={"help": "Optimizer function: [adam, sgd]"})
+    optimizer_cpu_offload: bool = field(
+        default=False, metadata={"help": "Whether offload optimizer states tensor and compute to CPU."}
+    )
+    optimizer_offload_fraction: float = field(
+        default=0.0, metadata={"help": "The fraction of optimizer states to offload from GPU memory to CPU."}
+    )
+
     save_hf_model: bool = field(default=False, metadata={"help": "Save model as hf format."})
 
     sequence_packing: bool = field(

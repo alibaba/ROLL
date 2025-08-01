@@ -43,8 +43,13 @@ class ActorWorker(BaseActorWorker):
             log_probs=log_probs, log_probs_base=old_log_probs, action_mask=response_mask, kl_penalty="kl"
         )
 
-        ratio = (log_probs - old_log_probs).exp()
-
+        if self.pipeline_config.importance_sampling == "token":
+            ratio = (log_probs - old_log_probs).exp()
+        elif self.pipeline_config.importance_sampling == "seq":
+            log_ratio = log_probs - old_log_probs
+            masked_log_ratio = masked_mean(log_ratio, final_response_mask, dim=-1)
+            ratio = masked_log_ratio.exp().unsqueeze(-1).expand_as(log_ratio)
+           
         surr1 = ratio * advantages
         surr2 = ratio.clamp(1 - self.pipeline_config.pg_clip, 1 + self.pipeline_config.pg_clip) * advantages
         loss = -torch.min(surr1, surr2)

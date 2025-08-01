@@ -138,6 +138,8 @@ class ModelConverter:
             if converted_state_dict is not None:
                 for mca_name, mca_weight in converted_state_dict.items():
                     named_weights = dist_converter(mca_name, mca_weight)
+                    if self.mca_config.mtp_num_layers:
+                        named_weights = self.template.convert_mtp_weights(named_weights)
                     if named_weights is not None:
                         mca_state_dict.update(named_weights)
                         self.log(f"hf_name: {name} -> mca_name: {list(named_weights.keys())}")
@@ -164,6 +166,8 @@ class ModelConverter:
             )
             mca_state_dict = model.state_dict_for_save_checkpoint()
             mca_state_dict = {k: v for k, v in mca_state_dict.items() if not k.endswith("._extra_state")}
+            if self.mca_config.mtp_num_layers:
+                mca_state_dict = self.template.revert_mtp_weights(mca_state_dict)
             for mca_name, weight in sorted(mca_state_dict.items()):
                 yield dist_reverter, mca_name, weight
 

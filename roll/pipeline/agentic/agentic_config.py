@@ -21,15 +21,21 @@ class RewardNormalizationConfig:
     grouping: str = field(default="state", metadata={"help": "state / batch / inductive"})
     method: str = field(default="identity", metadata={"help": "asym_clip / identity / mean_std"})
 
+@dataclass
+class LLMProxyConfig:
+    proxy_type: str = field(default="policy", metadata={"help": "llm proxy type: [policy, openai, random]."})
+    proxy_config: Dict = field(default_factory=dict, metadata={"help": "llm proxy config."})
+
 
 @dataclass
 class EnvManagerConfig(WorkerConfig):
-    env_groups: int = field(default=128, metadata={"help": "Number of environment groups during training."})
+    llm_proxy: LLMProxyConfig = field(default_factory=LLMProxyConfig, metadata={"help": "llm proxy config."})
+    num_env_groups: int = field(default=128, metadata={"help": "Number of environment groups during training."})
     group_size: int = field(
         default=1, metadata={"help": "Under the same group, the env config and env seed are ensured to be equal"}
     )
     tags: List[str] = field(default_factory=lambda: ["SimpleSokoban"], metadata={"help": "Environment tags."})
-    n_groups: List[int] = field(
+    num_groups_partition: List[int] = field(
         default_factory=lambda: [128],
         metadata={
             "help": "If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation"
@@ -53,11 +59,12 @@ class EnvManagerConfig(WorkerConfig):
         根据es config计算world_size
         """
         if self.max_env_num_per_worker <= 0:
-            self.max_env_num_per_worker = self.env_groups * self.group_size
+            self.max_env_num_per_worker = self.num_env_groups * self.group_size
             logger.warning("all env in one worker by default, you can set max_env_num_per_worker to scale env.")
         logger.info(f"max_env_num_per_worker: {self.max_env_num_per_worker}")
 
-        self.world_size = (self.env_groups * self.group_size + self.max_env_num_per_worker - 1) // self.max_env_num_per_worker
+        assert self.num_env_groups * self.group_size % self.max_env_num_per_worker == 0
+        self.world_size = (self.num_env_groups * self.group_size + self.max_env_num_per_worker - 1) // self.max_env_num_per_worker
         self.env_configs: Optional[Dict[int, Dict[int, Dict]]] = None
         """
         worker_rank: 
@@ -72,24 +79,10 @@ class AgenticConfig(BaseConfig):
     custom_envs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "List of environment configurations."})
     train_env_manager: EnvManagerConfig = field(default_factory=EnvManagerConfig)
     val_env_manager: EnvManagerConfig = field(default_factory=EnvManagerConfig)
-    enable_response_mask: bool = field(default=True, metadata={"help": "Whether to mask the response."})
     render_save_dir: str = field(default=None, metadata={"help": "Directory to save rendered frames."})
-    action_sep: str = field(default="||", metadata={"help": "Action separator."})
-    use_turn_scores: bool = field(
-        default=False,
-        metadata={
-            "help": "Important to GAE when applying token-level rewards to token-level advantages. If False, will take the sum of scores as the reward for the last turn."
-        },
-    )
-    enable_think: bool = field(default=True, metadata={"help": "False -> no think RL"})
     reward_normalization: RewardNormalizationConfig = field(
         default_factory=RewardNormalizationConfig, metadata={"help": "Reward normalization configuration."}
     )
-    special_token_list: List[str] = field(
-        default_factory=lambda: ["<think>", "</think>", "<answer>", "</answer>", "<|im_start|>", "<|im_end|>"],
-        metadata={"help": "Special tokens."},
-    )
-    max_steps_per_traj: int = field(default=10, metadata={"help": "Max steps per trajectory."})
 
     # role related
     pretrain: str = field(
@@ -211,6 +204,8 @@ class AgenticConfig(BaseConfig):
         self.train_env_manager.name = "train_env"
         self.val_env_manager.name = "val_env"
 
+        self.actor_infer.generating_args.num_return_sequences = 1
+
         if self.render_save_dir:
             self.render_save_dir = os.path.join(
                 self.render_save_dir, self.exp_name, datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -227,14 +222,17 @@ class AgenticConfig(BaseConfig):
         self.make_env_configs(self.train_env_manager)
         self.make_env_configs(self.val_env_manager)
 
-        train_env_num = self.train_env_manager.env_groups * self.train_env_manager.group_size
+        train_env_num = self.train_env_manager.num_env_groups * self.train_env_manager.group_size
         traj_per_env = (self.rollout_batch_size + train_env_num - 1) // train_env_num
-        if self.train_env_manager.max_traj_per_env < 0:
+        if self.async_generation_ratio > 0:
+            # force set max_traj_per_env when use async training
+            self.train_env_manager.max_traj_per_env = traj_per_env
+        elif self.train_env_manager.max_traj_per_env < 0:
             self.train_env_manager.max_traj_per_env = traj_per_env
         logger.info(f"train_env_manager.max_traj_per_env: {self.train_env_manager.max_traj_per_env}")
         assert self.train_env_manager.max_traj_per_env >= traj_per_env, f"max_traj_per_env must be >= {traj_per_env}"
 
-        val_env_num = self.val_env_manager.env_groups * self.val_env_manager.group_size
+        val_env_num = self.val_env_manager.num_env_groups * self.val_env_manager.group_size
         traj_per_env = (self.val_batch_size + val_env_num - 1) // val_env_num
         if self.val_env_manager.max_traj_per_env < 0:
             self.val_env_manager.max_traj_per_env = traj_per_env
@@ -248,32 +246,37 @@ class AgenticConfig(BaseConfig):
         env_manager_config.env_configs = {}
         group_seeds = {}
         max_env_num_per_worker = env_manager_config.max_env_num_per_worker
-        for tag, n_group in zip(env_manager_config.tags, env_manager_config.n_groups):
+        for tag, n_group in zip(env_manager_config.tags, env_manager_config.num_groups_partition):
             for env_id in range(
                 done_groups * env_manager_config.group_size, (done_groups + n_group) * env_manager_config.group_size
             ):
                 cfg_template = self.custom_envs[tag]
                 env_class = cfg_template.env_type
-                max_actions_per_traj = cfg_template.max_actions_per_traj
-                if cfg_template.env_config is None:
-                    env_config = REGISTERED_ENV_CONFIGS[env_class]()
-                else:
-                    env_config = REGISTERED_ENV_CONFIGS[env_class](**cfg_template.env_config)
+                max_tokens_per_step = cfg_template.max_tokens_per_step
+
                 group_id = env_id // env_manager_config.group_size
+                cfg_template.env_config["group_id"] = group_id
+                cfg_template.env_config["group_size"] = env_manager_config.num_env_groups
+                env_config = REGISTERED_ENV_CONFIGS[env_class](**cfg_template.env_config)
+
                 if group_id not in group_seeds:
                     group_seeds[group_id] = random.randint(0, 1000000)
-                entry = {
+                entry = {}
+                entry.update(cfg_template)
+                entry.pop("env_config", None)
+                entry.update({
                     "tag": tag,
-                    "group_id": env_id // env_manager_config.group_size,
+                    "group_id": group_id,
                     "env_id": env_id,
                     "config": env_config,
-                    "max_actions_per_traj": max_actions_per_traj,
                     "env_class": env_class,
+                    "env_manager_cls": cfg_template.get("env_manager_cls", "roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager"),
                     "group_seed": group_seeds[group_id],
-                }
+                })
                 worker_rank = env_id // max_env_num_per_worker
                 env_configs[worker_rank][env_id] = entry
             done_groups += n_group
+        assert done_groups == env_manager_config.num_env_groups
         env_manager_config.env_configs = env_configs
 
     def set_max_steps(self, max_steps: int):

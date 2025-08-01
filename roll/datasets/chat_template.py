@@ -1,4 +1,5 @@
 from functools import partial
+from pickle import FALSE
 from typing import TYPE_CHECKING, Callable, Dict
 
 from roll.utils.prompt import BASE_CHAT_FORMAT, LONGCOT_QWEN_2_5_SYSTEM
@@ -40,6 +41,14 @@ def native_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=N
     kwargs["add_generation_prompt"] = True
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
+@register_chat_template("qwen2_5_dpo")
+def dpo_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):
+    kwargs["tokenize"] = False
+
+    # Disable generation prompt ('<|assistant|>') to avoid redundant tokens in DPO training
+    kwargs["add_generation_prompt"] = False
+
+    return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
 # TODO: change template name ?
 @register_chat_template("chatml")

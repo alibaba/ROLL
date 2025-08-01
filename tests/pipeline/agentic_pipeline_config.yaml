@@ -153,17 +153,17 @@ custom_envs:
 
 train_env_manager:
   format_penalty: -0.001
-  env_groups: 2
+  num_env_groups: 2
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
   max_env_num_per_worker: 1
   tags: [ "FrozenLake" ]
-  n_groups: [ 2 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  num_groups_partition: [ 2 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 val_env_manager:
-  env_groups: 2
+  num_env_groups: 2
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
   max_env_num_per_worker: 1
   tags: [ "SimpleSokoban", "FrozenLake"]
-  n_groups: [ 2, 2 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  num_groups_partition: [ 2, 2 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation

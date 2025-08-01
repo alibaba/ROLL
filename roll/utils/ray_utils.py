@@ -38,6 +38,10 @@ class RayUtils:
             env_vars = {
                 "TORCHINDUCTOR_COMPILE_THREADS": "2",
             }
+
+        # used for debug
+        # env_vars["RAY_DEBUG"] = "legacy"
+
         get_logger().info(f"gpu is {device_type}, ray custom env_vars: {env_vars}")
         return env_vars
 

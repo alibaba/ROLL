@@ -31,7 +31,11 @@ system_envs:
 
 track_with: tensorboard
 tracker_kwargs:
-  log_dir: /data/oss_bucket_0/yuzhao/llm/tensorboard/roll_exp/agentic_sokoban
+  log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
 
 num_gpus_per_node: 8
 
@@ -41,24 +45,26 @@ logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
 
-rollout_batch_size: 512
+rollout_batch_size: 1024
 val_batch_size: 1024
 sequence_length: 8192
 
-reward_clip: 20
-advantage_clip: 10.0
+advantage_clip: 0.2
 ppo_epochs: 1
-adv_estimator: "reinforce"
+adv_estimator: "grpo"
 #pg_clip: 0.1
 #dual_clip_loss: True
 init_kl_coef: 0.0
 whiten_advantages: true
 entropy_loss_coef: 0
+max_grad_norm: 1.0
 
 pretrain: Qwen/Qwen2.5-VL-3B-Instruct
+reward_pretrain: Qwen/Qwen2.5-VL-3B-Instruct
 
 actor_train:
   model_args:
+    attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
@@ -66,11 +72,14 @@ actor_train:
     learning_rate: 1.0e-6
     weight_decay: 0
     per_device_train_batch_size: 2
-    gradient_accumulation_steps: 32
+    gradient_accumulation_steps: 64
     warmup_steps: 10
+    lr_scheduler_type: cosine
   data_args:
     template: qwen2_5
   strategy_args:
+#    strategy_name: deepspeed_train
+#    strategy_config: ${deepspeed_zero3}
     strategy_name: megatron_train
     strategy_config:
       tensor_model_parallel_size: 1
@@ -99,9 +108,9 @@ actor_infer:
     strategy_config:
       gpu_memory_utilization: 0.8
       block_size: 16
-      limit_mm_per_prompt: 
-        image: ${max_actions_per_traj}
       load_format: auto
+      limit_mm_per_prompt:
+        image: ${max_actions_per_traj}
   device_mapping: list(range(0,8))
 
 reference:
@@ -118,53 +127,111 @@ reference:
   device_mapping: list(range(0,8))
   infer_batch_size: 2
 
-enable_response_mask: True
-action_sep: "||"
-use_turn_scores: False # important to GAE when applying token-level rewards to token-level advantages. If False, will take the sum of scores as the reward for the last turn.
-enable_think: False # False -> no think RL
-max_actions_per_traj: 10
-reward_normalization:
-  grouping: tags # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
-  method: identity # asym_clip / identity / mean_std
 
-custom_envs:
-  SimpleSokoban:
-    env_type: sokoban
-    max_actions_per_traj:  ${max_actions_per_traj} # used in environment state manager to control the actual max actions executed per trajectory
-    max_steps_per_traj: ${max_actions_per_traj}
-    env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
-    max_tokens: 100 # used to curate llm prompt "max words", not used for rollout
-    grid_vocab: false
-    env_config: # keys should be a subset of SokobanConfig
-      dim_x: 6
-      dim_y: 6
-      num_boxes: 1
-      max_steps: ${max_actions_per_traj}
-      render_mode: "rgb_array"
-  FrozenLake:
-    env_type: frozen_lake
-    max_actions_per_traj:  ${max_actions_per_traj}
-    max_steps_per_traj: ${max_actions_per_traj}
-    env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
-    max_tokens: 100
-    grid_vocab: false
-    env_config:
-      is_slippery: false
-      render_mode: "rgb_array"
+action_pattern: <answer>(.*?)</answer>
+think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
+user_prompt_no_think_format: <answer> [your answer] </answer>
+user_prompt_think_format: <think> [Your thoughts] </think> <answer> [your answer] </answer>
+added_text_no_think: <answer>
+added_text_think: <think>
+
+max_tokens_per_step: 128
+max_actions_per_traj: 10
+
+reward_normalization:
+  grouping: traj_group_id # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
+  method: mean_std # asym_clip / identity / mean_std
 
 train_env_manager:
   format_penalty: -0.15 # sokoban env penalty_for_step=-0.1
   max_env_num_per_worker: 16
-  env_groups: 512
+  num_env_groups: 128
   # under the same group, the env config and env seed are ensured to be equal
-  group_size: 1
+  group_size: 8
   tags: [SimpleSokoban]
-  n_groups: [512] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  num_groups_partition: [128] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 val_env_manager:
   max_env_num_per_worker: 32
-  env_groups: 512
+  num_env_groups: 1024
   group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
-  tags: [SimpleSokoban, FrozenLake]
-  n_groups: [256, 256] #
+  tags: [SimpleSokoban, LargerSokoban, SokobanDifferentGridVocab, FrozenLake]
+  num_groups_partition: [256, 256, 256, 256] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
+
+custom_envs:
+  SimpleSokoban:
+    env_type: sokoban
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    added_text: ${added_text_no_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
+    use_thread_lock: true
+    env_config: # keys should be a subset of SokobanConfig
+      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${action_pattern}
+      max_steps: ${max_actions_per_traj}
+      dim_x: 6
+      dim_y: 6
+      num_boxes: 1
+      render_mode: "rgb_array"
+  LargerSokoban:
+    env_type: sokoban
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    added_text: ${added_text_no_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
+    use_thread_lock: true
+    env_config:
+      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${action_pattern}
+      max_steps: ${max_actions_per_traj}
+      dim_x: 8
+      dim_y: 8
+      num_boxes: 2
+      search_depth: 10
+      render_mode: "rgb_array"
+  SokobanDifferentGridVocab:
+    env_type: sokoban
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    added_text: ${added_text_no_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
+    use_thread_lock: true
+    env_config: # keys should be a subset of SokobanConfig
+      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${action_pattern}
+      search_depth: 30
+      dim_x: 6
+      dim_y: 6
+      num_boxes: 1
+      max_steps: ${max_actions_per_traj}
+      grid_lookup: { 0: "W", 1: ".", 2: "G", 3: "C", 4: "B", 5: "A", 6: "@" }
+      grid_vocab: { "W": "wall", ".": "empty", "G": "target", "C": "box on target", "B": "box", "A": "player", "@": "player on target" }
+      render_mode: "rgb_array"
+  FrozenLake:
+    env_type: frozen_lake
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_no_think_format}
+    added_text: ${added_text_no_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
+    use_thread_lock: true
+    env_config:
+      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${action_pattern}
+      max_steps: ${max_actions_per_traj}
+      is_slippery: false
+      render_mode: "rgb_array"
+  FrozenLakeThink:
+    env_type: frozen_lake
+    max_tokens_per_step: ${max_tokens_per_step}
+    user_prompt_format: ${user_prompt_think_format}
+    added_text: ${added_text_think}
+    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
+    use_thread_lock: true
+    env_config:
+      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${think_action_pattern}
+      max_steps: ${max_actions_per_traj}
+      is_slippery: false
+      render_mode: "rgb_array"
