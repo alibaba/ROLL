@@ -159,6 +159,9 @@ We are continuously working to expand ROLL's capabilities:
 
 ---
 
+## Notable work based on ROLL
+- [RecGPT](https://www.arxiv.org/abs/2507.22879): a next-generation, LLM-driven framework that places user intent at the core of recommender systems, fostering a more sustainable and mutually beneficial ecosystem.
+
 ## 🙏 Citation and Acknowledgement
 
 ROLL is inspired by the design of OpenRLHF, VeRL, Nemo-Aligner, and RAGEN.
