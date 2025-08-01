@@ -159,7 +159,7 @@ We are continuously working to expand ROLL's capabilities:
 
 ---
 
-## Notable work based on ROLL
+## 🏆 Notable work based on ROLL
 - [RecGPT](https://www.arxiv.org/abs/2507.22879): a next-generation, LLM-driven framework that places user intent at the core of recommender systems, fostering a more sustainable and mutually beneficial ecosystem.
 
 ## 🙏 Citation and Acknowledgement
@@ -177,12 +177,11 @@ The following repositories have been used in ROLL, either in their close-to-orig
 If you use ROLL in your research or project, please consider citing us:
 
 ```bibtex
-@misc{roll2025alibaba,
-  author = {ROLL Team and Other ROLL Contributors},
-  title = {Reinforcement Learning Optimization for Large-Scale Learning: An Efficient and User-Friendly Scaling Library},
-  year = {2025},
-  journal = {arXiv preprint arXiv: 2506.06122},
-  url = {https://arxiv.org/abs/2506.06122}
+@article{wang2025reinforcement,
+  title={Reinforcement Learning Optimization for Large-Scale Learning: An Efficient and User-Friendly Scaling Library},
+  author={Wang, Weixun and Xiong, Shaopan and Chen, Gengru and Gao, Wei and Guo, Sheng and He, Yancheng and Huang, Ju and Liu, Jiaheng and Li, Zhendong and Li, Xiaoyang and others},
+  journal={arXiv preprint arXiv:2506.06122},
+  year={2025}
 }
 ```
 
