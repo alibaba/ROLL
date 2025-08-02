@@ -78,6 +78,7 @@ class WebShopEnv(BaseEnv, WebAgentTextEnv):
         info = {
             "metrics": metrics,
         }
+        info.update(action_info)
         obs_with_actions = self._attach_actions(state)
         self.step_count += 1
         terminated, truncated = done, False
