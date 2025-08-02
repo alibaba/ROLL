@@ -57,8 +57,8 @@ class TrajEnvManager(BaseEnvManager):
         self.running = False
         self.use_thread_lock = self.env_config.get("use_thread_lock", False) # 避免同时执行大量cpu操作, 可以通过env_config配置
         self.thread_lock = thread_lock if self.use_thread_lock else nullcontext()
-        self.env: BaseEnv = REGISTERED_ENVS[self.env_config['env_class']](self.env_config['config'])
-        self.request_id: Optional[str] = None
+        with self.thread_lock:
+            self.env: BaseEnv = REGISTERED_ENVS[self.env_config['env_class']](self.env_config['config'])
 
         # Set environment step concurrency limit
         self.max_env_step_concurrent = self.env_config.get("max_env_step_concurrent", 0)

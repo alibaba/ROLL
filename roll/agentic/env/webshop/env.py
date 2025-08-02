@@ -2,18 +2,20 @@ import random
 import string
 from typing import Optional, Union
 
+from roll.agentic.env.parse_action_utils import default_parser_action_func
 from webshop_minimal import WebAgentTextEnv
 
-from roll.agentic.env.base import BaseLanguageBasedEnv
+from roll.agentic.env.base import BaseEnv
 from roll.agentic.env.webshop.config import WebShopEnvConfig
 from roll.agentic.utils import all_seed
 
 
-class WebShopEnv(BaseLanguageBasedEnv, WebAgentTextEnv):
+class WebShopEnv(BaseEnv, WebAgentTextEnv):
     def __init__(self, config: Optional[WebShopEnvConfig] = None, **kwargs: any) -> None:
         """
         Adapter for WebAgentTextEnv to conform to the BaseLanguageBasedEnv interface.
         """
+        BaseEnv.__init__(self, config=config)
         self.config = config or WebShopEnvConfig()
         self.observation_mode = self.config.observation_mode
         self.file_path = self.config.file_path
@@ -25,7 +27,6 @@ class WebShopEnv(BaseLanguageBasedEnv, WebAgentTextEnv):
         self.show_attrs = self.config.show_attrs
         self.render_cache = None
 
-        BaseLanguageBasedEnv.__init__(self)
         WebAgentTextEnv.__init__(
             self,
             observation_mode=self.observation_mode,
@@ -38,47 +39,60 @@ class WebShopEnv(BaseLanguageBasedEnv, WebAgentTextEnv):
             show_attrs=self.show_attrs,
             **kwargs,
         )
+        self.step_count = 0
 
     def reset(
         self, seed=None, session: Optional[Union[str, int]] = None, instruction_text: Optional[str] = None
     ) -> any:
-        """
-        Reset the environment and return the initial observation.
-
-        Args:
-            session (str|int|None): The new session ID.
-            instruction_text (str|None): Optional new instruction text.
-
-        Returns:
-            The initial observation.
-        """
+        self.step_count = 0
         if session is None:
             with all_seed(seed):
                 session = "".join(random.choices(string.ascii_lowercase, k=10))
         obs, _ = WebAgentTextEnv.reset(self, session=session, instruction_text=instruction_text)
         self.prepare_render_cache(WebAgentTextEnv.get_instruction_text(self))
         self.prepare_render_cache(obs)
-        obs_with_actions = self._attach_actions(obs)
-        return obs_with_actions
+        return self.render(), {}
 
     def step(self, action):
-        """
-        Take an action in the environment and return the next observation, reward, done, and info.
-        """
-        state, reward, done, info = WebAgentTextEnv.step(self, action)
+        action_info = self.parse_action(action)
+        if action_info["action"] is None:
+            metrics = {
+                "action_is_effective": False,
+                "action_is_valid": False,
+                "success": False,
+            }
+            info = {
+                "metrics": metrics,
+            }
+            info.update(action_info)
+            return self.render(), 0, False, False, info
+
+        state, reward, done, info = WebAgentTextEnv.step(self, action_info["action"])
         self.prepare_render_cache(self.observation)
-        info = {
+        metrics = {
             "action_is_effective": tuple(self.get_available_actions())
             == ("click[back to search]", "click[< prev]", "click[next >]"),
             "action_is_valid": True,
             "success": done,
         }
+        info = {
+            "metrics": metrics,
+        }
+        info.update(action_info)
         obs_with_actions = self._attach_actions(state)
-        return obs_with_actions, reward, done, info
+        self.step_count += 1
+        terminated, truncated = done, False
+        if terminated:
+            if not metrics["success"] and self.step_count >= self.config.max_steps:
+                truncated = True
+        return obs_with_actions, reward, terminated, truncated, info
 
     def _attach_actions(self, observation: str) -> str:
         actions = ", ".join(self.get_available_actions())
         return observation + "\n" + "Available actions: " + actions
+
+    def parse_action(self, text):
+        return default_parser_action_func(text, self.config.action_pattern, None, None)
 
     def render(self, mode=None):
         """
