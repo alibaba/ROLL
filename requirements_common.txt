@@ -23,6 +23,7 @@ codetiming
 more_itertools
 
 wandb
+swanlab
 
 math-verify
 openai

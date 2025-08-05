@@ -10,7 +10,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "agentic_pipeline_webshop"
+exp_name: "agentic_pipeline_webshop_async"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
@@ -53,6 +53,8 @@ logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
 
+async_generation_ratio: 1
+
 rollout_batch_size: 64
 val_batch_size: 64
 sequence_length: 8192
@@ -73,7 +75,7 @@ reward_pretrain: Qwen/Qwen2.5-7B-Instruct
 
 actor_train:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
@@ -81,7 +83,7 @@ actor_train:
     learning_rate: 1.0e-6
     weight_decay: 0
     per_device_train_batch_size: 1
-    gradient_accumulation_steps: 8
+    gradient_accumulation_steps: 16
     warmup_steps: 10
   data_args:
     template: qwen2_5
@@ -95,12 +97,11 @@ actor_train:
       use_distributed_optimizer: true
       recompute_granularity: full
       max_grad_norm: ${max_grad_norm}
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(0,4))
   infer_batch_size: 1
 
 actor_infer:
   model_args:
-    flash_attn: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
   generating_args:
@@ -118,12 +119,12 @@ actor_infer:
       gpu_memory_utilization: 0.8
       block_size: 16
       load_format: auto
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(4,8))
   infer_batch_size: 1
 
 reference:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~
@@ -132,7 +133,7 @@ reference:
   strategy_args:
     strategy_name: hf_infer
     strategy_config: ~
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(0,4))
   infer_batch_size: 1
 
 reward_normalization:
