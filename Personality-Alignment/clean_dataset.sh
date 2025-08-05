@@ -1,8 +1,3 @@
-#!/bin/bash
-
-# Qwen Dataset Cleaning Script
-# This script uses Qwen model to clean dialogue datasets
-
 set -e  # Exit on any error
 
 # Script configuration
@@ -10,13 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/clean_dataset.py"
 
 # Default parameters
-INPUT_FILE=""
-OUTPUT_FILE=""
+INPUT_FILE="dialogue_dataset_all_v6_summarized.jsonl"
+OUTPUT_FILE="dialogue_dataset_all_v6_cleaned.jsonl"
 STRATEGY="comprehensive"
-QWEN_MODEL_PATH="Qwen/Qwen3-8B"
+QWEN_MODEL_PATH="/project/hdtaccuracy/models/base/Qwen3-8B"
 DEVICE="auto"
 BATCH_SIZE=32
-INFERENCE_BATCH_SIZE=8
+INFERENCE_BATCH_SIZE=32
 LOG_FILE=""
 
 # Function to print usage

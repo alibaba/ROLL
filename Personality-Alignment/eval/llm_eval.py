@@ -1,5 +1,5 @@
 """
-LLM Evaluator for evaluating dialogue model outputs.
+LLM Evaluator for evaluating dialogue model outputs with multi-GPU support.
 Based on the GPT and Qwen cleaner structure from clean_dataset.py.
 """
 
@@ -11,16 +11,48 @@ from typing import List, Dict, Any, Optional, Tuple
 import logging
 from pathlib import Path
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 from tqdm import tqdm
 import torch
+import torch.multiprocessing as mp
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 import numpy as np
 from dataclasses import dataclass
+import multiprocessing as mp_std
+import queue
+import threading
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def extract_profile_and_history(prompt: str) -> tuple:
+    """
+    Extract profile and conversation history from the prompt
+
+    Args:
+        prompt: The full prompt text
+
+    Returns:
+        Tuple of (profile, conversation_history)
+    """
+    profile = ""
+    conversation_history = ""
+
+    # Extract profile
+    if "[Profile Begin]" in prompt and "[Profile End]" in prompt:
+        start = prompt.find("[Profile Begin]") + len("[Profile Begin]")
+        end = prompt.find("[Profile End]")
+        profile = prompt[start:end].strip()
+
+    # Extract conversation history
+    if "[Conversation History Begin]" in prompt and "[Conversation History End]" in prompt:
+        start = prompt.find("[Conversation History Begin]") + len("[Conversation History Begin]")
+        end = prompt.find("[Conversation History End]")
+        conversation_history = prompt[start:end].strip()
+
+    return profile, conversation_history
 
 
 @dataclass
@@ -51,6 +83,125 @@ class EvaluationResult:
             history_consistency=data.get("history_consistency", 0),
             explanations=data.get("explanations", {}),
         )
+
+
+def parse_evaluation_response_shared(response: str) -> Optional[EvaluationResult]:
+    """Shared function to parse evaluation response and extract JSON"""
+    if not response:
+        return None
+
+    # Try multiple methods to extract JSON
+    json_candidates = []
+
+    # Method 1: Find JSON block between { and }
+    json_start = response.find("{")
+    json_end = response.rfind("}") + 1
+    if json_start != -1 and json_end > json_start:
+        json_candidates.append(response[json_start:json_end])
+
+    # Method 2: Look for JSON in code blocks
+    import re
+
+    json_pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+    matches = re.findall(json_pattern, response, re.DOTALL)
+    json_candidates.extend(matches)
+
+    # Method 3: Try to fix common JSON issues
+    for candidate in json_candidates:
+        try:
+            # Clean up the candidate
+            cleaned = candidate.strip()
+
+            # Try parsing as-is first
+            try:
+                result_dict = json.loads(cleaned)
+                return EvaluationResult.from_dict(result_dict)
+            except json.JSONDecodeError:
+                pass
+
+            # Try fixing common issues
+            # Remove trailing commas
+            cleaned = re.sub(r",\s*}", "}", cleaned)
+            cleaned = re.sub(r",\s*]", "]", cleaned)
+
+            # Ensure all strings are properly quoted
+            lines = cleaned.split("\n")
+            fixed_lines = []
+            for line in lines:
+                # Fix unquoted keys
+                line = re.sub(r"(\w+):", r'"\1":', line)
+                # Fix single quotes to double quotes
+                line = line.replace("'", '"')
+                fixed_lines.append(line)
+
+            cleaned = "\n".join(fixed_lines)
+
+            try:
+                result_dict = json.loads(cleaned)
+                return EvaluationResult.from_dict(result_dict)
+            except json.JSONDecodeError:
+                continue
+
+        except Exception as e:
+            logger.debug(f"JSON parsing attempt failed: {e}")
+            continue
+
+    # If all parsing attempts fail, try to extract values manually
+    try:
+        return extract_values_manually_shared(response)
+    except Exception as e:
+        logger.error(f"Manual extraction failed: {e}")
+        return None
+
+
+def extract_values_manually_shared(response: str) -> Optional[EvaluationResult]:
+    """Shared function to manually extract evaluation values from response text"""
+    import re
+
+    # Initialize default values
+    topic_alignment = 3
+    persona_consistency = 3
+    preference_consistency = 3
+    history_consistency = 3
+    explanations = {
+        "topic_alignment": "Could not parse explanation",
+        "persona_consistency": "Could not parse explanation",
+        "preference_consistency": "Could not parse explanation",
+        "history_consistency": "Could not parse explanation",
+    }
+
+    # Try to extract scores using regex patterns
+    patterns = {
+        "topic_alignment": r'"?topic_alignment"?\s*:\s*(\d+)',
+        "persona_consistency": r'"?persona_consistency"?\s*:\s*(\d+)',
+        "preference_consistency": r'"?preference_consistency"?\s*:\s*(\d+)',
+        "history_consistency": r'"?history_consistency"?\s*:\s*(\d+)',
+    }
+
+    for key, pattern in patterns.items():
+        match = re.search(pattern, response, re.IGNORECASE)
+        if match:
+            try:
+                value = int(match.group(1))
+                if 1 <= value <= 5:  # Validate range
+                    if key == "topic_alignment":
+                        topic_alignment = value
+                    elif key == "persona_consistency":
+                        persona_consistency = value
+                    elif key == "preference_consistency":
+                        preference_consistency = value
+                    elif key == "history_consistency":
+                        history_consistency = value
+            except ValueError:
+                pass
+
+    return EvaluationResult(
+        topic_alignment=topic_alignment,
+        persona_consistency=persona_consistency,
+        preference_consistency=preference_consistency,
+        history_consistency=history_consistency,
+        explanations=explanations,
+    )
 
 
 EVAL_PROMPT = """
@@ -106,19 +257,127 @@ Score each criterion strictly within the 1-5 scale. Use the full scale whenever 
 3. Return your verdict **only** in the JSON schema below.
 
 ### Output JSON schema
-{
+{{
   "topic_alignment": <integer 1‑5>,
   "persona_consistency": <integer 1‑5>,
   "preference_consistency": <integer 1‑5>,
   "history_consistency": <integer 1‑5>,
-  "explanations": {
+  "explanations": {{
     "topic_alignment": "<one‑sentence rationale>",
     "persona_consistency": "<one‑sentence rationale>",
     "preference_consistency": "<one‑sentence rationale>",
     "history_consistency": "<one‑sentence rationale>"
-  }
-}
+  }}
+}}
 """
+
+
+def get_available_gpus() -> List[int]:
+    """Get list of available GPU devices"""
+    if not torch.cuda.is_available():
+        return []
+    return list(range(torch.cuda.device_count()))
+
+
+def worker_process(
+    gpu_id: int,
+    model_path: str,
+    inference_batch_size: int,
+    input_queue: mp_std.Queue,
+    output_queue: mp_std.Queue,
+    worker_id: int,
+):
+    """Worker process function for multi-GPU inference"""
+    try:
+        # Set CUDA device
+        torch.cuda.set_device(gpu_id)
+        device = f"cuda:{gpu_id}"
+
+        logger.info(f"Worker {worker_id} starting on GPU {gpu_id}")
+
+        # Load model on specific GPU
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer.padding_side = "left"
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map={"": device},
+            trust_remote_code=True,
+            attn_implementation="flash_attention_2",
+        )
+
+        generation_config = GenerationConfig(
+            max_new_tokens=1024,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+        logger.info(f"Worker {worker_id} model loaded successfully on GPU {gpu_id}")
+
+        while True:
+            try:
+                # Get batch from input queue
+                batch_data = input_queue.get(timeout=10)
+                if batch_data is None:  # Poison pill
+                    logger.info(f"Worker {worker_id} received stop signal")
+                    break
+
+                batch_id, prompts = batch_data
+
+                # Format prompts for chat
+                formatted_texts = []
+                for prompt in prompts:
+                    messages = [{"role": "user", "content": prompt}]
+                    text = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                    formatted_texts.append(text)
+
+                # Process in sub-batches
+                responses = []
+                for i in range(0, len(formatted_texts), inference_batch_size):
+                    sub_texts = formatted_texts[i : i + inference_batch_size]
+
+                    # Tokenize inputs
+                    model_inputs = tokenizer(
+                        sub_texts, return_tensors="pt", padding=True, truncation=True, max_length=7500
+                    ).to(device)
+
+                    # Generate responses
+                    with torch.no_grad():
+                        generated_ids = model.generate(
+                            input_ids=model_inputs.input_ids,
+                            attention_mask=model_inputs.attention_mask,
+                            generation_config=generation_config,
+                            pad_token_id=tokenizer.eos_token_id,
+                        )
+
+                    # Decode responses
+                    input_lengths = model_inputs.input_ids.shape[1]
+                    generated_ids = generated_ids[:, input_lengths:]
+
+                    sub_responses = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+                    responses.extend([resp.strip() if resp else None for resp in sub_responses])
+
+                # Put results in output queue
+                output_queue.put((batch_id, responses))
+
+                # Clear cache
+                torch.cuda.empty_cache()
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Worker {worker_id} error: {e}")
+                output_queue.put((batch_id, [None] * len(prompts)))
+
+    except Exception as e:
+        logger.error(f"Worker {worker_id} failed to initialize: {e}")
 
 
 class GPTEvaluator:
@@ -172,6 +431,10 @@ class GPTEvaluator:
 
         return None
 
+    def parse_evaluation_response(self, response: str) -> Optional[EvaluationResult]:
+        """Parse evaluation response and extract JSON"""
+        return parse_evaluation_response_shared(response)
+
     def evaluate_single_output(
         self, profile: str, conversation_history: str, ground_truth: str, model_output: str
     ) -> Optional[EvaluationResult]:
@@ -187,20 +450,7 @@ class GPTEvaluator:
         if not response:
             return None
 
-        try:
-            # Try to extract JSON from response
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                result_dict = json.loads(json_str)
-                return EvaluationResult.from_dict(result_dict)
-            else:
-                logger.error(f"No valid JSON found in response: {response}")
-                return None
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON parsing error: {e}, response: {response}")
-            return None
+        return self.parse_evaluation_response(response)
 
     def evaluate_batch(self, evaluation_data: List[Dict[str, Any]]) -> List[Optional[EvaluationResult]]:
         """Evaluate a batch of model outputs"""
@@ -214,9 +464,6 @@ class GPTEvaluator:
                 model_output=data.get("model_output", ""),
             )
             results.append(result)
-
-            # Add small delay to avoid API limits
-            # time.sleep(0.1)
 
         return results
 
@@ -252,7 +499,7 @@ class GPTEvaluator:
 
 
 class QwenEvaluator:
-    """Class for evaluating dialogue outputs using Qwen"""
+    """Class for evaluating dialogue outputs using Qwen with single GPU support"""
 
     def __init__(
         self, model_path: str = "Qwen/Qwen2.5-7B-Instruct", device: str = "auto", inference_batch_size: int = 8
@@ -284,9 +531,8 @@ class QwenEvaluator:
 
         # Set generation config
         self.generation_config = GenerationConfig(
-            max_new_tokens=512,
+            max_new_tokens=1024,
             do_sample=True,
-            # temperature=0.1,
             pad_token_id=self.tokenizer.eos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
         )
@@ -333,40 +579,9 @@ class QwenEvaluator:
             logger.error(f"Qwen batch inference failed: {e}")
             return [None] * len(prompts)
 
-    def call_qwen(self, prompt: str) -> Optional[str]:
-        """Call Qwen model for single inference"""
-        results = self.call_qwen_batch([prompt])
-        return results[0] if results else None
-
-    def evaluate_single_output(
-        self, profile: str, conversation_history: str, ground_truth: str, model_output: str
-    ) -> Optional[EvaluationResult]:
-        """Evaluate a single model output"""
-        prompt = EVAL_PROMPT.format(
-            PROFILE=profile,
-            CONVERSATION_HISTORY=conversation_history,
-            GROUND_TRUTH=ground_truth,
-            MODEL_OUTPUT=model_output,
-        )
-
-        response = self.call_qwen(prompt)
-        if not response:
-            return None
-
-        try:
-            # Try to extract JSON from response
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                result_dict = json.loads(json_str)
-                return EvaluationResult.from_dict(result_dict)
-            else:
-                logger.error(f"No valid JSON found in response: {response}")
-                return None
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON parsing error: {e}, response: {response}")
-            return None
+    def parse_evaluation_response(self, response: str) -> Optional[EvaluationResult]:
+        """Parse evaluation response and extract JSON"""
+        return parse_evaluation_response_shared(response)
 
     def evaluate_batch(self, evaluation_data: List[Dict[str, Any]]) -> List[Optional[EvaluationResult]]:
         """Evaluate model outputs in batches using batch inference"""
@@ -396,20 +611,8 @@ class QwenEvaluator:
                     results.append(None)
                     continue
 
-                try:
-                    # Try to extract JSON from response
-                    json_start = response.find("{")
-                    json_end = response.rfind("}") + 1
-                    if json_start != -1 and json_end > json_start:
-                        json_str = response[json_start:json_end]
-                        result_dict = json.loads(json_str)
-                        results.append(EvaluationResult.from_dict(result_dict))
-                    else:
-                        logger.error(f"No valid JSON found in response: {response}")
-                        results.append(None)
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON parsing error: {e}, response: {response}")
-                    results.append(None)
+                result = self.parse_evaluation_response(response)
+                results.append(result)
 
             # Clear GPU cache periodically
             if torch.cuda.is_available():
@@ -418,15 +621,142 @@ class QwenEvaluator:
         return results
 
 
+class QwenMultiGPUEvaluator:
+    """Class for evaluating dialogue outputs using Qwen with multi-GPU support"""
+
+    def __init__(
+        self,
+        model_path: str = "Qwen/Qwen2.5-7B-Instruct",
+        inference_batch_size: int = 8,
+        num_gpus: int = None,
+        max_queue_size: int = 100,
+    ):
+        """
+        Initialize Qwen multi-GPU evaluator
+
+        Args:
+            model_path: Path to Qwen model or HuggingFace model name
+            inference_batch_size: Batch size for model inference per GPU
+            num_gpus: Number of GPUs to use, if None will use all available
+            max_queue_size: Maximum size of input/output queues
+        """
+        self.model_path = model_path
+        self.inference_batch_size = inference_batch_size
+        self.max_queue_size = max_queue_size
+
+        # Get available GPUs
+        available_gpus = get_available_gpus()
+        if not available_gpus:
+            raise RuntimeError("No CUDA GPUs available")
+
+        if num_gpus is None:
+            self.gpu_ids = available_gpus
+        else:
+            self.gpu_ids = available_gpus[: min(num_gpus, len(available_gpus))]
+
+        logger.info(f"Using GPUs: {self.gpu_ids}")
+
+        # Initialize multiprocessing
+        mp_std.set_start_method("spawn", force=True)
+
+        # Create queues for communication
+        self.input_queue = mp_std.Queue(maxsize=max_queue_size)
+        self.output_queue = mp_std.Queue(maxsize=max_queue_size)
+
+        # Start worker processes
+        self.workers = []
+        for i, gpu_id in enumerate(self.gpu_ids):
+            worker = mp_std.Process(
+                target=worker_process,
+                args=(gpu_id, model_path, inference_batch_size, self.input_queue, self.output_queue, i),
+            )
+            worker.start()
+            self.workers.append(worker)
+
+        logger.info(f"Started {len(self.workers)} worker processes")
+
+    def parse_evaluation_response(self, response: str) -> Optional[EvaluationResult]:
+        """Parse evaluation response and extract JSON"""
+        return parse_evaluation_response_shared(response)
+
+    def evaluate_batch(self, evaluation_data: List[Dict[str, Any]]) -> List[Optional[EvaluationResult]]:
+        """Evaluate model outputs using multi-GPU inference"""
+        # Prepare prompts
+        prompts = []
+        for data in evaluation_data:
+            prompt = EVAL_PROMPT.format(
+                PROFILE=data.get("profile", ""),
+                CONVERSATION_HISTORY=data.get("conversation_history", ""),
+                GROUND_TRUTH=data.get("ground_truth", ""),
+                MODEL_OUTPUT=data.get("model_output", ""),
+            )
+            prompts.append(prompt)
+
+        # Split into batches for parallel processing
+        batch_size = self.inference_batch_size * 2  # Larger batches for better GPU utilization
+        batches = []
+        for i in range(0, len(prompts), batch_size):
+            batches.append(prompts[i : i + batch_size])
+
+        # Submit batches to workers
+        for batch_id, batch in enumerate(batches):
+            self.input_queue.put((batch_id, batch))
+
+        # Collect results
+        batch_results = {}
+        for _ in range(len(batches)):
+            batch_id, responses = self.output_queue.get()
+            batch_results[batch_id] = responses
+
+        # Reconstruct results in original order
+        all_responses = []
+        for batch_id in range(len(batches)):
+            all_responses.extend(batch_results[batch_id])
+
+        # Parse evaluation results
+        results = []
+        for response in all_responses:
+            if not response:
+                results.append(None)
+                continue
+
+            result = self.parse_evaluation_response(response)
+            results.append(result)
+
+        return results
+
+    def shutdown(self):
+        """Shutdown worker processes"""
+        # Send poison pills to all workers
+        for _ in self.workers:
+            self.input_queue.put(None)
+
+        # Wait for workers to finish
+        for worker in self.workers:
+            worker.join(timeout=30)
+            if worker.is_alive():
+                logger.warning(f"Worker {worker.pid} did not shutdown gracefully, terminating...")
+                worker.terminate()
+
+        logger.info("All worker processes stopped")
+
+    def __del__(self):
+        """Cleanup when object is destroyed"""
+        try:
+            self.shutdown()
+        except:
+            pass
+
+
 class LLMEvaluator:
-    """Main evaluator class that can use either GPT or Qwen"""
+    """Main evaluator class that can use GPT, Qwen, or Multi-GPU Qwen"""
 
     def __init__(self, evaluator_type: str = "gpt", **kwargs):
         """
         Initialize LLM evaluator
 
         Args:
-            evaluator_type: Type of evaluator to use ('gpt' or 'qwen')
+            evaluator_type: Type of evaluator to use ('gpt', 'qwen', 'qwen-multi-gpu')
             **kwargs: Additional arguments passed to the specific evaluator
         """
         self.evaluator_type = evaluator_type
@@ -435,11 +765,52 @@ class LLMEvaluator:
             self.evaluator = GPTEvaluator(**kwargs)
         elif evaluator_type == "qwen":
             self.evaluator = QwenEvaluator(**kwargs)
+        elif evaluator_type == "qwen-multi-gpu":
+            self.evaluator = QwenMultiGPUEvaluator(**kwargs)
         else:
             raise ValueError(f"Unknown evaluator type: {evaluator_type}")
 
+    def process_evaluation_data(
+        self, evaluation_data: List[Dict[str, Any]], prompt_data: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        merged_data = []
+        for entry in prompt_data:
+            id = entry.get("qid", None)
+            # find entry in evaluation_data with the same id
+            if id is not None:
+                matching_entry = next((e for e in evaluation_data if e.get("qid") == id), None)
+                if not matching_entry:
+                    model_output = None
+                else:
+                    model_output = matching_entry.get("response", None)
+            prompt = entry.get("prompt", None)
+            profile, conversation_history = extract_profile_and_history(prompt)
+            gt = entry.get("output", None)
+            if not gt or not model_output or not profile or not conversation_history:
+                logger.warning(
+                    f"Skipping entry with missing data: missing gt={not gt}, model_output={not model_output}, profile={not profile}, conversation_history={not conversation_history}"
+                )
+                continue
+
+            merged_entry = {
+                "qid": id,
+                "profile": profile,
+                "conversation_history": conversation_history,
+                "ground_truth": gt,
+                "model_output": model_output,
+            }
+            merged_data.append(merged_entry)
+
+        return merged_data
+
     def evaluate_dataset(
-        self, input_file: str, output_file: str, parallel: bool = False, max_workers: int = 5, batch_size: int = 100
+        self,
+        input_file: str,
+        prompt_file: str,
+        output_file: str,
+        parallel: bool = False,
+        max_workers: int = 5,
+        batch_size: int = 100,
     ) -> Dict[str, float]:
         """
         Evaluate an entire dataset and save results
@@ -458,74 +829,93 @@ class LLMEvaluator:
         logger.info(f"Input file: {input_file}")
         logger.info(f"Output file: {output_file}")
 
-        # Read evaluation data
-        evaluation_data = []
-        with open(input_file, "r", encoding="utf-8") as f:
-            for line_num, line in enumerate(f, 1):
-                try:
-                    entry = json.loads(line.strip())
-                    evaluation_data.append(entry)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"JSON parsing error at line {line_num}: {e}")
-                    continue
+        try:
+            # Read evaluation data
+            evaluation_data = []
+            with open(input_file, "r", encoding="utf-8") as f:
+                for line_num, line in enumerate(f, 1):
+                    try:
+                        entry = json.loads(line.strip())
+                        evaluation_data.append(entry)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"JSON parsing error at line {line_num}: {e}")
+                        continue
 
-        logger.info(f"Loaded {len(evaluation_data)} entries for evaluation")
+            prompt_data = []
+            if prompt_file:
+                with open(prompt_file, "r", encoding="utf-8") as f:
+                    for line_num, line in enumerate(f, 1):
+                        try:
+                            entry = json.loads(line.strip())
+                            prompt_data.append(entry)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"JSON parsing error at line {line_num}: {e}")
+                            continue
 
-        # Process in batches
-        all_results = []
-        successful_evaluations = 0
+            # If prompts are provided, merge them with evaluation data
+            evaluation_data = self.process_evaluation_data(evaluation_data, prompt_data)
+            logger.info(f"Loaded {len(evaluation_data)} entries for evaluation")
 
-        with tqdm(total=len(evaluation_data), desc="Evaluating entries") as pbar:
-            for i in range(0, len(evaluation_data), batch_size):
-                batch = evaluation_data[i : i + batch_size]
-                logger.info(
-                    f"Processing batch {i//batch_size + 1}/{(len(evaluation_data) + batch_size - 1)//batch_size}"
-                )
+            # Process in batches
+            all_results = []
+            successful_evaluations = 0
 
-                try:
-                    if self.evaluator_type == "gpt" and parallel:
-                        batch_results = self.evaluator.evaluate_parallel(batch, max_workers)
-                    else:
-                        batch_results = self.evaluator.evaluate_batch(batch)
+            with tqdm(total=len(evaluation_data), desc="Evaluating entries") as pbar:
+                for i in range(0, len(evaluation_data), batch_size):
+                    batch = evaluation_data[i : i + batch_size]
+                    logger.info(
+                        f"Processing batch {i//batch_size + 1}/{(len(evaluation_data) + batch_size - 1)//batch_size}"
+                    )
 
-                    # Combine original data with evaluation results
-                    for j, (original_entry, result) in enumerate(zip(batch, batch_results)):
-                        output_entry = original_entry.copy()
-                        if result:
-                            output_entry["evaluation_result"] = result.to_dict()
-                            successful_evaluations += 1
+                    try:
+                        if self.evaluator_type == "gpt" and parallel:
+                            batch_results = self.evaluator.evaluate_parallel(batch, max_workers)
                         else:
+                            batch_results = self.evaluator.evaluate_batch(batch)
+
+                        # Combine original data with evaluation results
+                        for j, (original_entry, result) in enumerate(zip(batch, batch_results)):
+                            output_entry = original_entry.copy()
+                            if result:
+                                output_entry["evaluation_result"] = result.to_dict()
+                                successful_evaluations += 1
+                            else:
+                                output_entry["evaluation_result"] = None
+                            all_results.append(output_entry)
+
+                        pbar.update(len(batch))
+
+                    except Exception as e:
+                        logger.error(f"Error processing batch {i//batch_size + 1}: {e}")
+                        # Add entries without evaluation results
+                        for original_entry in batch:
+                            output_entry = original_entry.copy()
                             output_entry["evaluation_result"] = None
-                        all_results.append(output_entry)
+                            all_results.append(output_entry)
+                        pbar.update(len(batch))
 
-                    pbar.update(len(batch))
+            # Save results
+            with open(output_file, "w", encoding="utf-8") as f:
+                for entry in all_results:
+                    json.dump(entry, f, ensure_ascii=False)
+                    f.write("\n")
 
-                except Exception as e:
-                    logger.error(f"Error processing batch {i//batch_size + 1}: {e}")
-                    # Add entries without evaluation results
-                    for original_entry in batch:
-                        output_entry = original_entry.copy()
-                        output_entry["evaluation_result"] = None
-                        all_results.append(output_entry)
-                    pbar.update(len(batch))
+            # Calculate statistics
+            stats = self._calculate_statistics(all_results)
 
-        # Save results
-        with open(output_file, "w", encoding="utf-8") as f:
-            for entry in all_results:
-                json.dump(entry, f, ensure_ascii=False)
-                f.write("\n")
+            logger.info(f"Evaluation completed!")
+            logger.info(f"Total entries: {len(evaluation_data)}")
+            logger.info(f"Successful evaluations: {successful_evaluations}")
+            logger.info(f"Success rate: {successful_evaluations/len(evaluation_data)*100:.1f}%")
+            logger.info(f"Results saved to: {output_file}")
+            logger.info(f"Evaluation statistics: {stats}")
 
-        # Calculate statistics
-        stats = self._calculate_statistics(all_results)
+            return stats
 
-        logger.info(f"Evaluation completed!")
-        logger.info(f"Total entries: {len(evaluation_data)}")
-        logger.info(f"Successful evaluations: {successful_evaluations}")
-        logger.info(f"Success rate: {successful_evaluations/len(evaluation_data)*100:.1f}%")
-        logger.info(f"Results saved to: {output_file}")
-        logger.info(f"Evaluation statistics: {stats}")
-
-        return stats
+        finally:
+            # Cleanup multi-GPU evaluator if used
+            if self.evaluator_type == "qwen-multi-gpu":
+                self.evaluator.shutdown()
 
     def _calculate_statistics(self, results: List[Dict[str, Any]]) -> Dict[str, float]:
         """Calculate evaluation statistics"""
@@ -559,9 +949,13 @@ class LLMEvaluator:
 def main():
     parser = argparse.ArgumentParser(description="Evaluate dialogue model outputs using LLM evaluators")
     parser.add_argument("--input", "-i", required=True, help="Input jsonl file with evaluation data")
+    parser.add_argument("--prompt-input", "-p", help="Input json file with prompts (for manual evaluation)")
     parser.add_argument("--output", "-o", required=True, help="Output jsonl file for results")
     parser.add_argument(
-        "--evaluator-type", choices=["gpt", "qwen"], default="gpt", help="Type of evaluator to use: gpt or qwen"
+        "--evaluator-type",
+        choices=["gpt", "qwen", "qwen-multi-gpu"],
+        default="gpt",
+        help="Type of evaluator to use: gpt, qwen, or qwen-multi-gpu",
     )
 
     # GPT-specific arguments
@@ -575,8 +969,12 @@ def main():
     parser.add_argument(
         "--qwen-model-path", default="Qwen/Qwen2.5-7B-Instruct", help="Path to Qwen model or HuggingFace model name"
     )
-    parser.add_argument("--device", default="auto", help="Device to use for Qwen inference")
+    parser.add_argument("--device", default="auto", help="Device to use for single-GPU Qwen inference")
     parser.add_argument("--inference-batch-size", type=int, default=8, help="Batch size for model inference")
+
+    # Multi-GPU specific arguments
+    parser.add_argument("--num-gpus", type=int, help="Number of GPUs to use (for multi-GPU mode)")
+    parser.add_argument("--max-queue-size", type=int, default=100, help="Maximum queue size for multi-GPU mode")
 
     # Common arguments
     parser.add_argument("--batch-size", type=int, default=100, help="Batch size for processing")
@@ -605,6 +1003,24 @@ def main():
                 args.input,
                 args.output,
                 False,  # Qwen doesn't support parallel processing
+                args.max_workers,
+                args.batch_size,
+            )
+
+        elif args.evaluator_type == "qwen-multi-gpu":
+            evaluator = LLMEvaluator(
+                evaluator_type="qwen-multi-gpu",
+                model_path=args.qwen_model_path,
+                inference_batch_size=args.inference_batch_size,
+                num_gpus=args.num_gpus,
+                max_queue_size=args.max_queue_size,
+            )
+
+            stats = evaluator.evaluate_dataset(
+                args.input,
+                args.prompt_input,
+                args.output,
+                False,  # Multi-GPU Qwen handles parallelism internally
                 args.max_workers,
                 args.batch_size,
             )

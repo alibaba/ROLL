@@ -12,7 +12,12 @@ def load_dataset(file_path: str) -> List[Dict]:
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
-                records.append(json.loads(line))
+                record = json.loads(line)
+                if "cleaned_output" in record:
+                    # 如果有 cleaned_output 字段，使用它作为 output
+                    record["ground_truth"] = record.pop("cleaned_output")
+                records.append(record)
+
     return records
 
 
@@ -177,6 +182,10 @@ def split_dataset(base_dir, input_file: str, output_dir: str = ".", test_ratio: 
     """
     input_file = base_dir + input_file
     output_dir = base_dir + output_dir
+    # 创建输出目录
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
+
     print(f"Loading dataset from {input_file}...")
     records = load_dataset(input_file)
     print(f"Total records: {len(records)}")
@@ -186,10 +195,6 @@ def split_dataset(base_dir, input_file: str, output_dir: str = ".", test_ratio: 
     records = filter_dataset(records)
     # 把过滤数据集也保存到当前目录
     save_dataset(records, output_dir + "/filtered_dataset.jsonl")
-
-    # 创建输出目录
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
 
     # 方法1: 随机划分
     print("\n=== Random Split ===")
@@ -296,7 +301,7 @@ def split_dataset(base_dir, input_file: str, output_dir: str = ".", test_ratio: 
 if __name__ == "__main__":
     # 使用示例
     base_dir = "/project/hdtaccuracy/Personality-Alignment/"
-    input_file = "dialogue_dataset_all_v5_summarized.jsonl"  # 输入文件
-    output_dir = "split_data_v5_filtered"  # 输出目录
+    input_file = "dialogue_dataset_all_v6_cleaned.jsonl"  # 输入文件
+    output_dir = "split_data_v6_roll"  # 输出目录
 
     split_dataset(base_dir, input_file, output_dir, test_ratio=0.2, seed=42)

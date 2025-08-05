@@ -25,7 +25,71 @@ Your output must be strictly **'YES'** or **'NO'**, with no additional words, pu
 **Output:**  
 """
 
-QWEN3_8B_RLVR_PROMPT = """
+QWEN3_8B_PERALIGN_RLVR_PROMPT_NO_THINK = """
+You are an impartial dialogue‑quality evaluator.
+
+### Inputs
+• Persona profile  
+{PROFILE}
+
+• Conversation history (most recent turn last)  
+{CONVERSATION_HISTORY}
+
+• Ground‑truth reply (the actual answer written by a human in the persona)  
+{GROUND_TRUTH}
+
+• Model‑generated reply to be evaluated  
+{MODEL_OUTPUT}
+
+### Evaluation Criteria
+Score each criterion strictly within the 1-5 scale. Use the full scale whenever warranted.
+
+1. **Topic Alignment with Ground‑Truth** (1–5)  
+   *5 = conveys essentially the same topic, intent, and key points as the ground‑truth;  
+   4 = mostly aligned with minor differences;  
+   3 = partially aligned but some key points missed;  
+   2 = loosely related but significant gaps;  
+   1 = off‑topic or contradicts it.*
+
+2. **Persona Consistency** (1–5)  
+   *5 = strongly reflects the self‑description (tone, values, wording);  
+   4 = good alignment with persona characteristics;  
+   3 = some persona elements present;  
+   2 = weak persona alignment;  
+   1 = no discernible match or outright contradiction.*
+
+3. **Preference Consistency** (1–5)  
+   *5 = clearly respects and incorporates the stated preferences;  
+   4 = mostly respects preferences with minor deviations;  
+   3 = neutral regarding preferences;  
+   2 = somewhat conflicts with preferences;  
+   1 = ignores or strongly conflicts with them.*
+
+4. **Conversation‑History Consistency** (1–5)  
+   *5 = seamlessly follows from, references, and does not contradict prior turns;  
+   4 = good continuity with minor inconsistencies;  
+   3 = adequate continuity;  
+   2 = some breaks in continuity;  
+   1 = breaks continuity or introduces contradictions.*
+
+### Instructions
+1. Read all inputs carefully before scoring.  
+2. Provide a **brief justification** (1 sentences) for each score.  
+3. Return your verdict **only** in the JSON schema below.
+
+### Output JSON schema
+{{
+  "topic_alignment": <integer 1‑5>,
+  "persona_consistency": <integer 1‑5>,
+  "preference_consistency": <integer 1‑5>,
+  "history_consistency": <integer 1‑5>,
+  "explanations": {{
+    "topic_alignment": "<one‑sentence rationale>",
+    "persona_consistency": "<one‑sentence rationale>",
+    "preference_consistency": "<one‑sentence rationale>",
+    "history_consistency": "<one‑sentence rationale>"
+  }}
+}} /nothink
 """
 
 LONGCOT_QWEN_2_5_SYSTEM = "Your role as an assistant involves thoroughly exploring questions through a systematic long thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution. In the Thought section, detail your reasoning process using the specified format: <|begin_of_thought|> {thought with steps separated with '\\n\\n'} <|end_of_thought|> Each step should include detailed considerations such as analisying questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The solution should remain a logical, accurate, concise expression style and detail necessary step needed to reach the conclusion, formatted as follows: <|begin_of_solution|> {final formatted, precise, and clear solution} <|end_of_solution|> Now, try to solve the following question through the above guidelines:"
@@ -46,4 +110,7 @@ BASE_CHAT_FORMAT = (
     "User: {{content}} Assistant:"
 )
 
-prompt_maps = {"Qwen2.5-7B-Instruct-RLVR-prompt": Qwen2_5_7B_Instruct_RLVR_Prompt}
+prompt_maps = {
+    "Qwen2.5-7B-Instruct-RLVR-prompt": Qwen2_5_7B_Instruct_RLVR_Prompt,
+    "PERALIGN-RLVR-prompt": QWEN3_8B_PERALIGN_RLVR_PROMPT_NO_THINK,
+}

@@ -175,12 +175,16 @@ def format_history_prepare(messages: list, max_length: int = 6000) -> tuple:
     """
     history = []
     for msg in messages:
+        if msg.get("turn") == 0 and not msg.get("if_chosen", True):
+            continue
         if msg["content"].strip() == "EMPTY STRING":
             continue
         if msg.get("role") == "user":
-            history.append(f"Your target simulate person says: {msg['content']}")
+            history.append(f"<Your target simulate person says>: {msg['content']}")
         elif msg.get("role") == "model":
-            history.append(f"LLM assistant says: {msg['content']}")
+            history.append(f"<LLM assistant says>: {msg['content']}")
+        else:
+            raise ValueError(f"Unknown condition: {msg.get('role')}")
 
     # 组合历史记录
     full_history = "\n".join(history)
@@ -306,6 +310,7 @@ def build_dataset(
     use_summarization: 是否使用总结功能
     batch_size: 批量处理大小
     """
+    max_data_num = 100000
     profile_path = base_path + profile_path
     roleplay_path = base_path + roleplay_path
     profiles = load_profiles(profile_path)
@@ -327,6 +332,9 @@ def build_dataset(
         for line_idx, line in progress_bar:
             if not line.strip():
                 continue
+            if max_data_num > 0 and len(all_processing_items) >= max_data_num:
+                print(f"⚠️ 已达到最大数据量限制：{max_data_num}，停止收集")
+                break
             try:
                 record = json.loads(line)
                 messages = iterate_messages(record)
@@ -380,7 +388,9 @@ def build_dataset(
     summaries = {}
     if use_summarization:
         print("🔄 第三步：加载模型...")
-        model, tokenizer = load_qwen3_8b(model_path="Qwen/Qwen3-8B", device_map="auto", quantize=False)
+        model, tokenizer = load_qwen3_8b(
+            model_path="/project/hdtaccuracy/models/base/Qwen3-8B", device_map="auto", quantize=False
+        )
         print("✅ 模型加载完成")
 
         # 找出所有需要总结的项目
@@ -476,7 +486,7 @@ if __name__ == "__main__":
         base_path,
         "roleplay_dataset_en_new.jsonl",
         "profile.json",
-        "dialogue_dataset_all_v5_summarized.jsonl",
+        "dialogue_dataset_all_v6_summarized.jsonl",
         use_summarization=True,
     )
-    print("✅ 生成完成：dialogue_dataset_all_v5_summarized.jsonl")
+    print("✅ 生成完成：dialogue_dataset_all_v6_summarized.jsonl")

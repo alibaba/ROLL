@@ -1,3 +1,11 @@
+# ---------- rlvr_config_ds_lora.yaml ----------
+# ① 继承 DeepSpeed 预设
+defaults:
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
 hydra:
   run:
     dir: .
@@ -6,8 +14,8 @@ hydra:
 # ========= 基础信息 =========
 exp_name: "qwen3-8B-rlvr-llmjudge-h800-8gpu"
 seed: 42
-logging_dir: ./logs
-output_dir: ./output
+logging_dir: /project/hdtaccuracy/trains/grpo/qwen3_8b/logs
+output_dir: /project/hdtaccuracy/trains/grpo/qwen3_8b/output
 num_gpus_per_node: 8      # 8×H800
 
 track_with: wandb
@@ -41,46 +49,33 @@ whiten_advantages: true
 pretrain: /project/hdtaccuracy/models/base/Qwen3-8B
 reward_pretrain: /project/hdtaccuracy/models/base/Qwen3-8B            # critic 初始权重
 
-# ========= 验证集 =========
-# validation:
-#   data_args:
-#     template: qwen2_5
-#     file_name:
-#       - data/val_llm_judge.jsonl
-#   generating_args:
-#     top_p: 0.9
-#     top_k: 50
-#     num_beams: 1
-#     temperature: 0.7
-#     num_return_sequences: 1
-
 # ========= Actor（训练） =========
 actor_train:
   model_args:
     dtype: bf16
     disable_gradient_checkpointing: false
+    # —— LoRA 超参 ——                                   # 可按需微调
+    lora_rank: 8
+    lora_target: all          # 只插注意力可写 "q_proj,v_proj"
+    lora_alpha: 32
+    lora_dropout: 0.05
   training_args:
-    learning_rate: 1.0e-6
+    learning_rate: 1.0e-4     # LoRA 常用 1e-4–1e-3
     weight_decay: 0.0
-    per_device_train_batch_size: 1
-    gradient_accumulation_steps: 32
-    warmup_steps: 20
+    per_device_train_batch_size: 2   # ZeRO-3 显存足够可翻倍
+    gradient_accumulation_steps: 16  # 2×16 ≈ 原来 1×32
+    warmup_steps: 200
     num_train_epochs: 3
   data_args:
-    template: qwen2_5
+    template: qwen3_nothink
     file_name:
-      - data/train_llm_judge.jsonl
-    domain_interleave_probs:
-      llm_judge: 1.0          # 只抽样此域
+      - /project/hdtaccuracy/Personality-Alignment/split_data_v6_roll/train_user_based.jsonl
     dataset_dir: data
-    messages: messages
+    messages: prompt
   strategy_args:
-    strategy_name: megatron_train
-    strategy_config:
-      tensor_model_parallel_size: 2       # 4 GPU = 2 TP × 2 PP
-      pipeline_model_parallel_size: 2
-      virtual_pipeline_model_parallel_size: 1
-  device_mapping: [0, 1, 2, 3]            # GPU0‑3
+    strategy_name: deepspeed_train         # ← 从 megatron_train 改成 DS
+    strategy_config: ${deepspeed_zero2}    # 引用上面的 DS 预设
+  device_mapping: "[0, 1, 2, 3]"             # 与原先保持一致
   infer_batch_size: 2
 
 # ========= Actor（推理/采样） =========
@@ -89,20 +84,20 @@ actor_infer:
     dtype: bf16
     disable_gradient_checkpointing: true
   generating_args:
-    max_new_tokens: ${response_length}
+    max_new_tokens: 512
     top_p: 0.95
     top_k: 100
     num_beams: 1
     temperature: 0.95
     num_return_sequences: ${num_return_sequences_in_group}
   data_args:
-    template: qwen2_5
+    template: qwen3_nothink
   strategy_args:
     strategy_name: sglang
     strategy_config:
       mem_fraction_static: 0.7
   num_gpus_per_worker: 1
-  device_mapping: [4]                     # GPU4
+  device_mapping: "[4]"                     # GPU4
   infer_batch_size: 1
 
 # ========= Reference =========
@@ -111,13 +106,13 @@ reference:
     dtype: bf16
     disable_gradient_checkpointing: true
   data_args:
-    template: qwen2_5
+    template: qwen3_nothink
   strategy_args:
     strategy_name: megatron_infer
     strategy_config:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
-  device_mapping: [5]                     # GPU5
+  device_mapping: "[5]"                    # GPU5
   infer_batch_size: 1
 
 # ========= Reward =========
@@ -128,7 +123,7 @@ rewards:
     judge_model_type: inference
     tag_included: [RLVR]
     model_args:
-      model_name_or_path: virtuoussy/Qwen2.5-7B-Instruct-RLVR
+      model_name_or_path: /project/hdtaccuracy/models/base/Qwen3-8B            # critic 初始权重
       dtype: bf16
       attn_implementation: fa2
       disable_gradient_checkpointing: true
@@ -140,9 +135,9 @@ rewards:
       num_beams: 1
       num_return_sequences: 1
     data_args:
-      template: qwen2_5
+      template: qwen3_nothink
     strategy_args:
       strategy_name: hf_infer
-    device_mapping: [6, 7]                # GPU6‑7，独立占用
+    device_mapping: "[6, 7]"                # GPU6‑7，独立占用
     world_size: 2
     infer_batch_size: 4

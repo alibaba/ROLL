@@ -41,6 +41,15 @@ def native_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=N
     kwargs["add_generation_prompt"] = True
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
+
+@register_chat_template("qwen3_nothink")
+def qwen_nothink_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):
+    kwargs["tokenize"] = False
+    kwargs["add_generation_prompt"] = True
+    kwargs["enable_thinking"] = False
+    return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
+
+
 @register_chat_template("qwen2_5_dpo")
 def dpo_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):
     kwargs["tokenize"] = False
@@ -49,6 +58,7 @@ def dpo_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None
     kwargs["add_generation_prompt"] = False
 
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
+
 
 # TODO: change template name ?
 @register_chat_template("chatml")

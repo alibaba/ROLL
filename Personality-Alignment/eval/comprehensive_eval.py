@@ -32,6 +32,12 @@ def run_automated_evaluation(ground_truth_file: str, model_results_file: str, ou
     """
     logger.info("Running automated evaluation (BLEU/ROUGE)...")
 
+    # Check if automated_eval.py exists
+    script_path = Path("automated_eval.py")
+    if not script_path.exists():
+        logger.error(f"automated_eval.py not found in current directory: {os.getcwd()}")
+        return {}
+
     cmd = [
         sys.executable,
         "automated_eval.py",
@@ -43,30 +49,81 @@ def run_automated_evaluation(ground_truth_file: str, model_results_file: str, ou
         output_file,
     ]
 
+    logger.info(f"Running command: {' '.join(cmd)}")
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         logger.info("Automated evaluation completed successfully")
+        logger.info(f"STDOUT: {result.stdout}")
+        if result.stderr:
+            logger.warning(f"STDERR: {result.stderr}")
 
-        # Parse the output to extract statistics
+        # Parse the output to extract statistics - Updated parsing logic
         stats = {}
         for line in result.stdout.split("\n"):
-            if "BLEU Score - Mean:" in line:
-                parts = line.split()
-                stats["bleu_mean"] = float(parts[4])
-                stats["bleu_std"] = float(parts[6])
-                stats["bleu_median"] = float(parts[9])
-            elif "ROUGE-L Score - Mean:" in line:
-                parts = line.split()
-                stats["rouge_l_mean"] = float(parts[4])
-                stats["rouge_l_std"] = float(parts[6])
-                stats["rouge_l_median"] = float(parts[9])
-            elif "Entries evaluated:" in line:
-                stats["num_evaluated"] = int(line.split()[-1])
+            line = line.strip()
+            if not line:
+                continue
 
+            # Parse BLEU scores
+            if "BLEU Score - Mean:" in line:
+                # Format: "BLEU Score - Mean: 0.0006 ± 0.0046, Median: 0.0000"
+                import re
+
+                # Extract mean value
+                mean_match = re.search(r"Mean:\s*([\d.]+)", line)
+                if mean_match:
+                    stats["bleu_mean"] = float(mean_match.group(1))
+
+                # Extract std value
+                std_match = re.search(r"±\s*([\d.]+)", line)
+                if std_match:
+                    stats["bleu_std"] = float(std_match.group(1))
+
+                # Extract median value
+                median_match = re.search(r"Median:\s*([\d.]+)", line)
+                if median_match:
+                    stats["bleu_median"] = float(median_match.group(1))
+
+            # Parse ROUGE-L scores
+            elif "ROUGE-L Score - Mean:" in line:
+                # Format: "ROUGE-L Score - Mean: 0.0464 ± 0.0351, Median: 0.0412"
+                import re
+
+                # Extract mean value
+                mean_match = re.search(r"Mean:\s*([\d.]+)", line)
+                if mean_match:
+                    stats["rouge_l_mean"] = float(mean_match.group(1))
+
+                # Extract std value
+                std_match = re.search(r"±\s*([\d.]+)", line)
+                if std_match:
+                    stats["rouge_l_std"] = float(std_match.group(1))
+
+                # Extract median value
+                median_match = re.search(r"Median:\s*([\d.]+)", line)
+                if median_match:
+                    stats["rouge_l_median"] = float(median_match.group(1))
+
+            # Parse number of evaluated entries
+            elif "Entries evaluated:" in line:
+                # Format: "Entries evaluated: 19161"
+                import re
+
+                match = re.search(r"Entries evaluated:\s*(\d+)", line)
+                if match:
+                    stats["num_evaluated"] = int(match.group(1))
+
+        logger.info(f"Parsed automated stats: {stats}")
         return stats
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Automated evaluation failed: {e.stderr}")
+        logger.error(f"Automated evaluation failed with return code {e.returncode}")
+        logger.error(f"STDOUT: {e.stdout}")
+        logger.error(f"STDERR: {e.stderr}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error in automated evaluation: {e}")
         return {}
 
 
@@ -88,8 +145,18 @@ def run_llm_evaluation(
     """
     logger.info(f"Running LLM evaluation with {evaluator_type}...")
 
+    # Check if llm_eval.py exists
+    script_path = Path("llm_eval.py")
+    if not script_path.exists():
+        logger.error(f"llm_eval.py not found in current directory: {os.getcwd()}")
+        return {}
+
     # First, prepare evaluation data in the format expected by llm_eval.py
     eval_data_file = prepare_llm_eval_data(ground_truth_file, model_results_file)
+
+    if not eval_data_file or not Path(eval_data_file).exists():
+        logger.error("Failed to prepare evaluation data")
+        return {}
 
     cmd = [
         sys.executable,
@@ -110,28 +177,57 @@ def run_llm_evaluation(
     if kwargs.get("qwen_model_path"):
         cmd.extend(["--qwen-model-path", kwargs["qwen_model_path"]])
 
+    logger.info(f"Running command: {' '.join(cmd)}")
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         logger.info("LLM evaluation completed successfully")
+        logger.info(f"STDOUT: {result.stdout}")
+        if result.stderr:
+            logger.warning(f"STDERR: {result.stderr}")
 
-        # Parse the output to extract statistics
+        # Parse the output to extract statistics - Updated parsing logic
         stats = {}
         for line in result.stdout.split("\n"):
-            if "num_evaluated:" in line:
-                stats["num_evaluated"] = int(line.split()[-1])
-            elif "topic_alignment_mean:" in line:
-                stats["topic_alignment_mean"] = float(line.split()[-1])
-            elif "persona_consistency_mean:" in line:
-                stats["persona_consistency_mean"] = float(line.split()[-1])
-            elif "preference_consistency_mean:" in line:
-                stats["preference_consistency_mean"] = float(line.split()[-1])
-            elif "history_consistency_mean:" in line:
-                stats["history_consistency_mean"] = float(line.split()[-1])
+            line = line.strip()
+            if not line:
+                continue
 
+            # Updated parsing to handle the actual output format from llm_eval.py
+            import re
+
+            # Look for statistics in the format "key: value"
+            if "num_evaluated:" in line:
+                match = re.search(r"num_evaluated:\s*(\d+)", line)
+                if match:
+                    stats["num_evaluated"] = int(match.group(1))
+            elif "topic_alignment_mean:" in line:
+                match = re.search(r"topic_alignment_mean:\s*([\d.]+)", line)
+                if match:
+                    stats["topic_alignment_mean"] = float(match.group(1))
+            elif "persona_consistency_mean:" in line:
+                match = re.search(r"persona_consistency_mean:\s*([\d.]+)", line)
+                if match:
+                    stats["persona_consistency_mean"] = float(match.group(1))
+            elif "preference_consistency_mean:" in line:
+                match = re.search(r"preference_consistency_mean:\s*([\d.]+)", line)
+                if match:
+                    stats["preference_consistency_mean"] = float(match.group(1))
+            elif "history_consistency_mean:" in line:
+                match = re.search(r"history_consistency_mean:\s*([\d.]+)", line)
+                if match:
+                    stats["history_consistency_mean"] = float(match.group(1))
+
+        logger.info(f"Parsed LLM stats: {stats}")
         return stats
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"LLM evaluation failed: {e.stderr}")
+        logger.error(f"LLM evaluation failed with return code {e.returncode}")
+        logger.error(f"STDOUT: {e.stdout}")
+        logger.error(f"STDERR: {e.stderr}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error in LLM evaluation: {e}")
         return {}
 
 
@@ -148,28 +244,59 @@ def prepare_llm_eval_data(ground_truth_file: str, model_results_file: str) -> st
     """
     logger.info("Preparing data for LLM evaluation...")
 
+    # Check input files exist
+    if not Path(ground_truth_file).exists():
+        logger.error(f"Ground truth file not found: {ground_truth_file}")
+        return ""
+
+    if not Path(model_results_file).exists():
+        logger.error(f"Model results file not found: {model_results_file}")
+        return ""
+
     # Load ground truth data
     ground_truth = {}
-    with open(ground_truth_file, "r", encoding="utf-8") as f:
-        for line in f:
-            data = json.loads(line.strip())
-            qid = data.get("qid")
-            if qid:
-                ground_truth[qid] = data
+    try:
+        with open(ground_truth_file, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                if line.strip():
+                    try:
+                        data = json.loads(line.strip())
+                        qid = data.get("qid")
+                        if qid:
+                            ground_truth[qid] = data
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Invalid JSON in ground truth line {line_num}: {e}")
+
+        logger.info(f"Loaded {len(ground_truth)} ground truth entries")
+    except Exception as e:
+        logger.error(f"Error loading ground truth file: {e}")
+        return ""
 
     # Load model results
     model_results = {}
-    with open(model_results_file, "r", encoding="utf-8") as f:
-        for line in f:
-            data = json.loads(line.strip())
-            qid = data.get("qid")
-            if qid:
-                model_results[qid] = data.get("response", "")
+    try:
+        with open(model_results_file, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                if line.strip():
+                    try:
+                        data = json.loads(line.strip())
+                        qid = data.get("qid")
+                        if qid:
+                            model_results[qid] = data.get("response", "")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Invalid JSON in model results line {line_num}: {e}")
+
+        logger.info(f"Loaded {len(model_results)} model result entries")
+    except Exception as e:
+        logger.error(f"Error loading model results file: {e}")
+        return ""
 
     # Prepare evaluation data
     eval_data = []
+    matched_count = 0
     for qid in ground_truth:
         if qid in model_results:
+            matched_count += 1
             gt_data = ground_truth[qid]
 
             # Extract profile and conversation history from prompt
@@ -185,14 +312,25 @@ def prepare_llm_eval_data(ground_truth_file: str, model_results_file: str) -> st
             }
             eval_data.append(eval_entry)
 
+    logger.info(f"Matched {matched_count} entries between ground truth and model results")
+    logger.info(f"Prepared {len(eval_data)} entries for LLM evaluation")
+
+    if len(eval_data) == 0:
+        logger.error("No matching entries found between ground truth and model results")
+        return ""
+
     # Save prepared data
     eval_data_file = "prepared_eval_data.jsonl"
-    with open(eval_data_file, "w", encoding="utf-8") as f:
-        for entry in eval_data:
-            f.write(json.dumps(entry) + "\n")
+    try:
+        with open(eval_data_file, "w", encoding="utf-8") as f:
+            for entry in eval_data:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    logger.info(f"Prepared {len(eval_data)} entries for LLM evaluation")
-    return eval_data_file
+        logger.info(f"Saved prepared data to: {eval_data_file}")
+        return eval_data_file
+    except Exception as e:
+        logger.error(f"Error saving prepared data: {e}")
+        return ""
 
 
 def extract_profile_and_history(prompt: str) -> tuple:
@@ -350,9 +488,22 @@ def main():
 
     args = parser.parse_args()
 
+    logger.info(f"Starting comprehensive evaluation with arguments: {args}")
+    logger.info(f"Current working directory: {os.getcwd()}")
+
+    # Check input files
+    if not Path(args.ground_truth).exists():
+        logger.error(f"Ground truth file does not exist: {args.ground_truth}")
+        return 1
+
+    if not Path(args.model_results).exists():
+        logger.error(f"Model results file does not exist: {args.model_results}")
+        return 1
+
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
+    logger.info(f"Output directory: {output_dir.absolute()}")
 
     # Define output files
     automated_output = output_dir / f"{args.model_name}_automated_eval.txt"
@@ -365,22 +516,33 @@ def main():
     try:
         # Run automated evaluation
         if not args.skip_automated:
+            logger.info("=== Starting automated evaluation ===")
             automated_stats = run_automated_evaluation(args.ground_truth, args.model_results, str(automated_output))
+            logger.info(f"Automated evaluation completed. Stats: {automated_stats}")
+        else:
+            logger.info("Skipping automated evaluation")
 
         # Run LLM evaluation
         if not args.skip_llm:
+            logger.info("=== Starting LLM evaluation ===")
             llm_kwargs = {"api_key": args.api_key, "parallel": args.parallel, "qwen_model_path": args.qwen_model_path}
             llm_stats = run_llm_evaluation(
                 args.ground_truth, args.model_results, str(llm_output), args.evaluator_type, **llm_kwargs
             )
+            logger.info(f"LLM evaluation completed. Stats: {llm_stats}")
+        else:
+            logger.info("Skipping LLM evaluation")
 
         # Generate combined report
+        logger.info("=== Generating combined report ===")
         generate_combined_report(automated_stats, llm_stats, str(combined_report), args.model_name)
 
+        logger.info("Comprehensive evaluation completed successfully")
         return 0
 
     except Exception as e:
         logger.error(f"Evaluation failed: {e}")
+        logger.exception("Full exception traceback:")
         return 1
 
 
