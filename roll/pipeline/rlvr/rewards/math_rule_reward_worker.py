@@ -164,7 +164,7 @@ class MathRuleRewardWorker(Worker):
                 correct = False
                 extracted_response = ""
                 extracted_ground_truth = ""
-            # TODO check Anser
+            # TODO check Answer
             try:
                 outputs = json.dumps(
                     {

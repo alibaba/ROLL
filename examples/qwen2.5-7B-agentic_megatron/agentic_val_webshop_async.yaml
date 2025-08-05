@@ -144,14 +144,14 @@ train_env_manager:
   format_penalty: -0.05
   num_env_groups: 8
   group_size: 8
-  max_env_num_per_worker: 4
+  max_env_num_per_worker: 1 # The max_env_num_per_worker must be set to 1 to avoid conflicts with the webshop simple server.
   tags: [WebShopEnv]
   num_groups_partition: [8] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 val_env_manager:
   num_env_groups: 64
   group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
-  max_env_num_per_worker: 4
+  max_env_num_per_worker: 1 # The max_env_num_per_worker must be set to 1 to avoid conflicts with the webshop simple server.
   tags: [WebShopEnv]
   num_groups_partition: [64] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
