@@ -19,86 +19,79 @@ from tqdm import tqdm
 
 # 模式1：只给ground_truth，违反句式、话题、内容丰富度
 DISTRACTOR_PROMPTS = {
-    "style_violation": """[System]
-You are a distractor generator for multiple-choice questions.
-Your task: Given a TARGET sentence, generate exactly one sentence that violates the style/sentence structure of the target while keeping similar topic.
-The output should be different in sentence type/structure from the TARGET (e.g., if TARGET is a question, make it a statement; if TARGET is formal, make it informal).
-Do NOT explain, produce only the sentence.
-
-[User]
-TARGET: {correct_output}
-
-[Assistant] 
-""",
-    "topic_violation": """[System]
-You are a distractor generator for multiple-choice questions.
-Your task: Given a TARGET sentence, generate exactly one sentence that changes the main topic/subject while keeping similar sentence structure.
-The output should discuss a different topic but maintain similar grammatical structure as the TARGET.
-Do NOT explain, produce only the sentence.
-
-[User]
-TARGET: {correct_output}
-
-[Assistant] 
-""",
-    "richness_violation": """[System]
-You are a distractor generator for multiple-choice questions.
-Your task: Given a TARGET sentence, generate exactly one sentence that significantly differs in content richness/detail level.
-If TARGET is detailed, make it very simple; if TARGET is simple, make it overly complex.
-Do NOT explain, produce only the sentence.
-
-[User]
-TARGET: {correct_output}
-
-[Assistant] 
-""",
-    "profile_violation": """[System]
-You are a distractor generator for multiple-choice questions.
-Your task: Given a TARGET sentence and a PROFILE, generate exactly one sentence that obviously violates the personality profile.
-The output should contradict the personality traits, preferences, or characteristics described in the profile.
-Do NOT explain, produce only the sentence.
-
-[User]
-TARGET: {correct_output}
-PROFILE: {profile}
-
-[Assistant] 
-""",
-    "conversation_violation": """[System]
-You are a distractor generator for multiple-choice questions.
-Your task: Given a TARGET sentence and CONVERSATION HISTORY, generate exactly one sentence that is inappropriate or inconsistent with the conversation context.
-The output should ignore the conversation flow, context, or previous topics discussed.
-Do NOT explain, produce only the sentence.
-
-[User]
-TARGET: {correct_output}
-CONVERSATION: {conversation}
-
-[Assistant] 
-""",
-    "both_violation": """[System]
-You are a distractor generator for multiple-choice questions.
-Your task: Given a TARGET sentence, PROFILE, and CONVERSATION HISTORY, generate exactly one sentence that violates both the personality profile and conversation context.
-The output should contradict the personality traits AND be inappropriate for the conversation context.
-Do NOT explain, produce only the sentence.
-
-[User]
-TARGET: {correct_output}
-PROFILE: {profile}
-CONVERSATION: {conversation}
-
-[Assistant] 
-""",
+    "style_violation": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, generate exactly one sentence that violates the style/sentence structure of the target while keeping similar topic. The output should be different in sentence type/structure from the TARGET (e.g., if TARGET is a question, make it a statement; if TARGET is formal, make it informal). Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "TARGET: {correct_output}"},
+    ],
+    "topic_violation": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, generate exactly one sentence that changes the main topic/subject while keeping similar sentence structure. The output should discuss a different topic but maintain similar grammatical structure as the TARGET. The output sentence should be different from the TARGET. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "TARGET: {correct_output}"},
+    ],
+    "richness_violation": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, generate exactly one sentence that significantly differs in content richness/detail level. If TARGET is detailed, make it very simple; if TARGET is simple, make it overly complex. The output sentence should be different from the TARGET. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "TARGET: {correct_output}"},
+    ],
+    "profile_violation_w": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence and a PROFILE, generate exactly one sentence that obviously violates the personality profile. The output should contradict the personality traits, preferences, or characteristics described in the profile. IMPORTANT: Your output must strongly contradict the PROFILE and be completely inconsistent with the described personality. Also ensure it differs significantly from the TARGET sentence. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "TARGET: {correct_output}\nPROFILE: {profile}"},
+    ],
+    "conversation_violation_w": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence and CONVERSATION HISTORY, generate exactly one sentence that is inappropriate or inconsistent with the conversation context. The output should ignore the conversation flow, context, or previous topics discussed. IMPORTANT: Your output must be completely irrelevant to the CONVERSATION context and should disrupt the conversation flow. Also ensure it differs significantly from the TARGET sentence. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "TARGET: {correct_output}\nCONVERSATION: {conversation}"},
+    ],
+    "both_violation_w": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, PROFILE, and CONVERSATION HISTORY, generate exactly one sentence that violates both the personality profile and conversation context. The output should contradict the personality traits AND be inappropriate for the conversation context. IMPORTANT: Your output must strongly violate BOTH the PROFILE and CONVERSATION context simultaneously, and must be significantly different from the TARGET sentence. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "TARGET: {correct_output}\nPROFILE: {profile}\nCONVERSATION: {conversation}"},
+    ],
+    "profile_violation_w/o": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a PROFILE, generate exactly one sentence that obviously violates the personality profile. The output should contradict the personality traits, preferences, or characteristics described in the profile. IMPORTANT: Your output must strongly contradict the PROFILE and be completely inconsistent with the described personality. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "PROFILE: {profile}"},
+    ],
+    "conversation_violation_w/o": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a CONVERSATION HISTORY, generate exactly one sentence that is inappropriate or inconsistent with the conversation context. The output should ignore the conversation flow, context, or previous topics discussed. IMPORTANT: Your output must be completely irrelevant to the CONVERSATION context and should disrupt the conversation flow. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "CONVERSATION: {conversation}"},
+    ],
+    "both_violation_w/o": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a PROFILE and CONVERSATION HISTORY, generate exactly one sentence that violates both the personality profile and conversation context. The output should contradict the personality traits AND be inappropriate for the conversation context. IMPORTANT: Your output must strongly violate BOTH the PROFILE and CONVERSATION context simultaneously. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "PROFILE: {profile}\nCONVERSATION: {conversation}"},
+    ],
 }
 
 # ========================= 2. 读取原始数据 ========================= #
-DATA_PATH = "/home/zyangdm/ROLL/Personality-Alignment/dialogue_dataset_all_v5_summarized.jsonl"
+DATA_PATH = "/project/hdtaccuracy/Personality-Alignment/split_data_v6_filtered/filtered_dataset.jsonl"
 data: list[dict] = []
 with open(DATA_PATH, "r", encoding="utf-8") as f:
     for line in f:
         data.append(json.loads(line))
 
-data = data[:100]
+data = data[:10]
 
 
 # ========================= 3. 加载模型 ========================= #
@@ -111,7 +104,7 @@ def load_qwen3_8b(
     加载 Qwen3‑8B 模型和分词器
     """
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
+    tokenizer.padding_side = "left"  # 设置填充方向为左侧
     quant_config = (
         BitsAndBytesConfig(
             load_in_4bit=True,
@@ -133,7 +126,7 @@ def load_qwen3_8b(
     return model, tokenizer
 
 
-model_path = "Qwen/Qwen3-8B"
+model_path = "/project/hdtaccuracy/models/base/Qwen3-8B"
 model, tokenizer = load_qwen3_8b(model_path=model_path, device_map="auto")
 
 
@@ -184,7 +177,8 @@ def generate_distractors_by_mode(data_items, mode, batch_size=8):
     Args:
         data_items: 数据项列表
         mode: 生成模式 ('style_violation', 'topic_violation', 'richness_violation',
-              'profile_violation', 'conversation_violation', 'both_violation')
+              'profile_violation_w', 'conversation_violation_w', 'both_violation_w',
+              'profile_violation_w/o', 'conversation_violation_w/o', 'both_violation_w/o')
         batch_size: 批处理大小
 
     Returns:
@@ -200,18 +194,77 @@ def generate_distractors_by_mode(data_items, mode, batch_size=8):
 
         # 根据模式构造prompt
         if mode in ["style_violation", "topic_violation", "richness_violation"]:
-            prompt_text = DISTRACTOR_PROMPTS[mode].format(correct_output=correct_output)
-        elif mode == "profile_violation":
-            prompt_text = DISTRACTOR_PROMPTS[mode].format(correct_output=correct_output, profile=profile)
-        elif mode == "conversation_violation":
-            prompt_text = DISTRACTOR_PROMPTS[mode].format(correct_output=correct_output, conversation=conversation)
-        elif mode == "both_violation":
-            prompt_text = DISTRACTOR_PROMPTS[mode].format(
-                correct_output=correct_output, profile=profile, conversation=conversation
-            )
+            messages = [
+                DISTRACTOR_PROMPTS[mode][0],  # system message
+                {
+                    "role": "user",
+                    "content": DISTRACTOR_PROMPTS[mode][1]["content"].format(correct_output=correct_output),
+                },
+            ]
+        elif mode == "profile_violation_w":
+            messages = [
+                DISTRACTOR_PROMPTS[mode][0],  # system message
+                {
+                    "role": "user",
+                    "content": DISTRACTOR_PROMPTS[mode][1]["content"].format(
+                        correct_output=correct_output, profile=profile
+                    ),
+                },
+            ]
+        elif mode == "conversation_violation_w":
+            messages = [
+                DISTRACTOR_PROMPTS[mode][0],  # system message
+                {
+                    "role": "user",
+                    "content": DISTRACTOR_PROMPTS[mode][1]["content"].format(
+                        correct_output=correct_output, conversation=conversation
+                    ),
+                },
+            ]
+        elif mode == "both_violation_w":
+            messages = [
+                DISTRACTOR_PROMPTS[mode][0],  # system message
+                {
+                    "role": "user",
+                    "content": DISTRACTOR_PROMPTS[mode][1]["content"].format(
+                        correct_output=correct_output, profile=profile, conversation=conversation
+                    ),
+                },
+            ]
+        # 新增：不输入 correct output 的版本
+        elif mode == "profile_violation_w/o":
+            messages = [
+                DISTRACTOR_PROMPTS[mode][0],  # system message
+                {
+                    "role": "user",
+                    "content": DISTRACTOR_PROMPTS[mode][1]["content"].format(profile=profile),
+                },
+            ]
+        elif mode == "conversation_violation_w/o":
+            messages = [
+                DISTRACTOR_PROMPTS[mode][0],  # system message
+                {
+                    "role": "user",
+                    "content": DISTRACTOR_PROMPTS[mode][1]["content"].format(conversation=conversation),
+                },
+            ]
+        elif mode == "both_violation_w/o":
+            messages = [
+                DISTRACTOR_PROMPTS[mode][0],  # system message
+                {
+                    "role": "user",
+                    "content": DISTRACTOR_PROMPTS[mode][1]["content"].format(
+                        profile=profile, conversation=conversation
+                    ),
+                },
+            ]
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
+        # 使用tokenizer的chat template格式化消息
+        prompt_text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+        )
         all_inputs.append(prompt_text)
 
     # 分批生成
@@ -276,15 +329,18 @@ def clean_generated_text(text: str) -> str:
 
 def generate_all_distractors_batch(data_items, batch_size=8):
     """
-    为每个数据项生成所有6种模式的干扰项，然后随机选择3个作为最终干扰项
+    为每个数据项生成所有9种模式的干扰项
     """
     modes = [
         "style_violation",
         "topic_violation",
         "richness_violation",
-        "profile_violation",
-        "conversation_violation",
-        "both_violation",
+        "profile_violation_w",
+        "conversation_violation_w",
+        "both_violation_w",
+        "profile_violation_w/o",
+        "conversation_violation_w/o",
+        "both_violation_w/o",
     ]
 
     # 为每种模式生成干扰项
@@ -293,21 +349,6 @@ def generate_all_distractors_batch(data_items, batch_size=8):
         print(f"\n正在生成 {mode} 模式的干扰项...")
         mode_distractors = generate_distractors_by_mode(data_items, mode, batch_size)
         all_mode_distractors[mode] = mode_distractors
-
-    # 为每个数据项随机选择3个不同模式的干扰项
-    # final_distractors = []
-    # for i in range(len(data_items)):
-    #     # 随机选择3种不同的模式
-    #     selected_modes = random.sample(modes, 3)
-    #     item_distractors = []
-
-    #     for mode in selected_modes:
-    #         if i < len(all_mode_distractors[mode]):
-    #             item_distractors.append(all_mode_distractors[mode][i])
-    #         else:
-    #             item_distractors.append(f"Missing_{mode}_distractor")
-
-    #     final_distractors.append(item_distractors)
 
     return all_mode_distractors
 
@@ -319,7 +360,7 @@ def process_original_prompt(prompt: str) -> str:
     profile, conversation_history = extract_profile_and_history(prompt)
     # new_prompt = "You are a helpful assistant.\nNow your task is to choose the most possible output A or B based on the given profile and conversation history.\n"
     # # 重构提示
-    new_prompt += f"[Profile Begin]{profile}[Profile End]\n"
+    new_prompt = f"[Profile Begin]{profile}[Profile End]\n"
     new_prompt += f"[Conversation History Begin]{conversation_history}[Conversation History End]\n"
     # new_prompt += "Now please choose the most possible output A, B, C or D\n"
 
@@ -328,47 +369,55 @@ def process_original_prompt(prompt: str) -> str:
 
 def process_data_batch(data, batch_size=8):
     """
-    批量处理数据:生成3个干扰项并混排成 ABCD 四选一
+    批量处理数据:生成干扰项并保存所有模式的结果
     """
     correct_outputs = [item["output"] for item in data]
     qids = [item["qid"] for item in data]
 
     print("开始批量生成多模式干扰项…")
-    all_distractors = generate_all_distractors_batch(data, batch_size)
+    all_mode_distractors = generate_all_distractors_batch(data, batch_size)
 
     print("构建新数据集…")
     new_data: list[dict] = []
-    for i, (qid, original_prompt, correct_output, distractors) in enumerate(
-        zip(qids, [item["prompt"] for item in data], correct_outputs, all_distractors)
+
+    for i, (qid, original_prompt, correct_output) in enumerate(
+        tqdm(
+            zip(qids, [item["prompt"] for item in data], correct_outputs),
+            total=len(data),
+            desc="构建新数据集",
+        )
     ):
-
-        #     # 创建选项列表：正确答案 + 3个干扰项
-        #     options = [correct_output] + distractors
-
-        #     # 随机打乱选项顺序
-        #     option_labels = ["A", "B", "C", "D"]
-        #     shuffled_indices = list(range(4))
-        #     random.shuffle(shuffled_indices)
-
-        #     # 找出正确答案的新位置
-        #     correct_option = option_labels[shuffled_indices.index(0)]
-
-        #     # 构建选项文本
-        #     option_text = ""
-        #     for j, label in enumerate(option_labels):
-        #         option_index = shuffled_indices[j]
-        #         option_text += f"{label}. {options[option_index]}\n"
-
         prompt_new = f"{process_original_prompt(original_prompt)}\n" "Your choice: /no_think"
-        data = {"qid": qid, "prompt": prompt_new, "output": correct_output}
-        data.update(distractors)
-        new_data.append(data)
-    #     data
-    #     new_data.append()
 
-    #     # 进度打印
-    #     if (i + 1) % 50 == 0:
-    #         print(f"已处理 {i + 1}/{len(data)} 条数据")
+        # 构建数据项，包含所有模式的干扰项
+        data_item = {"qid": qid, "prompt": prompt_new, "output": correct_output}
+
+        # 添加所有模式的干扰项
+        for mode, mode_distractors in all_mode_distractors.items():
+            if i < len(mode_distractors):
+                data_item[f"{mode}_distractor"] = mode_distractors[i]
+            else:
+                data_item[f"{mode}_distractor"] = f"Missing_{mode}_distractor"
+        # 检查每种模式的干扰项内容相互不一致
+        distractors = []
+        for mode in all_mode_distractors.keys():
+            if i < len(all_mode_distractors[mode]):
+                distractors.append(all_mode_distractors[mode][i])
+
+        # 检查是否有重复的干扰项
+        unique_distractors = set(distractors)
+        if len(unique_distractors) != len(distractors):
+            print(f"Warning: QID {qid} has duplicate distractors")
+            for j, d in enumerate(distractors):
+                if distractors.count(d) > 1:
+                    print(f"  Duplicate: '{d}' appears {distractors.count(d)} times")
+
+        # 检查干扰项是否与正确答案相同
+        for mode, distractor in zip(all_mode_distractors.keys(), distractors):
+            if distractor == correct_output:
+                print(f"Warning: QID {qid}, {mode} distractor is same as correct output")
+
+        new_data.append(data_item)
 
     return new_data
 
@@ -410,20 +459,23 @@ print(f"开始处理 {len(data)} 条数据，批量大小: {BATCH_SIZE}")
 new_data = process_data_batch(data, batch_size=BATCH_SIZE)
 
 # ========================= 7. 保存结果 ========================= #
-SAVE_PATH = "/home/zyangdm/ROLL/Personality-Alignment/new_changed_dialogue_dataset_multi_mode_v1.jsonl"
+SAVE_PATH = "/project/hdtaccuracy/Personality-Alignment/choice_ver/raw_choice_data_v5.jsonl"
 print("保存新数据集…")
 with open(SAVE_PATH, "w", encoding="utf-8") as f:
     for item in new_data:
         f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 print(f"处理完成！共生成 {len(new_data)} 条新数据")
-print("每条数据包含1个正确答案和3个来自不同违反模式的干扰项")
+# print("每条数据包含1个正确答案和3个来自不同违反模式的干扰项")
 
 # 统计信息
 print(f"\n生成模式说明：")
 print(f"1. style_violation: 违反句式结构")
 print(f"2. topic_violation: 违反话题内容")
 print(f"3. richness_violation: 违反内容丰富度")
-print(f"4. profile_violation: 违反个性档案")
-print(f"5. conversation_violation: 违反对话上下文")
-print(f"6. both_violation: 同时违反档案和对话")
+print(f"4. profile_violation_w: 违反个性档案 (with target)")
+print(f"5. conversation_violation_w: 违反对话上下文 (with target)")
+print(f"6. both_violation_w: 同时违反档案和对话 (with target)")
+print(f"7. profile_violation_w/o: 违反个性档案 (without target)")
+print(f"8. conversation_violation_w/o: 违反对话上下文 (without target)")
+print(f"9. both_violation_w/o: 同时违反档案和对话 (without target)")
