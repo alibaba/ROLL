@@ -230,20 +230,19 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
         loss = masked_mean(loss_mat * weights.unsqueeze(-1), loss_mask)
     elif loss_agg_mode == "seq-mean-token-sum":
-        seq_losses = masked_mean(loss_mat, loss_mask, dim=-1) # token-sum
+        seq_losses = masked_sum(loss_mat, loss_mask, dim=-1) # token-sum
         valid_samples = torch.any(loss_mask > 0, dim=-1).float()
         if weights is None:
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
         loss = (seq_losses * weights * valid_samples).sum() / (valid_samples.sum() + 1e-8) # seq-mean
     elif loss_agg_mode == "seq-mean-token-mean":
         seq_losses = masked_mean(loss_mat, loss_mask, dim=-1)
-        seq_losses = seq_losses / (torch.sum(loss_mask, dim=-1) + 1e-8)  # token-mean
         valid_samples = torch.any(loss_mask > 0, dim=-1).float()
         if weights is None:
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
         loss = (seq_losses * weights * valid_samples).sum() / (valid_samples.sum() + 1e-8)  # seq-mean
     elif loss_agg_mode == "seq-mean-token-sum-norm":
-        seq_losses = masked_mean(loss_mat, loss_mask, dim=-1)
+        seq_losses = masked_sum(loss_mat, loss_mask, dim=-1)
         valid_samples = torch.any(loss_mask > 0, dim=-1).float()
         if weights is None:
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
@@ -265,6 +264,15 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int = None) -> to
     else:
         return (
             (tensor * mask).sum() / (mask.sum() + 1e-8) if mask.sum() > 0 else torch.tensor(0.0, device=tensor.device)
+        )
+
+def masked_sum(tensor: torch.Tensor, mask: torch.Tensor, dim: int = None) -> torch.Tensor:
+    if dim is not None:
+        mask_sum = mask.sum(axis=dim)
+        return torch.where(mask_sum > 0, (tensor * mask).sum(axis=dim), torch.zeros_like(mask_sum))
+    else:
+        return (
+            (tensor * mask).sum() if mask.sum() > 0 else torch.tensor(0.0, device=tensor.device)
         )
 
 
