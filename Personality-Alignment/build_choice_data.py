@@ -18,72 +18,83 @@ from tqdm import tqdm
 # ========================= 1. Prompt 模板 ========================= #
 
 # 模式1：只给ground_truth，违反句式、话题、内容丰富度
+# ...existing code...
+
 DISTRACTOR_PROMPTS = {
     "style_violation": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, generate exactly one sentence that violates the style/sentence structure of the target while keeping similar topic. The output should be different in sentence type/structure from the TARGET (e.g., if TARGET is a question, make it a statement; if TARGET is formal, make it informal). Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence that a person would say, generate exactly one sentence that violates the style/sentence structure of the target while keeping similar topic. The output should be different in sentence type/structure from the TARGET (e.g., if TARGET is a question, make it a statement; if TARGET is formal, make it informal). Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "TARGET: {correct_output}"},
     ],
     "topic_violation": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, generate exactly one sentence that changes the main topic/subject while keeping similar sentence structure. The output should discuss a different topic but maintain similar grammatical structure as the TARGET. The output sentence should be different from the TARGET. Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence that a person would say, generate exactly one sentence that changes the main topic/subject while keeping similar sentence structure. The output sentence should be different from the TARGET. Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "TARGET: {correct_output}"},
     ],
     "richness_violation": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, generate exactly one sentence that significantly differs in content richness/detail level. If TARGET is detailed, make it very simple; if TARGET is simple, make it overly complex. The output sentence should be different from the TARGET. Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence that a person would say, generate exactly one sentence that significantly differs in content richness/detail level. If TARGET is detailed, make it very simple; if TARGET is simple, make it overly complex. The output sentence should be different from the TARGET. Do NOT explain, produce only the sentence.",
+        },
+        {"role": "user", "content": "TARGET: {correct_output}"},
+    ],
+    "free_violation": [
+        {
+            "role": "system",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence that a person would say, generate exactly one sentence that expresses something completely different from the target. IMPORTANT: Your output must express a completely different meaning or intention compared to the TARGET sentence. Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "TARGET: {correct_output}"},
     ],
     "profile_violation_w": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence and a PROFILE, generate exactly one sentence that obviously violates the personality profile. The output should contradict the personality traits, preferences, or characteristics described in the profile. IMPORTANT: Your output must strongly contradict the PROFILE and be completely inconsistent with the described personality. Also ensure it differs significantly from the TARGET sentence. Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence and a PROFILE, generate exactly one sentence that obviously violates the personality profile. You are simulating what a PERSON (not an AI model) with completely opposite traits would say. The output should contradict the personality traits, preferences, or characteristics described in the profile. When using pronouns, use first person ('I', 'me', 'my') as if you are that person speaking. IMPORTANT: Your output must strongly contradict the PROFILE and be completely inconsistent with the described personality. Also ensure it differs significantly from the TARGET sentence. Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "TARGET: {correct_output}\nPROFILE: {profile}"},
     ],
     "conversation_violation_w": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence and CONVERSATION HISTORY, generate exactly one sentence that is inappropriate or inconsistent with the conversation context. The output should ignore the conversation flow, context, or previous topics discussed. IMPORTANT: Your output must be completely irrelevant to the CONVERSATION context and should disrupt the conversation flow. Also ensure it differs significantly from the TARGET sentence. Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence and CONVERSATION HISTORY, generate exactly one sentence that is inappropriate or inconsistent with the conversation context. You are simulating what a PERSON (not an AI model) would say if they completely ignored the conversation flow. The output should ignore the conversation flow, context, or previous topics discussed. When using pronouns, use first person ('I', 'me', 'my') as if you are that person speaking. IMPORTANT: Your output must be completely irrelevant to the CONVERSATION context and should disrupt the conversation flow. Also ensure it differs significantly from the TARGET sentence. Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "TARGET: {correct_output}\nCONVERSATION: {conversation}"},
     ],
     "both_violation_w": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, PROFILE, and CONVERSATION HISTORY, generate exactly one sentence that violates both the personality profile and conversation context. The output should contradict the personality traits AND be inappropriate for the conversation context. IMPORTANT: Your output must strongly violate BOTH the PROFILE and CONVERSATION context simultaneously, and must be significantly different from the TARGET sentence. Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a TARGET sentence, PROFILE, and CONVERSATION HISTORY, generate exactly one sentence that violates both the personality profile and conversation context. You are simulating what a PERSON (not an AI model) with completely opposite traits would say while also ignoring the conversation context. The output should contradict the personality traits AND be inappropriate for the conversation context. When using pronouns, use first person ('I', 'me', 'my') as if you are that person speaking. IMPORTANT: Your output must strongly violate BOTH the PROFILE and CONVERSATION context simultaneously, and must be significantly different from the TARGET sentence. Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "TARGET: {correct_output}\nPROFILE: {profile}\nCONVERSATION: {conversation}"},
     ],
     "profile_violation_w/o": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a PROFILE, generate exactly one sentence that obviously violates the personality profile. The output should contradict the personality traits, preferences, or characteristics described in the profile. IMPORTANT: Your output must strongly contradict the PROFILE and be completely inconsistent with the described personality. Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a PROFILE, generate exactly one sentence that obviously violates the personality profile. You are simulating what a PERSON (not an AI model) with completely opposite traits would say. The output should contradict the personality traits, preferences, or characteristics described in the profile. When using pronouns, use first person ('I', 'me', 'my') as if you are that person speaking. IMPORTANT: Your output must strongly contradict the PROFILE and be completely inconsistent with the described personality. Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "PROFILE: {profile}"},
     ],
     "conversation_violation_w/o": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a CONVERSATION HISTORY, generate exactly one sentence that is inappropriate or inconsistent with the conversation context. The output should ignore the conversation flow, context, or previous topics discussed. IMPORTANT: Your output must be completely irrelevant to the CONVERSATION context and should disrupt the conversation flow. Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a CONVERSATION HISTORY, generate exactly one sentence that is inappropriate or inconsistent with the conversation context. You are simulating what a PERSON (not an AI model) would say if they completely ignored the conversation flow. The output should ignore the conversation flow, context, or previous topics discussed. When using pronouns, use first person ('I', 'me', 'my') as if you are that person speaking. IMPORTANT: Your output must be completely irrelevant to the CONVERSATION context and should disrupt the conversation flow. Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "CONVERSATION: {conversation}"},
     ],
     "both_violation_w/o": [
         {
             "role": "system",
-            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a PROFILE and CONVERSATION HISTORY, generate exactly one sentence that violates both the personality profile and conversation context. The output should contradict the personality traits AND be inappropriate for the conversation context. IMPORTANT: Your output must strongly violate BOTH the PROFILE and CONVERSATION context simultaneously. Do NOT explain, produce only the sentence.",
+            "content": "You are a distractor generator for multiple-choice questions. Your task: Given a PROFILE and CONVERSATION HISTORY, generate exactly one sentence that violates both the personality profile and conversation context. You are simulating what a PERSON (not an AI model) with completely opposite traits would say while also ignoring the conversation context. The output should contradict the personality traits AND be inappropriate for the conversation context. When using pronouns, use first person ('I', 'me', 'my') as if you are that person speaking. IMPORTANT: Your output must strongly violate BOTH the PROFILE and CONVERSATION context simultaneously. Do NOT explain, produce only the sentence.",
         },
         {"role": "user", "content": "PROFILE: {profile}\nCONVERSATION: {conversation}"},
     ],
 }
 
+
+# ...existing code...
 # ========================= 2. 读取原始数据 ========================= #
 DATA_PATH = "/project/hdtaccuracy/Personality-Alignment/split_data_v6_filtered/filtered_dataset.jsonl"
 data: list[dict] = []
@@ -91,7 +102,7 @@ with open(DATA_PATH, "r", encoding="utf-8") as f:
     for line in f:
         data.append(json.loads(line))
 
-data = data[:10]
+data = data[:2000]
 
 
 # ========================= 3. 加载模型 ========================= #
@@ -162,11 +173,11 @@ def get_max_length(mode: str) -> int:
     """
     根据模式返回最大长度
     """
-    if mode in ["style_violation", "topic_violation", "richness_violation"]:
+    if mode in ["style_violation", "topic_violation", "richness_violation", "free_violation"]:
         return 512  # 只需要生成一个句子，较短的长度
-    elif mode == "profile_violation":
+    elif mode in ["profile_violation_w", "profile_violation_w/o"]:
         return 1024
-    elif mode in ["conversation_violation", "both_violation"]:
+    elif mode in ["conversation_violation_w", "conversation_violation_w/o", "both_violation_w", "both_violation_w/o"]:
         return 8192
 
 
@@ -176,7 +187,7 @@ def generate_distractors_by_mode(data_items, mode, batch_size=8):
 
     Args:
         data_items: 数据项列表
-        mode: 生成模式 ('style_violation', 'topic_violation', 'richness_violation',
+        mode: 生成模式 ('style_violation', 'topic_violation', 'richness_violation', 'free_violation',
               'profile_violation_w', 'conversation_violation_w', 'both_violation_w',
               'profile_violation_w/o', 'conversation_violation_w/o', 'both_violation_w/o')
         batch_size: 批处理大小
@@ -193,7 +204,7 @@ def generate_distractors_by_mode(data_items, mode, batch_size=8):
         profile, conversation = extract_profile_and_history(item["prompt"])
 
         # 根据模式构造prompt
-        if mode in ["style_violation", "topic_violation", "richness_violation"]:
+        if mode in ["style_violation", "topic_violation", "richness_violation", "free_violation"]:
             messages = [
                 DISTRACTOR_PROMPTS[mode][0],  # system message
                 {
@@ -329,12 +340,13 @@ def clean_generated_text(text: str) -> str:
 
 def generate_all_distractors_batch(data_items, batch_size=8):
     """
-    为每个数据项生成所有9种模式的干扰项
+    为每个数据项生成所有10种模式的干扰项
     """
     modes = [
         "style_violation",
         "topic_violation",
         "richness_violation",
+        "free_violation",
         "profile_violation_w",
         "conversation_violation_w",
         "both_violation_w",
@@ -446,7 +458,7 @@ def test_single_mode(data, mode, batch_size=8):
 
 
 # ========================= 6. 执行 ========================= #
-BATCH_SIZE = 16
+BATCH_SIZE = 64
 print(f"开始处理 {len(data)} 条数据，批量大小: {BATCH_SIZE}")
 
 # 可选：测试各种模式效果（取消注释来测试）
@@ -473,9 +485,10 @@ print(f"\n生成模式说明：")
 print(f"1. style_violation: 违反句式结构")
 print(f"2. topic_violation: 违反话题内容")
 print(f"3. richness_violation: 违反内容丰富度")
-print(f"4. profile_violation_w: 违反个性档案 (with target)")
-print(f"5. conversation_violation_w: 违反对话上下文 (with target)")
-print(f"6. both_violation_w: 同时违反档案和对话 (with target)")
-print(f"7. profile_violation_w/o: 违反个性档案 (without target)")
-print(f"8. conversation_violation_w/o: 违反对话上下文 (without target)")
-print(f"9. both_violation_w/o: 同时违反档案和对话 (without target)")
+print(f"4. free_violation: 自由违反（表达不同意思/意图）")
+print(f"5. profile_violation_w: 违反个性档案 (with target)")
+print(f"6. conversation_violation_w: 违反对话上下文 (with target)")
+print(f"7. both_violation_w: 同时违反档案和对话 (with target)")
+print(f"8. profile_violation_w/o: 违反个性档案 (without target)")
+print(f"9. conversation_violation_w/o: 违反对话上下文 (without target)")
+print(f"10. both_violation_w/o: 同时违反档案和对话 (without target)")
