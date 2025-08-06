@@ -15,6 +15,10 @@
   --ifm-color-primary-lightest: #3cad6e;
   --ifm-code-font-size: 95%;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  .ant-float-btn-icon {
+    width: 24px !important;
+    height: 24px !important; 
+  }
 }
 
 /* For readability concerns, you should choose a lighter palette in dark mode. */
