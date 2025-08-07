@@ -35,6 +35,9 @@ distill_on_prompt: True
 sequence_length: 1024
 max_grad_norm: 1.0
 
+question_key: question_zh
+answer_key: answer_zh
+
 
 student:
   model_args:
