@@ -1,9 +1,13 @@
 defaults:
-  - ../../../examples/config/vl_traj_envs.yaml@_here_
+  - ../../../examples/config/step_envs.yaml@_here_
+
 
 rollout_batch_size: 32
 sequence_length: 8192
-pretrain: Qwen/Qwen2.5-VL-3B-Instruct
+pretrain: Qwen/Qwen2.5-0.5B-Instruct
+
+# Here, you can override variables defined in the imported envs. max_tokens_per_step: 128 in custom_env.SimpleSokoban, here replaced by 64
+max_tokens_per_step: 64
 
 train_env_manager:
   format_penalty: -0.15 # sokoban env penalty_for_step=-0.1
@@ -19,12 +23,8 @@ train_env_manager:
 #    proxy_type: openai
 #    proxy_config:
 #      base_url: https://offline-whale-wave.alibaba-inc.com/api/v2/services/aigc/text-generation/v1/chat/completions
-#      api_key: U91RQVCIEV
+#      api_key: xxx
 #      model_name: Qwen2.5-72B-Instruct-Chatflow
-
-custom_envs:
-  SimpleSokoban:
-    ${custom_env.SimpleSokoban}
 
 actor_infer:
   generating_args:
@@ -34,3 +34,8 @@ actor_infer:
     num_beams: 1
     temperature: 0.99
     num_return_sequences: 1
+
+custom_envs:
+  SimpleSokoban:
+    ${custom_env.SimpleSokoban}
+

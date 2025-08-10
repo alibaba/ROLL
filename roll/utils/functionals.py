@@ -695,7 +695,6 @@ def compute_advantage(
     token_level_rewards = data.batch["token_level_rewards"].float()
     if whiten_rewards:
         token_level_rewards = masked_whiten(values=token_level_rewards, mask=response_mask)
-    # data.batch['token_level_rewards'] = token_level_rewards
     token_level_rewards = token_level_rewards * response_mask
     data.batch["token_level_rewards"] = token_level_rewards
     if adv_estimator == "gae":
@@ -709,6 +708,10 @@ def compute_advantage(
             token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
         )
     elif adv_estimator == "grpo":
+        advantages, returns = compute_reinforce_return(
+            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
+        )
+    elif adv_estimator == "gigpo":
         advantages, returns = compute_reinforce_return(
             token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
         )

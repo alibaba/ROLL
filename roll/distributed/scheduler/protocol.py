@@ -621,6 +621,8 @@ class DataProto:
         """
         Note that this operation is in-place
         """
+        # Ensure that indices is at least a 1-D tensor.
+        indices = indices.view(-1) if indices.dim() == 0 else indices
         indices_np = indices.detach().numpy()
         self.batch = self.batch[indices]
         self.non_tensor_batch = {key: val[indices_np] for key, val in self.non_tensor_batch.items()}

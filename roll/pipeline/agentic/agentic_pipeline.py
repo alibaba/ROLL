@@ -1,7 +1,9 @@
 import json
 import os.path
+import random
 from typing import Any, Dict, List
 
+import numpy as np
 import ray
 import torch
 from codetiming import Timer
@@ -13,7 +15,8 @@ from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.agentic.agentic_config import AgenticConfig
-from roll.pipeline.agentic.utils import dump_rollout_render, get_score_normalize_fn
+from roll.pipeline.agentic.utils import (dump_rollout_render, compute_discounted_returns,
+                                         compute_response_level_rewards)
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.functionals import (
     apply_kl_penalty,
@@ -143,10 +146,14 @@ class AgenticPipeline(BasePipeline):
                 with Timer(name="rollout", logger=None) as rollout_timer:
                     batch.meta_info["is_offload_states"] = True
                     batch = ray.get(self.train_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
-                    batch.non_tensor_batch.pop("frames")
                 metrics["time/rollout"] = rollout_timer.last
                 metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
                 batch.meta_info["global_step"] = global_step
+
+                batch = compute_discounted_returns(batch, self.pipeline_config.adv_estimator, self.pipeline_config.step_reward_gamma)
+
+                batch = self.adjust_batch(batch, mode=self.pipeline_config.batch_adjust_mode)
+                metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
 
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_timer:
                     ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(batch, blocking=False)
@@ -183,44 +190,30 @@ class AgenticPipeline(BasePipeline):
                     metrics.update(reduce_metrics(old_log_probs.meta_info.pop("metrics", {})))
                 metrics["time/old_log_probs_values"] = cal_old_logpb_timer.last
 
-                # Rewards need to be processed after grouping
-                # We can group by tag(env_type)/traj_group_id(group)/batch(rollout_batch)... to compute rewards / advantages
-                batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
                 with Timer(name="adv", logger=None) as timer:
-                    grouping = self.pipeline_config.reward_normalization.grouping
-                    batch_grouped: Dict[str, DataProto] = {"default": batch}
-                    if grouping != "batch":
-                        batch_grouped = batch.group_by(keys=grouping)
-                    batch_list = []
-                    for group_name, group_batch in batch_grouped.items():
-                        score_norm_fn = get_score_normalize_fn(rn_cfg=self.pipeline_config.reward_normalization)
-                        scores: torch.Tensor = group_batch.batch["scores"].clone()
-                        penalty: torch.Tensor = group_batch.batch["penalty"]
-                        acc_scores = scores.sum(dim=-1)
-                        normalized_acc_scores = acc_scores + penalty
-                        normalized_acc_scores = score_norm_fn(normalized_acc_scores)
-                        group_batch.batch["response_level_rewards"] = normalized_acc_scores
-                        if self.pipeline_config.reward_clip:
-                            reward_clip_frac = compute_clip_fraction(
-                                values=group_batch.batch["response_level_rewards"],
-                                clip_max=self.pipeline_config.reward_clip,
-                                clip_min=-self.pipeline_config.reward_clip,
-                            )
-                            metrics["critic/reward_clip_frac"] = reward_clip_frac
-                            group_batch.batch["response_level_rewards"] = torch.clamp(
-                                group_batch.batch["response_level_rewards"],
-                                min=-self.pipeline_config.reward_clip,
-                                max=self.pipeline_config.reward_clip,
-                            )
+                    # Rewards need to be processed after grouping
+                    # We can group by tag(env_type)/traj_group_id(group)/batch(rollout_batch)... to compute rewards / advantages
+                    # The compute_response_level_rewards function injects a response_level_rewards key into batch.batch.
+                    batch = compute_response_level_rewards(batch=batch, pipeline_config=self.pipeline_config)
+                    metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
 
-                        group_batch, kl_metrics = apply_kl_penalty(
-                            data=group_batch, kl_ctrl=self.kl_ctrl, kl_penalty=self.pipeline_config.kl_penalty
+                    if self.pipeline_config.reward_clip:
+                        reward_clip_frac = compute_clip_fraction(
+                            values=batch.batch["response_level_rewards"],
+                            clip_max=self.pipeline_config.reward_clip,
+                            clip_min=-self.pipeline_config.reward_clip,
                         )
-                        batch_list.append(group_batch)
-                    batch = DataProto.concat(batch_list)
-                    batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
-                    batch.pop("prompt_id")
-                    # advantage是全局batch计算，还是group内计算？
+                        metrics["critic/reward_clip_frac"] = reward_clip_frac
+                        batch.batch["response_level_rewards"] = torch.clamp(
+                            batch.batch["response_level_rewards"],
+                            min=-self.pipeline_config.reward_clip,
+                            max=self.pipeline_config.reward_clip,
+                        )
+
+                    # Expand compute_response_level_rewards and add kl_penalty.
+                    batch, kl_metrics = apply_kl_penalty(data=batch, kl_ctrl=self.kl_ctrl, kl_penalty=self.pipeline_config.kl_penalty)
+
+                    # Is the advantage calculated globally across the batch, or within each group?
                     batch = compute_advantage(
                         data=batch,
                         gamma=self.pipeline_config.gamma,
@@ -230,6 +223,7 @@ class AgenticPipeline(BasePipeline):
                         whiten_advantages=self.pipeline_config.whiten_advantages,
                         whiten_rewards=self.pipeline_config.whiten_rewards,
                     )
+                    metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
 
                 metrics.update(kl_metrics)
                 metrics["time/adv"] = timer.last
@@ -252,7 +246,7 @@ class AgenticPipeline(BasePipeline):
             data_metrics = compute_data_metrics(batch=batch)
             metrics.update(data_metrics)
             metrics["system/tps"] = tps_timer.mean_throughput
-            metrics["system/samples"] = (global_step + 1) * batch.batch.shape[0]
+            metrics["system/samples"] = (global_step + 1) * self.pipeline_config.rollout_batch_size
 
             # do ckpt
             self.state.step = global_step
@@ -270,31 +264,37 @@ class AgenticPipeline(BasePipeline):
                         filename=os.path.join(timeline_dir, f"timeline-step-{global_step}.json"),
                     )
 
-                prompt_mask = batch.batch["prompt_mask"]
-                non_prompt_mask = torch.logical_not(batch.batch["prompt_mask"])
-                input_ids = batch.batch["input_ids"]
-                prompt_ids = torch.where(
-                    prompt_mask.bool(), input_ids, torch.full_like(input_ids, self.tokenizer.pad_token_id)
-                )
-                response_ids = torch.where(
-                    non_prompt_mask.bool(), input_ids, torch.full_like(input_ids, self.tokenizer.pad_token_id)
-                )
-
-                generate_res = []
-                prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
-                responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-                episode_scores = batch.non_tensor_batch["episode_scores"].tolist()
-                for prompt, prompt_id, response, response_id, episode_score in zip(
-                        prompts, prompt_ids, responses, response_ids, episode_scores
-                ):
-                    generate_res.append(
-                        {
-                            "prompt": prompt,
-                            "response": response,
-                            "episode_score": episode_score,
-                        }
+                log_res = []
+                batch_grouped = batch.group_by(keys="traj_id")
+                for group_name, group_batch in batch_grouped.items():
+                    group_batch = group_batch.select_idxs(idxs=[random.choice(range(len(group_batch)))])
+                    prompt_mask = group_batch.batch["prompt_mask"]
+                    non_prompt_mask = torch.logical_not(group_batch.batch["prompt_mask"])
+                    input_ids = group_batch.batch["input_ids"]
+                    prompt_ids = torch.where(
+                        prompt_mask.bool(), input_ids, torch.full_like(input_ids, self.tokenizer.pad_token_id)
                     )
-                logger.info(json.dumps(generate_res[:10], ensure_ascii=False))
+                    response_ids = torch.where(
+                        non_prompt_mask.bool(), input_ids, torch.full_like(input_ids, self.tokenizer.pad_token_id)
+                    )
+                    prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
+                    responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+                    episode_scores = group_batch.non_tensor_batch["episode_scores"].tolist()
+                    penalties = group_batch.batch["penalty"].tolist()
+                    for prompt, prompt_id, response, response_id, episode_score, penalty in zip(
+                            prompts, prompt_ids, responses, response_ids, episode_scores, penalties
+                    ):
+                        log_res.append(
+                            {
+                                "prompt": prompt,
+                                "response": response,
+                                "episode_score": episode_score,
+                                "penalty": penalty,
+                            }
+                        )
+                    if len(log_res) >= 10:
+                        break
+                logger.info(json.dumps(log_res, ensure_ascii=False))
                 logger.info(json.dumps(metrics, ensure_ascii=False))
 
             logger.info(f"pipeline step {global_step} finished")
@@ -314,21 +314,26 @@ class AgenticPipeline(BasePipeline):
         batch.meta_info["global_step"] = global_step
         eval_batch = ray.get(self.val_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.val_batch_size))
         eval_metrics = reduce_metrics(eval_batch.meta_info.get("metrics", {}))
-        eval_score = eval_batch.batch["scores"].sum(-1)
+        eval_score = get_episode_scores(eval_batch)
         eval_metrics["score/mean"] = torch.mean(eval_score).detach().item()
         eval_metrics["score/max"] = torch.max(eval_score).detach().item()
         eval_metrics["score/min"] = torch.min(eval_score).detach().item()
 
         batch_grouped = eval_batch.group_by(keys="tags")
         for group_name, group_batch in batch_grouped.items():
-            eval_score = group_batch.batch["scores"].sum(-1)
+            traj_group_scores = []
+            batch_traj_grouped = group_batch.group_by(keys="traj_group_id")
+            for batch_traj_group_name, batch_traj_group in batch_traj_grouped.items():
+                traj_group_score = get_episode_scores(batch_traj_group)
+                traj_group_scores.append(traj_group_score.mean().item())
+            eval_score = torch.tensor(traj_group_scores, dtype=torch.float)
             eval_metrics[f"{group_name}/score/mean"] = torch.mean(eval_score).detach().item()
             eval_metrics[f"{group_name}/score/max"] = torch.max(eval_score).detach().item()
             eval_metrics[f"{group_name}/score/min"] = torch.min(eval_score).detach().item()
 
         metrics.update({f"val/{k}": v for k, v in eval_metrics.items()})
 
-        if self.pipeline_config.render_save_dir:
+        if self.pipeline_config.render_save_dir and "frames" in eval_batch.non_tensor_batch:
             self.executor.submit(
                 dump_rollout_render,
                 save_dir=self.pipeline_config.render_save_dir,
@@ -340,10 +345,71 @@ class AgenticPipeline(BasePipeline):
             )
         return metrics
 
+    def adjust_batch(self, data: DataProto, mode="copy") -> DataProto:
+        """
+        ref: https://github.com/langfengQ/verl-agent/blob/e03bd502667c45172e8c093cc506db8438ae8ab5/agent_system/multi_turn_rollout/utils.py#L86
+        """
+        actor_train_train_bsz = self.pipeline_config.actor_train.training_args.per_device_train_batch_size * self.pipeline_config.actor_train.training_args.gradient_accumulation_steps * self.actor_train.dp_size
+        actor_train_infer_bsz = self.pipeline_config.actor_train.infer_batch_size * self.actor_train.dp_size
+        ref_infer_bsz = self.pipeline_config.reference.infer_batch_size * self.reference.dp_size
+        critic_train_bsz = 1
+        critic_infer_bsz = 1
+        if self.pipeline_config.adv_estimator == "gae":
+            critic_train_bsz = self.pipeline_config.critic.training_args.per_device_train_batch_size * self.pipeline_config.critic.training_args.gradiation_accumulation_steps * self.critic.dp_size
+            critic_infer_bsz = self.pipeline_config.critic.infer_batch_size * self.critic.dp_size
+
+        size_divide = np.lcm.reduce(np.array([actor_train_train_bsz, actor_train_infer_bsz, ref_infer_bsz, critic_infer_bsz, critic_train_bsz])).item()
+        batch_size = data.batch.batch_size[0]
+        threshold = batch_size % size_divide
+
+        if threshold == 0:
+            return data
+
+        if mode == "auto":
+            if threshold >= 0.5 * batch_size or  batch_size // size_divide == 0:
+                mode = "copy"
+            else:
+                mode = "delete"
+
+        metrics = data.meta_info.get("metrics", {})
+        metrics["system/batch_add_count"] = 0
+        metrics["system/batch_remove_count"] = 0
+        if mode == "delete":
+            remove_indices = np.random.choice(batch_size, threshold, replace=False)
+            remove_indices = np.sort(remove_indices)
+            keep_mask = np.ones(batch_size, dtype=bool)
+            keep_mask[remove_indices] = False
+            keep_mask_tensor = torch.tensor(keep_mask, dtype=torch.bool, device=data.batch['input_ids'].device)
+            tensor_data = data.batch[keep_mask_tensor]
+            non_tensor_data = {key: val[keep_mask] for key, val in data.non_tensor_batch.items()}
+            adjusted_batch = DataProto(batch=tensor_data, non_tensor_batch=non_tensor_data, meta_info=data.meta_info)
+            metrics["system/batch_remove_count"] = len(remove_indices)
+        elif mode == "copy":
+            to_add = size_divide - threshold
+            dup_indices = np.random.choice(batch_size, to_add, replace=False)
+            dup_proto = data.select_idxs(dup_indices)
+            # TODO: set dup_proto response_mask to 0
+            adjusted_batch = DataProto.concat([data, dup_proto])
+            metrics["system/batch_add_count"] = to_add
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
+
+        adjusted_batch.meta_info["metrics"] = metrics
+
+        return adjusted_batch
+
+def get_episode_scores(batch: DataProto) -> torch.Tensor:
+    batch_group_by_traj: Dict[str, DataProto] = batch.group_by(keys="traj_id")
+    scores = []
+    for traj_id,  traj_batch in batch_group_by_traj.items():
+        episode_scores = traj_batch.non_tensor_batch["episode_scores"][0]
+        scores.append(episode_scores)
+    return torch.tensor(scores, dtype=torch.float32)
+
 def compute_data_metrics(batch):
     # token_level_scores are per-token scores assigned by the reward model, possibly after normalization/clipping
     # score denotes the raw environment reward
-    sequence_score = batch.batch["scores"].sum(-1)
+    episode_scores = get_episode_scores(batch)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
     advantages = batch.batch["advantages"]
     # fix: https://github.com/volcengine/verl/pull/60
@@ -357,9 +423,9 @@ def compute_data_metrics(batch):
 
     metrics = {
         # score, sequence_score from env
-        "critic/score/mean": torch.mean(sequence_score).detach().item(),
-        "critic/score/max": torch.max(sequence_score).detach().item(),
-        "critic/score/min": torch.min(sequence_score).detach().item(),
+        "critic/score/mean": torch.mean(episode_scores).detach().item(),
+        "critic/score/max": torch.max(episode_scores).detach().item(),
+        "critic/score/min": torch.min(episode_scores).detach().item(),
         # reward
         "critic/rewards/mean": torch.mean(sequence_reward).detach().item(),
         "critic/rewards/max": torch.max(sequence_reward).detach().item(),
@@ -399,4 +465,15 @@ def compute_data_metrics(batch):
                 "critic/values/min": torch.min(values[response_mask]).detach().item(),
             }
         )
+    if "episode_rewards_norm" in batch.batch.keys():
+        episode_rewards_norm = batch.batch["episode_rewards_norm"]
+        step_rewards_norm = batch.batch["step_rewards_norm"]
+        metrics.update({
+            "critic/episode_rewards_norm/mean": episode_rewards_norm.mean().detach().item(),
+            "critic/episode_rewards_norm/max": episode_rewards_norm.max().detach().item(),
+            "critic/episode_rewards_norm/min": episode_rewards_norm.min().detach().item(),
+            "critic/step_rewards_norm/mean": step_rewards_norm.mean().detach().item(),
+            "critic/step_rewards_norm/max": step_rewards_norm.max().detach().item(),
+            "critic/step_rewards_norm/min": step_rewards_norm.min().detach().item(),
+        })
     return metrics
