@@ -18,8 +18,6 @@ checkpoint_config:
   type: file_system
   output_dir: /data/oss_bucket_0/chuye/roll/distill/models/zero3
 
-track_with: ml_tracker
-
 save_steps: 100
 logging_steps: 1
 resume_from_checkpoint: false

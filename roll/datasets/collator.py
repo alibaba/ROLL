@@ -218,3 +218,12 @@ class DataCollatorWithPaddingForMM:
                 batch[key] = np.empty(len(batch[key]), dtype=object)
                 batch[key][:] = batch[key]
         return batch
+
+@dataclass
+class DataCollatorWithPaddingForMMWithLabels(DataCollatorWithPaddingForMM):
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        batch = super().__call__(features)
+        labels = batch["input_ids"].clone()
+        labels[batch["attention_mask"] == 0] = -100
+        batch["labels"] = labels
+        return batch
