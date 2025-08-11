@@ -3,21 +3,21 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "distill_megatron"
+exp_name: "distill_vl_megatron"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
 
 checkpoint_config:
   type: file_system
-  output_dir: /data/oss_bucket_0/chuye/roll/distill/models/megatron_dp_pp
+  output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
 
 save_steps: 100
 logging_steps: 1
 resume_from_checkpoint: false
 
-student_pretrain: Qwen/Qwen2.5-7B-Instruct
-teacher_pretrain: Qwen/Qwen2.5-14B-Instruct
+student_pretrain: Qwen/Qwen2.5-VL-7B-Instruct
+teacher_pretrain: Qwen/Qwen2.5-VL-32B-Instruct
 
 # distill config
 distill_loss_weight: 0.85
@@ -26,9 +26,6 @@ distill_on_prompt: True
 
 sequence_length: 1024
 max_grad_norm: 1.0
-
-question_key: question_zh
-answer_key: answer_zh
 
 student:
   model_args:
@@ -39,21 +36,22 @@ student:
   training_args:
     learning_rate: 2.0e-5
     lr_scheduler_type: constant
-    per_device_train_batch_size: 2
+    per_device_train_batch_size: 4
     gradient_accumulation_steps: 1
     warmup_steps: 0
     num_train_epochs: 1
     max_steps: 1000
-
   data_args:
-    template: qwen2_5
-    file_name:
-      - data/GSM8K_zh.json  #https://huggingface.co/datasets/meta-math/GSM8K_zh
+    template: qwen2-vl
+    # use leonardPKU/GEOQA_R1V_Train_8K as dataset
+    # download to ./data/geoqa_data from https://huggingface.co/datasets/leonardPKU/GEOQA_R1V_Train_8K
+    file_name: data/geoqa_data/
+    dataset_dir: ./
     preprocessing_num_workers: 16
   strategy_args:
     strategy_name: megatron_train
     strategy_config:
-      tensor_model_parallel_size: 1
+      tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 2
       use_distributed_optimizer: true
       recompute_granularity: full
@@ -65,11 +63,11 @@ teacher:
     disable_gradient_checkpointing: true
     dtype: bf16
   data_args:
-    template: qwen2_5
+    template: qwen2-vl
   strategy_args:
     strategy_name: megatron_infer
     strategy_config:
-      tensor_model_parallel_size: 1
+      tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 2
       bf16: true
   device_mapping: list(range(0,8))

@@ -1,5 +1,5 @@
 defaults:
-  - ../config/traj_envs@_here_
+  - ../config/step_envs@_here_
   - ../config/deepspeed_zero@_here_
   - ../config/deepspeed_zero2@_here_
   - ../config/deepspeed_zero3@_here_
@@ -60,20 +60,29 @@ sequence_length: 8192
 reward_clip: 20
 advantage_clip: 0.2 # 0.1-0.3
 ppo_epochs: 1
-adv_estimator: "grpo"
+
+# gigpo
+adv_estimator: "gigpo"
+batch_adjust_mode: "copy"
+step_reward_weight: 1.0
+episode_reward_weight: 1.0
+step_reward_gamma: 0.95
+
 #pg_clip: 0.1
 max_grad_norm: 1.0
 #dual_clip_loss: True
 init_kl_coef: 0.0
-whiten_advantages: true
+whiten_advantages: false
 entropy_loss_coef: 0
+use_kl_loss: true
+kl_loss_coef: 0.01
 
 pretrain: Qwen/Qwen2.5-7B-Instruct
 reward_pretrain: Qwen/Qwen2.5-7B-Instruct
 
 actor_train:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
@@ -100,7 +109,6 @@ actor_train:
 
 actor_infer:
   model_args:
-    flash_attn: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
   generating_args:
@@ -123,7 +131,7 @@ actor_infer:
 
 reference:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~
@@ -140,7 +148,7 @@ reward_normalization:
   method: mean_std # asym_clip / identity / mean_std
 
 train_env_manager:
-  format_penalty: -0.05
+  format_penalty: -0.1
   num_env_groups: 8
   group_size: 8
   max_env_num_per_worker: 1 # The max_env_num_per_worker must be set to 1 to avoid conflicts with the webshop simple server.
@@ -153,6 +161,13 @@ val_env_manager:
   max_env_num_per_worker: 1 # The max_env_num_per_worker must be set to 1 to avoid conflicts with the webshop simple server.
   tags: [WebShopEnv]
   num_groups_partition: [64] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+
+max_tokens_per_step: 128
+max_actions_per_traj: 20
+action_pattern: <answer>(.*?)</answer>
+think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
+user_prompt_no_think_format: <answer> [your answer] </answer>
+user_prompt_think_format: <think> [Your thoughts] </think> <answer> [your answer] </answer>
 
 custom_envs:
   WebShopEnv:

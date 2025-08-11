@@ -18,8 +18,6 @@ checkpoint_config:
   type: file_system
   output_dir: /data/oss_bucket_0/chuye/roll/distill/models/zero3
 
-track_with: ml_tracker
-
 save_steps: 100
 logging_steps: 1
 resume_from_checkpoint: false
@@ -34,6 +32,9 @@ distill_on_prompt: True
 
 sequence_length: 1024
 max_grad_norm: 1.0
+
+question_key: question_zh
+answer_key: answer_zh
 
 
 student:

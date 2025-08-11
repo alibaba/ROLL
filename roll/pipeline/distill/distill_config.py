@@ -27,6 +27,15 @@ class DistillConfig(BaseConfig):
         metadata={"help": "Configuration for the teacher's role."}
     )
 
+    # data related
+    question_key: str = field(
+        default='question',
+        metadata={"help": "The user’s question"})
+    answer_key: str = field(
+        default='answer',
+        metadata={"help": "The assistant’s answer corresponding to that question."}
+    )
+
     # Distillation related
     distill_loss_weight: float = field(
         default=0.5,

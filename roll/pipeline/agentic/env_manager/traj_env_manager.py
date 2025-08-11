@@ -68,20 +68,14 @@ class TrajEnvManager(BaseEnvManager):
             self.env_step_limiter = get_global_limiter(tag=env_tag, max_concurrent_calls=self.max_env_step_concurrent)
 
         cfg_template = self.pipeline_config.custom_envs[self.env_config["tag"]]
-        self.agent_system_template = cfg_template.get("agent_system_template", "You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game.")
-        self.user_prompt_format = cfg_template.get("user_prompt_format", "<answer> [your answer] </answer>")
-        self.agent_template = cfg_template.get("agent_template", "\nTurn {turn_idx}:\nState:\n{state}\nYou have {actions_left} actions left. "
-                                                "Always output: {format_template} with no extra text. Strictly follow this format. "
-                                                "Max response length: {max_response_length} words (tokens).\nDecide the next action:\n")
-        self.reward_template = cfg_template.get("reward_template", "Reward:\n{reward}\n")
-        self.added_text = self.env_config["added_text"]
+        self.agent_system_template = cfg_template["agent_system_template"]
+        self.agent_template = cfg_template["agent_template"]
+        self.reward_template = cfg_template["reward_template"]
 
         if self.env_config["env_id"] == 0:
             self.logger.info(f"agent_system_template: {self.agent_system_template}")
-            self.logger.info(f"user_prompt_format: {self.user_prompt_format}")
             self.logger.info(f"agent_template: {self.agent_template}")
             self.logger.info(f"reward_template: {self.reward_template}")
-            self.logger.info(f"added_text: {self.added_text}")
 
         # TODO: add rewards_scheduler for local ray reward workers
         self.llm_proxy: BaseLLMProxy = create_llm_proxy(
@@ -137,12 +131,14 @@ class TrajEnvManager(BaseEnvManager):
                 log_stats = {"generate_time": [], "step_time": [], "current_step": []}
 
                 rollout: DataProto = self.formulate_rollouts(rollout_cache)
-                traj_group_id = f"{self.env_config['group_id']}_{self.episode_id}_{self.group_seed}"
-                rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id], dtype=object)
+                traj_group_id = f"{self.rollout_cache.tag}_{self.rollout_cache.group_id}_{self.episode_id}_{self.group_seed}"
+                traj_id = f"{traj_group_id}_{self.rollout_cache.env_id}"
+                rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id] * rollout.batch.batch_size[0], dtype=object)
+                rollout.non_tensor_batch["traj_id"] = np.array([traj_id] * rollout.batch.batch_size[0], dtype=object)
                 ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout))
 
-                self.rollout_cache = None
                 if not self.running or (is_sync_training and self.episode_id >= self.worker_config.max_traj_per_env):
+                    self.rollout_cache: Optional[RolloutCache] = None
                     self.logger.debug(
                         f"env_id: {self.env_config['env_id']} max_traj_per_env {self.worker_config.max_traj_per_env} reached, stopping rollout loop")
                     break
@@ -171,7 +167,6 @@ class TrajEnvManager(BaseEnvManager):
             llm_output.batch['responses'],
             skip_special_tokens=True
         )
-        responses = [self.added_text + response for response in responses]  # The LLM generation does not include <think> tags. Add them back here.
 
         next_state, reward, terminated, truncated, info = self.env.step(action=responses[0])
 
@@ -195,7 +190,7 @@ class TrajEnvManager(BaseEnvManager):
             "actions_left": self.env.config.max_steps - self.rollout_cache.step,
         })
 
-        if self.mode == "val":
+        if self.mode == "val" and self.pipeline_config.render_save_dir:
             frame = self.env.render(mode='rgb_array')
             if isinstance(frame, np.ndarray):
                 self.rollout_cache.frames.append(frame)
@@ -206,7 +201,6 @@ class TrajEnvManager(BaseEnvManager):
         messages = self.format_messages(rollout_cache.history)
 
         lm_input_texts = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        lm_input_texts += self.added_text
 
         inputs = self.tokenizer(lm_input_texts, return_tensors="pt", padding=True, padding_side="left", truncation=False)
         input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
@@ -257,7 +251,6 @@ class TrajEnvManager(BaseEnvManager):
                 user_content += self.agent_template.format(turn_idx=idx,
                                                            state=content["state"],
                                                            actions_left=content["actions_left"],
-                                                           format_template=self.user_prompt_format,
                                                            max_response_length=self.env_config["max_tokens_per_step"])
             messages.append({"role": "user", "content": user_content})
 
@@ -345,7 +338,7 @@ class TrajEnvManager(BaseEnvManager):
             "messages_list": np.array([messages], dtype=object),
             "tags": np.array([self.rollout_cache.tag], dtype=object),
             "frames": np.array([self.rollout_cache.frames], dtype=object),
-            "turn_scores": np.array([scores], dtype=object),
+            "step_scores": np.array([scores], dtype=object),
             "episode_scores": np.array([episode_score], dtype=object),
         })
 

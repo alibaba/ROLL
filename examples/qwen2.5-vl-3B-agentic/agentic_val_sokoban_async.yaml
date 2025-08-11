@@ -129,17 +129,6 @@ reference:
   device_mapping: list(range(0,4))
   infer_batch_size: 2
 
-
-action_pattern: <answer>(.*?)</answer>
-think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
-user_prompt_no_think_format: <answer> [your answer] </answer>
-user_prompt_think_format: <think> [Your thoughts] </think> <answer> [your answer] </answer>
-added_text_no_think: <answer>
-added_text_think: <think>
-
-max_tokens_per_step: 128
-max_actions_per_traj: 10
-
 reward_normalization:
   grouping: traj_group_id # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
   method: mean_std # asym_clip / identity / mean_std
@@ -161,79 +150,17 @@ val_env_manager:
   num_groups_partition: [256, 256, 256, 256] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 
+# Here, you can override variables defined in the imported envs. max_tokens_per_step: 128 in custom_env.SimpleSokoban, here replaced by 64
+max_tokens_per_step: 64
+
 custom_envs:
   SimpleSokoban:
-    env_type: sokoban
-    max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
-    added_text: ${added_text_no_think}
-    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
-    use_thread_lock: true
-    env_config: # keys should be a subset of SokobanConfig
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
-      action_pattern: ${action_pattern}
-      max_steps: ${max_actions_per_traj}
-      dim_x: 6
-      dim_y: 6
-      num_boxes: 1
-      render_mode: "rgb_array"
+    ${custom_env.SimpleSokoban}
   LargerSokoban:
-    env_type: sokoban
-    max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
-    added_text: ${added_text_no_think}
-    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
-    use_thread_lock: true
-    env_config:
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
-      action_pattern: ${action_pattern}
-      max_steps: ${max_actions_per_traj}
-      dim_x: 8
-      dim_y: 8
-      num_boxes: 2
-      search_depth: 10
-      render_mode: "rgb_array"
+    ${custom_env.LargerSokoban}
   SokobanDifferentGridVocab:
-    env_type: sokoban
-    max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
-    added_text: ${added_text_no_think}
-    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
-    use_thread_lock: true
-    env_config: # keys should be a subset of SokobanConfig
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
-      action_pattern: ${action_pattern}
-      search_depth: 30
-      dim_x: 6
-      dim_y: 6
-      num_boxes: 1
-      max_steps: ${max_actions_per_traj}
-      grid_lookup: { 0: "W", 1: ".", 2: "G", 3: "C", 4: "B", 5: "A", 6: "@" }
-      grid_vocab: { "W": "wall", ".": "empty", "G": "target", "C": "box on target", "B": "box", "A": "player", "@": "player on target" }
-      render_mode: "rgb_array"
+    ${custom_env.SokobanDifferentGridVocab}
   FrozenLake:
-    env_type: frozen_lake
-    max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
-    added_text: ${added_text_no_think}
-    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
-    use_thread_lock: true
-    env_config:
-      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
-      action_pattern: ${action_pattern}
-      max_steps: ${max_actions_per_traj}
-      is_slippery: false
-      render_mode: "rgb_array"
+    ${custom_env.FrozenLake}
   FrozenLakeThink:
-    env_type: frozen_lake
-    max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_think_format}
-    added_text: ${added_text_think}
-    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
-    use_thread_lock: true
-    env_config:
-      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
-      action_pattern: ${think_action_pattern}
-      max_steps: ${max_actions_per_traj}
-      is_slippery: false
-      render_mode: "rgb_array"
+    ${custom_env.FrozenLakeThink}
