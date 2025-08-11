@@ -71,7 +71,9 @@ class BasePipeline:
     def do_checkpoint(self, global_step):
         metrics = self.state.log_history[-1]
         metrics["system/step"] = global_step
-        if global_step > 0 and global_step % self.pipeline_config.save_steps == 0:
+        if global_step > 0 and (
+            global_step % self.pipeline_config.save_steps == 0 or global_step == self.pipeline_config.max_steps - 1
+        ):
             ckpt_metrics_refss = []
             for cluster in self.checkpoint_clusters:
                 ckpt_metrics_refss.append(cluster.do_checkpoint(global_step=global_step, blocking=False))
