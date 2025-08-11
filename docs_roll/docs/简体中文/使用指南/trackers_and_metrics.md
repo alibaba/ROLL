@@ -1,46 +1,83 @@
-# 实验数据分析与查看 
+# tracker和metrics
 
-## 实验数据追踪
-pipeline对应的config文件中，提供了两种数据追踪方式
-- TensorBoard
-- Weights & Biases (wandb)
+ROLL 框架支持多种实验track工具，帮助您监控和分析训练过程。本文档将详细介绍如何配置和使用这些跟踪器。
+
+## 支持的trackers
+
+ROLL 框架目前支持以下几种trackers：
+
+1. **TensorBoard** - Google 开发的可视化工具
+2. **Weights & Biases (WandB)** - 功能强大的机器学习实验跟踪平台
+3. **SwanLab** - 新一代 AI 实验跟踪工具
+4. **Stdout** - 直接输出到标准输出
+
+## 配置跟踪器
+
+在 YAML 配置文件中，通过 `track_with` 和 `tracker_kwargs` 参数来配置跟踪器：
+
 ```yaml
-# wandb (Weights & Biases) 提供了更高级的云端实验管理和协作功能。
-#track_with: wandb
-#tracker_kwargs:
-#  api_key:
-#  project: roll-agentic
-#  name: ${exp_name}_frozen_lake
-#  notes: "agentic_pipeline"
-#  tags:
-#    - agentic
-#    - roll
-#    - baseline
-
+# 使用 TensorBoard
 track_with: tensorboard
 tracker_kwargs:
-  # log_dir 是 TensorBoard 日志文件的根目录。每次实验运行会在该目录下创建以时间戳命名的子目录。
-  log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban
+  log_dir: /path/to/tensorboard/logs
+
+# 使用 Weights & Biases
+track_with: wandb
+tracker_kwargs:
+  api_key: your_wandb_api_key
+  project: your_project_name
+  name: experiment_name
+  notes: "实验描述"
+  tags:
+    - tag1
+    - tag2
+
+# 使用 SwanLab
+track_with: swanlab
+tracker_kwargs:
+  login_kwargs:
+    api_key: your_swanlab_api_key
+  project: your_project_name
+  logdir: /path/to/swanlab/logs
+  experiment_name: experiment_name
+  tags:
+    - tag1
+    - tag2
+
+# 使用 Stdout
+track_with: stdout
 ```
-## 实验数据可视化
-下文以TensorBoard为例，介绍如何可视化查看实验数据
 
-1. **确保TensorBoard已安装**
-```shell
-pip install tensorboard
+## SwanLab 使用详解
+
+### 配置 SwanLab
+
+要在 ROLL 中使用 SwanLab，请按以下方式配置：
+
+```yaml
+track_with: swanlab
+tracker_kwargs:
+  login_kwargs:
+    api_key: your_api_key  # 您的 SwanLab API 密钥
+  project: roll-experiments  # 项目名称
+  logdir: ./swanlog  # 日志存储目录
+  experiment_name: ${exp_name}  # 实验名称，通常使用 exp_name 变量
+  tags:  # 实验标签
+    - roll
+    - rl
+    - experiment
 ```
 
-2. **启动TensorBoard。**pipeline运行结束后，在log_dir目录下（例如 /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban），可以找到以日期时间命名的各个实验运行目录。通过以下命令启动tensorboard，它将扫描该日期时间目录下的运行日志：
-```shell
-tensorboard --logdir /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban/{latest_date}
-```
+### 获取 SwanLab API 密钥
 
-3. 在终端中，会看到如下提示
-![tensorboard_start](../../../static/img/tensorboard_start.png)
+1. 访问 [SwanLab 官网](https://swanlab.cn/)
+2. 注册或登录您的账户
+3. 进入用户设置页面
+4. 找到 API 密钥并复制
 
-4. 在浏览器中打开*localhost:6006*，即可查看TensorBoard界面。如果在远程机器上使用，需要正确配置端口映射。
-![tensorboard](../../../static/img/tensorboard.png)
+## 指标监控
 
+ROLL 框架会自动记录以下类型的指标：
 
 ## 算法效果指标
 

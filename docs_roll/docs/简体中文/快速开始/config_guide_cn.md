@@ -1,6 +1,8 @@
-# 配置指南
+# ROLL 配置指南
 
-## Pipeline配置
+ROLL 框架通过 YAML 配置文件来定义实验参数。本文档将详细介绍配置项的含义和使用方法。
+
+## Pipeline 配置
 
 ```yaml
 exp_name: "agentic_pipeline"
@@ -32,12 +34,12 @@ num_return_sequences_in_group: 8
 
 ### 基本信息与通用配置
 - `exp_name`: 当前实验的名称，用于标识和组织输出文件、日志等。默认是从 Python 文件名派生。
-- `seed`:  用于初始化随机数生成器。设置固定的种子可以确保实验的可复现性。
+- `seed`: 用于初始化随机数生成器。设置固定的种子可以确保实验的可复现性。
 - `rpc_timeout`: 远程过程调用（RPC）的超时时长，单位为秒。用于 Ray Actor 之间通信。如果一个调用在此时间内没有响应，则会抛出超时错误。
 - `output_dir`: 模型预测结果和检查点（checkpoints）的输出目录。
 - `logging_dir`: 存储日志文件的目录。
-- `track_with`:  用于跟踪实验进度的工具类型。可选 wandb (Weights & Biases), tensorboard (TensorBoard), 或 stdout (标准输出)。
-- `tracker_kwargs`:  传递给所选跟踪器类的额外关键字参数（字典）。例如，WandB 的 API 密钥、项目名称等。
+- `track_with`: 用于跟踪实验进度的工具类型。可选 wandb (Weights & Biases), tensorboard (TensorBoard), swanlab 或 stdout (标准输出)。
+- `tracker_kwargs`: 传递给所选跟踪器类的额外关键字参数（字典）。例如，WandB 的 API 密钥、项目名称等。
 
 ### 训练/评估流程配置
 - `max_steps`: 训练的最大步数。如果大于 0，则设置流水线执行的总步数。训练将在达到此步数时停止。
@@ -60,12 +62,11 @@ num_return_sequences_in_group: 8
 - `num_gpus_per_node`: 指定每个节点上可用的 GPU 数量。当节点数量大于 1 时，此参数应请求整个节点上的 GPU 总数。确保在多节点设置中 GPU 资源分配与请求一致。
 
 ### 调度与请求管理
-- `generate_opt_level`:  控制 LLM 生成（推理）的优化级别。设置为 0 时，使用基础批次生成接口；设置为 1 时，使用调度器处理请求。
+- `generate_opt_level`: 控制 LLM 生成（推理）的优化级别。设置为 0 时，使用基础批次生成接口；设置为 1 时，使用调度器处理请求。
 - `is_num_return_sequences_expand`: 是否在提示（prompts）中复制 num_return_sequences 次。如果为 True，LLM 会为每个输入提示生成多个独立的响应，而不是只生成一个。
 - `max_running_requests`: 在 LLM 推理服务器上可以同时处理的最大请求数量。这限制了并行推理的并发度。
 - `is_use_additional_prompts`: 是否使用除常规批次大小之外的额外提示进行处理。
 - `max_additional_running_prompts`: 在 batch_size 之外，可以额外运行的提示数量。这可能用于处理一些特殊或低优先级的请求，而不会阻塞主批次。
-
 
 ### RLVR Pipeline 常用配置
 
@@ -123,7 +124,6 @@ num_return_sequences_in_group: 8
     - 'seq-mean-token-mean': 序列级别和 token 级别的均值。
     - 'seq-mean-token-sum-norm': 序列级别的均值，token 级别的归一化求和。
 
-
 ### Agentic Pipeline 配置
 
 #### 奖励归一化配置
@@ -139,8 +139,7 @@ num_return_sequences_in_group: 8
 - format_penalty: 当 LLM 生成的响应不符合预期格式时所施加的惩罚值。这是一个负值，会降低不合格响应的奖励。
 - worker_cls: 环境管理器将使用的具体工作器类的路径。这个类实现了环境交互的逻辑。
 
-
-有关 RLVR/Agentic Pipeline配置和Reward设置的更多详细信息，还可以参阅 [RLVR Pipeline Start](../../English/StepByStep/agent_pipeline_start.md) 和 [Agentic Pipeline Start](../../English/StepByStep/agent_pipeline_start.md)
+有关 RLVR/Agentic Pipeline配置和Reward设置的更多详细信息，还可以参阅 [RLVR Pipeline Start](../../English/UserGuide/pipeline/agent_pipeline_start.md) 和 [Agentic Pipeline Start](../../English/UserGuide/pipeline/agent_pipeline_start.md)
 
 ## Worker配置
 
@@ -254,7 +253,7 @@ reference:
 - `gpu_memory_utilization`: 用于模型执行器的 GPU 内存占比。 例如 0.6 表示使用 60% 的 GPU 内存。
 - `block_size`: token 块大小，用于连续的 token 块。影响 VLLM 内部的内存管理效率。
 - `max_model_len`: 模型上下文长度。如果未指定，将从模型配置中自动推导。
-- `load_format`: 加载模型权重的格式。由于模型会在开始时进行“更新”，此值可以设置为 dummy。
+- `load_format`: 加载模型权重的格式。由于模型会在开始时进行"更新"，此值可以设置为 dummy。
 
 #### SGLang 策略配置
 
@@ -288,6 +287,6 @@ actor_train:
 
 在 DeepSpeed 训练中，全局训练批次大小是`per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size (即`actor_train`/`critic`的`device_mapping`长度)。
 
-在 Megatron 训练中，全局训练批次大小是`per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size / `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `context_parallel_size` (不需要除以`expert_model_parallel_size`).
+在 Megatron 训练中，全局训练批次大小是`per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size / `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `context_parallel_size` (不需要除以`expert_model_parallel_size`)。
 
 如果你想在每次 Rollout 中执行一次优化步骤，则应设置`gradient_accumulation_steps`为 `rollout_batch_size` \* `num_return_sequences_in_group` \* `tensor_model_parallel_size` \* `pipeline_model_parallel_size` \* `context_parallel_size`/ `per_device_train_batch_size` / world_size.
