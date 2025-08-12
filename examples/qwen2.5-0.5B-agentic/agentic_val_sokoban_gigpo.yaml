@@ -49,7 +49,7 @@ rollout_batch_size: 1024
 val_batch_size: 1024
 sequence_length: 1024
 
-advantage_clip: 0.2
+advantage_clip: 20
 ppo_epochs: 1
 
 # gigpo
@@ -62,9 +62,11 @@ step_reward_gamma: 0.95
 # pg_clip: 0.1
 #dual_clip_loss: True
 init_kl_coef: 0.0
-whiten_advantages: true
+whiten_advantages: false
 entropy_loss_coef: 0
 max_grad_norm: 1.0
+use_kl_loss: true
+kl_loss_coef: 0.01
 
 pretrain: Qwen/Qwen2.5-0.5B-Instruct
 reward_pretrain: Qwen/Qwen2.5-0.5B-Instruct
