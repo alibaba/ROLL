@@ -1,0 +1,30 @@
+FROM rocm/pytorch-training:v25.6
+RUN pip3 install ray==2.48.0 \
+&& pip3 install pydantic==2.11.7 \
+&& pip3 install huggingface-hub==0.34.0 \
+&& pip3 install https://github.com/aaab8b/roll_amd_dependencies/releases/download/v0.1/megatron_core-0.12.2-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl \
+&& pip3 install https://github.com/aaab8b/roll_amd_dependencies/releases/download/v0.1/vllm-0.10.0+rocm634-cp310-cp310-linux_x86_64.whl \
+&& pip3 install tensordict \
+&&pip3 install modelscope \
+&& pip3 install loralib \
+&& pip3 install isort \
+&& pip3 install jsonlines \
+&& pip3 install pyext \
+&& pip3 install dacite \
+&& pip3 install codetiming \
+&& pip3 install swanlab \
+&& pip3 install math-verify \
+&& pip3 install gym \
+&& pip3 install gymnasium[toy-text] \
+&& pip3 install gym_sokoban \
+&& pip3 install hydra-core \
+&& pip3 install latex2sympy2==1.5.4 \
+&& pip3 install pycocotools
+RUN git clone https://github.com/alibaba/ROLL.git /app/ROLL
+
+WORKDIR /app/ROLL
+RUN pip3 install ./mcore_adapter \
+&& export PYTHONPATH=/app/ROLL:$PYTHONPATH
+
+RUN sed -i 's/_flash_attn_max_version = PkgVersion("2\.7\.3")/_flash_attn_max_version = PkgVersion("3.0.0.post1")/' /opt/conda/envs/py_3.10/lib/python3.10/site-packages/transformer_engine/pytorch/attention.py
+

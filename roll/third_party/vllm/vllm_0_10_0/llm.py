@@ -187,7 +187,6 @@ class Llm0100(LLM):
                 params=sampling_params,
                 arrival_time=time.time(),
                 lora_request=lora_request,
-                prompt_adapter_request=None,
             )
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
