@@ -278,7 +278,9 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             position_ids = data.batch["position_ids"]
             forward_args = data.meta_info.get("forward_args", {})
             # TODO: The offload option may be integrated into the pipeline config in the future.
-            is_offload_optimizer_states_in_train_step = data.meta_info.get("is_offload_optimizer_states_in_train_step", True)
+            is_offload_optimizer_states_in_train_step = data.meta_info.get(
+                "is_offload_optimizer_states_in_train_step", True
+            )
             if position_ids.dim() == 3:
                 # qwen2vl mrope, maybe use a placeholder and let model generate position_ids
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
@@ -352,7 +354,9 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         self.model.save_checkpoint(save_dir, tag=tag, **kwargs)
 
         if self.worker_config.checkpoint_config.get("async_upload", True):
-            self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=local_state_path)
+            self.thread_executor.submit(
+                self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=local_state_path
+            )
         else:
             self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=local_state_path)
 
@@ -369,7 +373,11 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         peft_model = self.unwrap_model()
         if not self.ds_config.is_zero3():
             lora_state_dict = get_peft_model_state_dict(peft_model)
-            return lora_state_dict
+            lora_params = []
+            for name, param in peft_model.named_parameters():
+                if "lora_" in name and ".default" in name:
+                    lora_params.append((name.replace(".default", ""), param))
+            return lora_params
         adapter_name = "default"
         state_dict = peft_model.state_dict()
         lora_state_dict = {k: state_dict[k] for k in state_dict if ("lora_" in k and adapter_name in k)}
@@ -390,7 +398,29 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         comm_plan = self.model_update_comm_plan[model_update_name][self.worker.rank_info.pp_rank]
         model = self.unwrap_model()
         broadcast_time_cost = 0
+
+        # if is_lora:
+        #     if (
+        #         self.worker.rank_info.tp_rank == 0
+        #         and self.worker.rank_info.cp_rank == 0
+        #         and self.worker.rank_info.dp_rank == 0
+        #     ):
+        #         refs = []
+        #         safe_peft_config = {
+        #             "r": peft_config.r,
+        #             "lora_alpha": peft_config.lora_alpha,
+        #             "lora_dropout": getattr(peft_config, "lora_dropout", 0.0),
+        #             "target_modules": peft_config.target_modules,
+        #             "task_type": peft_config.task_type,
+        #             "bias": getattr(peft_config, "bias", "none"),
+        #         }
+        #         for worker in tgt_workers:
+        #             ref = worker.add_lora.remote(peft_config=safe_peft_config)
+        #             refs.append(ref)
+        #         ray.get(refs)
+
         with Timer("model_update_total") as timer_total:
+            # logger.info(str(list(all_params)))
             for param_name, param in tqdm(all_params, desc="weight update progress", total=len(all_params)):
                 shape = param.shape if not self.ds_config.is_zero3() else param.ds_shape
                 if not self.ds_config.is_zero3():
@@ -483,6 +513,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         }
         if is_lora:
             metrics["all_gather"] = timer_total.last - broadcast_time_cost - timer_add_lora.last
+            # metrics["all_gather"] = timer_total.last - broadcast_time_cost
             metrics["add_lora"] = timer_add_lora.last
         else:
             metrics["all_gather"] = timer_total.last - broadcast_time_cost

@@ -4,7 +4,7 @@
 #SBATCH --gpus-per-node=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --exclude=dgx-34
-#SBATCH --time=24:00:00
+#SBATCH --time=30:00:00
 #SBATCH --account=hdtaccuracy
 #SBATCH --partition=normal
 ##SBATCH --container-writable

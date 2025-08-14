@@ -169,3 +169,6 @@ log
 
 output/
 .vscode/
+wandb
+*.json
+slurm-*

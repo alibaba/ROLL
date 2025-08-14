@@ -2,6 +2,8 @@ from concurrent import futures
 from collections import defaultdict
 from datetime import timedelta
 from typing import List, Optional, Callable, Dict, Tuple
+from inspect import signature
+from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 
 import deepspeed
 import torch
@@ -30,6 +32,14 @@ class HfInferStrategy(InferenceStrategy):
         super().__init__(worker)
         self.executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=1)
         self.generate_config = None
+        self.running = False  # server-less模式的运行标志
+
+    def start_server(self, *args, **kwargs):
+        # HF 推理无独立 server，这里仅标记为运行中，满足上层 while not running 的检查
+        self.running = True
+
+    def stop_server(self, *args, **kwargs):
+        self.running = False
 
     def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
@@ -177,3 +187,31 @@ class HfInferStrategy(InferenceStrategy):
         if include is None or OffloadStateType.model_params in include:
             offload_hf_model(model=self.model)
         torch.cuda.empty_cache()
+
+    def add_lora(self, peft_config: dict):
+        # 过滤 LoraConfig 可接受字段
+        allow = set(signature(LoraConfig).parameters.keys())
+        cfg = {k: v for k, v in peft_config.items() if k in allow}
+
+        # 删除/忽略 runtime_config（避免 dict 触发 AttributeError）
+        cfg.pop("runtime_config", None)
+
+        # 规范 target_modules
+        if isinstance(cfg.get("target_modules"), str):
+            cfg["target_modules"] = [t.strip() for t in cfg["target_modules"].split(",") if t.strip()]
+
+        # 填充缺省 task_type
+        cfg.setdefault("task_type", TaskType.CAUSAL_LM)
+
+        lora_cfg = LoraConfig(**cfg)
+
+        model = self.model
+        if isinstance(model, PeftModel):
+            # 已 wrap：确保存在 default 适配器
+            if "default" not in getattr(model, "peft_config", {}):
+                model.add_adapter("default", lora_cfg)
+            model.set_adapter("default")
+        else:
+            # 首次 wrap
+            self.model = get_peft_model(model, lora_cfg)
+            self.model.eval()

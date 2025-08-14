@@ -17,6 +17,7 @@ seed: 42
 logging_dir: /project/hdtaccuracy/trains/grpo/qwen3_8b/logs
 output_dir: /project/hdtaccuracy/trains/grpo/qwen3_8b/output
 num_gpus_per_node: 8      # 8×H800
+# num_gpus_per_node: 2      # 2×H800
 
 track_with: wandb
 tracker_kwargs:
@@ -28,10 +29,10 @@ tracker_kwargs:
    - baseline
   
 # ========= 训练控制 =========
-max_steps: 1000
+# max_steps: 1000
 save_steps: 100
 logging_steps: 1
-eval_steps: 50
+# eval_steps: 50
 resume_from_checkpoint: false
 
 # ========= RL 超参 =========
@@ -39,16 +40,28 @@ rollout_batch_size: 32
 prompt_length: 7000
 response_length: 512
 num_return_sequences_in_group: 8
-ppo_epochs: 1
+ppo_epochs: 3
 adv_estimator: "reinforce"
 value_clip: 0.5
 reward_clip: 10
+reward_normalize: true
 whiten_advantages: true
 
 # ========= 预训练权重 =========
 pretrain: /project/hdtaccuracy/models/base/Qwen3-8B
 reward_pretrain: /project/hdtaccuracy/models/base/Qwen3-8B            # critic 初始权重
-
+validation:
+  data_args:
+    template: qwen3_nothink
+    file_name:
+      - /project/hdtaccuracy/Personality-Alignment/split_data_v6_roll/test_user_based.jsonl
+    max_samples: 100
+  generating_args:
+    top_p: 0.9
+    top_k: 50
+    num_beams: 1
+    temperature: 0.7
+    num_return_sequences: 1
 # ========= Actor（训练） =========
 actor_train:
   model_args:
@@ -56,7 +69,7 @@ actor_train:
     disable_gradient_checkpointing: false
     # —— LoRA 超参 ——                                   # 可按需微调
     lora_rank: 8
-    lora_target: all          # 只插注意力可写 "q_proj,v_proj"
+    lora_target: q_proj,k_proj,v_proj,o_proj
     lora_alpha: 32
     lora_dropout: 0.05
   training_args:
@@ -65,24 +78,31 @@ actor_train:
     per_device_train_batch_size: 2   # ZeRO-3 显存足够可翻倍
     gradient_accumulation_steps: 16  # 2×16 ≈ 原来 1×32
     warmup_steps: 200
-    num_train_epochs: 3
+    num_train_epochs: 5
   data_args:
     template: qwen3_nothink
     file_name:
       - /project/hdtaccuracy/Personality-Alignment/split_data_v6_roll/train_user_based.jsonl
     dataset_dir: data
     messages: prompt
+    domain_interleave_probs:
+      llm_judge: 1.0
   strategy_args:
     strategy_name: deepspeed_train         # ← 从 megatron_train 改成 DS
     strategy_config: ${deepspeed_zero2}    # 引用上面的 DS 预设
   device_mapping: "[0, 1, 2, 3]"             # 与原先保持一致
-  infer_batch_size: 2
+  # device_mapping: "[0, 1]"
+  infer_batch_size: 8
 
 # ========= Actor（推理/采样） =========
 actor_infer:
   model_args:
     dtype: bf16
     disable_gradient_checkpointing: true
+    lora_rank: 8
+    lora_alpha: 32
+    lora_dropout: 0.05
+    lora_target: q_proj,k_proj,v_proj,o_proj
   generating_args:
     max_new_tokens: 512
     top_p: 0.95
@@ -93,12 +113,15 @@ actor_infer:
   data_args:
     template: qwen3_nothink
   strategy_args:
-    strategy_name: sglang
+    strategy_name: vllm
     strategy_config:
-      mem_fraction_static: 0.7
+      gpu_memory_utilization: 0.75
+      block_size: 16
+      max_model_len: 8000
   num_gpus_per_worker: 1
   device_mapping: "[4]"                     # GPU4
-  infer_batch_size: 1
+  # device_mapping: "[0]"
+  infer_batch_size: 32
 
 # ========= Reference =========
 reference:
@@ -113,12 +136,13 @@ reference:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
   device_mapping: "[5]"                    # GPU5
-  infer_batch_size: 1
+  # device_mapping: "[1]"
+  infer_batch_size: 32
 
 # ========= Reward =========
 rewards:
   llm_judge:
-    worker_cls: roll.pipeline.rlvr.rewards.llm_judge_reward_worker.PerAlignLLMJudgeRewardWorker
+    worker_cls: roll.pipeline.rlvr.rewards.peralign_llm_judge_reward_worker.PerAlignLLMJudgeRewardWorker
     judge_prompt: PERALIGN-RLVR-prompt
     judge_model_type: inference
     tag_included: [RLVR]
@@ -131,7 +155,7 @@ rewards:
       max_new_tokens: 512
       top_p: 0.8
       top_k: 50
-      temperature: 0.8
+      temperature: 0.6
       num_beams: 1
       num_return_sequences: 1
     data_args:
@@ -140,4 +164,6 @@ rewards:
       strategy_name: hf_infer
     device_mapping: "[6, 7]"                # GPU6‑7，独立占用
     world_size: 2
-    infer_batch_size: 4
+    # device_mapping: "[1]"
+    # world_size: 1
+    infer_batch_size: 32

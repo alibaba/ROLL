@@ -25,7 +25,12 @@ from roll.utils.collective import collective
 from roll.utils.functionals import GenerateRequestType, concatenate_input_and_output
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
+from inspect import signature
 
+try:
+    from vllm.engine.arg_utils import EngineArgs
+except Exception:
+    EngineArgs = None
 
 logger = get_logger()
 
@@ -90,6 +95,20 @@ class VllmStrategy(InferenceStrategy):
         # set VLLM_PORT to avoid port conflict applied by vllm
         vllm_port = self.worker.get_free_port()
         os.environ["VLLM_PORT"] = str(vllm_port)
+        if "mem_fraction_static" in vllm_config and "gpu_memory_utilization" not in vllm_config:
+            vllm_config["gpu_memory_utilization"] = vllm_config.pop("mem_fraction_static")
+        # ensure internal keys are not forwarded
+        for _k in ("engine_mode", "pending_size", "sleep_level"):
+            vllm_config.pop(_k, None)
+        # filter out unsupported keys based on EngineArgs signature
+        if EngineArgs is not None:
+            allowed = set(signature(EngineArgs.__init__).parameters.keys())
+            allowed.discard("self")
+            dropped = [k for k in list(vllm_config.keys()) if k not in allowed]
+            for k in dropped:
+                vllm_config.pop(k, None)
+            if dropped:
+                logger.warning(f"vLLM dropped unsupported engine args: {dropped}")
 
         if engine_mode == "sync":
             self.model = LLM(resource_placement_groups=self.worker_config.resource_placement_groups, **vllm_config)
@@ -148,9 +167,7 @@ class VllmStrategy(InferenceStrategy):
             if len(lora_int_ids) > 0:
                 lora_int_id = lora_int_ids[0]
                 lora_requests = [
-                    LoRARequest(
-                        lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="dummy_lora_path"
-                    )
+                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="dummy_lora_path")
                 ] * batch_size
         vllm_outputs = self.model.generate(
             sampling_params=sampling_params,
@@ -204,16 +221,12 @@ class VllmStrategy(InferenceStrategy):
                         gen_kwargs={**generation_config, "max_new_tokens": max_new_tokens}
                     )
                     if "multi_modal_data" in batch.non_tensor_batch:
-                        prompt_token_ids = [
-                            batch.non_tensor_batch["multi_modal_data"][0]
-                            ["prompt_token_ids"]
-                        ]
-                        multi_modal_data = [
-                            batch.non_tensor_batch["multi_modal_data"][0]
-                            ["multi_modal_data"]
-                        ]
+                        prompt_token_ids = [batch.non_tensor_batch["multi_modal_data"][0]["prompt_token_ids"]]
+                        multi_modal_data = [batch.non_tensor_batch["multi_modal_data"][0]["multi_modal_data"]]
                     else:
-                        prompt_token_ids = gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
+                        prompt_token_ids = gather_unpadded_input_ids(
+                            input_ids=input_ids, attention_mask=attention_mask
+                        )
                         multi_modal_data = None
                     lora_requests = None
                     if self.is_lora:
@@ -367,7 +380,7 @@ def compare_sampling_params(params1: SamplingParams, params2: SamplingParams) ->
         "top_k",
         "max_tokens",
         "n",
-        "stop_token_ids", 
+        "stop_token_ids",
         "presence_penalty",
         "frequency_penalty",
         "repetition_penalty",

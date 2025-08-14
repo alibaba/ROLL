@@ -16,6 +16,8 @@ def load_dataset(file_path: str) -> List[Dict]:
                 if "cleaned_output" in record:
                     # 如果有 cleaned_output 字段，使用它作为 output
                     record["ground_truth"] = record.pop("cleaned_output")
+                    record["domain"] = "llm_judge"
+                    record["id"] = record["qid"]
                 records.append(record)
 
     return records
@@ -41,7 +43,7 @@ def filter_dataset(records: List[Dict]) -> List[Dict]:
         if prompt_len > 7000 or output_len > 500 or output_len < 10:
             filtered_count += 1
             continue
-
+        record["tag"] = "peralign-conv"  # 添加 tag 字段
         filtered_records.append(record)
 
     print(f"Original records: {len(records)}")

@@ -91,7 +91,7 @@ class PerAlignLLMJudgeRewardWorker(Worker):
             except Exception as e:
                 print(e)
                 continue
-        self.logger.info(f"judge model api output: {str(output)}")
+        # self.logger.info(f"judge model api output: {str(output)}")
         return output
 
     def _run_local_inference(self, messages: Dict) -> str:
@@ -124,7 +124,7 @@ class PerAlignLLMJudgeRewardWorker(Worker):
                 generate_ids = output.batch["input_ids"][:, len(input_ids[0]) :]
 
         output = self.tokenizer.decode(generate_ids[0], skip_special_tokens=True)
-        self.logger.info(f"judge model inference output: {str(output)}")
+        # self.logger.info(f"judge model inference output: {str(output)}")
         return output.strip()
 
     def _extract_score(self, response: str) -> float:
@@ -205,20 +205,15 @@ class PerAlignLLMJudgeRewardWorker(Worker):
             Note output your score in the following format: Score: your score.
             """
         else:
-            # Check if this is the PERALIGN prompt that needs special formatting
-            if self.judge_prompt == prompt_maps.get("QWEN3_8B_PERALIGN_RLVR_PROMPT"):
-                # Parse the original prompt to extract components
-                parsed_data = self._parse_peralign_prompt(prompt)
+            # Parse the original prompt to extract components
+            parsed_data = self._parse_peralign_prompt(prompt)
 
-                formatted_prompt = self.judge_prompt.format(
-                    PROFILE=parsed_data["profile"],
-                    CONVERSATION_HISTORY=parsed_data["conversation_history"],
-                    GROUND_TRUTH=reference if reference else "No reference provided",
-                    MODEL_OUTPUT=response,
-                )
-            else:
-                # For other prompts, use the original format
-                formatted_prompt = self.judge_prompt.format(question=prompt, response=response, reference=reference)
+            formatted_prompt = self.judge_prompt.format(
+                PROFILE=parsed_data["profile"],
+                CONVERSATION_HISTORY=parsed_data["conversation_history"],
+                GROUND_TRUTH=reference if reference else "No reference provided",
+                MODEL_OUTPUT=response,
+            )
 
         messages = [{"role": "user", "content": formatted_prompt}]
 
@@ -263,9 +258,8 @@ class PerAlignLLMJudgeRewardWorker(Worker):
                     self.logger.warning(f"Invalid score {score} in response: {response}")
                     return 0.5
 
-            # Calculate average score and normalize to 0-1 range
             avg_score = sum(scores) / len(scores)
-            normalized_score = (avg_score - 1) / 4  # Convert 1-5 scale to 0-1 scale
+            normalized_score = avg_score
 
             self.logger.info(
                 f"Extracted scores: {scores}, average: {avg_score:.2f}, normalized: {normalized_score:.3f}"
@@ -278,29 +272,6 @@ class PerAlignLLMJudgeRewardWorker(Worker):
         except Exception as e:
             self.logger.error(f"Error extracting peralign score: {e}, response: {response}")
             return 0.5
-
-    def _format_judge_prompt(self, prompt: str, response: str, reference: str = None) -> str:
-        if "user\n" in prompt:
-            prompt = prompt.split("user\n")[-1].strip()
-        if not self.judge_prompt:
-            formatted_prompt = f"""
-            You are an expert judge evaluating the quality of a response to a given prompt.
-            
-            Prompt: {prompt}
-            
-            Response: {response}
-            
-            Reference: {reference}
-            
-            Please evaluate the response on a scale from 0 to 10.
-            Consider factors such as correctness, completeness, clarity, and relevance to the prompt.
-            Your evaluation should be a single number between 0 and 10.
-            Note output your score in the following format: Score: your score.
-            """
-        else:
-            formatted_prompt = self.judge_prompt.format(question=prompt, response=response, reference=reference)
-        messages = [{"role": "user", "content": formatted_prompt}]
-        return messages
 
     # def _get_llm_judgment(self, prompt_id: str, prompt: str, response: str, reference: str = None) -> float:
     #     messages = self._format_judge_prompt(prompt, response, reference)

@@ -482,7 +482,9 @@ def default_reward_model_provider(
             setattr(model, "load_state_dict", value_head_load_state_dict.__get__(model))
             logger.info(f"patch AutoModelForCausalLMWithValueHead load_state_dict and forward")
         else:
-            raise NotImplementedError
+            # raise NotImplementedError
+            logger.info(f"use AutoModelForCausalLM model {model_args.model_type}")
+            model = load_model(model_args, is_trainable, add_valuehead=False)
         if model.config.pad_token_id is None:
             model.config.pad_token_id = tokenizer.pad_token_id
 

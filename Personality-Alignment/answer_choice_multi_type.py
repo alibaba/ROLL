@@ -215,7 +215,7 @@ def evaluate_distractor_type(model, tokenizer, data, distractor_type, batch_size
 
 def main():
     # File path
-    file_path = "/project/hdtaccuracy/Personality-Alignment/choice_ver/raw_choice_data_v5.jsonl"
+    file_path = "/project/hdtaccuracy/Personality-Alignment/choice_ver/raw_choice_data_v7_hard.jsonl"
 
     # Load model and tokenizer
     print("Loading Qwen3-8B model...")
@@ -229,13 +229,13 @@ def main():
 
     # Load dataset
     print("Loading dataset...")
-    data = load_dataset(file_path)  # Limit to first 1000 samples for testing
+    data = load_dataset(file_path)  # Load full dataset
 
-    # Define all distractor types
     distractor_types = [
         "style_violation",
         "topic_violation",
         "richness_violation",
+        "free_violation",
         "profile_violation_w",
         "conversation_violation_w",
         "both_violation_w",
