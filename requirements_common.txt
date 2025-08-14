@@ -21,16 +21,21 @@ pyext
 dacite
 codetiming
 more_itertools
+pybase64
 
 wandb
 swanlab
 
 math-verify
 openai
+langdetect
+nltk==3.8
 
 gym
 gymnasium[toy-text]
 gym_sokoban
+gem-llm
+mcp
 
 hydra-core
 omegaconf

@@ -1,0 +1,36 @@
+max_tokens_per_step: 128
+max_actions_per_traj: 10
+
+env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+gem_code:
+  CodeContest:
+    env_type: "code:CodeContest"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${code_agent_system_template}
+    agent_template: ${code_agent_template}
+    env_config:
+      dataset_name: axon-rl/CodeContest
+  Taco8k:
+    env_type: "code:Taco8k"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${code_agent_system_template}
+    agent_template: ${code_agent_template}
+    env_config:
+      dataset_name: axon-rl/TACO-8k
+  PrimeIntellect15k:
+    env_type: "code:PrimeIntellect15k"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${code_agent_system_template}
+    agent_template: ${code_agent_template}
+    env_config:
+      dataset_name: axon-rl/PrimeIntellect-15k
+
+code_agent_system_template: You're a helpful assistant.
+code_agent_template: "{observation}"
+

@@ -15,7 +15,7 @@ class RandomProxy(BaseLLMProxy):
                  lm_input: DataProto,
                  generation_config: Dict[str, Any]) -> Any:
 
-        response_text = f"{random.choice(self.available_actions)}"
+        response_text = f"{self.env.sample_random_action()}"
         responses = self.tokenizer([response_text], return_tensors="pt")
         lm_input.batch["responses"] = responses["input_ids"]
         lm_input.non_tensor_batch["response_text"] = np.array([response_text], dtype=object)

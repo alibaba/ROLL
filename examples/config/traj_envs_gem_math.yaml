@@ -1,0 +1,64 @@
+max_tokens_per_step: 128
+max_actions_per_traj: 10
+
+env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+gem_math:
+  # Math Environments
+  ASDiv2K:
+    env_type: "math:ASDiv2K"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      dataset_name: axon-rl/ASDIV-2k
+  GSM8K:
+    env_type: "math:GSM8K"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      dataset_name: axon-rl/GSM-8k
+  Math12K:
+    env_type: "math:Math12K"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      dataset_name: axon-rl/MATH-12k
+  Math8K-3to5:
+    env_type: "math:Math8K-3to5"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      dataset_name: axon-rl/MATH-lvl3to5-8k
+  Orz57K:
+    env_type: "math:Orz57K"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      dataset_name: axon-rl/ORZ-57k
+  DeepScaleR40K:
+    env_type: "math:DeepScaleR40K"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      dataset_name: axon-rl/DeepScaleR-40K
+
+math_agent_system_template: You're a helpful assistant.
+math_agent_template: "{observation}\nEnsure that your response includes the format of '\\boxed{{answer}}', e.g. \\boxed{{A}}."
+

@@ -1,3 +1,6 @@
+from omegaconf import DictConfig
+
+import gem
 from contextlib import nullcontext
 from threading import Lock
 from typing import Dict, List, Optional
@@ -7,13 +10,12 @@ import torch
 from tensordict import TensorDict
 from transformers import PreTrainedTokenizer
 
-from roll.agentic.env import REGISTERED_ENVS
-from roll.agentic.env.base import BaseEnv
 from roll.agentic.llm_proxy import BaseLLMProxy, create_llm_proxy
 from roll.agentic.rollout.base_env_manager import RolloutCache, BaseEnvManager
 from roll.agentic.rollout.env_action_limiter import get_global_limiter
 from roll.agentic.rollout.rollout_scheduler import GroupQueueManager
-from roll.agentic.rollout.token_mask_utils import split_by_token, token_ids_to_assistant_mask
+from roll.agentic.rollout.token_mask_utils import split_by_token, token_ids_to_assistant_mask, \
+    custom_apply_chat_template
 from roll.distributed.scheduler.generate_scheduler import RequestScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig, AgenticConfig
@@ -22,6 +24,7 @@ from roll.utils.constants import GenerateStopReason
 from roll.utils.functionals import pad_to_length
 from roll.utils.hash_utils import compute_object_hash
 from roll.utils.logging import get_logger
+from roll.utils.str_utils import contains_renderable_field
 
 
 class StepEnvManager(TrajEnvManager):
@@ -29,7 +32,7 @@ class StepEnvManager(TrajEnvManager):
     def __init__(self,
                  worker_config: EnvManagerConfig,
                  pipeline_config: AgenticConfig,
-                 env_config: Dict,
+                 env_config: DictConfig,
                  tokenizer: PreTrainedTokenizer,
                  generate_scheduler,
                  output_queue: GroupQueueManager,
@@ -40,7 +43,7 @@ class StepEnvManager(TrajEnvManager):
         self.logger = get_logger()
         self.worker_config: EnvManagerConfig = worker_config
         self.pipeline_config = pipeline_config
-        self.env_config: Dict = env_config
+        self.env_config: DictConfig = env_config
         self.tokenizer: PreTrainedTokenizer = tokenizer
         self.output_queue = output_queue
         self.mode = mode
@@ -55,7 +58,7 @@ class StepEnvManager(TrajEnvManager):
         self.use_thread_lock = self.env_config.get("use_thread_lock", False) # 避免同时执行大量cpu操作, 可以通过env_config配置
         self.thread_lock = thread_lock if self.use_thread_lock else nullcontext()
         with self.thread_lock:
-            self.env: BaseEnv = REGISTERED_ENVS[self.env_config['env_class']](self.env_config['config'])
+            self.env = gem.make(env_id=self.env_config["env_type"], **self.env_config['config'])
 
         # Set environment step concurrency limit
         self.max_env_step_concurrent = self.env_config.get("max_env_step_concurrent", 0)
@@ -76,7 +79,7 @@ class StepEnvManager(TrajEnvManager):
             generate_scheduler=self.generate_scheduler,
             llm_proxy_config=self.worker_config.llm_proxy,
             tokenizer=self.tokenizer,
-            available_actions=self.env.get_all_actions()
+            env=self.env
         )
 
     def reset(self) -> RolloutCache:
@@ -87,12 +90,13 @@ class StepEnvManager(TrajEnvManager):
         seed = self.group_seed + self.episode_id
 
         with self.thread_lock:
-            next_state, _ = self.env.reset(seed=seed)
+            observation, info = self.env.reset(seed=seed)
 
         self.rollout_cache.history.append({
-            "state": next_state,    # env return
-            "actions_left": self.env.config.max_steps - self.rollout_cache.step,
-            "observation": None     # agent input string
+            "observation": observation,    # env return
+            "actions_left": self.env_config.max_steps - self.rollout_cache.step,
+            "messages": None,     # agent input messages
+            **info
         })
         self.episode_id += 1
         return self.rollout_cache
@@ -103,28 +107,33 @@ class StepEnvManager(TrajEnvManager):
             skip_special_tokens=True
         )
 
-        next_state, reward, terminated, truncated, info = self.env.step(action=responses[0])
+        observation, reward, terminated, truncated, info = self.env.step(action=responses[0])
+        suffix = info.pop("suffix", None)
 
         self.rollout_cache.step += 1
         self.rollout_cache.terminated = terminated
         self.rollout_cache.truncated = truncated
-        if self.rollout_cache.step >= self.env.config.max_steps:
+        if self.rollout_cache.step >= self.env_config.max_steps:
             self.rollout_cache.terminated = True
             if not terminated:
                 self.rollout_cache.truncated = True
         self.rollout_cache.history[-1]['reward'] = reward
         self.rollout_cache.history[-1]['penalty'] = 0
-        if not info['metrics'].get("action_is_valid", True):
+
+        metrics = info.get("metrics", {})
+        if not metrics.get("action_is_valid", True):
             self.rollout_cache.history[-1]['penalty'] = self.worker_config.format_penalty
         self.rollout_cache.history[-1]['llm_response'] = responses[0]
         if info is not None:
             self.rollout_cache.history[-1].update(info)
 
         self.rollout_cache.history.append({
-            "state": next_state,
-            "actions_left": self.env.config.max_steps - self.rollout_cache.step,
-            "observation": None
+            "observation": observation,
+            "actions_left": self.env_config.max_steps - self.rollout_cache.step,
+            "messages": None
         })
+        if suffix is not None:
+            self.rollout_cache.history[-1]["suffix"] = suffix
 
         return self.rollout_cache
 
@@ -132,30 +141,47 @@ class StepEnvManager(TrajEnvManager):
         memory_history = []
         if "history_length" in self.cfg_template:
             memory_history = rollout_cache.history[-self.cfg_template["history_length"]:-1]
+        env_instruction = rollout_cache.history[0]["observation"]
+
+        def get_observation(inner_entry):
+            if env_instruction == inner_entry["observation"]:
+                obs = inner_entry['suffix']
+            else:
+                obs = f"{inner_entry['observation']} {inner_entry['suffix']}"
+            return obs
+
         sar_history = []
         for history_step, entry in enumerate(memory_history):
-            action = entry.get('action_content', entry.get('action_content', entry.get('llm_response')))
-            action_is_valid = entry['metrics'].get("action_is_valid", True)
-            if not action_is_valid:
-                action += "(IMPORTANT TIPS: this action is not valid, your new response *must* strictly adhere to the format according to env instructions.)"
-            sar_history.append(f"(step: {self.rollout_cache.step - len(memory_history) + history_step + 1}, state: {entry['state']}, action: {action}, reward: {entry['reward']})")
+            observation = get_observation(entry)
+            sar_history.append(f"(step:{self.rollout_cache.step - len(memory_history) + history_step + 1}, observation: {observation}, response: {entry.get('llm_response')})")
+
+        observation = get_observation(rollout_cache.history[-1])
+
+        render_dict = {"env_instruction": env_instruction, "history": ", ".join(sar_history)}
+        if contains_renderable_field(self.agent_template, "step_count"):
+            render_dict["step_count"] = self.rollout_cache.step
+        if contains_renderable_field(self.agent_template, "history_length"):
+            render_dict["history_length"] = len(memory_history)
+        if contains_renderable_field(self.agent_template, "current_step"):
+            render_dict["current_step"] = self.rollout_cache.step + 1
+        if contains_renderable_field(self.agent_template, "current_observation"):
+            render_dict["current_observation"] = observation
+        if contains_renderable_field(self.agent_template, "max_response_length"):
+            render_dict["max_response_length"] = self.env_config["max_tokens_per_step"]
         messages = [
             {"role": "system", "content": self.agent_system_template},
-            {"role": "user", "content": self.agent_template.format(
-                env_instruction=self.env.config.env_instruction,
-                step_count=self.rollout_cache.step,
-                history_length=len(memory_history),
-                history=", ".join(sar_history),
-                current_step=self.rollout_cache.step + 1,
-                current_observation=rollout_cache.history[-1]['state'],
-                max_response_length=self.env_config["max_tokens_per_step"],
-            )}
+            {"role": "user", "content": self.agent_template.format(**render_dict)}
         ]
-        lm_input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        rollout_cache.history[-1]['observation'] = messages
+        rollout_cache.history[-1]['messages'] = messages
 
-        inputs = self.tokenizer(lm_input_text, return_tensors="pt", padding=True, padding_side="left", truncation=False)
-        input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
+        prompt_ids = custom_apply_chat_template(messages=messages, tokenizer=self.tokenizer, add_generation_prompt=True)
+        if len(prompt_ids) >= self.pipeline_config.sequence_length:
+            self.logger.warning(f"sequence_length = {self.pipeline_config.sequence_length} input_ids length = {len(prompt_ids)},"
+                                f"maybe you should increase the response_length")
+            return DataProto(meta_info={"stop_reason": GenerateStopReason.MAX_LENGTH})
+
+        input_ids = torch.tensor(prompt_ids, dtype=torch.long).unsqueeze(0)
+        attention_mask = torch.tensor([1] * input_ids.shape[1], dtype=torch.long).unsqueeze(0)
         position_ids = attention_mask.cumsum(dim=-1)
         lm_input = DataProto()
         lm_input.batch = TensorDict({
@@ -169,10 +195,6 @@ class StepEnvManager(TrajEnvManager):
 
         generation_config["max_new_tokens"] = min(max_new_tokens,
                                                   max(self.pipeline_config.sequence_length - lm_input.batch['input_ids'].shape[1] - max_new_tokens, 1))
-        if generation_config["max_new_tokens"] <= 1:
-            self.logger.warning(f"sequence_length = {self.pipeline_config.sequence_length} input_ids length = {lm_input.batch['input_ids'].shape[1]},"
-                                f"maybe you should increase the response_length")
-            return DataProto(meta_info={"stop_reason": GenerateStopReason.MAX_LENGTH})
         lm_input.meta_info["src_rank"] = self.env_config["env_id"]
 
         lm_output: DataProto = self.llm_proxy.generate(messages=messages,
@@ -181,13 +203,11 @@ class StepEnvManager(TrajEnvManager):
 
         if lm_output is None:
             return DataProto(meta_info={"stop_reason": GenerateStopReason.ABORT})
-
-        lm_output.non_tensor_batch.update({
-            "env_ids": np.array([rollout_cache.env_id], dtype=object),
-            "group_ids": np.array([rollout_cache.group_id], dtype=object),
-            "messages_list": np.array([messages], dtype=object),
-            "tags": np.array([rollout_cache.tag], dtype=object),
-        })
+        response_ids = lm_output.batch['responses'][0]
+        response_ids = response_ids.tolist()
+        rollout_cache.history[-1]["prompt_ids"] = prompt_ids
+        rollout_cache.history[-1]["response_ids"] = response_ids
+        rollout_cache.history[-1]["messages"].append({"role": "assistant", "content": self.tokenizer.decode(response_ids, skip_special_tokens=True)})
         lm_output.meta_info["stop_reason"] = GenerateStopReason.FINISH
         return lm_output
 
@@ -195,36 +215,23 @@ class StepEnvManager(TrajEnvManager):
         """
         Construct step-wise training samples from the collected trajectory.
         """
-        if 'state' in rollout_cache.history[-1]:
+        if 'observation' in rollout_cache.history[-1]:
             rollout_cache.history.pop(-1)
 
         samples: List[DataProto] = []
         episode_score = sum([i['reward'] for i in self.rollout_cache.history])
-        episode_penalty = sum([i['penalty'] for i in self.rollout_cache.history])
         for step, history in enumerate(rollout_cache.history):
-            messages: List[Dict] = history["observation"]
-            messages.append({
-                "role": "assistant",
-                "content": history["llm_response"]
-            })
-            lm_input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
-            inputs = self.tokenizer(lm_input_text, return_tensors="pt", padding=True, padding_side="left", truncation=False)
-            token_ids = inputs.input_ids[0].tolist()
-            token_ids_split = split_by_token(token_ids, token_ids[0])
-            response_masks_list = token_ids_to_assistant_mask(messages=messages, input_ids_list=token_ids_split, tokenizer=self.tokenizer)
-            response_masks = [item for items in response_masks_list for item in items]
+            token_ids = history["prompt_ids"] + history["response_ids"]
+            response_masks = [0] * len(history["prompt_ids"]) + [1] * len(history["response_ids"])
+            input_ids =torch.tensor(token_ids, dtype=torch.long).unsqueeze(0)
+            attention_mask = torch.tensor([1] * len(token_ids), dtype=torch.long).unsqueeze(0)
             response_mask = torch.tensor(response_masks, dtype=torch.bool).unsqueeze(0)
+
             first_response_idx = response_masks.index(1)
-            last_response_idx = len(response_masks) - 1 - response_masks[::-1].index(1)
             prompt_masks = [1] * first_response_idx + [0] * (len(token_ids) - first_response_idx)
             prompt_mask = torch.tensor(prompt_masks, dtype=torch.bool).unsqueeze(0)
             score_tensor = torch.tensor([0] * len(token_ids), dtype=torch.float).unsqueeze(0)
-
-            # Place the episode-level reward scalar on the very last assistant-response token id.
-            # tokens after the last eos_token_id is aborted.
-            score_tensor[0][last_response_idx] = history['reward']
-            input_ids = inputs.input_ids[:, :last_response_idx+1]
-            attention_mask = inputs.attention_mask[:, :last_response_idx+1]
+            score_tensor[0][-1] = history['reward']
             position_ids = attention_mask.cumsum(dim=-1)
 
             input_ids = pad_to_length(input_ids, length=self.pipeline_config.sequence_length, pad_value=self.tokenizer.pad_token_id)
@@ -242,7 +249,6 @@ class StepEnvManager(TrajEnvManager):
                         "position_ids": position_ids,
                         "response_mask": response_mask,
                         "prompt_mask": prompt_mask,
-                        "penalty": torch.Tensor([history["penalty"]]),
                         "scores": score_tensor,
                     },
                     batch_size=input_ids.shape[0]),
@@ -252,8 +258,7 @@ class StepEnvManager(TrajEnvManager):
                     "tags": np.array([self.rollout_cache.tag], dtype=object),
                     "env_ids": np.array([self.rollout_cache.env_id], dtype=object),
                     "group_ids": np.array([self.rollout_cache.group_id], dtype=object),
-                    "messages_list": np.array([messages], dtype=object),
-                    "state_hash": np.array([compute_object_hash(history["state"])], dtype=object),
+                    "state_hash": np.array([compute_object_hash(history["suffix"])], dtype=object),
                     "step": np.array([step], dtype=object),
                 }
             ))
@@ -261,8 +266,9 @@ class StepEnvManager(TrajEnvManager):
         batch: DataProto = DataProto.concat(samples)
 
         response_length = batch.batch["response_mask"].sum().float().item()
+        metrics = self.rollout_cache.history[-1].get('metrics', {})
         env_metric = {
-            'success': float(self.rollout_cache.history[-1]['metrics'].get('success', episode_score > 0)),
+            'success': float(metrics.get('success', episode_score > 0)),
             'num_actions': rollout_cache.step,
         }
         custom_metric = {}

@@ -1,31 +1,9 @@
-import copy
-import time
 from abc import abstractmethod
-from contextlib import nullcontext
 from dataclasses import dataclass, field
-from itertools import zip_longest
-from queue import Queue
-from threading import Lock, Thread
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
-import numpy as np
-import ray
-import torch
-from ray.util.queue import Empty
-from tensordict import TensorDict
-from transformers import PreTrainedTokenizer, AutoTokenizer
-
-from roll.agentic.env import REGISTERED_ENVS
-from roll.agentic.env.base import BaseEnv
-from roll.agentic.rollout.env_action_limiter import get_global_limiter
-from roll.agentic.rollout.token_mask_utils import messages_to_tokens_and_masks
-from roll.datasets.chat_template import get_chat_template
-from roll.distributed.scheduler.generate_scheduler import RequestScheduler, GlobalCounter
 from roll.distributed.scheduler.protocol import DataProto
-from roll.pipeline.agentic.agentic_config import EnvManagerConfig, AgenticConfig
-from roll.utils.constants import RAY_NAMESPACE
-from roll.utils.functionals import pad_to_length
-from roll.utils.logging import get_logger
+from roll.agentic.env import gem
 
 
 @dataclass
@@ -46,6 +24,7 @@ class BaseEnvManager:
     def __init__(self, *args, **kwargs):
         self.current_step = -1
         self.running = False
+        self.env: gem.Env
 
     @abstractmethod
     def run_rollout_loop(self, data: DataProto):
@@ -72,7 +51,7 @@ class BaseEnvManager:
     def make_decision(self, rollout_cache: RolloutCache) -> DataProto:
         pass
 
-    def format_messages(self, history: List[Dict]) -> List[Dict]:
+    def format_messages(self, history: List[Dict]) -> DataProto:
         pass
 
     def formulate_rollouts(self, rollout_cache: RolloutCache) -> DataProto:

@@ -40,6 +40,5 @@ O   _   _   G
 """
 
 from .env import FrozenLakeEnv
-from .config import FrozenLakeEnvConfig
 
-__all__ = ["FrozenLakeEnv", "FrozenLakeEnvConfig"]
+__all__ = ["FrozenLakeEnv"]

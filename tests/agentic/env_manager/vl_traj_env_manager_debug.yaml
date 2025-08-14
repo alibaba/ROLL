@@ -34,3 +34,21 @@ actor_infer:
     num_beams: 1
     temperature: 0.99
     num_return_sequences: 1
+
+custom_env:
+  SimpleSokoban:
+    env_type: sokoban
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
+    use_thread_lock: true
+    agent_system_template: ${agent_system_template}
+    pre_step_template: ${pre_step_template}
+    next_step_template: ${next_step_template}
+    env_config: # keys should be a subset of SokobanConfig
+      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${all_response_pattern}
+      max_steps: ${max_actions_per_traj}
+      dim_room: [10, 10]
+      num_boxes: 1
+      render_mode: "rgb_array"

@@ -1,0 +1,38 @@
+max_tokens_per_step: 128
+max_actions_per_traj: 10
+
+env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+gem_rg:
+  advanced_geometry:
+    env_type: "rg:advanced_geometry"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${rg_agent_system_template}
+    agent_template: ${rg_agent_template}
+    env_config:
+      size: 500
+      seed: 42
+  sokoban:
+    env_type: "rg:sokoban"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${rg_agent_system_template}
+    agent_template: ${rg_agent_template}
+    env_config:
+      size: 500
+      seed: 42
+  LetterCounting:
+    env_type: "rg:leg_counting"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${rg_agent_system_template}
+    agent_template: ${rg_agent_template}
+    env_config:
+      size: 500
+      seed: 42
+
+rg_agent_system_template: You're a helpful assistant.
+rg_agent_template: "{observation}\nEnsure that your response includes the format of '\\boxed{{answer}}', e.g. \\boxed{{A}}."

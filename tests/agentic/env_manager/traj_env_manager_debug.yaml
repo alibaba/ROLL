@@ -1,5 +1,7 @@
 defaults:
   - ../../../examples/config/traj_envs.yaml@_here_
+  - ../../../examples/config/traj_envs_gem_games.yaml@_here_
+  - ../../../examples/config/traj_envs_gem_rg.yaml@_here_
 
 rollout_batch_size: 32
 sequence_length: 8192
@@ -25,12 +27,72 @@ train_env_manager:
 custom_envs:
   SimpleSokoban:
     ${custom_env.SimpleSokoban}
+  FrozenLake:
+    ${custom_env.FrozenLake}
+  NaturalQuestions:
+    ${custom_env.NaturalQuestions}
+  GemGame:
+    ${gem_games.Hangman}
 
 actor_infer:
   generating_args:
-    max_new_tokens: 128 # single-turn response length
+    max_new_tokens: ${max_tokens_per_step} # single-turn response length
     top_p: 0.99
     top_k: 100
     num_beams: 1
     temperature: 0.99
     num_return_sequences: 1
+
+max_tokens_per_step: 128
+max_actions_per_traj: 10
+
+env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+custom_env:
+  SimpleSokoban:
+    env_type: sokoban
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${agent_system_template}
+    agent_template: ${agent_template}
+    env_config: # keys should be a subset of SokobanConfig
+      action_pattern: ${all_response_pattern}
+      dim_room: [10, 10]
+      num_boxes: 1
+    wrappers:
+      - python_tool:
+          tool_type: python_code
+          tool_args:
+            timeout: 5
+            sandbox_type: none
+            keep_error_last_line: false
+          wrapper_cls: gem.tools.tool_env_wrapper.ToolEnvWrapper
+          wrapper_args:
+            tool_reward: 0.05
+            tool_success_reward: 0.25
+            max_tool_uses: 5
+  FrozenLake:
+    env_type: frozen_lake
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${agent_system_template}
+    agent_template: ${agent_template}
+    env_config:
+      action_pattern: ${all_response_pattern}
+      max_steps: ${max_actions_per_traj}
+      is_slippery: false
+  NaturalQuestions:
+    env_type: "qa:NaturalQuestions"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${single_prompt_agent_system_template}
+    agent_template: ${single_prompt_agent_template}
+    env_config:
+      action_pattern: ${all_response_pattern}
+      max_steps: 1
+      is_slippery: false
+      dataset_name: axon-rl/NaturalQuestions

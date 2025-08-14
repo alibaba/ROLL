@@ -39,3 +39,18 @@ custom_envs:
   SimpleSokoban:
     ${custom_env.SimpleSokoban}
 
+custom_env:
+  SimpleSokoban:
+    env_type: sokoban
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    history_length: ${default_history_length}
+    agent_system_template: ${agent_system_template}
+    agent_template: ${agent_template}
+    env_config: # keys should be a subset of SokobanConfig
+      action_pattern: ${all_response_pattern}
+      max_steps: ${max_actions_per_traj}
+      dim_room: [6, 6]
+      num_boxes: 1

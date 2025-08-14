@@ -162,13 +162,6 @@ val_env_manager:
   tags: [WebShopEnv]
   num_groups_partition: [64] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
-max_tokens_per_step: 128
-max_actions_per_traj: 20
-action_pattern: <answer>(.*?)</answer>
-think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
-user_prompt_no_think_format: <answer> [your answer] </answer>
-user_prompt_think_format: <think> [Your thoughts] </think> <answer> [your answer] </answer>
-
 custom_envs:
   WebShopEnv:
     ${custom_env.WebShopEnv}

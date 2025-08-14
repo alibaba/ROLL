@@ -1,66 +1,60 @@
-
+all_response_pattern: ^(.*)$
 action_pattern: <answer>(.*?)</answer>
 think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
-user_prompt_no_think_format: <answer> [your answer] </answer>
-user_prompt_think_format: <think> [Your thoughts] </think> <answer> [your answer] </answer>
 
 max_tokens_per_step: 128
 max_actions_per_traj: 10
+sokoban_format_penalty: -0.15
+frozen_format_penalty: -0.01
 
 custom_env:
   SimpleSokoban:
     env_type: sokoban
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     pre_step_template: ${pre_step_template}
     next_step_template: ${next_step_template}
-    reward_template: ${reward_template}
     env_config: # keys should be a subset of SokobanConfig
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${action_pattern}
       max_steps: ${max_actions_per_traj}
-      dim_x: 6
-      dim_y: 6
+      format_penalty: ${sokoban_format_penalty}
+      dim_room: [6, 6]
       num_boxes: 1
       render_mode: "rgb_array"
   LargerSokoban:
     env_type: sokoban
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     pre_step_template: ${pre_step_template}
     next_step_template: ${next_step_template}
-    reward_template: ${reward_template}
     env_config:
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${action_pattern}
       max_steps: ${max_actions_per_traj}
-      dim_x: 8
-      dim_y: 8
+      format_penalty: ${sokoban_format_penalty}
+      dim_room: [10, 10]
       num_boxes: 2
       search_depth: 10
       render_mode: "rgb_array"
   SokobanDifferentGridVocab:
     env_type: sokoban
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     pre_step_template: ${pre_step_template}
     next_step_template: ${next_step_template}
-    reward_template: ${reward_template}
     env_config: # keys should be a subset of SokobanConfig
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${action_pattern}
+      format_penalty: ${sokoban_format_penalty}
       search_depth: 30
-      dim_x: 6
-      dim_y: 6
+      dim_room: [6, 6]
       num_boxes: 1
       max_steps: ${max_actions_per_traj}
       grid_lookup: { 0: "W", 1: ".", 2: "G", 3: "C", 4: "B", 5: "A", 6: "@" }
@@ -68,43 +62,43 @@ custom_env:
       render_mode: "rgb_array"
   FrozenLake:
     env_type: frozen_lake
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     pre_step_template: ${pre_step_template}
     next_step_template: ${next_step_template}
-    reward_template: ${reward_template}
     env_config:
-      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${action_pattern}
       max_steps: ${max_actions_per_traj}
+      format_penalty: ${frozen_format_penalty}
       is_slippery: false
       render_mode: "rgb_array"
   FrozenLakeThink:
     env_type: frozen_lake
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_think_format}
     env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     pre_step_template: ${pre_step_template}
     next_step_template: ${next_step_template}
-    reward_template: ${reward_template}
     env_config:
-      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${think_action_pattern}
       max_steps: ${max_actions_per_traj}
+      format_penalty: ${frozen_format_penalty}
       is_slippery: false
       render_mode: "rgb_array"
 
 agent_system_template: "You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game."
-pre_step_template: "\nTurn {turn_idx}:\nState"
+pre_step_template: |
+  {observation}
+  Turn {turn_idx}:
+  Current state is:
+
 next_step_template: |
-  You have {actions_left} actions left. 
-  Always output: <answer> [your answer] </answer> with no extra text. 
+  Enter your move.
   Strictly follow this format.
+  You have {actions_left} actions left. 
   Max response length: {max_response_length} words (tokens).
-  Decide the next action:
-reward_template: "Reward:\n{reward}\n"

@@ -1,5 +1,6 @@
 import base64
 import copy
+import gem
 from contextlib import nullcontext
 from threading import Lock
 from typing import Dict, List, Optional
@@ -9,8 +10,6 @@ import numpy as np
 import torch
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from roll.agentic.env import REGISTERED_ENVS
-from roll.agentic.env.base import BaseEnv
 from roll.agentic.llm_proxy import BaseLLMProxy, create_llm_proxy
 from roll.agentic.rollout.base_env_manager import RolloutCache, BaseEnvManager
 from roll.agentic.rollout.env_action_limiter import get_global_limiter
@@ -41,6 +40,7 @@ class VLTrajEnvManager(TrajEnvManager):
                  mode='train',
                  *args, **kwargs):
         """
+        TODO: GEM currently does not support VL scenarios and requires extension.
         """
         BaseEnvManager.__init__(self)
         self.logger = get_logger()
@@ -70,7 +70,7 @@ class VLTrajEnvManager(TrajEnvManager):
         self.use_thread_lock = self.env_config.get("use_thread_lock", False) # 避免同时执行大量cpu操作, 可以通过env_config配置
         self.thread_lock = thread_lock if self.use_thread_lock else nullcontext()
         with self.thread_lock:
-            self.env: BaseEnv = REGISTERED_ENVS[self.env_config['env_class']](self.env_config['config'])
+            self.env = gem.make(env_id=self.env_config["env_type"], **self.env_config['config'])
 
         # Set environment step concurrency limit
         self.max_env_step_concurrent = self.env_config.get("max_env_step_concurrent", 0)
@@ -87,7 +87,7 @@ class VLTrajEnvManager(TrajEnvManager):
         [
                 {
                     "type": "text",
-                    "text": self.reward_template + self.pre_step_template
+                    "text":  "{observation}\nTurn {turn_idx}:\nCurrent state is:\n"
                 },
                 {
                     "type": "image",
@@ -102,19 +102,17 @@ class VLTrajEnvManager(TrajEnvManager):
         """
         self.pre_step_template = cfg_template["pre_step_template"]
         self.next_step_template = cfg_template["next_step_template"]
-        self.reward_template = cfg_template["reward_template"]
         if self.env_config["env_id"] == 0:
             self.logger.info(f"agent_system_template: {self.agent_system_template}")
             self.logger.info(f"pre_step_template: {self.pre_step_template}")
             self.logger.info(f"next_step_template: {self.next_step_template}")
-            self.logger.info(f"reward_template: {self.reward_template}")
 
         # TODO: add rewards_scheduler for local ray reward workers
         self.llm_proxy: BaseLLMProxy = create_llm_proxy(
             generate_scheduler=self.generate_scheduler,
             llm_proxy_config=self.worker_config.llm_proxy,
             tokenizer=self.tokenizer,
-            available_actions=self.env.get_all_actions()
+            env=self.env
         )
 
 
@@ -169,18 +167,15 @@ class VLTrajEnvManager(TrajEnvManager):
             {"role": "system", "content": self.agent_system_template},
         ]
 
-        pre_step_content = ""
         for idx, content in enumerate(history):
-            if idx == 0:
-                pre_step_content = self.env.config.env_instruction
 
-            assert "state" in content, ("The current EnvManager is specifically tailored for standard RL interaction "
+            assert "observation" in content, ("The current EnvManager is specifically tailored for standard RL interaction "
                                         "sequences, following the format of (s, a, r, s, a, r...).")
 
-            pre_step_content += self.pre_step_template.format(turn_idx=idx)
+            pre_step_content = self.pre_step_template.format(observation=content["observation"], turn_idx=idx + 1)
             next_step_content = self.next_step_template.format(actions_left=content["actions_left"],
                                                                max_response_length=self.env_config["max_tokens_per_step"])
-            base64_image = base64.b64encode(content["state"]).decode("utf-8")
+            base64_image = base64.b64encode(content["suffix"]).decode("utf-8")
             user_content_list_dict = [
                 {
                     "type": "text",
@@ -189,7 +184,7 @@ class VLTrajEnvManager(TrajEnvManager):
                 {
                     "type": "image",
                     "image": f"data:image/jpeg;base64,{base64_image}",
-                    "image_PIL": PIL.Image.fromarray(content["state"], mode='RGB')
+                    "image_PIL": PIL.Image.fromarray(content["suffix"], mode='RGB')
                 },
                 {
                     "type": "text",
@@ -200,14 +195,13 @@ class VLTrajEnvManager(TrajEnvManager):
 
             if "llm_response" in content:
                 messages.append({"role": "assistant", "content": content["llm_response"]})
-
-            pre_step_content = ""
-            if "reward" in content:
-                pre_step_content = self.reward_template.format(reward=content['reward'])
         return messages
 
     def formulate_rollouts(self, rollout_cache: RolloutCache):
-        if 'state' in rollout_cache.history[-1]:
+        # TODO: check inconsistent tokenization between successive encode-decode operations
+        #  can potentially lead to a training crash. check token in token out
+        #  the same as TrajEnvManager.
+        if 'observation' in rollout_cache.history[-1]:
             rollout_cache.history.pop(-1)
         history = rollout_cache.history[:-1]
         last_cache = copy.deepcopy(rollout_cache.history[-1])
@@ -282,8 +276,9 @@ class VLTrajEnvManager(TrajEnvManager):
             "episode_scores": np.array([episode_score], dtype=object),
         })
 
+        metrics = self.rollout_cache.history[-1].get('metrics', {})
         env_metric = {
-            'success': float(self.rollout_cache.history[-1]['metrics'].get('success', episode_score > 0)),
+            'success': float(metrics.get('success', episode_score > 0)),
             'num_actions': rollout_cache.step,
         }
         custom_metric = {}

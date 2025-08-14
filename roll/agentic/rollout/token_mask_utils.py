@@ -2,6 +2,55 @@ from typing import List, Dict
 
 from transformers import PreTrainedTokenizer
 
+from roll.datasets.collator import DataCollatorWithPaddingForMM
+
+
+def custom_apply_chat_template(messages: List[Dict], tokenizer: PreTrainedTokenizer, add_generation_prompt=True) -> List:
+    if len(messages) == 0:
+        return []
+    if messages[0]["role"] == "system":
+        token_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=add_generation_prompt)
+        return token_ids
+    else:
+        system_mock = [{"role": "system", "content": ""}]
+        system_token_ids_mock = tokenizer.apply_chat_template(system_mock, tokenize=True)
+        token_ids = tokenizer.apply_chat_template(system_mock + messages, tokenize=True, add_generation_prompt=add_generation_prompt)
+        return token_ids[len(system_token_ids_mock):]
+
+def custom_vl_apply_chat_template(messages: List[Dict], collator: DataCollatorWithPaddingForMM, add_generation_prompt=True) -> Dict:
+    if len(messages) == 0:
+        return {}
+
+    images = []
+    for message in messages:
+        if message["role"] == "user":
+            content: List[Dict] = message["content"]
+            images.extend([content[i].pop("image_PIL") for i in range(len(content)) if content[i]["type"] == "image"])
+
+    if messages[0]["role"] == "system":
+        messages_text = collator.processor.apply_chat_template(messages, add_generation_prompt=add_generation_prompt)
+        features = [{
+            collator.prompt_key: messages_text,
+            collator.image_key: images,
+            collator.image_flag_key: True
+        }]
+        inputs = collator(features)
+        inputs.pop("position_ids", None)
+        return inputs
+    else:
+        system_mock = [{"role": "system", "content": ""}]
+        system_token_ids_mock = collator.processor.apply_chat_template(system_mock, tokenize=True)
+        messages_text = collator.processor.apply_chat_template(system_mock + messages)
+        features = [{
+            collator.prompt_key: messages_text,
+            collator.image_key: images,
+            collator.image_flag_key: True
+        }]
+        inputs = collator(features)
+        inputs.pop("position_ids", None)
+        inputs["input_ids"] = inputs["input_ids"][:, len(system_token_ids_mock):]
+        inputs["attention_mask"] = inputs["attention_mask"][:, len(system_token_ids_mock):]
+        return inputs
 
 def messages_to_tokens_and_masks(messages: List[Dict], tokenizer: PreTrainedTokenizer, add_generation_prompt=False):
     """

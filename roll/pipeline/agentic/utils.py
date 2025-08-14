@@ -149,8 +149,7 @@ def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticC
         # ref: https://github.com/langfengQ/verl-agent/blob/e03bd502667c45172e8c093cc506db8438ae8ab5/gigpo/core_gigpo.py#L109
         # step 1
         episode_scores = torch.from_numpy(batch.non_tensor_batch["episode_scores"].astype(np.float32))
-        scores_with_penalty = episode_scores + batch.batch["penalty"]
-        scores_to_group = DataProto.from_dict({"scores": scores_with_penalty})
+        scores_to_group = DataProto.from_dict({"scores": episode_scores})
         scores_to_group.non_tensor_batch = batch.non_tensor_batch
         episode_rewards: torch.Tensor = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
 
@@ -168,8 +167,7 @@ def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticC
         batch.batch["episode_rewards_norm"] = episode_rewards
         batch.batch["step_rewards_norm"] = step_rewards
     else:
-        scores_with_penalty = batch.batch["scores"].clone().sum(dim=-1) + batch.batch["penalty"]
-        scores_to_group = DataProto.from_dict({"scores": scores_with_penalty})
+        scores_to_group = DataProto.from_dict({"scores": batch.batch["scores"].clone().sum(dim=-1)})
         scores_to_group.non_tensor_batch = batch.non_tensor_batch
         batch.batch["response_level_rewards"] = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
 

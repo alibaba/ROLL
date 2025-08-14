@@ -3,6 +3,7 @@ from typing import List, Dict, Optional, Any
 
 from transformers import PreTrainedTokenizer
 
+import gem
 from roll.distributed.scheduler.generate_scheduler import RequestScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import LLMProxyConfig
@@ -13,14 +14,14 @@ class BaseLLMProxy(ABC):
     LLMProxy defines a unified interface for generating responses based on messages or lm_input DataProto.
     Subclasses will implement specific inference apis.
     """
-    def __init__(self, generate_scheduler: RequestScheduler, llm_proxy_config: LLMProxyConfig, tokenizer: PreTrainedTokenizer, available_actions: List[str]):
+    def __init__(self, generate_scheduler: RequestScheduler, llm_proxy_config: LLMProxyConfig, tokenizer: PreTrainedTokenizer, env: gem.Env):
         """
 
         """
         self.generate_scheduler = generate_scheduler
         self.llm_proxy_config = llm_proxy_config
         self.tokenizer = tokenizer
-        self.available_actions = available_actions
+        self.env = env
 
     @abstractmethod
     def generate(self,

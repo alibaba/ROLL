@@ -155,38 +155,6 @@ val_env_manager:
   tags: [WebShopEnv]
   num_groups_partition: [64] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
-max_tokens_per_step: 128
-max_actions_per_traj: 20
-action_pattern: <answer>(.*?)</answer>
-think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
-user_prompt_no_think_format: <answer> [your answer] </answer>
-user_prompt_think_format: <think> [Your thoughts] </think> <answer> [your answer] </answer>
-
-env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
 custom_envs:
   WebShopEnv:
-    env_type: webshop
-    max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
-    env_manager_cls: ${env_manager_cls}
-    use_thread_lock: true
-    agent_system_template: ${agent_system_template}
-    agent_template: ${agent_template}
-    reward_template: ${reward_template}
-    env_config:
-      observation_mode: text
-      max_steps: ${max_actions_per_traj}
-
-
-agent_system_template: |
-  You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game.
-agent_template: |
-  Turn {turn_idx}:
-  State:
-  {state}
-  You have {actions_left} actions left. 
-  Always output: <answer> [your answer] </answer> with no extra text. Strictly follow this format.
-  Max response length: {max_response_length} words (tokens).
-  Decide the next action:
-
-reward_template: "Reward:\n{reward}\n"
+    ${custom_env.WebShopEnv}

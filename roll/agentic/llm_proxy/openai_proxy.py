@@ -1,3 +1,5 @@
+import gem
+import gym
 import time
 from typing import List, Dict, Any, Optional
 
@@ -26,7 +28,7 @@ class OpenAIProxy(BaseLLMProxy):
                  generate_scheduler: RequestScheduler,
                  llm_proxy_config: LLMProxyConfig,
                  tokenizer: PreTrainedTokenizer,
-                 available_actions):
+                 env: gem.Env):
         """
         Initializes the OpenAIProxy with the given configuration.
 
@@ -34,9 +36,9 @@ class OpenAIProxy(BaseLLMProxy):
             generate_scheduler (RequestScheduler): Scheduler for managing requests.
             llm_proxy_config (LLMProxyConfig): Configuration specific to the LLM proxy (e.g., API key, base URL).
             tokenizer (PreTrainedTokenizer): Tokenizer for the model.
-            available_actions: Actions available to the model (if applicable).
+            env (gem.Env): sample_random_action (if applicable).
         """
-        super().__init__(generate_scheduler, llm_proxy_config, tokenizer, available_actions)
+        super().__init__(generate_scheduler, llm_proxy_config, tokenizer, env)
 
         self.base_url = llm_proxy_config.proxy_config["base_url"]
         self.api_key = llm_proxy_config.proxy_config["api_key"]

@@ -1,115 +1,110 @@
+all_response_pattern: ^(.*)$
 action_pattern: <answer>(.*?)</answer>
 think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
-user_prompt_no_think_format: <answer> [your answer] </answer>
-user_prompt_think_format: <think> [Your thoughts] </think> <answer> [your answer] </answer>
 
 max_tokens_per_step: 128
 max_actions_per_traj: 10
+sokoban_format_penalty: -0.15
+frozen_format_penalty: -0.01
 
 env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
 custom_env:
   SimpleSokoban:
     env_type: sokoban
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: ${env_manager_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
-    reward_template: ${reward_template}
     env_config: # keys should be a subset of SokobanConfig
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${action_pattern}
       max_steps: ${max_actions_per_traj}
-      dim_x: 6
-      dim_y: 6
+      format_penalty: ${sokoban_format_penalty}
+      dim_room: [6, 6]
       num_boxes: 1
   LargerSokoban:
     env_type: sokoban
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: ${env_manager_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
-    reward_template: ${reward_template}
     env_config:
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${action_pattern}
       max_steps: ${max_actions_per_traj}
-      dim_x: 8
-      dim_y: 8
+      format_penalty: ${sokoban_format_penalty}
+      dim_room: [10, 10]
       num_boxes: 2
       search_depth: 10
   SokobanDifferentGridVocab:
     env_type: sokoban
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: ${env_manager_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
-    reward_template: ${reward_template}
     env_config: # keys should be a subset of SokobanConfig
-      env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${action_pattern}
       max_steps: ${max_actions_per_traj}
+      format_penalty: ${sokoban_format_penalty}
       search_depth: 30
-      dim_x: 6
-      dim_y: 6
+      dim_room: [6, 6]
       num_boxes: 1
       grid_lookup: { 0: "W", 1: ".", 2: "G", 3: "C", 4: "B", 5: "A", 6: "@" }
       grid_vocab: { "W": "wall", ".": "empty", "G": "target", "C": "box on target", "B": "box", "A": "player", "@": "player on target" }
   FrozenLake:
     env_type: frozen_lake
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: ${env_manager_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
-    reward_template: ${reward_template}
     env_config:
-      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${action_pattern}
       max_steps: ${max_actions_per_traj}
+      format_penalty: ${frozen_format_penalty}
       is_slippery: false
   FrozenLakeThink:
     env_type: frozen_lake
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_think_format}
     env_manager_cls: ${env_manager_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
-    reward_template: ${reward_template}
     env_config:
-      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
       action_pattern: ${think_action_pattern}
       max_steps: ${max_actions_per_traj}
+      format_penalty: ${frozen_format_penalty}
       is_slippery: false
   WebShopEnv:
     env_type: webshop
+    max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
-    user_prompt_format: ${user_prompt_no_think_format}
     env_manager_cls: ${env_manager_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
-    reward_template: ${reward_template}
     env_config:
       observation_mode: text
       max_steps: ${max_actions_per_traj}
+      format_penalty: -0.05
 
-agent_system_template: |
-  You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game.
+agent_system_template: You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game.
 agent_template: |
+  {observation}
   Turn {turn_idx}:
-  State:
-  {state}
-  You have {actions_left} actions left. 
-  Always output: <answer> [your answer] </answer> with no extra text. Strictly follow this format.
-  Max response length: {max_response_length} words (tokens).
+  {suffix}
+  Strictly follow this format:
+  1. output format is '<answer> [your answer] </answer>' with no extra text. 
+  2. You have {actions_left} actions left. 
+  3. Max response length: {max_response_length} words (tokens).
   Decide the next action:
 
-reward_template: "Reward:\n{reward}\n"
+single_prompt_agent_system_template: You're a helpful assistant.
+single_prompt_agent_template: "{observation}"
+

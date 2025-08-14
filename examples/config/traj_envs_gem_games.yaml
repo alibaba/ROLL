@@ -1,0 +1,107 @@
+max_tokens_per_step: 128
+max_actions_per_traj: 10
+
+env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+gem_games:
+  GuessTheNumber:
+    env_type: game:GuessTheNumber-v0 # Based on default/first registration
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${game_agent_system_template}
+    agent_template: ${game_agent_template}
+    env_config:
+      min_number: 1
+      max_number: 20
+      max_turns: ${max_actions_per_traj} # From GuessTheNumber-v0 registration
+  Mastermind:
+    env_type: game:Mastermind-v0
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${game_agent_system_template}
+    agent_template: ${game_agent_template}
+    env_config:
+      code_length: 4
+      num_numbers: 6
+      max_turns: ${max_actions_per_traj} # From Mastermind-v0 registration
+      duplicate_numbers: False
+  Minesweeper:
+    env_type: game:Minesweeper-v0
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${game_agent_system_template}
+    agent_template: ${game_agent_template}
+    env_config:
+      rows: 8
+      cols: 8
+      num_mines: 10
+      max_turns: ${max_actions_per_traj} # From Minesweeper-v0 registration
+  Wordle:
+    env_type: game:Wordle-v0
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${game_agent_system_template}
+    agent_template: ${game_agent_template}
+    env_config:
+      word_length: 5
+      only_real_words: True
+      max_turns: ${max_actions_per_traj} # From Wordle-v0 registration
+  FifteenPuzzle:
+    env_type: game:FifteenPuzzle-v0
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${game_agent_system_template}
+    agent_template: ${game_agent_template}
+    env_config:
+      num_rows: 3
+      max_turns: ${max_actions_per_traj} # From FifteenPuzzle-v0 registration
+  Hangman:
+    env_type: game:Hangman-v0
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${game_agent_system_template}
+    agent_template: ${game_agent_template}
+    env_config:
+      word_length: 5
+      hardcore: False
+      max_turns: ${max_actions_per_traj} # From Hangman-v0 registration
+  Sudoku:
+    env_type: game:Sudoku-v0
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${game_agent_system_template}
+    agent_template: ${game_agent_template}
+    env_config:
+      clues: 50
+      max_turns: ${max_actions_per_traj} # From Sudoku-v0 registration
+      scale: 9
+  TowerofHanoi:
+    env_type: game:TowerofHanoi-v0
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    agent_system_template: ${game_agent_system_template}
+    agent_template: ${game_agent_template}
+    env_config:
+      num_disks: 4
+      max_turns: ${max_actions_per_traj} # From TowerofHanoi-v0 registration
+
+game_agent_system_template: You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game.
+game_agent_template: |
+  {observation}
+  {suffix}
+

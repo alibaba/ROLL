@@ -7,10 +7,8 @@ from typing import Optional, List, Dict, Any, Literal
 
 from omegaconf import DictConfig
 
-from roll.agentic.env import REGISTERED_ENV_CONFIGS
 from roll.configs.base_config import BaseConfig
 from roll.configs.worker_config import WorkerConfig
-from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.utils.logging import get_logger
 
 logger = get_logger()
@@ -259,12 +257,14 @@ class AgenticConfig(BaseConfig):
             ):
                 cfg_template = self.custom_envs[tag]
                 env_class = cfg_template.env_type
-                max_tokens_per_step = cfg_template.max_tokens_per_step
 
                 group_id = env_id // env_manager_config.group_size
-                cfg_template.env_config["group_id"] = group_id
-                cfg_template.env_config["group_size"] = env_manager_config.num_env_groups
-                env_config = REGISTERED_ENV_CONFIGS[env_class](**cfg_template.env_config)
+
+                if "env_config" not in cfg_template:
+                    cfg_template.env_config = {}
+                # cfg_template.env_config["rank"] = group_id
+                # cfg_template.env_config["world_size"] = env_manager_config.num_env_groups
+                env_config = {**cfg_template.env_config}
 
                 if group_id not in group_seeds:
                     group_seeds[group_id] = random.randint(0, 1000000)
@@ -281,7 +281,7 @@ class AgenticConfig(BaseConfig):
                     "group_seed": group_seeds[group_id],
                 })
                 worker_rank = env_id // max_env_num_per_worker
-                env_configs[worker_rank][env_id] = entry
+                env_configs[worker_rank][env_id] = DictConfig(entry)
             done_groups += n_group
         assert done_groups == env_manager_config.num_env_groups
         env_manager_config.env_configs = env_configs

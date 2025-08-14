@@ -280,16 +280,14 @@ class AgenticPipeline(BasePipeline):
                     prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
                     responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
                     episode_scores = group_batch.non_tensor_batch["episode_scores"].tolist()
-                    penalties = group_batch.batch["penalty"].tolist()
-                    for prompt, prompt_id, response, response_id, episode_score, penalty in zip(
-                            prompts, prompt_ids, responses, response_ids, episode_scores, penalties
+                    for prompt, prompt_id, response, response_id, episode_score in zip(
+                            prompts, prompt_ids, responses, response_ids, episode_scores
                     ):
                         log_res.append(
                             {
                                 "prompt": prompt,
                                 "response": response,
                                 "episode_score": episode_score,
-                                "penalty": penalty,
                             }
                         )
                     if len(log_res) >= 10:
@@ -419,7 +417,6 @@ def compute_data_metrics(batch):
     response_length = response_mask.sum(-1).float()  # (batch_size,)
     returns = batch.batch["returns"]
     non_prompt_mask = torch.logical_not(batch.batch["prompt_mask"]).float()
-    penalty: torch.Tensor = batch.batch["penalty"]
 
     metrics = {
         # score, sequence_score from env
@@ -430,10 +427,6 @@ def compute_data_metrics(batch):
         "critic/rewards/mean": torch.mean(sequence_reward).detach().item(),
         "critic/rewards/max": torch.max(sequence_reward).detach().item(),
         "critic/rewards/min": torch.min(sequence_reward).detach().item(),
-        # penalty
-        "critic/penalty/mean": torch.mean(penalty).detach().item(),
-        "critic/penalty/max": torch.max(penalty).detach().item(),
-        "critic/penalty/min": torch.min(penalty).detach().item(),
         # adv
         "critic/advantages/mean": masked_mean(advantages, response_mask).detach().item(),
         "critic/advantages/max": torch.max(advantages[response_mask]).detach().item(),
