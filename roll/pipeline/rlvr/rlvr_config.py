@@ -156,8 +156,8 @@ class RLVRConfig(BaseConfig):
     ppo_epochs: int = field(default=1, metadata={"help": "Number of optimisation epochs per batch of samples"})
     max_grad_norm: float = field(default=1.0, metadata={"help": "Maximum norm"})
     l2: float = field(default=0.0, metadata={"help": "L2 regularization"})
-    lambd: float = field(default=0.95, metadata={"help": "Gamma parameter for advantage calculation"})
-    gamma: float = field(default=1, metadata={"help": "Lambda parameter for advantage calculation"})
+    lambd: float = field(default=0.95, metadata={"help": "Lambda parameter for advantage calculation"})
+    gamma: float = field(default=1, metadata={"help": "Gamma parameter for advantage calculation"})
     pg_clip: Optional[float] = field(default=0.2, metadata={"help": "Range for clipping in PPO policy gradient loss"})
     value_clip: Optional[float] = field(
         default=None, metadata={"help": "Range for clipping values in loss calculation"}
