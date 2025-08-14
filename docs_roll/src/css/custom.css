@@ -28,3 +28,8 @@
   --ifm-color-primary-lightest: #4fddbf;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
 }
+
+.ant-float-btn-icon {
+  width: 24px !important;
+  height: 24px !important; 
+}

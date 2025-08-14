@@ -80,8 +80,7 @@ class VLTrajEnvManager(TrajEnvManager):
             self.env_step_limiter = get_global_limiter(tag=env_tag, max_concurrent_calls=self.max_env_step_concurrent)
 
         cfg_template = self.pipeline_config.custom_envs[self.env_config["tag"]]
-        self.agent_system_template = cfg_template.get("agent_system_template", "You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game.")
-        self.user_prompt_format = cfg_template.get("user_prompt_format", "<answer> [your answer] </answer>")
+        self.agent_system_template = cfg_template["agent_system_template"]
 
         """
         vl messages user content is List[Dict], like:
@@ -101,20 +100,14 @@ class VLTrajEnvManager(TrajEnvManager):
                 }
             ]
         """
-        self.pre_step_template = cfg_template.get("pre_step_template", "\nTurn {turn_idx}:\nState")
-        self.next_step_template = cfg_template.get("next_step_template", "\nYou have {actions_left} actions left. "
-                                                "Always output: {format_template} with no extra text. "
-                                                "Strictly follow this format."
-                                                "Max response length: {max_response_length} words (tokens).\nDecide the next action:\n")
-        self.reward_template = cfg_template.get("reward_template", "Reward:\n{reward}\n")
-        self.added_text = self.env_config["added_text"]
+        self.pre_step_template = cfg_template["pre_step_template"]
+        self.next_step_template = cfg_template["next_step_template"]
+        self.reward_template = cfg_template["reward_template"]
         if self.env_config["env_id"] == 0:
             self.logger.info(f"agent_system_template: {self.agent_system_template}")
-            self.logger.info(f"user_prompt_format: {self.user_prompt_format}")
             self.logger.info(f"pre_step_template: {self.pre_step_template}")
             self.logger.info(f"next_step_template: {self.next_step_template}")
             self.logger.info(f"reward_template: {self.reward_template}")
-            self.logger.info(f"added_text: {self.added_text}")
 
         # TODO: add rewards_scheduler for local ray reward workers
         self.llm_proxy: BaseLLMProxy = create_llm_proxy(
@@ -129,7 +122,6 @@ class VLTrajEnvManager(TrajEnvManager):
         messages = self.format_messages(rollout_cache.history)
 
         lm_input_texts = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        lm_input_texts += self.added_text
 
         images = []
         for message in messages:
@@ -187,7 +179,6 @@ class VLTrajEnvManager(TrajEnvManager):
 
             pre_step_content += self.pre_step_template.format(turn_idx=idx)
             next_step_content = self.next_step_template.format(actions_left=content["actions_left"],
-                                                               format_template=self.user_prompt_format,
                                                                max_response_length=self.env_config["max_tokens_per_step"])
             base64_image = base64.b64encode(content["state"]).decode("utf-8")
             user_content_list_dict = [
@@ -287,7 +278,7 @@ class VLTrajEnvManager(TrajEnvManager):
             "messages_list": np.array([messages], dtype=object),
             "tags": np.array([self.rollout_cache.tag], dtype=object),
             "frames": np.array([self.rollout_cache.frames], dtype=object),
-            "turn_scores": np.array([scores], dtype=object),
+            "step_scores": np.array([scores], dtype=object),
             "episode_scores": np.array([episode_score], dtype=object),
         })
 

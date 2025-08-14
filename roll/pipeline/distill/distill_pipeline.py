@@ -29,18 +29,20 @@ def is_valid_example(example):
     for i, msg in enumerate(example["conversation"]):
         if msg.get("role") is None or msg.get("content") is None:
             return False
-    if example['split'] != 'train':
+    if ('split' in example) and (example['split'] != 'train'):
         return False
     return True
 
 
-def preprocess_dataset(dataset, template_function, encode_function, num_proc):
+def preprocess_dataset(dataset, template_function, encode_function, pipeline_config):
+    num_proc = pipeline_config.student.data_args.preprocessing_num_workers
     dataset = dataset.map(
         sample2conversation,
         batched=True,
         num_proc=num_proc,
         desc="Sample to conversation",
         load_from_cache_file=False,
+        fn_kwargs={'question_key': pipeline_config.question_key, 'answer_key': pipeline_config.answer_key}
     )
     dataset = dataset.filter(
         is_valid_example,
@@ -65,13 +67,13 @@ def preprocess_dataset(dataset, template_function, encode_function, num_proc):
     return dataset
 
 
-def sample2conversation(examples):
+def sample2conversation(examples, *, question_key, answer_key):
     conversations = []
 
-    for i in range(len(examples["question"])):
+    for i in range(len(examples[question_key])):
         conversation = []
-        conversation.append({"role": "user", "content": examples["question_zh"][i]})
-        conversation.append({"role": "assistant", "content": examples["answer_zh"][i]})
+        conversation.append({"role": "user", "content": examples[question_key][i]})
+        conversation.append({"role": "assistant", "content": examples[answer_key][i]})
 
         conversations.append(conversation)
 
@@ -80,7 +82,7 @@ def sample2conversation(examples):
 
 def get_template_function(tokenizer):
     def template_function_batch(examples):
-        prompts = [
+        text = [
             tokenizer.apply_chat_template(
                 conversation,
                 tokenize=False,
@@ -88,7 +90,7 @@ def get_template_function(tokenizer):
             )
             for conversation in examples["conversation"]
         ]
-        return {"prompt": prompts}
+        return {"text": text}
 
     return template_function_batch
 
@@ -96,7 +98,7 @@ def get_template_function(tokenizer):
 def get_tokenize_function(tokenizer, pipeline_config):
     def tokenize_function_batch(examples):
         model_inputs = tokenizer(
-            examples["prompt"],
+            examples["text"],
             truncation=True,
             padding="max_length",
             max_length=pipeline_config.sequence_length,
@@ -119,7 +121,7 @@ def get_dataloader(dataset, batch_size, data_collator, num_proc):
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         drop_last=True,
         num_workers=num_proc,
         collate_fn=data_collator,
@@ -140,7 +142,7 @@ class DistillPipeline(BasePipeline):
         if not dataset_paths:
             raise ValueError("No dataset paths provided")
         print(f'load_dataset_paths: {chr(10)} {chr(10).join(dataset_paths)}')
-        dataset = datasets.load_dataset('json', data_files=dataset_paths[0])['train']
+        dataset = datasets.load_dataset('json', data_files=dataset_paths)['train']
 
         # Currently, only models where the student and teacher are of the same type are supported.
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.student.model_args)
@@ -152,7 +154,7 @@ class DistillPipeline(BasePipeline):
             dataset,
             template_function,
             encode_function,
-            num_proc=self.pipeline_config.student.data_args.preprocessing_num_workers,
+            pipeline_config,
         )
 
         data_collator = DataCollatorWithPaddingForPaddedKeys(

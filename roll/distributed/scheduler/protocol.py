@@ -109,7 +109,8 @@ def collate_fn(x: list["DataProtoItem"]):
     batch = torch.stack(batch).contiguous()
     non_tensor_batch = list_of_dict_to_dict_of_list(non_tensor_batch)
     for key, val in non_tensor_batch.items():
-        non_tensor_batch[key] = np.array(val, dtype=object)
+        non_tensor_batch[key] = np.empty(len(val), dtype=object)
+        non_tensor_batch[key][:] = val
     return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
 
 
@@ -286,7 +287,8 @@ class DataProto:
                 ), f"Not all the tensor in tensors have the same batch size with batch_dims={num_batch_dims}. Got {pivot_key} has {batch_size}, {key} has {current_batch}"
 
         for key, val in non_tensors.items():
-            non_tensors[key] = np.array(val, dtype=object)
+            non_tensors[key] = np.empty(len(val), dtype=object)
+            non_tensors[key][:] = val
 
         tensor_dict = TensorDict(source=tensors, batch_size=batch_size)
         return cls(batch=tensor_dict, non_tensor_batch=non_tensors, meta_info=meta_info)
@@ -619,6 +621,8 @@ class DataProto:
         """
         Note that this operation is in-place
         """
+        # Ensure that indices is at least a 1-D tensor.
+        indices = indices.view(-1) if indices.dim() == 0 else indices
         indices_np = indices.detach().numpy()
         self.batch = self.batch[indices]
         self.non_tensor_batch = {key: val[indices_np] for key, val in self.non_tensor_batch.items()}

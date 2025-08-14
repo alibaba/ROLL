@@ -7,6 +7,7 @@ from typing import Literal, Optional, Dict, Union, List
 
 from roll.configs.worker_config import WorkerConfig
 from roll.utils.logging import get_logger
+from roll.utils.config_utils import validate_megatron_batch_size
 
 logger = get_logger()
 
@@ -214,6 +215,26 @@ class BaseConfig:
         if self.rpc_timeout is not None:
             os.environ["roll_RPC_TIMEOUT"] = str(self.rpc_timeout)
         os.environ.update(self.system_envs)
+
+        # Validate rollout_batch_size divisibility for Megatron data parallelism
+        if hasattr(self, 'actor_train') and isinstance(self.actor_train, WorkerConfig):
+            strategy_name = self.actor_train.strategy_args.strategy_name
+
+            # Only validate for Megatron strategies
+            if 'megatron' in strategy_name.lower():
+                try:
+                    validate_megatron_batch_size(
+                        batch_size=self.rollout_batch_size,
+                        num_gpus=len(self.actor_train.device_mapping),
+                        strategy_config=self.actor_train.strategy_args.strategy_config,
+                    )
+                except ValueError as e:
+                    logger.error(f"Megatron DP validation failed: {e}")
+                    raise
+            else:
+                logger.debug(
+                    f"Skipping DP validation for non-Megatron actor_train strategy: {strategy_name}"
+                )
 
         # the required num nodes
         total_devices = []

@@ -3,12 +3,16 @@ import shutil
 import subprocess
 from datetime import datetime
 from multiprocessing import Pool
-from typing import List, Callable
+from typing import List, Callable, Dict
 
-from codetiming import Timer
+import numpy as np
 import torch
+from codetiming import Timer
+from torch import Tensor
 
 from roll.agentic.utils import dump_frames_as_gif
+from roll.distributed.scheduler.protocol import DataProto
+from roll.pipeline.agentic.agentic_config import AgenticConfig, RewardNormalizationConfig
 from roll.utils.logging import get_logger
 
 logger = get_logger()
@@ -41,12 +45,13 @@ def dump_rollout_render(save_dir, step, frames: List[List], env_ids: List, tags:
             logger.error(f"dump rollout render failed: {e}")
     logger.info(f"dump_rollout_render_cost: {timer.last}")
 
+@torch.no_grad()
 def get_score_normalize_fn(rn_cfg) -> Callable:
     grouping, method = rn_cfg.grouping, rn_cfg.method
     if method == "mean_std":
         norm_func = lambda x: (
             (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + 1e-6)
-            if x.std(dim=-1, keepdim=True).abs().max() > 1e-6
+            if x.numel() > 1 and x.std(dim=-1, keepdim=True).abs().max() > 1e-6
             else torch.zeros_like(x)
         )  # stable to bf16 than x.std()
     elif method == "mean":
@@ -54,7 +59,7 @@ def get_score_normalize_fn(rn_cfg) -> Callable:
     elif method == "asym_clip":
         norm_func = lambda x: (
             (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + 1e-6)
-            if x.std(dim=-1, keepdim=True).abs().max() > 1e-6
+            if x.numel() > 1 and x.std(dim=-1, keepdim=True).abs().max() > 1e-6
             else torch.zeros_like(x)
         ).clamp(min=-1, max=3)
     elif method == "identity":
@@ -63,3 +68,109 @@ def get_score_normalize_fn(rn_cfg) -> Callable:
         raise ValueError(f"Invalid normalization method: {method}")
 
     return norm_func
+
+@torch.no_grad()
+def compute_discounted_returns(batch: DataProto, adv_estimator, gamma=1.0) -> DataProto:
+    """
+    Compute discounted returns for each trajectory in the batch.
+
+    Args:
+        batch (DataProto): A `DataProto` instance containing trajectories.
+        adv_estimator (str): Advantage estimator type; only `"gigpo"` triggers computation here.
+        gamma (float, optional): Discount factor applied to future rewards. Defaults to 1.0.
+
+    Returns:
+        DataProto: Updated batch where each trajectory contains an extra tensor key
+                   `"step_rewards"` holding the computed discounted returns.
+    """
+    if adv_estimator == "gigpo":
+        batch.batch["sample_order_placeholder"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
+        batch_group_by_traj: Dict[str, DataProto] = batch.group_by(keys="traj_id")
+        for traj_id,  traj_batch in batch_group_by_traj.items():
+
+            indices: Tensor = torch.argsort(torch.from_numpy(traj_batch.non_tensor_batch["step"].astype(np.int64)))
+            traj_batch.reorder(indices)
+            step_scores = traj_batch.non_tensor_batch["step_scores"].astype(np.float32)
+            rewards = torch.as_tensor(step_scores).float()
+            discounts = torch.empty_like(rewards)
+            running_return = 0.0
+            for t in reversed(range(len(rewards))):
+                running_return = rewards[t] + gamma * running_return
+                discounts[t] = running_return
+            traj_batch.batch["step_rewards"] = discounts
+
+        merged = DataProto.concat(list(batch_group_by_traj.values()))
+        merged.reorder(indices=torch.argsort(merged.batch["sample_order_placeholder"]))
+        merged.pop("sample_order_placeholder")
+        return merged
+    else:
+        return batch
+
+def grouped_reward_norm(batch: "DataProto", reward_normalization: RewardNormalizationConfig) -> torch.Tensor:
+    batch.batch["sample_order_placeholder"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
+    grouping = reward_normalization.grouping
+    batch_grouped: Dict[str, DataProto] = {"default": batch}
+    if grouping != "batch":
+        batch_grouped = batch.group_by(keys=grouping)
+    batch_list = []
+    for group_name, group_batch in batch_grouped.items():
+        score_norm_fn = get_score_normalize_fn(rn_cfg=reward_normalization)
+        normalized_acc_scores = score_norm_fn(group_batch.batch["scores"])
+        group_batch.batch["grouped_rewards"] = normalized_acc_scores
+        batch_list.append(group_batch)
+    batch = DataProto.concat(batch_list)
+    batch.reorder(indices=torch.argsort(batch.batch["sample_order_placeholder"]))
+    batch.pop("sample_order_placeholder")
+    return batch.batch.pop("grouped_rewards")
+
+def build_state_group(batch: "DataProto") -> "DataProto":
+    batch.batch["sample_order_placeholder"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
+    batch_group_by_traj_group: Dict[str, DataProto] = batch.group_by(keys="traj_group_id")
+    merged = []
+    for traj_group_id, traj_group_batch in batch_group_by_traj_group.items():
+        batch_group_by_state: Dict[str, DataProto] = traj_group_batch.group_by(keys="state_hash")
+        for state, state_batch in batch_group_by_state.items():
+            state_batch.non_tensor_batch["state_group_id"] = np.array([state] * state_batch.batch.batch_size[0], dtype=object)
+            merged.append(state_batch)
+    state_batch_size = [len(m) for m in merged]
+    merged = DataProto.concat(merged)
+    merged.reorder(indices=torch.argsort(merged.batch["sample_order_placeholder"]))
+    merged.pop("sample_order_placeholder")
+    metrics = merged.meta_info.pop("metrics", {})
+    metrics["system/state_batch_size/max"] = np.max(state_batch_size)
+    metrics["system/state_batch_size/mean"] = np.mean(state_batch_size)
+    metrics["system/state_batch_size/min"] = np.min(state_batch_size)
+    merged.meta_info["metrics"] = metrics
+    return merged
+
+@torch.no_grad()
+def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticConfig) -> "DataProto":
+    if pipeline_config.adv_estimator == "gigpo":
+        # ref: https://github.com/langfengQ/verl-agent/blob/e03bd502667c45172e8c093cc506db8438ae8ab5/gigpo/core_gigpo.py#L109
+        # step 1
+        episode_scores = torch.from_numpy(batch.non_tensor_batch["episode_scores"].astype(np.float32))
+        scores_with_penalty = episode_scores + batch.batch["penalty"]
+        scores_to_group = DataProto.from_dict({"scores": scores_with_penalty})
+        scores_to_group.non_tensor_batch = batch.non_tensor_batch
+        episode_rewards: torch.Tensor = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
+
+        # step 2
+        batch = build_state_group(batch=batch)
+
+        # step 3
+        scores_to_group = DataProto.from_dict({"scores": batch.batch["step_rewards"]})
+        scores_to_group.non_tensor_batch = batch.non_tensor_batch
+        step_rewards: torch.Tensor = grouped_reward_norm(batch=scores_to_group,
+                                                         reward_normalization=RewardNormalizationConfig(grouping="state_group_id",
+                                                                                                        method=pipeline_config.reward_normalization.method))
+
+        batch.batch["response_level_rewards"] = pipeline_config.episode_reward_weight * episode_rewards + pipeline_config.step_reward_weight * step_rewards
+        batch.batch["episode_rewards_norm"] = episode_rewards
+        batch.batch["step_rewards_norm"] = step_rewards
+    else:
+        scores_with_penalty = batch.batch["scores"].clone().sum(dim=-1) + batch.batch["penalty"]
+        scores_to_group = DataProto.from_dict({"scores": scores_with_penalty})
+        scores_to_group.non_tensor_batch = batch.non_tensor_batch
+        batch.batch["response_level_rewards"] = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
+
+    return batch

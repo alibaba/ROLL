@@ -1,0 +1,36 @@
+.header{
+    display: flex;
+    justify-content: space-between;
+  }
+  .floatButtonOverlay{
+    z-index: 999;
+    :global{
+      .ant-popover-inner{
+        flex-direction: column;
+        width: 400px;
+        overflow: hidden;
+        height: calc(100vh - 200px);
+        display: flex;
+        .ant-popover-inner-content{
+          flex: 1;
+          overflow: hidden;
+        }
+      }
+      .ant-popover-arrow {
+        display: none;
+      }
+    }
+  }
+  
+  .floatButton{
+    :global{
+      .ant-float-btn-body {
+        background-color: #4554e5;
+        &:hover{
+          background-color: #4554e5;
+        }
+      }
+    }
+  }
+  
+  

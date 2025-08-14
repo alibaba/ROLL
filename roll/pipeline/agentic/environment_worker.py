@@ -12,6 +12,7 @@ from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider, default_processor_provider
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig
+from roll.pipeline.agentic.env_manager.step_env_manager import StepEnvManager
 from roll.pipeline.agentic.env_manager.traj_env_manager import TrajEnvManager
 from roll.pipeline.agentic.env_manager.vl_traj_env_manager import VLTrajEnvManager
 from roll.utils.import_utils import safe_import_class
@@ -54,7 +55,7 @@ class EnvironmentWorker(Worker):
 
             assert env_manager_cls is not None
 
-            if env_manager_cls == TrajEnvManager:
+            if env_manager_cls in [TrajEnvManager, StepEnvManager]:
                 return env_id, env_manager_cls(
                     worker_config=self.worker_config,
                     pipeline_config=pipeline_config,

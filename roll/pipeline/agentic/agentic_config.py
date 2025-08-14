@@ -109,12 +109,19 @@ class AgenticConfig(BaseConfig):
         metadata={"help": "Configuration for the reference role."}
     )
 
+    batch_adjust_mode: Literal["copy", "delete", "auto"] = field(
+        default="copy", metadata={"help": "batch adjust mode: copy or delete"}
+    )
+    episode_reward_weight: float = field(default=1.0, metadata={"help": "Episode reward weight, used in GiGPO."})
+    step_reward_weight: float = field(default=1.0, metadata={"help": "Step reward weight, used in GiGPO."})
+    step_reward_gamma: float = field(default=0.95, metadata={"help": "Gamma parameter for step reward calculation"})
+
     # PPO related
     ppo_epochs: int = field(default=1, metadata={"help": "Number of optimisation epochs per batch of samples"})
     max_grad_norm: float = field(default=1.0, metadata={"help": "Maximum norm"})
     l2: float = field(default=0.0, metadata={"help": "L2 regularization"})
-    lambd: float = field(default=0.95, metadata={"help": "Gamma parameter for advantage calculation"})
-    gamma: float = field(default=1, metadata={"help": "Lambda parameter for advantage calculation"})
+    lambd: float = field(default=0.95, metadata={"help": "Lambda parameter for advantage calculation"})
+    gamma: float = field(default=1, metadata={"help": "Gamma parameter for advantage calculation"})
     pg_clip: Optional[float] = field(default=0.2, metadata={"help": "Range for clipping in PPO policy gradient loss"})
     value_clip: Optional[float] = field(
         default=None, metadata={"help": "Range for clipping values in loss calculation"}
@@ -140,7 +147,7 @@ class AgenticConfig(BaseConfig):
     whiten_rewards: bool = field(default=False, metadata={"help": "Whiten the rewards before compute advantages."})
     whiten_advantages: bool = field(default=False, metadata={"help": "Whiten the advantage."})
     advantage_clip: float = field(default=None, metadata={"help": "advantage_clip value"})
-    adv_estimator: Literal["gae", "reinforce", "grpo"] = field(
+    adv_estimator: Literal["gae", "reinforce", "grpo", "gigpo"] = field(
         default="gae", metadata={"help": "advantage estimator: gae (GAE)."}
     )
     reward_norm: Literal["batch", "group", "running", None] = field(

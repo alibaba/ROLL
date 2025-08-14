@@ -59,7 +59,8 @@ class SokobanEnv(BaseEnv, GymSokobanEnv):
                 "metrics": metrics,
             }
             info.update(action_info)
-            return self.render(), 0, False, False, info
+            self._calc_reward()
+            return self.render(), self.reward_last, False, False, info
 
         previous_pos = self.player_position
         _, reward, terminated, _ = GymSokobanEnv.step(self, action_info["action"])

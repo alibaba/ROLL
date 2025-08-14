@@ -188,12 +188,20 @@ class LogMonitorListener:
         self.node_ip_address = ray.util.get_node_ip_address()
         self.rank = get_driver_rank()
         self.world_size = get_driver_world_size()
-        self.log_monitor = LogMonitor(
-            node_ip_address=self.node_ip_address,
-            logs_dir=self.log_dir,
-            gcs_publisher=StdPublisher(),
-            is_proc_alive_fn=is_proc_alive,
-        )
+        if ray.__version__ <"2.47.0":
+            self.log_monitor = LogMonitor(
+                node_ip_address=self.node_ip_address,
+                logs_dir=self.log_dir,
+                gcs_publisher=StdPublisher(),
+                is_proc_alive_fn=is_proc_alive,
+            )
+        else:
+            self.log_monitor = LogMonitor(
+                node_ip_address=self.node_ip_address,
+                logs_dir=self.log_dir,
+                gcs_client=StdPublisher(),
+                is_proc_alive_fn=is_proc_alive,
+            )
         monitor_logger.setLevel(logging.CRITICAL)
 
         self.exception_monitor = None

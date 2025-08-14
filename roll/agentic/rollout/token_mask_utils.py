@@ -102,7 +102,9 @@ def token_ids_to_assistant_mask(messages: List[Dict], input_ids_list: List[List]
             assistant_token_ids = []
             assistant_mask = []
             token_id_without_format = tokenizer.encode(message["content"])
-            first_assistant_idx = token_ids.index(token_id_without_format[0])
+            first_assistant_idx = len(token_ids)
+            if len(token_id_without_format) > 0:
+                first_assistant_idx = token_ids.index(token_id_without_format[0])
             assistant_token_ids.extend(token_ids[: first_assistant_idx])
             assistant_mask.extend([0] * first_assistant_idx)
             after_eos_token_id = False

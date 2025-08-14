@@ -1,5 +1,4 @@
 defaults:
-  - ../config/envs@_here_
   - ../config/deepspeed_zero@_here_
   - ../config/deepspeed_zero2@_here_
   - ../config/deepspeed_zero3@_here_

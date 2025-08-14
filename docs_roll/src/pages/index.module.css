@@ -10,6 +10,21 @@
   overflow: hidden;
 }
 
+.content {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+}
+.left {
+  padding-left: 20px;
+}
+.desc {
+  font-weight: 700;
+  font-size: 20px;
+  margin-bottom: 20px;
+  margin-top: 20px;
+}
+
 @media screen and (max-width: 996px) {
   .heroBanner {
     padding: 2rem;
