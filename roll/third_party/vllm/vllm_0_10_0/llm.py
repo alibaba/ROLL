@@ -168,7 +168,6 @@ class Llm0100(LLM):
                 preprocessed_inputs = input_preprocessor.preprocess(
                     prompt={"prompt_token_ids": token_ids, "multi_modal_data": multi_modal_data[i]},
                     lora_request=lora_request,
-                    prompt_adapter_request=None,
                 )
                 # in v1, engine does not use a input_processor
                 processed_inputs = (

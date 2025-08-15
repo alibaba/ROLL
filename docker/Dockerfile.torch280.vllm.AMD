@@ -26,5 +26,8 @@ WORKDIR /app/ROLL
 RUN pip3 install ./mcore_adapter \
 && export PYTHONPATH=/app/ROLL:$PYTHONPATH
 
-RUN sed -i 's/_flash_attn_max_version = PkgVersion("2\.7\.3")/_flash_attn_max_version = PkgVersion("3.0.0.post1")/' /opt/conda/envs/py_3.10/lib/python3.10/site-packages/transformer_engine/pytorch/attention.py
-
+RUN sed -i 's/_flash_attn_max_version = PkgVersion("2\.7\.3")/_flash_attn_max_version = PkgVersion("3.0.0.post1")/' /opt/conda/envs/py_3.10/lib/python3.10/site-packages/transformer_engine/pytorch/attention.py \
+&& sed -i -e '/^[[:space:]]*if envs.VLLM_USE_STANDALONE_COMPILE and is_torch_equal_or_newer(/ {' -e 'N' -e 's/^\([[:space:]]*\).*\n.*/\1if False:/' -e '}' /opt/conda/envs/py_3.10/lib/python3.10/site-packages/vllm/compilation/backends.py \
+&& sed -i \
+-e '/^[[:space:]]*if cuda_val := os.environ.get(CUDA_VISIBLE_DEVICES_ENV_VAR, None) is not None:/ s/^\([[:space:]]*if \)cuda_val := os.environ.get(CUDA_VISIBLE_DEVICES_ENV_VAR, None) is not None:/\1(cuda_val := os.environ.get(CUDA_VISIBLE_DEVICES_ENV_VAR, None)) is not None:/' \
+-e '/^[[:space:]]*if hip_val := os.environ.get(HIP_VISIBLE_DEVICES_ENV_VAR, None) is None:/ s/^\([[:space:]]*if \)hip_val:= os.environ.get(HIP_VISIBLE_DEVICES_ENV_VAR, None) is None:/\1(hip_val := os.environ.get(HIP_VISIBLE_DEVICES_ENV_VAR, None)) is None:/' /opt/conda/envs/py_3.10/lib/python3.10/site-packages/ray/_private/accelerators/amd_gpu.py
