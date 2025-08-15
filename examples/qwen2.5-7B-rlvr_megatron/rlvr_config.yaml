@@ -246,7 +246,13 @@ rewards:
     data_args:
       template: qwen2_5
     strategy_args:
-      strategy_name: hf_infer
-      strategy_config: null
+      # strategy_name: hf_infer
+      # strategy_config: null
+      strategy_name: vllm
+      strategy_config:
+        gpu_memory_utilization: 0.8
+        block_size: 16
+        max_model_len: 8000
+        load_format: auto
     device_mapping: list(range(12,16))
     infer_batch_size: 4

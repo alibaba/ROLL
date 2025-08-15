@@ -228,6 +228,7 @@ rewards:
     tag_included: [RLVR]
     model_args:
       model_name_or_path: virtuoussy/Qwen2.5-7B-Instruct-RLVR
+      attn_implementation: fa2
       disable_gradient_checkpointing: true
       dtype: bf16
       model_type: trl
@@ -241,7 +242,13 @@ rewards:
     data_args:
       template: qwen2_5
     strategy_args:
-      strategy_name: hf_infer
-      strategy_config: null
-    device_mapping: list(range(6,8))
+      # strategy_name: hf_infer
+      # strategy_config: null
+      strategy_name: vllm
+      strategy_config:
+        gpu_memory_utilization: 0.8
+        block_size: 16
+        max_model_len: 8000
+        load_format: auto
+    device_mapping: list(range(12,16))
     infer_batch_size: 4
