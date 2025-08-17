@@ -17,7 +17,6 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams, RequestOutputKind
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine import EngineCoreOutputs
@@ -37,7 +36,6 @@ def custom_process_inputs(
     arrival_time: Optional[float] = None,
     lora_request: Optional[LoRARequest] = None,
     trace_headers: Optional[Mapping[str, str]] = None,
-    prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     priority: int = 0,
 ) -> EngineCoreRequest:
 
@@ -47,8 +45,6 @@ def custom_process_inputs(
         raise ValueError("V1 does not support priority yet.")
     if trace_headers is not None:
         raise ValueError("V1 does not support tracing yet.")
-    if prompt_adapter_request is not None:
-        raise ValueError("V1 does not support prompt_adapter_request.")
 
     assert arrival_time is not None
 
@@ -195,7 +191,6 @@ class LLMEngine0100(LLMEngine):
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> None:
@@ -205,7 +200,6 @@ class LLMEngine0100(LLMEngine):
         prompt_str, request = self.processor.custom_process_inputs(request_id, processed_inputs, params,
                                                 arrival_time, lora_request,
                                                 trace_headers,
-                                                prompt_adapter_request,
                                                 priority)
 
         n = params.n if isinstance(params, SamplingParams) else 1
