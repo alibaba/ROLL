@@ -1,21 +1,21 @@
-# Converting Megatron Models to Hugging Face Format
+# Converting MCoreAdapter Models to Hugging Face Format
 
-MCoreAdapter provides tools for converting between Megatron and Hugging Face model formats. This document will guide you on how to convert a trained Megatron model to Hugging Face format for use in other projects.
+MCoreAdapter provides tools for converting between Megatron(McoreAdapter) and Hugging Face model formats. This document will guide you on how to convert a trained Megatron model to Hugging Face format for use in other projects.
 
 ## Conversion Tool
 
-MCoreAdapter includes a conversion tool `tools/convert.py` that can convert Megatron models to Hugging Face format.
+MCoreAdapter includes a conversion tool `tools/convert.py` that can convert Megatron(McoreAdapter) models to Hugging Face format.
 
 ## Conversion Command
 
-To convert a Megatron model to a Hugging Face model, use the following command:
+To convert a model trained with megatron_strategy to a Hugging Face model, use the following command:
 
 ```bash
 python tools/convert.py --checkpoint_path path_to_megatron_model --output_path path_to_output_hf_model
 ```
 
 Where:
-- `path_to_megatron_model` is the path to the Megatron model you want to convert
+- `path_to_megatron_model` is the path to the McoreAdapter model you want to convert
 - `path_to_output_hf_model` is the output path for the converted Hugging Face model
 
 ## Notes
@@ -26,4 +26,4 @@ Where:
 
 ## Direct Use of Hugging Face Models
 
-It's worth noting that MCoreAdapter can also directly load Hugging Face models, so in some cases you can skip the step of converting models to Megatron format. This is particularly useful when you want to use Hugging Face models in Roll framework's reinforcement learning workflows.
+It's worth noting that MCoreAdapter can directly load Hugging Face models without explicitly converting models to Megatron(McoreAdapter) format. This is particularly useful when you want to use Hugging Face models for reinforcement learning in the Roll framework.
