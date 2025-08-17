@@ -1,12 +1,10 @@
 """
 Code Sandbox Reward Worker for evaluating code solutions.
-
 This module provides functionality to test code solutions in a sandbox environment
 and compute rewards based on test case results.
 """
 
 import asyncio
-import aiohttp
 import json
 import re
 import time
@@ -14,18 +12,19 @@ import traceback
 import uuid
 from typing import Dict, List, Optional, Tuple, Union, Any
 
+import aiohttp
 import ray
 import torch
 
-from roll.pipeline.rlvr.rlvr_config import RewardConfig
-from roll.utils.local_code.evaluator import codegen_metrics
-from roll.utils.local_code.extract_utils import extract_code_generation
 from roll.configs.worker_config import WorkerConfig
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_tokenizer_provider
+from roll.pipeline.rlvr.rlvr_config import RewardConfig
+from roll.utils.local_code.evaluator import codegen_metrics
+from roll.utils.local_code.extract_utils import extract_code_generation
 from roll.utils.logging import get_logger
 
 
@@ -36,23 +35,45 @@ def modified_text(text: str) -> str:
 
 
 def remove_entrypoints(code: str, language: str = "python") -> str:
+    """
+    Remove entry points and example usage from code.
+
+    Args:
+        code: Source code to process
+        language: Programming language of the code
+
+    Returns:
+        Processed code with entry points removed
+    """
     if language == "python":
         if 'if __name__ == "__main__":' in code:
-            next_line = code.index('if __name__ == "__main__":')
-            code = code[:next_line].strip()
+            try:
+                next_line = code.index('if __name__ == "__main__":')
+                code = code[:next_line].strip()
+            except ValueError:
+                pass
         elif "if __name__ == '__main__':" in code:
-            next_line = code.index("if __name__ == '__main__':")
-            code = code[:next_line].strip()
+            try:
+                next_line = code.index("if __name__ == '__main__':")
+                code = code[:next_line].strip()
+            except ValueError:
+                pass
     elif language == "cpp":
         if "int main()" in code:
-            next_line = code.index("int main()")
-            code = code[:next_line].strip()
+            try:
+                next_line = code.index("int main()")
+                code = code[:next_line].strip()
+            except ValueError:
+                pass
     elif language == "go":
         code = code.replace("package main", "")
 
     if "# Example usage" in code:
-        next_line = code.index("# Example usage")
-        code = code[:next_line].strip()
+        try:
+            next_line = code.index("# Example usage")
+            code = code[:next_line].strip()
+        except ValueError:
+            pass
 
     if language == "python" and "def" in code:
         lines = code.strip().split("\n")
@@ -71,7 +92,7 @@ class CodeTester:
     def __init__(self, sandbox_url: str):
         self.DEFAULT_TIMEOUT = 30
         self.SOLUTION_IMPORTS = {
-            "python": "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\nfrom heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\nfrom random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\nfrom operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\nfrom typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\nimport bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\nimport operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(6*10**5)\n"
+            "python": "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\nfrom heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\nfrom random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\nfrom operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\nfrom typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\nimport bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\nimport operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(6*10**5)\nfrom typing import List, Dict, Any, Optional, Tuple\nfrom math import inf\n"
         }
         self.sandbox_url = sandbox_url
         self.logger = get_logger()
@@ -252,16 +273,12 @@ class CodeTester:
             ssl=False,
         )
         timeout = aiohttp.ClientTimeout(total=90, connect=20, sock_read=30)
-
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             semaphore = asyncio.Semaphore(concurrency_limit)
-
             async def bounded_process_single_test(test_case):
                 async with semaphore:
                     return await self.process_single_test(prompt_id, session, test_case)
-
             tasks = [bounded_process_single_test(test_case) for test_case in test_cases]
-
             for task in asyncio.as_completed(tasks):
                 try:
                     test_case, results = await task
@@ -279,9 +296,16 @@ class CodeTester:
         """
         return asyncio.run(self.sandbox_test_async(prompt_id, test_cases))
 
-    def sanbox_result_judge(self, test_cases: List[Dict], sandbox_results: List[Dict]) -> Tuple[int, List[str]]:
+    def sandbox_result_judge(self, test_cases: List[Dict], sandbox_results: List[Dict]) -> Tuple[int, List[str]]:
         """
         Judge the results of sandbox tests.
+
+        Args:
+            test_cases: List of test cases
+            sandbox_results: List of sandbox results
+
+        Returns:
+            Tuple containing the number of passed tests and a list of error types
         """
         pass_test_number = 0
         error_types = []
@@ -291,7 +315,7 @@ class CodeTester:
             
             for response in responses:
                 status = response["status"]
-                sanbox_output = ""
+                sandbox_output = ""
                 
                 if "expected_stdout" in test_cases[i]:
                     expected_output = test_cases[i].get("expected_stdout", "").strip()
@@ -299,19 +323,19 @@ class CodeTester:
                     expected_output = test_cases[i].get("expected_output", "").strip()
                     
                 if status == "Success":
-                    sanbox_output = response.get("run_result", {}).get("stdout", "").strip()
-                    if "User customization applied." in sanbox_output:
-                        sanbox_output = sanbox_output.replace("User customization applied.", "").strip()
-                    if "User customization module loaded!" in sanbox_output:
-                        sanbox_output = sanbox_output.replace("User customization module loaded!", "").strip()
+                    sandbox_output = response.get("run_result", {}).get("stdout", "").strip()
+                    if "User customization applied." in sandbox_output:
+                        sandbox_output = sandbox_output.replace("User customization applied.", "").strip()
+                    if "User customization module loaded!" in sandbox_output:
+                        sandbox_output = sandbox_output.replace("User customization module loaded!", "").strip()
                         
-                    if "User" in sanbox_output:
-                        if expected_output in sanbox_output:
+                    if "User" in sandbox_output:
+                        if expected_output in sandbox_output:
                             flag = "[Pass]"
                     elif (
                         expected_output == ""
-                        or sanbox_output == expected_output
-                        or modified_text(sanbox_output) == modified_text(expected_output)
+                        or sandbox_output == expected_output
+                        or modified_text(sandbox_output) == modified_text(expected_output)
                     ):
                         flag = "[Pass]"
                         
@@ -327,7 +351,8 @@ class CodeTester:
                             error_types.append(f"ReturnCode: {stderr}")
                         else:
                             error_types.append(stderr)
-                    except:
+                    except Exception as e:  # Added specific exception type
+                        self.logger.error(f"Error processing stderr: {e}")
                         error_types.append("Others")
                         
             if flag == "[Pass]":
@@ -356,18 +381,17 @@ class CodeTester:
             "origin_response": code,
             "test_code": code,
             "test_cases_info": test_cases,
-            "sanbox_responses": "",
+            "sandbox_responses": "",
             "succeed_test_cases_number": 0,
             "pass_test_number": 0,
             "validation": 1,
             "format_validation": 0,
-            "have_think": 0,
+            "format_think": 0,
             "error_info": [],
         }
-
-        format_validation, have_think = self.check_format(prompt_id, code)
+        format_validation, format_think = self.check_format(prompt_id, code)
         info["format_validation"] = format_validation
-        info["have_think"] = have_think
+        info["format_think"] = format_think
         
         start_time = time.time()
         
@@ -396,12 +420,10 @@ class CodeTester:
         succeed_test_cases, responses = self.sandbox_test(prompt_id, test_cases)
         if not responses or not succeed_test_cases:
             info["error_info"] = ["sandbox error"]
-            info["sanbox_responses"] = responses
+            info["sandbox_responses"] = responses
             info["validation"] = 0
             return info
-
-        pass_test_number, error_types = self.sanbox_result_judge(succeed_test_cases, responses)
-
+        pass_test_number, error_types = self.sandbox_result_judge(succeed_test_cases, responses)
         time_duration = time.time() - start_time
         self.logger.debug(
             f"prompt_id: {prompt_id}, total case number: {len(succeed_test_cases)} "
@@ -409,18 +431,16 @@ class CodeTester:
             f"pass rate: {pass_test_number / len(succeed_test_cases) if succeed_test_cases else 0}, "
             f"time: {time_duration}, detailed info: {error_info}"
         )
-
         pass_test_ratio = pass_test_number / len(succeed_test_cases) if succeed_test_cases else 0
         info["test_code"] = test_code
         info["test_cases_info"] = test_cases
-        info["sanbox_responses"] = responses
+        info["sandbox_responses"] = responses
         info["succeed_test_cases_number"] = len(succeed_test_cases)
         info["pass_test_number"] = pass_test_number
         info["pass_test_ratio"] = pass_test_ratio
         info["error_info"] = error_types
         
         return info
-
 
 def cal_http_sandbox(global_step: int, prompt_id: str, prompt: str, response: str, 
                     case_type: str, test_cases: List[Dict], url: str) -> Tuple[int, Dict, str]:
@@ -434,22 +454,36 @@ def cal_http_sandbox(global_step: int, prompt_id: str, prompt: str, response: st
     pass_test_ratio = info.get("pass_test_ratio", 0)
     
     error_info = info.get('error_info', [""])
-    error_info = error_info[0] if error_info else ""
+    error_info_str = error_info[0] if error_info else ""
     
     if validation == 0:
-        return -1, info, error_info
+        info["error"] = "Sandbox validation failed"
+        info["error_code"] = -1
+        info["error_message"] = "Compilation Error"
+        return -1, info, "Sandbox validation failed"
+    elif error_info and not pass_test_ratio >= 1:
+        error_type = error_info[0] if error_info else "Unknown Error"
+        if "SyntaxError" in error_type or "IndentationError" in error_type:
+            info["error"] = error_type
+            info["error_code"] = -1
+            info["error_message"] = "Compilation Error"
+        else:
+            info["error"] = error_type
+            info["error_code"] = -2
+            info["error_message"] = "Wrong Answer"
+        return -1, info, error_type
         
     correct = 1 if pass_test_ratio >= 1 else 0
-    return correct, info, error_info
+    return correct, info, error_info_str
 
-
-def run_assert_tests(code: str, test_cases: List[Dict], timeout: int = 20) -> bool:
+def run_assert_tests(code: str, test_cases: List[Dict], timeout: int = 20) -> Tuple[bool, Dict]:
     """
     Run assert-style test cases against the provided code.
     """
     from roll.utils.local_code.execute_utils import BASE_IMPORTS, codeexecute_check_correctness
     
     all_passed = True
+    error_info = {}
     for test_case in test_cases:
         assert_code = test_case["assert_code"]
         
@@ -470,13 +504,34 @@ def run_assert_tests(code: str, test_cases: List[Dict], timeout: int = 20) -> bo
         else:
             full_code = f"{BASE_IMPORTS}\n{code}\n{assert_code}"
         
-        passed = codeexecute_check_correctness(full_code, timeout=timeout)
-        if not passed:
+        try:
+            passed = codeexecute_check_correctness(full_code, timeout=timeout)
+            if not passed:
+                all_passed = False
+                error_info = {
+                    'error': 'AssertionError in test case',
+                    'error_code': -2,
+                    'error_message': 'Wrong Answer'
+                }
+                break
+        except SyntaxError as e:
             all_passed = False
+            error_info = {
+                'error': str(e),
+                'error_code': -1,
+                'error_message': 'Compilation Error'
+            }
+            break
+        except Exception as e:
+            all_passed = False
+            error_info = {
+                'error': str(e),
+                'error_code': -3,
+                'error_message': 'Runtime Error'
+            }
             break
     
-    return all_passed
-
+    return all_passed, error_info
 
 def run_check_based_tests(extracted_code: str, test_cases: List[Dict], timeout: int = 60) -> Tuple[bool, float, Dict]:
     """
@@ -486,6 +541,8 @@ def run_check_based_tests(extracted_code: str, test_cases: List[Dict], timeout: 
     import subprocess
     
     error_info = {}
+    if len(test_cases) == 0:
+        return True, 1, error_info
     test_case = test_cases[0]
     
     test_code_lines = [x for x in test_case['assert_code'].split("\n") if x != ""]
@@ -520,16 +577,22 @@ def run_check_based_tests(extracted_code: str, test_cases: List[Dict], timeout: 
                     passed_tests += 1
                 else:
                     all_passed = False
-                    error_info['no_pass_case'] = cur_solution
-                    error_info['error_message'] = result.stderr
+                    error_message = result.stderr.strip() if result.stderr else "Check failed"
+                    error_info = {
+                        'error': error_message,
+                        'error_code': -2,
+                        'error_message': 'Wrong Answer'
+                    }
         except Exception as e:
             all_passed = False
-            error_info['no_pass_case'] = cur_solution
-            error_info['error_message'] = str(e)
+            error_info = {
+                'error': str(e),
+                'error_code': -1 if 'SyntaxError' in str(e) else -2,
+                'error_message': 'Compilation Error' if 'SyntaxError' in str(e) else 'Runtime Error'
+            }
     
     pass_ratio = passed_tests / total_tests if total_tests > 0 else 0
     return all_passed, pass_ratio, error_info
-
 
 def run_text_tests(response: str, test_cases: List[Dict]) -> Tuple[bool, Dict]:
     """
@@ -542,55 +605,57 @@ def run_text_tests(response: str, test_cases: List[Dict]) -> Tuple[bool, Dict]:
         assert_code = test_case["assert_code"] if "assert_code" in test_case else test_case
         quoted_response = f"\'\'\'{response}\'\'\'"
         case_code = assert_code.replace("{response}", quoted_response)
-        cur_import = """import copy\nimport string\nimport math\nimport collections\nimport bisect\nimport heapq\nimport functools\nimport random\nimport itertools\nimport operator\nimport re\nimport numpy as np\nimport pandas as pd\nimport nltk"""
-        full_code = f"{cur_import}\n{case_code}"
+        full_code = case_code
         
         try:
             exec(full_code)
             passed = True
-        except AssertionError:
+        except AssertionError as e:
             passed = False
+            error_info = {
+                'error': str(e),
+                'error_code': -2,
+                'error_message': 'Wrong Answer'
+            }
         except Exception as e:
             print(f"Error executing test case: {e}")
             passed = False
-            
+            error_info = {
+                'error': str(e),
+                'error_code': -1 if 'SyntaxError' in str(e) else -3,
+                'error_message': 'Compilation Error' if 'SyntaxError' in str(e) else 'Runtime Error'
+            }
+
         if not passed:
-            error_info['no_pass_case'] = full_code
             all_passed = False
             break
     
     return all_passed, error_info
 
-
 def run_io_tests(extracted_code: str, test_cases: List[Dict], func_name: str = None, 
-                num_process_evaluate: int = 4, timeout: int = 60) -> bool:
+                num_process_evaluate: int = 1, timeout: int = 20) -> bool:
     """
     Run input/output test cases against the provided code.
     """
+    from roll.utils.local_code.evaluator import codegen_check_correctness
+
     if func_name == "None":
         func_name = ""
         
-    evaluation_sample = json.dumps({
+    evaluation_sample = {
         "inputs": [t["stdin"] for t in test_cases],
         "outputs": [t["expected_stdout"] for t in test_cases],
         "fn_name": func_name,
-    })
-    evaluation_sample = {"input_output": evaluation_sample}
+    }
+    res, metadata = codegen_check_correctness(evaluation_sample, extracted_code, timeout=timeout, debug=True)
     
-    metrics, _, _ = codegen_metrics(
-        [evaluation_sample],
-        [[extracted_code]],
-        k_list=[1],
-        num_process_evaluate=num_process_evaluate,
-        timeout=timeout,
-        debug=False
-    )
-    return "pass@1" in metrics and metrics["pass@1"] == 100.0
+    all_passed = int(all(x == 1 for x in res))
 
+    return all_passed, metadata
 
 def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: str, 
                   case_type: str, test_cases: List[Dict], func_name: str = None, 
-                  num_process_evaluate: int = 4, timeout: int = 60) -> Tuple[int, Dict, str]:
+                  num_process_evaluate: int = 1, timeout: int = 20) -> Tuple[int, Dict, str]:
     """
     Calculate rewards using local testing.
     
@@ -603,7 +668,7 @@ def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: 
     4. Text testing: Test cases contain assert code that validates text responses
     5. Check-based testing: Test cases contain import_prefix, test_code, and entry_point
     """
-    from roll.utils.local_code.execute_utils import BASE_IMPORTS, codeexecute_check_correctness
+    from roll.utils.local_code.execute_utils import BASE_IMPORTS
     
     info = {
         "global_step": global_step,
@@ -613,49 +678,105 @@ def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: 
         "origin_response": response,
         "test_code": response,
         "format_validation": 0,
-        "have_think": 0,
+        "format_think": 0,
         "validation": 1,
     }
-    
-    extracted_code = ""
-    if case_type != "text":
-        if "</think>" in response:
-            info['have_think'] = 1
-        if "```" in response:
-            info['format_validation'] = 1
-        extracted_code = extract_code_generation(response)
-        info["test_code"] = extracted_code
-        
-    correct = 0
-    if case_type == "check_based":
-        all_passed, pass_ratio, error_info = run_check_based_tests(extracted_code, test_cases, timeout)
-        info.update(error_info)
-        info["pass_test_ratio"] = pass_ratio
-        if all_passed:
-            correct = 1
-            
-    elif case_type == "text":
-        all_passed, error_info = run_text_tests(response, test_cases)
-        info.update(error_info)
-        if all_passed:
-            info["pass_test_ratio"] = 1
-            correct = 1
-            
-    elif case_type == "assert" or case_type == "pytest":
-        all_passed = run_assert_tests(extracted_code, test_cases, timeout=timeout)
-        if all_passed:
-            info["pass_test_ratio"] = 1
-            correct = 1
-            
-    else:
-        all_passed = run_io_tests(extracted_code, test_cases, func_name, 
-                                 num_process_evaluate, timeout)
-        if all_passed:
-            info["pass_test_ratio"] = 1
-            correct = 1
-    
-    return correct, info, ""
+    if "</think>" in response:
+        info['format_think'] = 1
+    if "```" in response:
+        info['format_validation'] = 1
 
+    if response == "":
+        info["error"] = "Empty Response"
+        info["error_code"] = -1
+        info["error_message"] = "Empty Response"
+        return 0, info, ""
+
+    extracted_code = ""
+    if "<|begin_of_solution|>" in response:
+        response = response.split("<|begin_of_solution|>")[-1].strip()
+    if "</think>" in response:
+        response = response.split("</think>")[-1].strip()
+    if case_type != "text":
+        try:
+            extracted_code = extract_code_generation(response)
+            info["test_code"] = extracted_code
+        except Exception as e:
+            info["error"] = str(e)
+            info["error_code"] = -1
+            info["error_message"] = "Extract Response Error"
+            return 0, info, ""
+
+    extracted_code = BASE_IMPORTS + extracted_code
+
+    try:
+        correct = 0
+        if case_type == "check_based":
+            try:
+                all_passed, pass_ratio, error_info = run_check_based_tests(extracted_code, test_cases, timeout)
+                info.update(error_info)
+                info["pass_test_ratio"] = pass_ratio
+                if all_passed:
+                    correct = 1
+            except TypeError as e:
+                info["error"] = "Test environment error: " + str(e)
+                info["error_code"] = -4
+                info["error_message"] = "Environment Error"
+                return 0, info, "Environment Error"
+
+        elif case_type == "text":
+            try:
+                all_passed, error_info = run_text_tests(response, test_cases)
+                info.update(error_info)
+                if all_passed:
+                    info["pass_test_ratio"] = 1
+                    correct = 1
+            except TypeError as e:
+                info["error"] = "Test environment error: " + str(e)
+                info["error_code"] = -4
+                info["error_message"] = "Environment Error"
+                return 0, info, "Environment Error"
+
+        elif case_type == "assert" or case_type == "pytest":
+            try:
+                all_passed, error_info = run_assert_tests(extracted_code, test_cases, timeout=timeout)
+                info.update(error_info)
+                if all_passed:
+                    info["pass_test_ratio"] = 1
+                    correct = 1
+            except TypeError as e:
+                info["error"] = "Test environment error: " + str(e)
+                info["error_code"] = -4
+                info["error_message"] = "Environment Error"
+                return 0, info, "Environment Error"
+
+        else:
+            try:
+                all_passed, metadata = run_io_tests(extracted_code, test_cases, func_name,
+                                     num_process_evaluate, timeout)
+                if metadata:
+                    info.update(metadata)
+                if all_passed:
+                    info["pass_test_ratio"] = 1
+                    correct = 1
+                elif "error_message" not in info and not all_passed:
+                    info["error"] = "Test failed"
+                    info["error_code"] = -2
+                    info["error_message"] = "Wrong Answer"
+            except TypeError as e:
+                info["error"] = "Test environment error: " + str(e)
+                info["error_code"] = -4
+                info["error_message"] = "Environment Error"
+                return 0, info, "Environment Error"
+    except Exception as e:
+        info["error"] = f"Unexpected error: {str(e)}"
+        info["error_code"] = -5
+        info["error_message"] = "Unexpected Error"
+        return 0, info, str(e)
+    if correct and info.get("error_message", "") == "":
+        info['error_message'] = "Succeed"
+
+    return correct, info, ""
 
 class CodeSandboxRewardWorker(Worker):
     """
@@ -675,7 +796,6 @@ class CodeSandboxRewardWorker(Worker):
         self.rank_info.dp_size = self.rank_info.world_size
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
-
         self.use_local = self.worker_config.use_local
         self.url = self.worker_config.code_url
         self.max_resp_len = 10000
@@ -700,10 +820,8 @@ class CodeSandboxRewardWorker(Worker):
         error_infos = []
         format_validations = []
         have_thinks = []
-
         prompts_text_list = self.tokenizer.batch_decode(data.batch["prompts"], skip_special_tokens=True)
         response_text_list = self.tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=True)
-
         for i, (prompt_id, prompt_txt, response, case_type, test_cases, test_case_function, tag) in enumerate(
             zip(
                 data.non_tensor_batch["id"],
@@ -726,7 +844,6 @@ class CodeSandboxRewardWorker(Worker):
                 correct, info, error_info = cal_http_sandbox(
                     global_step, prompt_id, prompt_txt, response, case_type, test_cases, self.url
                 )
-
             info['tag'] = tag
             self.logger.debug(f"{json.dumps(info, ensure_ascii=False)}")
 

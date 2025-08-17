@@ -9,7 +9,7 @@ def extract_code_generation(model_output: str):
     if "```" not in model_output:
         return model_output.strip()
     else:
-        code_pattern = r"```(cpp|python|java)\s*\n*(.*?)```"
+        code_pattern = r"```(cpp|python|java|python3)\s*\n*(.*?)```"
         code = re.findall(code_pattern, model_output, re.DOTALL)
         if code and len(code) > 0:
             return code[-1][1]
@@ -17,4 +17,7 @@ def extract_code_generation(model_output: str):
             solutions = re.findall(r"```(.*?)```", model_output, re.DOTALL)
             if len(solutions) == 0:
                 return ""
+            def_solutions = [sol for sol in solutions if "def" in sol]
+            if def_solutions:
+                return def_solutions[-1]
             return solutions[-1]

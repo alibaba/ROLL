@@ -1,15 +1,18 @@
 import ast
 import json
 import multiprocessing
+import os
+import sys
+import traceback
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
 import numpy as np
 from tqdm import tqdm
 
 from roll.utils.local_code.execute_utils import BASE_IMPORTS, codeexecute_check_correctness
 from roll.utils.local_code.pass_k_utils import compute_metrics_from_results
-
 
 def codegen_check_correctness(sample, generation, timeout, debug=True):
     """Check correctness of code generation with a global timeout.
@@ -20,29 +23,48 @@ def codegen_check_correctness(sample, generation, timeout, debug=True):
 
     def _temp_run(sample, generation, debug, result, metadata_list, timeout):
         from .testing_util import run_test
+        try:
+            with open(os.devnull, 'w') as devnull:
+                sys.stdout = devnull
+                sys.stderr = devnull
+                try:
+                    res, metadata = run_test(sample=sample, test=generation, debug=debug, timeout=timeout)
+                    result.append(res)
+                    metadata_list.append(metadata)
+                except Exception as e:
+                    traceback.print_exc(10)
+                    result.append([-1 for i in range(len(sample['inputs']))])
+                    metadata_list.append({})
+        except Exception as e:
+            traceback.print_exc(10)
 
-        res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
-        result.append(res)
-        metadata_list.append(metadata)
-
-    manager = multiprocessing.Manager()
-    result = manager.list()
-    metadata_list = manager.list()
-    p = multiprocessing.Process(
-        target=_temp_run,
-        args=(sample, generation, debug, result, metadata_list, timeout),
-    )
-    p.start()
-    p.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
-    if p.is_alive():
-        p.kill()
-    if not result:
-        in_outs = json.loads(sample["input_output"])
-        # consider that all tests failed
-        result = [[-1 for i in range(len(in_outs["inputs"]))]]
-        if debug:
-            print("global timeout")
-    return result[0], metadata_list[0]
+    with multiprocessing.Manager() as manager:
+        result = manager.list()
+        metadata_list = manager.list()
+        p = multiprocessing.Process(
+            target=_temp_run,
+            args=(sample, generation, debug, result, metadata_list, timeout),
+        )
+    
+        p.start()
+        try:
+            max_timeout = min(timeout * len(sample["inputs"]) + 1, 20)
+            p.join(timeout=max_timeout)
+        except Exception as e:
+            if debug:
+                print(f"Exception during process join: {repr(e)}")
+            traceback.print_exc(10)
+        finally:
+            if p.is_alive():
+                p.kill()
+            p.join()
+        if not result:
+            result = [[-1 for i in range(len(sample["inputs"]))]]
+            if debug:
+                print("global timeout")
+        if not metadata_list:
+            metadata_list = [{}]
+        return result[0], metadata_list[0]
 
 
 def evaluate_generations_by_problem(problem_generations: list, sample: list, debug: bool, timeout: int):
@@ -120,7 +142,6 @@ def evaluate_generations(
     """
 
     # generations are code generations in the same order of the dataset
-
     inputs = [
         [(generations_list[index], samples_list[index], debug, timeout), index]
         for index in range(len(generations_list))
@@ -281,6 +302,7 @@ def test_output_metrics(
     samples,
     generations,
     k_list=[1, 5],
+    debug=False,
 ):
     num_samples = len(samples)
     results = []
