@@ -29,6 +29,9 @@ logger = get_logger(__name__)
 
 ASSERT_SP_CONSISTENCY = os.getenv("ASSERT_SP_CONSISTENCY", "1") == "1"
 
+MCORE_WORD_EMBEDDING = "embedding.word_embeddings.weight"
+MCORE_LM_HEAD = "output_layer.weight"
+
 
 @dataclass
 class DistParallelConfig:
@@ -80,8 +83,8 @@ class DistParallelConfig:
 
 
 default_dist_config = DistParallelConfig(
-    pre_process_weights=["embedding.word_embeddings.weight"],
-    post_process_weights=["output_layer.weight", "decoder.final_layernorm.weight"],
+    pre_process_weights=[MCORE_WORD_EMBEDDING],
+    post_process_weights=[MCORE_LM_HEAD, "decoder.final_layernorm.weight"],
     duplicated_weights=[
         ".self_attention.linear_qkv.layer_norm_weight",
         ".mlp.linear_fc1.layer_norm_weight",
@@ -92,8 +95,8 @@ default_dist_config = DistParallelConfig(
         ".self_attention.k_layernorm.weight",
     ],
     column_parallel_weights=[
-        "embedding.word_embeddings.weight",
-        "output_layer.weight",
+        MCORE_WORD_EMBEDDING,
+        MCORE_LM_HEAD,
         ".self_attention.linear_qkv.weight",
         ".mlp.linear_fc1.weight",
         ".linear_fc1.weight",
@@ -172,8 +175,8 @@ register_dist_config(
 register_dist_config(
     "deepseek_v3",
     DistParallelConfig(
-        pre_process_weights=["embedding.word_embeddings.weight"],
-        post_process_weights=["output_layer.weight", "decoder.final_layernorm.weight"],
+        pre_process_weights=[MCORE_WORD_EMBEDDING],
+        post_process_weights=[MCORE_LM_HEAD, "decoder.final_layernorm.weight"],
         duplicated_weights=[
             ".self_attention.q_layernorm.weight",
             ".input_layernorm.weight",
@@ -187,8 +190,8 @@ register_dist_config(
             ".self_attention.linear_kv_up_proj.layer_norm_weight",
         ],
         column_parallel_weights=[
-            "embedding.word_embeddings.weight",
-            "output_layer.weight",
+            MCORE_WORD_EMBEDDING,
+            MCORE_LM_HEAD,
             ".self_attention.linear_q_down_proj.weight",
             ".self_attention.linear_q_up_proj.weight",
             ".self_attention.linear_kv_down_proj.weight",
@@ -270,22 +273,15 @@ class DistModuleConverter:
             if self.pipeline_model_parallel_rank is None:
                 return True
             if self.name_match(weight_name, self.config.pre_process_weights):
-                # mtp use embedding weights in last stage
-                if self.mca_config.mtp_num_layers:
-                    is_last_pp_stage = self.pipeline_model_parallel_rank == (
-                        self.mca_config.pipeline_model_parallel_size - 1
-                    ) and self.virtual_pipeline_model_parallel_rank == (
-                        (self.mca_config.virtual_pipeline_model_parallel_size or 1) - 1
-                    )
-                    if is_last_pp_stage:
+                # mtp and tie_embeddings_and_output_weights use embedding weights in last stage
+                if weight_name == MCORE_WORD_EMBEDDING and (
+                    self.mca_config.mtp_num_layers or self.mca_config.tie_embeddings_and_output_weights
+                ):
+                    if self.is_pipeline_last_stage():
                         return True
-                return self.pipeline_model_parallel_rank == 0 and self.virtual_pipeline_model_parallel_rank == 0
+                return self.is_pipeline_first_stage()
             if self.name_match(weight_name, self.config.post_process_weights):
-                return self.pipeline_model_parallel_rank == (
-                    self.mca_config.pipeline_model_parallel_size - 1
-                ) and self.virtual_pipeline_model_parallel_rank == (
-                    (self.mca_config.virtual_pipeline_model_parallel_size or 1) - 1
-                )
+                return self.is_pipeline_last_stage()
             index = get_mca_layer_index(weight_name)
             if index is None:
                 return True
@@ -305,6 +301,16 @@ class DistModuleConverter:
             return (moe_index // self.num_layers_for_expert) == self.expert_model_parallel_rank
 
         return on_this_experts() and on_this_pipeline()
+
+    def is_pipeline_last_stage(self):
+        return self.pipeline_model_parallel_rank == (
+            self.mca_config.pipeline_model_parallel_size - 1
+        ) and self.virtual_pipeline_model_parallel_rank == (
+            (self.mca_config.virtual_pipeline_model_parallel_size or 1) - 1
+        )
+
+    def is_pipeline_first_stage(self):
+        return self.pipeline_model_parallel_rank == 0 and self.virtual_pipeline_model_parallel_rank == 0
 
     def _convert_column_parallel(self, weight: "Tensor"):
         return torch.chunk(weight, self.mca_config.tensor_model_parallel_size, dim=0)[
@@ -603,6 +609,16 @@ class DistModuleConverter:
             return [local_to_global(i) for i in local_moe_index]
 
     def dist_convert(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
+        if (
+            self.mca_config.tie_embeddings_and_output_weights
+            and self.mca_config.pipeline_model_parallel_size > 1
+            and self.is_pipeline_last_stage()
+        ):
+            if self.revert and name == MCORE_LM_HEAD:
+                return None  # don't need a duplicate lm head
+            elif not self.revert and name == MCORE_WORD_EMBEDDING:
+                name = MCORE_LM_HEAD  # load word embedding weight to lm head
+
         if not self.is_on_this_rank(name):
             return None
         pure_name = self.get_pure_name(name)

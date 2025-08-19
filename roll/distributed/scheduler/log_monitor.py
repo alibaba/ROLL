@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import Dict
 
 import ray
+from packaging.version import Version
 from ray._private.log_monitor import (
     LogMonitor as RayLogMonitor,
     is_proc_alive,
@@ -22,7 +23,6 @@ from ray._private.log_monitor import (
     RUNTIME_ENV_SETUP_PATTERN,
     LogFileInfo,
 )
-from ray._private.ray_logging import stderr_deduplicator
 from ray._private.worker import print_to_stdstream, logger as monitor_logger, print_worker_logs
 
 from roll.distributed.scheduler.driver_utils import get_driver_rank, wait_for_nodes, get_driver_world_size
@@ -188,18 +188,18 @@ class LogMonitorListener:
         self.node_ip_address = ray.util.get_node_ip_address()
         self.rank = get_driver_rank()
         self.world_size = get_driver_world_size()
-        if ray.__version__ <"2.47.0":
+        if Version(ray.__version__) >= Version("2.47.0"):
             self.log_monitor = LogMonitor(
                 node_ip_address=self.node_ip_address,
                 logs_dir=self.log_dir,
-                gcs_publisher=StdPublisher(),
+                gcs_client=StdPublisher(),
                 is_proc_alive_fn=is_proc_alive,
             )
         else:
             self.log_monitor = LogMonitor(
                 node_ip_address=self.node_ip_address,
                 logs_dir=self.log_dir,
-                gcs_client=StdPublisher(),
+                gcs_publisher=StdPublisher(),
                 is_proc_alive_fn=is_proc_alive,
             )
         monitor_logger.setLevel(logging.CRITICAL)

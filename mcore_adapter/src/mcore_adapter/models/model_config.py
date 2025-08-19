@@ -146,7 +146,7 @@ class PretrainedConfig:
         return config
 
     def distribute_config_match(self, other):
-        "check the config corresponding ckpt can be used for current config training"
+        """check the config corresponding ckpt can be used for current config training"""
         raise NotImplementedError("distribute_config_match not implemented")
 
 
@@ -243,6 +243,13 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             self.moe_router_dtype = "fp32"
             logger.warning(f"Using {self.moe_router_dtype} for moe_router_dtype, "
                            "since num_moe_experts is large and moe_router_dtype not set.")
+        if self.variable_seq_lengths and self.moe_token_dispatcher_type in ["allgather"]:
+            if self.num_moe_experts is not None:
+                logger.warning(
+                    f"Token dispatcher type: {self.moe_token_dispatcher_type} does not support "
+                    f"variable sequence length, use alltoall dispatcher instead."
+                )
+            self.moe_token_dispatcher_type = "alltoall"
 
         super().__post_init__()
         pipeline_size = self.pipeline_model_parallel_size

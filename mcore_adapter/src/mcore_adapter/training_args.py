@@ -210,6 +210,12 @@ class DistributingParallelArguments:
         if self.recompute_modules is not None and isinstance(self.recompute_modules, str):
             self.recompute_modules = self.recompute_modules.split(",")
 
+        if self.variable_seq_lengths and self.moe_token_dispatcher_type in ["allgather"]:
+            raise ValueError(
+                f"Token dispatcher type: {self.moe_token_dispatcher_type} does not support "
+                f"variable sequence length, please use alltoall dispatcher instead."
+            )
+
     def get_config_dict(self):
         return {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) is not None}
 
