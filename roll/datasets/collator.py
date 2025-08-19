@@ -215,8 +215,9 @@ class DataCollatorWithPaddingForMM:
                 assert batch[key].shape[0] == batch["input_ids"].shape[0]
             else:
                 assert len(batch[key]) == batch["input_ids"].shape[0]
+                val = batch[key]
                 batch[key] = np.empty(len(batch[key]), dtype=object)
-                batch[key][:] = batch[key]
+                batch[key][:] = val
         return batch
 
 @dataclass
