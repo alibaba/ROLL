@@ -84,10 +84,9 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [RAFT++](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/RAFT_Plus_Plus)  
 [StarPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/agentic_StarPO)
 
-#### Beckend
+#### Backend
 [DeepSeed](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/deepspeed)  
-[Megatron](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/megatron)  
-[LoRA](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/lora)  
+[Megatron](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/megatron)   
 [vLLM](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/vllm)  
 [SGLang](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/sglang)
 
@@ -119,7 +118,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
     *   Inference/Generation supports vLLM, SGLang.
     *   Training supports DeepSpeed (ZeRO), Megatron-LM 5D parallelism (mcore-adapter, dp/tp/pp/cp/ep), FSDP under implementation.
     *   Extreme offload/reload capabilities.
-    *   Supports LoRA training.
+    *   Supports [LoRA](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/lora) training.
     *   Supports FP8 rollout (FP8 inference for LLM as judge, FP8 rollout with BF16 training under development).
 *   **AutoDeviceMapping:** Supports custom device mapping for different roles, flexibly managing colocated and disaggregated deployments.
 *   **Observability:** Integrated with SwanLab / WandB / TensorBoard, tracking of performance for each domain and reward type.

@@ -26,7 +26,7 @@ adv_estimator: "grpo"
 ppo_epochs: 1
 use_kl_loss: true
 kl_loss_coef: 0.001
-loss_agg_mode: "seq-mean-token-sum"
+loss_agg_mode: "seq-mean-token-mean"
 
 # ppo related
 # advantage
