@@ -18,7 +18,18 @@ class RayUtils:
     @staticmethod
     def get_custom_env_env_vars(
         device_type: DeviceType | None = None) -> dict:
-        env_vars = {}
+        env_vars = {
+            # This is a following temporiary fix for starvation of plasma lock at
+            # https://github.com/ray-project/ray/pull/16408#issuecomment-861056024.
+            # When the system is overloaded (rpc queueing) and can not pull Object from remote in a short period
+            # (e.g. DynamicSampliningScheduler.report_response using ray.get inside Threaded Actor), the minimum
+            # 1000ms batch timeout can still starve others (e.g. Release in callback of PinObjectIDs, reported here
+            # https://github.com/ray-project/ray/pull/16402#issuecomment-861222140), which in turn, will exacerbates
+            # queuing of rpc.
+            # So we set a small timeout for PullObjectsAndGetFromPlasmaStore to avoid holding store_client lock
+            # too long.
+            "RAY_get_check_signal_interval_milliseconds": "1",
+        }
         if device_type is None:
             device_type = GPUUtils.get_device_type()
         if DeviceType.NVIDIA == device_type:
