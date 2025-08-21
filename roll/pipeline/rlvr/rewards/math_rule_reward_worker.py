@@ -36,37 +36,50 @@ class timeout:
         signal.alarm(0)
 
 
-def _hf_verify_math_sample(response, answer, output_queue):
-    gold_answer = parse(answer)
-    exect_answer = parse(response)
-    if gold_answer is None or exect_answer is None:
-        output_queue.put((False, exect_answer, gold_answer))
-    else:
-        ans = verify(gold_answer, exect_answer)
-        output_queue.put((ans, exect_answer, gold_answer))
+def _hf_verify_math_sample(response, answer, result):
+    try:
+        gold_answer = parse(answer)
+        exect_answer = parse(response)
+
+        if gold_answer is None or exect_answer is None:
+            result.append((False, "", ""))
+        else:
+            ans = verify(gold_answer, exect_answer)
+            result.append((ans, str(gold_answer), str(exect_answer)))
+    except Exception as e:
+        result.append((False, "", ""))
 
 
 def hf_verify_math_sample(answer_a, answer_b, timeout_sec=5.0):
     """
     在多进程中调用 hf math verify,
     以在超时时间内完不成时返回 False.
+    使用 multiprocessing.Manager 避免僵尸进程
     """
-    output_queue = multiprocessing.Queue()
-
-    p = multiprocessing.Process(target=_hf_verify_math_sample, args=(answer_a, answer_b, output_queue))
-    p.start()
-    p.join(timeout_sec)
-
-    if p.is_alive():
-        # 超时 -> 杀掉子进程, 返回 False
-        p.terminate()
-        p.join()
-        return False, "", ""
-
-    if not output_queue.empty():
-        return output_queue.get()
-    else:
-        return False, "", ""
+    with multiprocessing.Manager() as manager:
+        result = manager.list()
+        
+        p = multiprocessing.Process(
+            target=_hf_verify_math_sample,
+            args=(answer_a, answer_b, result)
+        )
+        
+        p.start()
+        try:
+            max_timeout = min(timeout_sec + 1, 10)
+            p.join(timeout=max_timeout)
+        except Exception as e:
+            pass
+        finally:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=2)
+                if p.is_alive():
+                    p.kill()
+            p.join(timeout=2)
+        if not result:
+            return False, "", ""
+        return result[0]
 
 
 def get_repetition_penalty_reward(ngram_size: int, max_penalty: float):

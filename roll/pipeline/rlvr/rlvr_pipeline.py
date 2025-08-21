@@ -597,7 +597,7 @@ class RLVRPipeline(BasePipeline):
         grouped_batch = epoch_batch.group_by("tag")
         for group_key, group_batch in grouped_batch.items():
             score_mean = group_batch.batch["scores"].mean().item()
-            print(f"{group_key}:  {score_mean}")
+            logger.info(f"val_correct/{group_key}:  {score_mean}")
             val_metrics_mgr.add_domain_metrics(
                 "val_correct", {f"{group_key}/mean": (group_batch.batch["scores"] == 1).detach().float().mean().item()}
             )

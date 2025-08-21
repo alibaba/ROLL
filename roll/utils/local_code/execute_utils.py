@@ -11,58 +11,7 @@ import signal
 import tempfile
 import sys
 
-BASE_IMPORTS = """import copy
-import string
-import math
-import collections
-import bisect
-import heapq
-import functools
-import random
-import itertools
-import operator
-import re
-import sys
-import datetime
-import statistics
-import io
-import json
-from typing import List, Tuple, Dict, Set, Optional, Union, Any, Callable, Iterable, Iterator, Generator
-from builtins import *
-
-from itertools import accumulate, chain, combinations, count, permutations, product, groupby, islice, repeat, zip_longest, cycle
-from copy import deepcopy
-from string import ascii_lowercase
-from math import floor, log2, log10, sqrt, comb, gcd, ceil, inf, isqrt, log, prod
-from collections import defaultdict, deque, Counter, OrderedDict
-from bisect import bisect, bisect_left, bisect_right, insort
-from heapq import heappush, heappop, heapify, merge
-from functools import reduce, cache, lru_cache, partial
-from random import randrange, shuffle
-from operator import itemgetter, sub, iand
-from re import search as re_search
-from os.path import commonprefix
-
-from string import *
-from re import *
-from datetime import *
-from collections import *
-from heapq import *
-from bisect import *
-from copy import *
-from math import *
-from random import *
-from statistics import *
-from itertools import *
-from functools import *
-from operator import *
-from io import *
-from sys import *
-from json import *
-
-import numpy as np
-import pandas as pd
-"""  # noqa: E501
+BASE_IMPORTS = "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\nfrom heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\nfrom random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\nfrom operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\nfrom typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\nimport bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\nimport operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(6*10**5)\nfrom typing import List, Dict, Any, Optional, Tuple\nfrom math import inf\n"
 
 
 def codeexecute_check_correctness(check_program, timeout=3):

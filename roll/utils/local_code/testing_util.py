@@ -112,7 +112,10 @@ def run_test(sample, test=None, debug=False, timeout=60):
             print(f'loading test code = {datetime.now().time()}')
 
         if which_type == CODE_TYPE.call_based:
-            sol += test
+            if "from string import *" not in test:
+                sol += test
+            else:
+                sol = test
             if debug:
                 print(f'sol = {sol}')
             signal.alarm(timeout)
