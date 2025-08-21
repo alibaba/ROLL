@@ -12,8 +12,11 @@ def create_data_proto():
         "a": torch.randn(5, 2),
         "b": torch.randn(5, 3),
     }
-    non_tensors = {"c": np.array([[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]], dtype=object)}
+    non_tensors = {
+        "c": np.array([{'id': i} for i in range(5)], dtype=object)
+    }
     return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
+
 
 
 def test_data_proto_initialization(create_data_proto):
@@ -114,6 +117,64 @@ def test_np_concat():
     val = [array1, array2, array3]
     t = custom_np_concatenate(val)
     print(t.shape)
+
+def test_concat_global_keys_dict():
+    """Test dict-valued metrics aggregation across ranks."""
+    dp0 = DataProto.from_single_dict(
+        {"x": torch.randn(3)},  # shape (3,) keeps batch_size=3
+        meta_info={"metrics": {"acc": 0.8, "loss": np.array([0.1, 0.2])}}
+    )
+    dp1 = DataProto.from_single_dict(
+        {"x": torch.randn(2)},
+        meta_info={"metrics": {"acc": 0.9, "loss": np.array([0.15, 0.25])}}
+    )
+
+    merged = DataProto.concat([dp0, dp1], global_keys={"metrics"})
+
+    # total batch length = 3 + 2 = 5 (flattened)
+    assert len(merged) == 5
+    np.testing.assert_array_equal(merged.meta_info["metrics"]["acc"], [0.8, 0.9])
+    np.testing.assert_array_equal(
+        merged.meta_info["metrics"]["loss"],
+        [0.1, 0.2, 0.15, 0.25]
+    )
+
+
+def test_concat_global_keys_scalar():
+    """Test scalar metrics aggregation."""
+    dp0 = DataProto.from_single_dict(
+        {"dummy": torch.randn(1)}, meta_info={"lr": 1e-4}
+    )
+    dp1 = DataProto.from_single_dict(
+        {"dummy": torch.randn(1)}, meta_info={"lr": 2e-4}
+    )
+    merged = DataProto.concat([dp0, dp1], global_keys={"lr"})
+    assert merged.meta_info["lr"] == [1e-4, 2e-4]
+
+
+def test_concat_non_global_remain_rank0():
+    """Test non-global keys retain rank-0 value only."""
+    dp0 = DataProto.from_single_dict(
+        {"dummy": torch.randn(1)}, meta_info={"seed": 42}
+    )
+    dp1 = DataProto.from_single_dict(
+        {"dummy": torch.randn(1)}, meta_info={"seed": 123}
+    )
+    merged = DataProto.concat([dp0, dp1])
+    assert merged.meta_info["seed"] == 42
+
+
+def test_concat_empty_global_keys():
+    """Test no aggregation when global_keys is empty/default."""
+    dp0 = DataProto.from_single_dict(
+        {"dummy": torch.randn(1)}, meta_info={"metrics": {"a": 1}}
+    )
+    dp1 = DataProto.from_single_dict(
+        {"dummy": torch.randn(1)}, meta_info={"metrics": {"a": 2}}
+    )
+    merged = DataProto.concat([dp0, dp1])  # no global_keys provided
+    assert merged.meta_info["metrics"]["a"] == 1
+
 
 
 if __name__ == "__main__":

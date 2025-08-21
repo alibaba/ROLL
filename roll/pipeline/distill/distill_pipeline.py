@@ -217,7 +217,7 @@ class DistillPipeline(BasePipeline):
                     with Timer(name="student_train_step", logger=None) as student_timer:
                         student_train_metrics_refs = self.student.train_step(batch, blocking=False)
                         student_train_metrics = DataProto.materialize_concat(data_refs=student_train_metrics_refs)
-                        student_metric = {k: v.cpu().numpy() for k, v in student_train_metrics.batch.items()}
+                        student_metric = student_train_metrics.meta_info.pop("metrics", {})
                     metrics_mgr.add_reduced_metrics(student_metric)
                 metrics_mgr.add_metric("train/teacher_forward", teacher_timer.last)
                 metrics_mgr.add_metric("train/student_train_step", student_timer.last)

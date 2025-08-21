@@ -84,11 +84,7 @@ class StudentWorker(Worker):
             data.to("cpu")
             metrics["student/lr"] = self.strategy.scheduler.get_last_lr()[0]
 
-        # When metrics are stored in meta_info, only the data from rank 0 can be collected.
-        # To obtain the correct loss values, the metrics are stored in the batch instead.
-        metrics = {k: torch.tensor(v).unsqueeze(0).to('cpu') for k, v in metrics.items()}
-        metrics = TensorDict.from_dict(metrics, batch_size=[1])
-        output = DataProto(batch=metrics).to("cpu")
+        output = DataProto(meta_info=metrics).to("cpu")
 
         return output
 

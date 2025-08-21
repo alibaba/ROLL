@@ -8,7 +8,7 @@ import copy
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Set
 
 import numpy as np
 import ray
@@ -592,30 +592,74 @@ class DataProto:
         return output
 
     @staticmethod
-    def concat(data: List["DataProto"]) -> "DataProto":
-        """Concat a list of DataProto. The batch is concatenated among dim=0.
-        The meta_info is assumed to be identical and will use the first one.
-
-        Args:
-            data (List[DataProto]): list of DataProto
-
-        Returns:
-            DataProto: concatenated DataProto
+    def concat(
+            data: List["DataProto"],
+            *,
+            global_keys: Optional[Set[str]] = None,
+    ) -> "DataProto":
         """
-        batch_lst = []
-        for batch in data:
-            if batch.batch is not None:
-                batch_lst.append(batch.batch)
-        if len(batch_lst) > 0 and batch_lst[0] is not None:
-            new_batch = torch.cat(batch_lst, dim=0)
-        else:
-            new_batch = None
+        Concatenate a list of DataProto objects.
 
-        non_tensor_batch = list_of_dict_to_dict_of_list(list_of_dict=[d.non_tensor_batch for d in data])
-        for key, val in non_tensor_batch.items():
-            non_tensor_batch[key] = custom_np_concatenate(val)
+        Parameters
+        ----------
+        data : List[DataProto]
+            List of DataProto instances to be concatenated.
+        global_keys : Set[str], optional
+            Keys in `meta_info` that should be **aggregated across ranks**.
+            - If the value is a dict, each sub-key is concatenated across ranks.
+            - Otherwise, values are collected into a list.
+            Keys not listed retain only the value from rank 0.
 
-        return DataProto(batch=new_batch, non_tensor_batch=non_tensor_batch, meta_info=data[0].meta_info)
+        Returns
+        -------
+        DataProto
+            A new DataProto with concatenated tensors, non-tensor data,
+            and processed meta information.
+        """
+        global_keys = global_keys if global_keys is not None else {"metrics"}
+
+        # ---------- 1. Concatenate tensor / non-tensor batches ----------
+        batch_lst = [d.batch for d in data if d.batch is not None]
+        new_batch = torch.cat(batch_lst, dim=0) if batch_lst else None
+
+        non_tensor_batch = list_of_dict_to_dict_of_list(
+            [d.non_tensor_batch for d in data]
+        )
+        for k, v in non_tensor_batch.items():
+            non_tensor_batch[k] = custom_np_concatenate(v)
+
+        # ---------- 2. Aggregate meta information ----------
+        merged_meta = dict(data[0].meta_info)  # start with rank-0 values
+
+        for key in global_keys:
+            if key not in merged_meta:
+                continue
+
+            values = [d.meta_info.get(key) for d in data]
+
+            # Case 1: dict — aggregate each sub-key across ranks
+            if isinstance(merged_meta[key], dict):
+                sub_dict = list_of_dict_to_dict_of_list(values)
+                for sub_key, sub_list in sub_dict.items():
+                    try:
+                        if np.isscalar(sub_list[0]):
+                            sub_dict[sub_key] = np.array(sub_list)
+                        else:
+                            sub_dict[sub_key] = np.concatenate(sub_list, axis=0)
+                    except Exception:
+                        # fallback: keep as list
+                        sub_dict[sub_key] = sub_list
+                merged_meta[key] = sub_dict
+
+            # Case 2: non-dict — collect into list
+            else:
+                merged_meta[key] = values
+
+        return DataProto(
+            batch=new_batch,
+            non_tensor_batch=non_tensor_batch,
+            meta_info=merged_meta,
+        )
 
     def reorder(self, indices):
         """
@@ -718,21 +762,47 @@ class DataProto:
         )
 
     @staticmethod
-    def materialize_concat(data_refs: Union[List[ray.ObjectRef], ray.ObjectRef, List["ObjectRefWrap"]]) -> "DataProto":
+    def materialize_concat(
+            data_refs: Union[List[ray.ObjectRef], ray.ObjectRef, List["ObjectRefWrap"]],
+            *,
+            global_keys: Optional[Set[str]] = None,
+    ) -> "DataProto":
+        """
+        Fetch a collection of DataProto objects from Ray ObjectRef(s) and concatenate
+        them into a single DataProto instance.
+
+        Parameters
+        ----------
+        data_refs : Union[List[ray.ObjectRef], ray.ObjectRef, List[ObjectRefWrap]]
+            Ray object references (or ObjectRefWrap) pointing to DataProto objects.
+        global_keys : Optional[Set[str]], optional
+            Keys in ``meta_info`` that should be aggregated across all ranks when
+            concatenating.  If None, only rank-0 values are kept for all keys.
+
+        Returns
+        -------
+        DataProto
+            The concatenated DataProto instance.
+        """
+        # Normalize input to List[<reference>]
         if isinstance(data_refs, DataProto):
             data_refs = [data_refs]
+
         timeout = None
         if "roll_RPC_TIMEOUT" in os.environ:
-            timeout = int(os.environ.get("roll_RPC_TIMEOUT"))
+            timeout = int(os.environ["roll_RPC_TIMEOUT"])
 
+        # Fetch objects from Ray
         if isinstance(data_refs[0], ObjectRefWrap):
             data_refs: List[ObjectRefWrap]
-            data_obj_refs = [data_ref.obj_ref for data_ref in data_refs]
-            data_get = ray.get(data_obj_refs, timeout=timeout)
-            data = [data_get[i] for i in range(len(data_get)) if data_refs[i].collected]
+            obj_refs = [ref.obj_ref for ref in data_refs]
+            fetched = ray.get(obj_refs, timeout=timeout)
+            data = [fetched[i] for i, ref in enumerate(data_refs) if ref.collected]
         else:
-            data = ray.get(data_refs, timeout=timeout)
-        return DataProto.concat(data)
+            data: List["DataProto"] = ray.get(data_refs, timeout=timeout)
+
+        # Concatenate and apply global aggregation rules
+        return DataProto.concat(data, global_keys=global_keys)
 
 
 class ObjectRefWrap:
