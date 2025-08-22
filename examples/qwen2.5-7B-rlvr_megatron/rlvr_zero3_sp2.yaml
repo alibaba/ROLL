@@ -9,7 +9,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "qwen2.5-7B-rlvr-config"
+exp_name: "qwen2.5-7B-rlvr-config-sp2"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
@@ -78,18 +78,13 @@ add_token_level_kl: false
 # advantage
 whiten_advantages: true
 
-# lora
-lora_target: o_proj,q_proj,k_proj,v_proj
-lora_rank: 32
-lora_alpha: 32
-
 # dynamic sampling scheduler
 # use_additional_prompts: true
 # max_running_requests: 256
 # is_num_return_sequences_expand: false
 
-pretrain: /data/cpfs_0/common/models/Qwen2.5-7B
-reward_pretrain: /data/cpfs_0/common/models/Qwen2.5-7B
+pretrain: Qwen/Qwen2.5-7B
+reward_pretrain: Qwen/Qwen2.5-7B
 
 validation:
   data_args:
@@ -108,15 +103,12 @@ validation:
 actor_train:
   model_args:
     attn_implementation: fa2
-    # Recomputed tensor size does not match for LoRA with Zero3 when activating checkpointing, See https://github.com/huggingface/transformers/issues/34928 for details
-    disable_gradient_checkpointing: true
+    disable_gradient_checkpointing: false
     dtype: bf16
-    lora_target: ${lora_target}
-    lora_rank: ${lora_rank}
-    lora_alpha: ${lora_alpha}
+    ulysses_size: 2
     model_type: ~
   training_args:
-    learning_rate: 1.0e-5
+    learning_rate: 1.0e-6
     weight_decay: 0
     per_device_train_batch_size: 1
     gradient_accumulation_steps: 32
@@ -143,17 +135,14 @@ actor_train:
   strategy_args:
     strategy_name: deepspeed_train
     strategy_config: ${deepspeed_zero3}
-  device_mapping: list(range(0,16))
-  infer_batch_size: 4
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
 
 actor_infer:
   model_args:
     attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
-    lora_target: ${lora_target}
-    lora_rank: ${lora_rank}
-    lora_alpha: ${lora_alpha}
   generating_args:
     max_new_tokens: ${response_length}
     top_p: 0.99
@@ -166,12 +155,10 @@ actor_infer:
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.6
-      # https://github.com/vllm-project/vllm/issues/9452
-      enforce_eager: false
+      gpu_memory_utilization: 0.8
       block_size: 16
       max_model_len: 8000
-  device_mapping: list(range(0,12))
+  device_mapping: list(range(0,6))
   infer_batch_size: 1
 
 reference:
@@ -179,14 +166,15 @@ reference:
     attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
+    ulysses_size: 2
     model_type: ~
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
-  device_mapping: list(range(0,16))
-  infer_batch_size: 8
+    strategy_name: deepspeed_infer
+    strategy_config: ${deepspeed_zero3}
+  device_mapping: list(range(0,8))
+  infer_batch_size: 4
 
 rewards:
   crossthinkqa:
@@ -246,7 +234,7 @@ rewards:
     judge_model_type: inference
     tag_included: [RLVR]
     model_args:
-      model_name_or_path: /data/cpfs_0/common/models/Qwen2.5-7B-Instruct-RLVR/
+      model_name_or_path: virtuoussy/Qwen2.5-7B-Instruct-RLVR
       attn_implementation: fa2
       disable_gradient_checkpointing: true
       dtype: bf16
@@ -263,5 +251,5 @@ rewards:
     strategy_args:
       strategy_name: hf_infer
       strategy_config: null
-    device_mapping: list(range(12,16))
-    infer_batch_size: 4
+    device_mapping: list(range(6,8))
+    infer_batch_size: 2

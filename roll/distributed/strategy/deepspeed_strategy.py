@@ -22,12 +22,12 @@ from roll.datasets.collator import collate_fn_to_dict_list
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
-from roll.models.func_providers import log_probs_forward_step_func
 from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
 from roll.third_party.deepspeed.offload_states_patch import bind_deepspeed_offload_states_func
 from roll.utils.collective import collective
+from roll.utils.context_parallel import apply_ulysses_patch, get_ulysses_group, set_upg_manager
 from roll.utils.deepspeed_utils import get_optimizer_grouped_parameters
-from roll.utils.functionals import append_to_dict, log_probs_from_logits
+from roll.utils.functionals import append_to_dict, entropy_from_logits, log_probs_from_logits
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
 
@@ -63,13 +63,40 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         deepspeed.init_distributed(timeout=timedelta(minutes=self.worker_config.backend_timeout))
         dist.all_reduce(torch.zeros(1).cuda())
 
-        self.worker.rank_info.dp_rank = dist.get_rank()
-        self.worker.rank_info.dp_size = dist.get_world_size()
+        # apply Ulysses parallel
+        world_size = dist.get_world_size()
+        global_rank = dist.get_rank()
+
+        if (cp_size := self.worker_config.model_args.ulysses_size) > 1:
+            apply_ulysses_patch()
+            set_upg_manager(ulysses_size=cp_size, rank=global_rank, world_size=world_size)
+
+        self.worker.rank_info.dp_rank = global_rank // cp_size
+        self.worker.rank_info.dp_size = world_size // cp_size
+        self.worker.rank_info.cp_rank = global_rank % cp_size
+        self.worker.rank_info.cp_size = cp_size
 
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
 
         model = model_provider(tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=False)
+
+        try:
+            num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
+        except AttributeError:
+            num_attention_heads, num_key_value_heads = (
+                model.config.text_config.num_attention_heads,
+                model.config.text_config.num_key_value_heads,
+            )
+
+        assert num_attention_heads % cp_size == 0, (
+            f"num_attention_heads {num_attention_heads} must be divisible by ulysses_size {cp_size}"
+        )
+        assert num_key_value_heads % cp_size == 0 or cp_size % num_key_value_heads == 0, (
+            f"num_key_value_heads {num_key_value_heads} must be divisible by ulysses_size "
+            f"{cp_size}or vise versa. Upon ulysses_size % num_key_value_heads == 0,"
+            f"kv heads are repeated to ensure correctness."
+        )
 
         logger.info(f"{self.model}")
 
@@ -83,6 +110,24 @@ class DeepSpeedInferStrategy(InferenceStrategy):
 
         logger.info(f"{self.model}")
         dist.barrier()
+
+    def get_data_input(self, batch: DataProto):
+        def broadcast_obj(obj, group):
+            obj_list = [obj if dist.get_rank(group) == 0 else None]
+            src_rank = dist.get_process_group_ranks(group)[0]
+            dist.broadcast_object_list(obj_list, src=src_rank, group=group)
+            return obj_list[0]
+        # to avoid making side-effect on LLM, if want to broadcast non_tensor_batch,
+        # set _broadcast_non_tensor_batch into meta_info
+        broadcast_non_tensor_batch = batch.meta_info.get("_broadcast_non_tensor_batch", False)
+        if self.worker.rank_info.cp_size > 1:
+            if broadcast_non_tensor_batch:
+                tmp_batch = broadcast_obj(batch, get_ulysses_group())
+                batch.batch = tmp_batch.batch
+                batch.non_tensor_batch = tmp_batch.non_tensor_batch
+            else:
+                batch.batch = broadcast_obj(batch.batch, get_ulysses_group())
+        return batch
 
     def forward_step(
         self,
@@ -119,6 +164,13 @@ class DeepSpeedInferStrategy(InferenceStrategy):
                         # DataProto.to('cuda') in upper frame not work for non_tensor_batch
                         forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
                     forward_args.update({"force_vit_image": True})
+
+                if self.worker.rank_info.cp_size > 1:
+                    splited_features = self.get_feature_on_cp_rank(input_ids, attention_mask, position_ids)
+                    input_ids = splited_features["input_ids"]
+                    attention_mask = splited_features["attention_mask"]
+                    position_ids = splited_features["position_ids"]
+
                 # set use_cache=False manually for the same reason as HfInferStrategy
                 output = self.model(
                     input_ids=input_ids,
@@ -131,6 +183,28 @@ class DeepSpeedInferStrategy(InferenceStrategy):
                 losses_reduced.append(loss_reduced)
         results = collate_fn_to_dict_list(losses_reduced)
         return results
+
+    def get_feature_on_cp_rank(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None, position_ids: torch.Tensor = None
+    ):
+        seqlens_in_batch = input_ids.size(1)
+        assert seqlens_in_batch % self.worker.rank_info.cp_size == 0, (
+            f"input_length={seqlens_in_batch} not divisible by cp_size={self.worker.rank_info.cp_size}"
+        )
+        cp_middle_rank_len = seqlens_in_batch // self.worker.rank_info.cp_size
+        padded_input_ids = input_ids
+        result = {}
+        start_index = cp_middle_rank_len * self.worker.rank_info.cp_rank
+        end_index = cp_middle_rank_len * (self.worker.rank_info.cp_rank + 1)
+        result["input_ids"] = padded_input_ids[:, start_index:end_index]
+        if attention_mask is not None:
+            result["attention_mask"] = attention_mask[:, start_index:end_index]
+        if position_ids is not None:
+            if position_ids.dim() == 3:
+                result["position_ids"] = position_ids[:, :, start_index:end_index]
+            else:
+                result["position_ids"] = position_ids[:, start_index:end_index]
+        return result
 
     def generate(self, batch: DataProto, generation_config):
         input_ids = batch.batch["input_ids"]  # (bs, prompt_length)
@@ -203,6 +277,38 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         self.model.offload_states(include=include, non_blocking=non_blocking)
         torch.cuda.empty_cache()
 
+    def op_compute_log_probs(self, logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor):
+        """
+        input_ids [[p, p, r, r, r, 0, 0]] p: prompt, r: response, 0: pad
+        response_mask [[0, 0, 1, 1, 1, 0, 0]]
+        """
+        labels: torch.Tensor = input_ids[:, 1:].clone()
+        labels[attention_mask[:, 1:] == 0] = 0  # avoid invalid token id
+        # TODO: don't pad here but process this shift after generation
+        labels = torch.cat([labels, torch.zeros_like(labels[:, :1])], dim=1)
+        if self.worker.rank_info.cp_size > 1:
+            labels = self.get_feature_on_cp_rank(labels)["input_ids"]
+        log_probs = log_probs_from_logits(logits, labels)
+        if self.worker.rank_info.cp_size > 1:
+            with torch.no_grad():
+                all_log_probs = [torch.empty_like(log_probs) for _ in range(self.worker.rank_info.cp_size)]
+                dist.all_gather(all_log_probs, log_probs, group=get_ulysses_group())
+            all_log_probs[self.worker.rank_info.cp_rank] = log_probs
+            log_probs = torch.cat(all_log_probs, dim=1)
+        log_probs = log_probs[:, :-1] * attention_mask[:, 1:]
+        return log_probs
+
+    def op_compute_entropy(self, logits: torch.Tensor, attention_mask: torch.Tensor):
+        entropy = entropy_from_logits(logits)
+        if self.worker.rank_info.cp_size > 1:
+            with torch.no_grad():
+                all_entropy = [torch.empty_like(entropy) for _ in range(self.worker.rank_info.cp_size)]
+                dist.all_gather(all_entropy, entropy, group=get_ulysses_group())
+            all_entropy[self.worker.rank_info.cp_rank] = entropy
+            entropy = torch.cat(all_entropy, dim=1)
+        entropy = entropy[:, :-1] * attention_mask[:, 1:]
+        return entropy
+
 
 class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
     strategy_name = "deepspeed_train"
@@ -214,13 +320,41 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         deepspeed.init_distributed(timeout=timedelta(minutes=self.worker_config.backend_timeout))
         dist.all_reduce(torch.zeros(1).cuda())
 
-        self.worker.rank_info.dp_rank = dist.get_rank()
-        self.worker.rank_info.dp_size = dist.get_world_size()
+        # apply Ulysses parallel
+        world_size = dist.get_world_size()
+        global_rank = dist.get_rank()
+
+        if (cp_size := self.worker_config.model_args.ulysses_size) > 1:
+            apply_ulysses_patch()
+            set_upg_manager(ulysses_size=cp_size, rank=global_rank, world_size=world_size)
+
+        self.worker.rank_info.dp_rank = global_rank // cp_size
+        self.worker.rank_info.dp_size = world_size // cp_size
+        self.worker.rank_info.cp_rank = global_rank % cp_size
+        self.worker.rank_info.cp_size = cp_size
+
 
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
 
         model = model_provider(tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=True)
+
+        try:
+            num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
+        except AttributeError:
+            num_attention_heads, num_key_value_heads = (
+                model.config.text_config.num_attention_heads,
+                model.config.text_config.num_key_value_heads,
+            )
+
+        assert num_attention_heads % cp_size == 0, (
+            f"num_attention_heads {num_attention_heads} must be divisible by ulysses_size {cp_size}"
+        )
+        assert num_key_value_heads % cp_size == 0 or cp_size % num_key_value_heads == 0, (
+            f"num_key_value_heads {num_key_value_heads} must be divisible by ulysses_size "
+            f"{cp_size}or vise versa. Upon ulysses_size % num_key_value_heads == 0,"
+            f"kv heads are repeated to ensure correctness."
+        )
 
         adam_optimizer = DeepSpeedCPUAdam if self.ds_config.is_offload() else FusedAdam
         optim_params = get_optimizer_grouped_parameters(
@@ -295,11 +429,19 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                     # DataProto.to('cuda') in upper frame not work for non_tensor_batch
                     forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
                 forward_args.update({"force_vit_image": True})
+
+            if self.worker.rank_info.cp_size > 1:
+                splited_features = self.get_feature_on_cp_rank(input_ids, attention_mask, position_ids)
+                input_ids = splited_features["input_ids"]
+                attention_mask = splited_features["attention_mask"]
+                position_ids = splited_features["position_ids"]
+
             output = self.model(
                 input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, **forward_args
             )
             loss, loss_reduced = loss_func(data, output.logits)
             append_to_dict(metrics, loss_reduced)
+            loss *= self.worker.rank_info.cp_size
             self.model.backward(loss)
 
             is_gradient_accumulation_boundary = self.model.is_gradient_accumulation_boundary()

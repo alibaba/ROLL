@@ -94,6 +94,12 @@ class ModelArguments(LoraArguments):
             "help": "Prefix of frozen modules for partial-parameter (freeze) fine-tuning. Use commas to separate multiple modules."
         },
     )
+    ulysses_size: Optional[int] = field(
+        default=1,
+        metadata={
+            "help": "The group size for Ulysses attention."
+        },
+    )
 
     def __post_init__(self):
         def split_arg(arg):
