@@ -50,6 +50,10 @@ num_gpus_per_node: 8
 
 pretrain: Qwen/Qwen2.5-3B-Instruct
 
+ipo: false
+beta: 0.1
+label_smoothing: 0.0
+
 chosen_key: chosen
 rejected_key: rejected
 
