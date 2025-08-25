@@ -15,7 +15,6 @@ from transformers import set_seed
 from vllm import RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.utils import random_uuid
-import vllm
 
 from mcore_adapter.models.converter.convert_utils import RecvBucketManager
 from roll.distributed.executor.worker import Worker
@@ -74,7 +73,6 @@ class VllmStrategy(InferenceStrategy):
                 ),  # potentially hangs in tp>1
                 "enable_prefix_caching": vllm_config.get("enable_prefix_caching", False),
                 "load_format": vllm_config.get("load_format", "dummy"),  # use model update passed value
-                "compilation_config":vllm.config.CompilationConfig(),
             }
         )
         self.is_lora = self.worker_config.model_args.lora_target is not None

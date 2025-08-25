@@ -6,7 +6,9 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 import cloudpickle
 import torch
 from vllm import LLM, EngineArgs, SamplingParams, envs
-from vllm.config import CompilationConfig
+from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
+                         is_init_field)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.engine.arg_utils import HfOverrides, PoolerConfig, TaskOption
 from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
@@ -22,38 +24,32 @@ class Llm0100(LLM):
         resource_placement_groups: List[Dict],
         model: str,
         tokenizer: Optional[str] = None,
-        tokenizer_mode: str = "auto",
+        tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
         tensor_parallel_size: int = 1,
-        dtype: str = "auto",
-        quantization: Optional[str] = None,
+        dtype: ModelDType = "auto",
+        quantization: Optional[QuantizationMethods] = None,
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         seed: Optional[int] = None,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
-        enforce_eager: Optional[bool] = None,
+        enforce_eager: bool = False,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
+        hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
-        compilation_config: Optional[Union[int, dict[str, Any]]] = None,
+        compilation_config: Optional[Union[int, dict[str, Any], CompilationConfig]] = None,
         **kwargs,
     ) -> None:
-        '''
-        LLM constructor.
-
-        Note: if enforce_eager is unset (enforce_eager is None)
-        it defaults to False.
-        '''
-
         # setup envs for vllm
         # https://github.com/vllm-project/vllm/pull/14189/files
         # TODO do not override other options in PYTORCH_CUDA_ALLOC_CONF
@@ -72,14 +68,21 @@ class Llm0100(LLM):
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
+        if hf_overrides is None:
+            hf_overrides = {}
+
         if compilation_config is not None:
-            if isinstance(compilation_config, (int, dict)):
-                compilation_config_instance = CompilationConfig.from_cli(
-                    str(compilation_config))
+            if isinstance(compilation_config, int):
+                compilation_config_instance = CompilationConfig(
+                    level=compilation_config)
+            elif isinstance(compilation_config, dict):
+                predicate = lambda x: is_init_field(CompilationConfig, x[0])
+                compilation_config_instance = CompilationConfig(
+                    **dict(filter(predicate, compilation_config.items())))
             else:
                 compilation_config_instance = compilation_config
         else:
-            compilation_config_instance = None
+            compilation_config_instance = CompilationConfig()
 
         kwargs["enable_sleep_mode"] = True
         engine_args = EngineArgs(
@@ -103,7 +106,8 @@ class Llm0100(LLM):
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
-            # hf_overrides=hf_overrides,
+            hf_token=hf_token,
+            hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,

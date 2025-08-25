@@ -29,19 +29,20 @@ class RayUtils:
             # So we set a small timeout for PullObjectsAndGetFromPlasmaStore to avoid holding store_client lock
             # too long.
             "RAY_get_check_signal_interval_milliseconds": "1",
+            "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
         }
         if device_type is None:
             device_type = GPUUtils.get_device_type()
         if DeviceType.NVIDIA == device_type:
-            env_vars = {
+            env_vars.update({
                 # "RAY_DEBUG": "legacy",
                 "TORCHINDUCTOR_COMPILE_THREADS": "2",
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 "NCCL_CUMEM_ENABLE": "0",   # https://github.com/NVIDIA/nccl/issues/1234
                 "NCCL_NVLS_ENABLE": "0",
-            }
+            })
         elif DeviceType.AMD == device_type:
-            env_vars = {
+            env_vars.update({
                 # These VLLM related enviroment variables are related to backend. maybe used afterwards.
                 # "VLLM_USE_TRITON_FLASH_ATTN":"0",
                 # "VLLM_ROCM_USE_AITER":"1",
@@ -49,18 +50,17 @@ class RayUtils:
                 # "VLLM_ROCM_USE_AITER_ASMMOE":"1",
                 # "VLLM_ROCM_USE_AITER_PAGED_ATTN":"1",
                 # "RAY_DEBUG": "legacy",
-                "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
                 "VLLM_USE_V1":"0",
                 "TORCHINDUCTOR_COMPILE_THREADS": "2",
                 "PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True",
                 # "NCCL_DEBUG_SUBSYS":"INIT,COLL",
                 # "NCCL_DEBUG":"INFO",
                 # "NCCL_DEBUG_FILE":"rccl.%h.%p.log",
-            }
+            })
         elif DeviceType.UNKNOWN == device_type:
-            env_vars = {
+            env_vars.update({
                 "TORCHINDUCTOR_COMPILE_THREADS": "2",
-            }
+            })
 
         # used for debug
         # env_vars["RAY_DEBUG"] = "legacy"
@@ -102,18 +102,19 @@ class RayUtils:
     def get_vllm_run_time_env_vars(
         gpu_rank:str,
         device_type: DeviceType | None = None) -> dict:
-        env_vars = {}
+        env_vars = {
+            "PYTORCH_CUDA_ALLOC_CONF" : "",
+            "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
+        }
         if device_type is None:
             device_type = GPUUtils.get_device_type()
         if DeviceType.NVIDIA == device_type:
-            env_vars={
-                    "PYTORCH_CUDA_ALLOC_CONF" : "",
+            env_vars.update({
                     "CUDA_VISIBLE_DEVICES": f"{gpu_rank}",
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                }
+                })
         elif DeviceType.AMD == device_type:
-            env_vars={
-                    "PYTORCH_CUDA_ALLOC_CONF" : "",
+            env_vars.update({
                     "HIP_VISIBLE_DEVICES": f"{gpu_rank}",
                     "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
                     "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",
@@ -121,6 +122,6 @@ class RayUtils:
                     # "NCCL_DEBUG":"INFO",
                     # "NCCL_DEBUG_FILE":"rccl.%h.%p.log",
                     # "NCCL_P2P_DISABLE":"1",
-            }
+            })
         get_logger().info(f"gpu is {device_type}, ray custom runtime env_vars: {env_vars}")
         return env_vars
