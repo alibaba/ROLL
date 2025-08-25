@@ -707,12 +707,11 @@ def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: 
             info["error_message"] = "Extract Response Error"
             return 0, info, ""
 
-    extracted_code = BASE_IMPORTS + extracted_code
-
     try:
         correct = 0
         if case_type == "check_based":
             try:
+                extracted_code = BASE_IMPORTS + extracted_code
                 all_passed, pass_ratio, error_info = run_check_based_tests(extracted_code, test_cases, timeout)
                 info.update(error_info)
                 info["pass_test_ratio"] = pass_ratio

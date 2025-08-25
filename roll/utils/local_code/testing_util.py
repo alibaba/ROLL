@@ -42,7 +42,6 @@ class TimeoutException(Exception):
 
 
 def timeout_handler(signum, frame):
-    print("alarm went off")
     return
     # raise TimeoutException
 
@@ -112,10 +111,7 @@ def run_test(sample, test=None, debug=False, timeout=60):
             print(f'loading test code = {datetime.now().time()}')
 
         if which_type == CODE_TYPE.call_based:
-            if "from string import *" not in test:
-                sol += test
-            else:
-                sol = test
+            sol += test
             if debug:
                 print(f'sol = {sol}')
             signal.alarm(timeout)

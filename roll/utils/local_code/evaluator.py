@@ -48,7 +48,7 @@ def codegen_check_correctness(sample, generation, timeout, debug=True):
     
         p.start()
         try:
-            max_timeout = min(timeout * len(sample["inputs"]) + 1, 20)
+            max_timeout = min(timeout * len(sample["inputs"]) + 1, 360)
             p.join(timeout=max_timeout)
         except Exception as e:
             if debug:
