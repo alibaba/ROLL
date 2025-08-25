@@ -59,6 +59,7 @@ class LLMJudgeRewardWorker(Worker):
             self.tokenizer = self.strategy.tokenizer
             print(f"{self.worker_name} initialized with inference model")
             self.strategy.offload_states()
+            torch.cuda.init()
         else:
             raise ValueError(f"Unsupported model type: {self.judge_model_type}")
 

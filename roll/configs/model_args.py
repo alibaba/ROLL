@@ -1,10 +1,10 @@
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import torch
 
 
-# Borrowed from: https://github.com/hiyouga/LLaMA-Factory/blob/main/src/llamafactory/hparams/finetuning_args.py
+# Inspired by: https://github.com/hiyouga/LLaMA-Factory/blob/main/src/llamafactory/hparams/finetuning_args.py
 @dataclass
 class LoraArguments:
     r"""
@@ -53,7 +53,11 @@ class ModelArguments(LoraArguments):
             "help": "Path to the model weight or identifier from huggingface.co/models or modelscope.cn/models."
         },
     )
-    attn_implementation: Optional[str] = field(
+    adapter_name_or_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the adapter weight or identifier from huggingface.co/models."},
+    )
+    attn_implementation: Optional[Literal["sdpa", "fa2", "auto"]] = field(
         default=None,
         metadata={"help": "Enable FlashAttention for faster training and inference."},
     )
@@ -106,12 +110,13 @@ class ModelArguments(LoraArguments):
             if isinstance(arg, str):
                 return [item.strip() for item in arg.split(",")]
             return arg
+
         self.lora_alpha = self.lora_alpha or self.lora_rank * 2
         if self.lora_target is not None and not any(c in self.lora_target for c in ["*", "$", "|", "("]):
             # split when lora_target is not regex expression
             self.lora_target = split_arg(self.lora_target)
-        self.freeze_module_prefix: Optional[list[str]] = split_arg(self.freeze_module_prefix)
-        self.additional_target: Optional[list[str]] = split_arg(self.additional_target)
+        self.freeze_module_prefix: Optional[List[str]] = split_arg(self.freeze_module_prefix)
+        self.additional_target: Optional[List[str]] = split_arg(self.additional_target)
 
         dtype_mapping = {
             "fp32": torch.float32,
