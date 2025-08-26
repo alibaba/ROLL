@@ -145,7 +145,7 @@ We are continuously working to expand ROLL's capabilities:
 
 ## 🏆 Notable work based on ROLL
 - [RecGPT](https://www.arxiv.org/abs/2507.22879): a next-generation, LLM-driven framework that places user intent at the core of recommender systems, fostering a more sustainable and mutually beneficial ecosystem.
-
+- [TaoSR1](https://arxiv.org/abs/2508.12365): A novel LLM framework directly deploying Chain-of-Thought (CoT) reasoning for e-commerce query-product relevance prediction, overcoming deployment challenges for superior performance.
 -----
 
 ## 🙏 Citation and Acknowledgement
