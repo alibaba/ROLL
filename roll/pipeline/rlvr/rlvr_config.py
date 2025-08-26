@@ -128,7 +128,7 @@ class RLVRConfig(BaseConfig):
         metadata={"help": "Path to pretrain model directory for the reward model, if available."}
     )
     validation: WorkerConfig = field(
-        default_factory=WorkerConfig,
+        default=None,
         metadata={"help": "Configuration for the validation."}
     )
     actor_train: WorkerConfig = field(
@@ -289,6 +289,29 @@ class RLVRConfig(BaseConfig):
             self.tag_2_domain = {
                 tag: key for key, worker_config in self.rewards.items() for tag in worker_config.tag_included
             }
+        if self.actor_infer:
+            self.actor_infer.generating_args.max_new_tokens = self.sequence_length - self.prompt_length
+            logger.warning(f"rewrite actor_infer max_new_tokens: {self.actor_infer.generating_args.max_new_tokens}")
+        if self.validation:
+            self.validation.generating_args.max_new_tokens = self.val_sequence_length - self.val_prompt_length
+            logger.warning(f"rewrite validation max_new_tokens: {self.validation.generating_args.max_new_tokens}")
+
+        # infer the required num nodes
+        total_devices = []
+        for attribute_name in dir(self):
+            attribute = getattr(self, attribute_name)
+            if isinstance(attribute, WorkerConfig):
+                if attribute.device_mapping is not None:
+                    total_devices.extend(attribute.device_mapping)
+        for worker_config in self.rewards.values():
+            if worker_config.device_mapping is not None:
+                total_devices.extend(worker_config.device_mapping)
+        if len(total_devices) > 0:
+            max_gpu_num = max(total_devices) + 1
+            if max_gpu_num <= self.num_gpus_per_node:
+                self.num_nodes = 1
+            else:
+                self.num_nodes = (max_gpu_num + self.num_gpus_per_node - 1) // self.num_gpus_per_node
 
     def set_max_steps(self, max_steps: int):
         actor_backward_batch_size = (
