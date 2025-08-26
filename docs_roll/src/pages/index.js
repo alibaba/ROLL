@@ -39,7 +39,7 @@ export default function Home() {
 
   const history = useHistory();
   useEffect(() => {
-    history.replace('/ROLL/docs/English/QuickStart/start');
+    history.replace('/ROLL/docs/English/start');
   }, [history]);
 
   return (
