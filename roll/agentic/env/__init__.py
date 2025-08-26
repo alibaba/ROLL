@@ -6,8 +6,8 @@ import gem
 from roll.utils.logging import get_logger
 logger = get_logger()
 
-gem.register(id="sokoban", entry_point="roll.agentic.env.sokoban:SokobanEnv")
-gem.register(id="frozen_lake", entry_point="roll.agentic.env.frozen_lake:FrozenLakeEnv")
+gem.register("sokoban", entry_point="roll.agentic.env.sokoban:SokobanEnv")
+gem.register("frozen_lake", entry_point="roll.agentic.env.frozen_lake:FrozenLakeEnv")
 
 
 try:
@@ -21,7 +21,7 @@ try:
     sys.path.append(module_path)
 
     from .webshop.env import WebShopEnv
-    # gem.register(id="webshop", entry_point="roll.agentic.env.frozen_lake:FrozenLakeEnv")
+    # gem.register("webshop", entry_point="roll.agentic.env.frozen_lake:FrozenLakeEnv")
     logger.warning(f"webshop interface is not ready yet, please wait")
 except Exception as e:
     logger.info(f"Failed to import webshop: {e}")

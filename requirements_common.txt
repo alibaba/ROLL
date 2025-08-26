@@ -34,7 +34,7 @@ nltk==3.8
 gym
 gymnasium[toy-text]
 gym_sokoban
-gem-llm
+gem-llm==0.0.4
 mcp
 
 hydra-core

@@ -228,7 +228,7 @@ class BaseConfig:
         os.environ.update(self.system_envs)
 
         # Validate rollout_batch_size divisibility for Megatron data parallelism
-        if hasattr(self, 'actor_train') and isinstance(self.actor_train, WorkerConfig):
+        if hasattr(self, 'actor_train') and isinstance(self.actor_train, WorkerConfig) and self.actor_train.strategy_args is not None:
             strategy_name = self.actor_train.strategy_args.strategy_name
 
             # Only validate for Megatron strategies
