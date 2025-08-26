@@ -119,6 +119,14 @@ class BaseConfig:
         default=None,
         metadata={"help": "The maximum length of the sequence to be padded."},
     )
+    val_prompt_length: Optional[int] = field(
+        default=None,
+        metadata={"help": "The maximum length of a prompt to be padded."},
+    )
+    val_sequence_length: Optional[int] = field(
+        default=None,
+        metadata={"help": "The maximum length of the sequence to be padded."},
+    )
     alive_check_interval: int = field(
         default=10,
         metadata={"help": "The interval of worker alive check."}
@@ -159,15 +167,18 @@ class BaseConfig:
 
         if self.sequence_length is None:
             self.sequence_length = self.response_length + self.prompt_length
-            logger.warning(
-                f"sequence_length is not set, use response_length + prompt_length as sequence_length: {self.sequence_length}"
-            )
 
         if self.response_length is not None:
-            logger.warning(
-                f"response_length is deprecated, use sequence_length instead, sequence_length is {self.sequence_length}"
-            )
             self.response_length = None
+
+        if self.val_prompt_length is None:
+            assert self.val_sequence_length is None, "val_prompt_length and val_sequence_length must be set simultaneously"
+            self.val_prompt_length = self.prompt_length
+            self.val_sequence_length = self.sequence_length
+
+        if self.val_prompt_length is not None:
+            assert self.val_sequence_length, "val_prompt_length and val_sequence_length must be set simultaneously"
+
 
         if self.track_with == "tensorboard":
             self.tracker_kwargs["log_dir"] = os.path.join(
