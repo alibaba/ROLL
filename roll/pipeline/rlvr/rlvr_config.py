@@ -230,7 +230,7 @@ class RLVRConfig(BaseConfig):
     )
     dual_clip_loss: bool = field(default=False, metadata={"help": "Use dual clip loss"})
     loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", "seq-mean-token-sum-norm"] = (
-        field(default="seq-mean-token-sum", metadata={"help": "Loss aggregation mode"})
+        field(default="seq-mean-token-mean", metadata={"help": "Loss aggregation mode"})
     )
     importance_sampling: Literal["token", "seq"] = (
         field(default="token", metadata={"help": "policy importance sampling"})

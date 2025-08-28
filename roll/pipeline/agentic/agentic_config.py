@@ -169,7 +169,7 @@ class AgenticConfig(BaseConfig):
     kl_loss_coef: float = field(default=0, metadata={"help": "Loss coefficient for kl loss"})
     entropy_loss_coef: float = field(default=0, metadata={"help": "Loss coefficient for entropy loss"})
     loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", "seq-mean-token-sum-norm"] = (
-        field(default="seq-mean-token-sum", metadata={"help": "Loss aggregation mode"})
+        field(default="seq-mean-token-mean", metadata={"help": "Loss aggregation mode"})
     )
     dual_clip_loss: bool = field(default=False, metadata={"help": "Use dual clip loss"})
 
