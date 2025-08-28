@@ -16,6 +16,8 @@ RNG_STATE_DIR = "rng_state"
 
 CACHE_PATH = os.path.join(os.path.expanduser("~"), ".cache", "roll")
 
+IGNORE_INDEX = -100
+
 
 class GenerateStopReason(enum.Enum):
     FINISH = enum.auto()

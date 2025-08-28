@@ -228,3 +228,30 @@ class DataCollatorWithPaddingForMMWithLabels(DataCollatorWithPaddingForMM):
         labels[batch["attention_mask"] == 0] = -100
         batch["labels"] = labels
         return batch
+
+
+@dataclass
+class DataCollatorForSFT(DataCollatorWithPaddingForPaddedKeys):
+    label_pad_token_id: int = -100
+    shift_feature: bool = True
+
+    def __call__(self, features):
+        padded_batch = super().__call__(features)
+        labels = padded_batch.pop("labels")
+        padded_labels = []
+        for label in labels:
+            seq_len = len(label)
+            if seq_len > self.max_length:
+                padded_labels.append(label[:self.max_length])
+            else:
+                padded_labels.append(label + [self.label_pad_token_id] * (self.max_length - seq_len))
+        
+        padded_batch.update({"labels": torch.tensor(padded_labels, dtype=torch.int64)})
+
+        if self.shift_feature:
+            labels = padded_batch.pop("labels")
+            labels = labels[:, 1:]
+            labels = torch.cat([labels, torch.tensor([self.label_pad_token_id] * labels.shape[0], dtype=torch.int64).reshape(-1, 1)], dim=1)
+            padded_batch["labels"] = labels
+
+        return padded_batch

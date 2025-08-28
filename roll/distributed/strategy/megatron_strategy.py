@@ -40,7 +40,7 @@ from roll.third_party.megatron.offload_states_patch import (
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
 from roll.utils.collective import collective
-from roll.utils.constants import SCHEDULER_NAME, OPTIMIZER_NAME, DIST_OPTIMIZER_DIR, RNG_STATE_DIR
+from roll.utils.constants import SCHEDULER_NAME, OPTIMIZER_NAME, DIST_OPTIMIZER_DIR, RNG_STATE_DIR, IGNORE_INDEX
 from roll.utils.context_managers import disable_gradients
 from roll.utils.functionals import append_to_dict
 from roll.utils.logging import get_logger
@@ -167,6 +167,9 @@ class MegatronInferStrategy(InferenceStrategy):
         attention_mask = data.batch["attention_mask"]
         input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
         attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
+        labels = data.batch["labels"] if "labels" in data.batch else None # labels is only used for sft
+        if labels is not None:
+            labels = self._get_feature_on_this_cp_rank(labels, "labels")
         position_ids = None
         # attention_mask: SelfAttention defalt to te DotProductAttention with
         # AttnMaskType.causal in which attention_mask would not be used, pass
@@ -194,8 +197,9 @@ class MegatronInferStrategy(InferenceStrategy):
                 # DataProto.to('cuda') in upper frame not work for non_tensor_batch
                 forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
             forward_args.update({"force_vit_image": True})
+        
         output_tensor = model(
-            input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, **forward_args
+            input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, labels=labels, **forward_args
         )
 
         return output_tensor, partial(loss_func, data)
@@ -241,6 +245,31 @@ class MegatronInferStrategy(InferenceStrategy):
     def op_compute_logits(self, logits: torch.Tensor):
         full_logits = gather_from_tensor_model_parallel_region(logits)
         return full_logits
+
+    def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor):
+        labels = self._get_feature_on_this_cp_rank(labels, "labels")
+        
+        loss_mask = (labels != IGNORE_INDEX).float()
+        loss_mask = loss_mask.view(-1).float()
+        losses = torch.sum(losses.view(-1) * loss_mask)
+        loss_mask = loss_mask.sum()
+
+        if mpu.get_context_parallel_world_size() > 1:
+            loss_info = torch.cat([losses.view(1), loss_mask.view(1)])
+            torch.distributed.all_reduce(
+                loss_info, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group()
+            )
+            losses, loss_mask = loss_info[0], loss_info[1]
+
+        loss = losses.clone() # clone to make sure loss is not a view 
+
+        local_num_tokens = loss_mask.clone().detach()
+        if local_num_tokens == 0:
+            local_num_tokens += 1  # avoid divide by zero
+
+        metrics = {f"{self.worker_config.name}/loss": (loss / local_num_tokens).clone().detach().unsqueeze(0)}
+        
+        return loss, local_num_tokens.int(), metrics
 
 
 class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):

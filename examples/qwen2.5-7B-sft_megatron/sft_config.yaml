@@ -1,0 +1,70 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen2.5-7B-sft-config"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output_sft
+system_envs:
+  USE_MODELSCOPE: '1'
+
+#track_with: wandb
+#tracker_kwargs:
+#  api_key:
+#  project: roll_examples
+#  notes: roll_examples
+#  tags:
+#    - sft
+#    - baseline
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ./rl_examples/llm/tensorboard/roll_exp/rlvr
+
+num_gpus_per_node: 8
+
+max_steps: 500
+save_steps: 100
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+sequence_length: 2048
+
+pretrain: Qwen/Qwen2.5-7B
+
+# sft related 
+# system_key: system_prompt # use the default system prompt in the tokenizer tmplate if not provided
+prompt_key: instruction
+query_key: input
+response_key: output
+
+validation:
+  data_args:
+    file_name: data/code_alpaca_20k.json
+    template: qwen2_5
+
+sft_train:
+  model_args:
+    dtype: bf16
+  training_args:
+    num_train_epochs: 1
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 16
+    learning_rate: 5.0e-6
+  data_args:
+    file_name: data/code_alpaca_20k.json # https://huggingface.co/datasets/sahil2801/CodeAlpaca-20k
+    template: qwen2_5
+    preprocessing_num_workers: 4
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 2
+      sequence_parallel: true
+      pipeline_model_parallel_size: 2
+      use_distributed_optimizer: true
+      context_parallel_size: 2
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2

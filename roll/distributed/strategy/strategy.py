@@ -6,6 +6,7 @@ import torch
 
 from roll.distributed.scheduler.protocol import DataProto
 from roll.utils.checkpoint_manager import CheckpointManager
+from roll.utils.constants import IGNORE_INDEX
 from roll.utils.collective import collective
 from roll.utils.functionals import log_probs_from_logits, get_dist_info_from_comm_plan, entropy_from_logits
 from roll.utils.logging import get_logger
@@ -142,6 +143,13 @@ class InferenceStrategy(ABC):
     def op_compute_logits(self, logits: torch.Tensor):
         return logits
 
+    # Both megatron and deepspeed can output language loss directly.
+    # This op is mainly for computing context-parallel loss. 
+    def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor):
+        loss_mask = (labels != IGNORE_INDEX).float()
+        loss_mask = loss_mask.view(-1).float()
+        losses = torch.sum(losses.view(-1) * loss_mask)
+        return losses
 
 class TrainStrategy(InferenceStrategy):
     def __init__(self, worker: "Worker"):

@@ -38,13 +38,13 @@ def get_chat_template(key, tokenizer: "PreTrainedTokenizer"):
 @register_chat_template("qwen2_5")
 def native_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):
     kwargs["tokenize"] = False
-    kwargs["add_generation_prompt"] = True
+    kwargs["add_generation_prompt"] = kwargs.get("add_generation_prompt", True)
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
 @register_chat_template("qwen3")
 def qwen3_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):
     kwargs["tokenize"] = False
-    kwargs["add_generation_prompt"] = True
+    kwargs["add_generation_prompt"] = kwargs.get("add_generation_prompt", True)
     kwargs["enable_thinking"] = True
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
@@ -53,7 +53,7 @@ def dpo_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None
     kwargs["tokenize"] = False
 
     # Disable generation prompt ('<|assistant|>') to avoid redundant tokens in DPO training
-    kwargs["add_generation_prompt"] = False
+    kwargs["add_generation_prompt"] = kwargs.get("add_generation_prompt", False)
 
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
@@ -66,7 +66,7 @@ def chatml_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=N
         "+ '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
     )
     kwargs["tokenize"] = False
-    kwargs["add_generation_prompt"] = True
+    kwargs["add_generation_prompt"] = kwargs.get("add_generation_prompt", True)
     return tokenizer.apply_chat_template(conversation, tools, documents, chat_template=chat_template, **kwargs)
 
 
@@ -85,12 +85,12 @@ def longcot_qwen2_5_chat_template(
         if conversation[i]["role"] == "user":
             conversation[i]["content"] = "Return your final response within \\boxed{}. " + conversation[i]["content"]
     kwargs["tokenize"] = False
-    kwargs["add_generation_prompt"] = True
+    kwargs["add_generation_prompt"] = kwargs.get("add_generation_prompt", True)
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
 
 @register_chat_template("longcot_V3")
 def longcot_think_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):
     kwargs["tokenize"] = False
-    kwargs["add_generation_prompt"] = True
+    kwargs["add_generation_prompt"] = kwargs.get("add_generation_prompt", True)
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs) + "<think>\n"
