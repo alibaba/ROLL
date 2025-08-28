@@ -15,6 +15,10 @@ class WebShopEnv(BaseEnv, WebAgentTextEnv):
         """
         Adapter for WebAgentTextEnv to conform to the BaseLanguageBasedEnv interface.
         """
+
+        # 未修改API
+        raise NotImplementedError
+
         BaseEnv.__init__(self, config=config)
         self.config = config or WebShopEnvConfig()
         self.observation_mode = self.config.observation_mode
