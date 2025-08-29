@@ -15,11 +15,11 @@ In ROLL, the LitePPO algorithm-specific configuration parameters are as follows 
 ```yaml
 # LitePPO core config
 ## normalization
-reward_norm: group
+norm_mean_type: group
+norm_std_type: batch
 
 ## token-level loss 
 token_level_loss: true
-div_std_global: true # coming soon
 
 # ppo related, other parts are compatible with GRPO/PPO settings
 rollout_batch_size: 512  # prompt
@@ -54,9 +54,9 @@ reward_scale: false
 
 ### Core Parameter Descriptions
 
-- `reward_norm`: Reward normalization type, optional values are "batch", "group", "running", null, default value is "group"
+- `norm_mean_type`: Mean type for reward normalization: the options are "batch", "group", "running", or None; the default is None
+- `norm_std_type`: Std type for reward normalization: the options are "batch", "group", "running", or None; the default is None
 - `token_level_loss`: Whether to enable token-level loss computation, default value is true
-- `div_std_global`: Whether to use global standard deviation for normalization, this feature is coming soon, default value is true
 
 ### PPO Related Parameters
 

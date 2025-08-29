@@ -44,9 +44,8 @@ init_kl_coef: 0.2
 kl_horizon: 10000
 add_token_level_kl: false
 # normalize
-reward_norm: null
-reward_shift: false
-reward_scale: false
+norm_mean_type: None
+norm_std_type: None
 ```
 
 ### PPO相关参数说明
@@ -75,9 +74,9 @@ reward_scale: false
 | `init_kl_coef`                  | 0.2                  | 浮点数                                                                                  | 初始 KL 惩罚系数                         |
 | `kl_horizon`                    | 10000                | 正整数                                                                                  | 自适应 KL 控制的范围                       |
 | `add_token_level_kl`            | false                | true, false                                                                          | 是否添加 token 级别的 KL 惩罚               |
-| `reward_norm`                   | null                 | "batch", "group", "running", null                                                    | 奖励归一化类型                            |
-| `reward_shift`                  | false                | true, false                                                                          | 是否在奖励归一化中仅减去均值                     |
-| `reward_scale`                  | false                | true, false                                                                          | 是否在奖励归一化中仅除以标准差                    |
+| `norm_mean_type`                | None                 | "batch", "group", "running", None                                                    | 奖励归一化中均值的类型                            |
+| `norm_std_type`                 | None                 | "batch", "group", "running", None                                                    | 奖励归一化中标准差的类型                            |
+
 
 ## PPO 的关键组件
 

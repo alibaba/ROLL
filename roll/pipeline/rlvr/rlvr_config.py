@@ -159,6 +159,10 @@ class RLVRConfig(BaseConfig):
     lambd: float = field(default=0.95, metadata={"help": "Lambda parameter for advantage calculation"})
     gamma: float = field(default=1, metadata={"help": "Gamma parameter for advantage calculation"})
     pg_clip: Optional[float] = field(default=0.2, metadata={"help": "Range for clipping in PPO policy gradient loss"})
+    use_pg_clip_range: bool = field(default=False, metadata={"help": "Use to change the clipping range of pg_clip"})
+    pg_clip_low: Optional[float] = field(default=0.2, metadata={"help": "Range for clipping lower in PPO policy gradient loss"})
+    pg_clip_high: Optional[float] = field(default=0.2, metadata={"help": "Range for clipping higher in PPO policy gradient loss"})
+    
     value_clip: Optional[float] = field(
         default=None, metadata={"help": "Range for clipping values in loss calculation"}
     )
@@ -188,17 +192,17 @@ class RLVRConfig(BaseConfig):
     adv_estimator: Literal["gae", "reinforce", "grpo"] = field(
         default="gae", metadata={"help": "advantage estimator: gae (GAE)."}
     )
-    reward_norm: Literal["batch", "group", "running", None] = field(
+    norm_mean_type: Literal["batch", "group", "running", None] = field(
         default=None,
         metadata={
-            "help": "Reward normalization type: 'batch' (normalize across batch), 'group' (normalize within prompt groups), 'running' (use running statistics)"
+            "help": "Mean type for reward normalization: 'batch' (normalize across batch), 'group' (normalize within prompt groups), 'running' (use running statistics), None (without subtracting mean)"
         },
     )
-    reward_shift: bool = field(
-        default=False, metadata={"help": "Only subtract mean without dividing by std during reward normalization"}
-    )
-    reward_scale: bool = field(
-        default=False, metadata={"help": "Only divide by std without subtracting mean during reward normalization"}
+    norm_std_type: Literal["batch", "group", "running", None] = field(
+        default=None,
+        metadata={
+            "help": "Std type for reward normalization: 'batch' (normalize across batch), 'group' (normalize within prompt groups), 'running' (use running statistics), None (without dividing by std)"
+        },
     )
     add_token_level_kl: bool = field(default=False, metadata={"help": "Add token level kl penalty"})
     critic_warmup: int = field(

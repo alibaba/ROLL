@@ -457,14 +457,41 @@ def expand_to_token_level(data: "DataProto"):
     return token_level_rewards
 
 
-def batch_reward_norm(response_level_rewards: torch.Tensor, div_std=True):
-    batch_mean = response_level_rewards.mean()
-    if div_std:
-        normalized_rewards = (response_level_rewards - batch_mean) / (response_level_rewards.std() + 1e-6)
+def reward_norm(response_level_rewards: torch.Tensor, n_sample=-1, running_ctrl={}, norm_mean_type=None, norm_std_type=None):
+    group_mode = (norm_mean_type == "group") or (norm_std_type == "group")
+    if group_mode and n_sample > 0:
+        reshape_reward = response_level_rewards.reshape(*response_level_rewards.size()[:-1], -1, n_sample)
+    if norm_mean_type == "running" or norm_std_type == "running":
+        running = running_ctrl["domain"]
+        running.update(response_level_rewards)
+    # 均值计算
+    if norm_mean_type == "batch":
+        reward_mean = response_level_rewards.mean()
+    elif norm_mean_type == "group":
+        reward_mean = reshape_reward.mean(dim=-1, keepdim=True)
+    elif norm_mean_type == "running":
+        reward_mean = running.mean
+    elif norm_mean_type == None:
+        reward_mean = 0.0
+    # 标准差计算
+    if norm_std_type == "batch":
+        reward_std = response_level_rewards.std()
+    elif norm_std_type == "group":
+        reward_std = torch.std(reshape_reward, dim=-1, keepdim=True)
+    elif norm_std_type == "running":
+        reward_std = running.std
+    # 选择基础奖励值
+    rewards = reshape_reward if norm_mean_type == "group" else response_level_rewards
+    # 标准化奖励
+    if norm_std_type is not None:
+        normalized_rewards = (rewards - reward_mean) / (reward_std + 1e-6)
     else:
-        normalized_rewards = response_level_rewards - batch_mean
-    return normalized_rewards
+        normalized_rewards = (rewards - reward_mean)
 
+    # 如果是对 group mean 归一化，需要恢复原始形状
+    if norm_mean_type == "group":
+        normalized_rewards = normalized_rewards.reshape(*response_level_rewards.size())
+    return normalized_rewards
 
 def group_reward_norm(data: "DataProto", n_sample=-1, div_std=True, div_std_global=False):
     assert n_sample > 1, "n_sample must > 1"
@@ -531,42 +558,17 @@ def compute_token_reward(data: "DataProto", pipeline_config: RLVRConfig, kl_ctrl
 def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_ctrl):
     response_level_rewards = data.batch["response_level_rewards"].clone().detach()
     response_level_metrics = {"critic/reward_clip_frac": 0.0}
-    # 对reward进行处理: 可以选择不同的normalization方法
-    # 使用group-based normalization (按prompt分组)
-    if pipeline_config.adv_estimator == "grpo" or pipeline_config.reward_norm == "group":
-        if pipeline_config.reward_shift:
-            data = group_reward_norm(
-                data,
-                n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
-                div_std=False,
-            )
-        else:
-            data = group_reward_norm(
-                data,
-                n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
-                div_std=True,
-            )
-        response_level_rewards = data.batch["response_level_rewards"].clone().detach()
+    # 对reward进行处理: 可以灵活定义不同的normalization方法
+    if pipeline_config.adv_estimator == "grpo":
+        pipeline_config.norm_mean_type, pipeline_config.norm_std_type = "group", "group"
 
-    # 使用batch-based normalization (整个batch)
-    elif pipeline_config.reward_norm == "batch":
-        if hasattr(pipeline_config, "reward_shift") and pipeline_config.reward_shift:
-            response_level_rewards = batch_reward_norm(response_level_rewards, div_std=False)
-        else:
-            response_level_rewards = batch_reward_norm(response_level_rewards, div_std=True)
-
-    # 使用running statistics进行normalization
-    elif pipeline_config.reward_norm == "running":
-        running = running_ctrl["domain"]
-        running.update(response_level_rewards)
-        mean = running.mean
-        std = running.std + torch.finfo(response_level_rewards.dtype).eps
-        if pipeline_config.reward_shift:
-            response_level_rewards = response_level_rewards - mean
-        elif pipeline_config.reward_scale:
-            response_level_rewards = response_level_rewards / std
-        else:
-            response_level_rewards = (response_level_rewards - mean) / std
+    response_level_rewards = reward_norm(
+                    response_level_rewards,
+                    n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
+                    running_ctrl=running_ctrl,
+                    norm_mean_type=pipeline_config.norm_mean_type,
+                    norm_std_type=pipeline_config.norm_std_type
+                    )
 
     # 对reward进行clip
     if pipeline_config.reward_clip:

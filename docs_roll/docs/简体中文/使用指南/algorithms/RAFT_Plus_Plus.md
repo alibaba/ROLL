@@ -17,9 +17,8 @@ RAFT++ (Reward rAnked Fine-Tuning) 是一种基于排序的强化学习算法，
 adv_estimator: "reinforce"
 
 # normalize
-reward_norm: None
-reward_shift: false
-reward_scale: false
+norm_mean_type: None
+norm_std_type: None
 
 # advantage
 whiten_advantages: false
@@ -47,9 +46,8 @@ add_token_level_kl: false
 ### 核心参数说明
 
 - `adv_estimator`: 优势估计器类型，设置为 "reinforce"，这是RAFT++算法的核心配置
-- `reward_norm`: 奖励归一化类型，可选值为 "batch", "group", "running", null，默认值为 null
-- `reward_shift`: 是否在奖励归一化中仅减去均值，默认值为 false
-- `reward_scale`: 是否在奖励归一化中仅除以标准差，默认值为 false
+- `norm_mean_type`: 奖励归一化均值类型，可选值为 "batch", "group", "running", None，默认值为None
+- `norm_std_type`: 奖励归一化标准差类型，可选值为 "batch", "group", "running", None，默认值为None
 - `whiten_advantages`: 是否对优势值进行白化处理，默认值为 false
 
 ### PPO 相关参数

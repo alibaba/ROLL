@@ -15,11 +15,11 @@ LitePPO是一种轻量级的近端策略优化算法，专为大语言模型的�
 ```yaml
 # LitePPO core config
 ## normalization
-reward_norm: group
+norm_mean_type: group
+norm_std_type: batch
 
 ## token-level loss 
 token_level_loss: true
-div_std_global: true # coming soon
 
 # ppo related，其他部分可以和GRPO/PPO等设置兼容
 rollout_batch_size: 512  # prompt
@@ -54,9 +54,9 @@ reward_scale: false
 
 ### 核心参数说明
 
-- `reward_norm`: 奖励归一化类型，可选值为 "batch", "group", "running", null，默认值为 "group"
+- `norm_mean_type`: 奖励归一化均值类型，可选值为 "batch", "group", "running", None，默认值为None
+- `norm_std_type`: 奖励归一化标准差类型，可选值为 "batch", "group", "running", None，默认值为None
 - `token_level_loss`: 是否启用 token 级别的损失计算，默认值为 true
-- `div_std_global`: 是否使用全局标准差进行归一化，此功能即将推出，默认值为 true
 
 ### PPO 相关参数
 

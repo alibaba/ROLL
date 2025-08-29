@@ -17,9 +17,8 @@ In ROLL, the RAFT++ algorithm-specific configuration parameters are as follows (
 adv_estimator: "reinforce"
 
 # normalize
-reward_norm: None
-reward_shift: false
-reward_scale: false
+norm_mean_type: None
+norm_std_type: None
 
 # advantage
 whiten_advantages: false
@@ -47,9 +46,8 @@ add_token_level_kl: false
 ### Core Parameter Descriptions
 
 - `adv_estimator`: Advantage estimator type, set to "reinforce", which is the core configuration of RAFT++ algorithm
-- `reward_norm`: Reward normalization type, optional values are "batch", "group", "running", null, default value is null
-- `reward_shift`: Whether to only subtract mean in reward normalization, default value is false
-- `reward_scale`: Whether to only divide by standard deviation in reward normalization, default value is false
+- `norm_mean_type`: Mean type for reward normalization: the options are "batch", "group", "running", or None; the default is None
+- `norm_std_type`: Std type for reward normalization: the options are "batch", "group", "running", or None; the default is None
 - `whiten_advantages`: Whether to whiten advantage values, default value is false
 
 ### PPO Related Parameters

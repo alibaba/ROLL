@@ -100,13 +100,16 @@ num_return_sequences_in_group: 8
     - 'gae': 广义优势估计（GAE）。
     - 'reinforce': REINFORCE 算法中的优势估计。
     - 'grpo': Gated Recurrent Policy Optimization 中的优势估计。
-- `reward_norm`: 奖励归一化的方式。
-    - 'batch': 对批次内的所有奖励进行归一化。
-    - 'group': 在提示组内部进行归一化。
-    - 'running': 使用动态更新的统计量进行归一化。
-    - None: 不进行归一化。
-- `reward_shift`: 在奖励归一化时，是否只减去均值而不除以标准差。
-- `reward_scale`: 在奖励归一化时，是否只除以标准差而不减去均值。
+- `norm_mean_type`: 奖励归一化的均值计算方式。
+    - 'batch': 批次内的所有奖励的均值。
+    - 'group': 提示组内部的均值。
+    - 'running': 使用动态更新的统计量进行均值计算。
+    - None: 归一化的时候不减去均值。
+- `norm_std_type`: 奖励归一化的标准差计算方式。
+    - 'batch': 批次内的所有奖励的标准差。
+    - 'group': 提示组内部的标准差。
+    - 'running': 使用动态更新的统计量进行标准差计算。
+    - None: 归一化的时候不除以标准差。
 
 #### PPO 损失函数组件
 - `add_token_level_kl`: 是否添加 token 级别的 KL 散度惩罚。

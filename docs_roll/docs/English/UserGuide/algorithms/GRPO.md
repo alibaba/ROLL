@@ -37,9 +37,8 @@ dual_clip_loss: true
 # clip
 reward_clip: 10
 # normalize
-reward_norm: null
-reward_shift: false
-reward_scale: false
+norm_mean_type: None
+norm_std_type: None
 
 # reward
 add_token_level_kl: false
@@ -64,9 +63,8 @@ The following parameters are common in PPO but also apply to GRPO:
 - `advantage_clip`: Advantage value clipping range
 - `dual_clip_loss`: Whether to use dual clipping loss
 - `reward_clip`: Reward value clipping range
-- `reward_norm`: Reward normalization type
-- `reward_shift`: Whether to only subtract mean in reward normalization
-- `reward_scale`: Whether to only divide by standard deviation in reward normalization
+- `norm_mean_type`: Mean type for reward normalization: the options are "batch", "group", "running", or None; the default is None
+- `norm_std_type`: Std type for reward normalization: the options are "batch", "group", "running", or None; the default is None
 - `add_token_level_kl`: Whether to add token-level KL penalty
 
 ## Differences Between GRPO and PPO

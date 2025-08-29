@@ -268,8 +268,10 @@ class ActorWorker(Worker):
 
         ratio = (log_probs - old_log_probs).exp()
 
+        pg_clip_low = self.pipeline_config.pg_clip_low if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip
+        pg_clip_high = self.pipeline_config.pg_clip_high if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip  
         surr1 = ratio * advantages
-        surr2 = ratio.clamp(1 - self.pipeline_config.pg_clip, 1 + self.pipeline_config.pg_clip) * advantages
+        surr2 = ratio.clamp(1 - pg_clip_low, 1 + pg_clip_high) * advantages
         pg_loss = -torch.min(surr1, surr2)
         if self.pipeline_config.dual_clip_loss:
             dual_clip_loss = -torch.max(-pg_loss, (1 + self.pipeline_config.pg_clip * 2) * advantages)
@@ -287,9 +289,8 @@ class ActorWorker(Worker):
         policykl = compute_approx_kl(
             log_probs=log_probs, log_probs_base=old_log_probs, action_mask=response_mask, kl_penalty="kl"
         )
-
-        clipped_low = (ratio < 1 - self.pipeline_config.pg_clip).float()
-        clipped_high = (ratio > 1 + self.pipeline_config.pg_clip).float()
+        clipped_low = (ratio < 1 - pg_clip_low).float()
+        clipped_high = (ratio > 1 + pg_clip_high).float()
         clipped = (clipped_low + clipped_high).float()
 
         entropy = self.strategy.op_compute_entropy(logits=output_tensor, attention_mask=data.batch["response_mask"])

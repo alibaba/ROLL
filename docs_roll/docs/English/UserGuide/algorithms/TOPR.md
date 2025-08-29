@@ -46,9 +46,8 @@ init_kl_coef: 0.2
 kl_horizon: 10000
 add_token_level_kl: false
 # normalize
-reward_norm: null
-reward_shift: false
-reward_scale: false
+norm_mean_type: None
+norm_std_type: None
 ```
 
 ### Core Parameter Descriptions
@@ -83,9 +82,8 @@ The following parameters are common configuration items for PPO-class algorithms
 - `init_kl_coef`: Initial KL penalty coefficient, default value is 0.2
 - `kl_horizon`: Range for adaptive KL control, default value is 10000
 - `add_token_level_kl`: Whether to add token-level KL penalty, default value is false
-- `reward_norm`: Reward normalization type, optional values are "batch", "group", "running", null, default value is null
-- `reward_shift`: Whether to only subtract mean in reward normalization, default value is false
-- `reward_scale`: Whether to only divide by standard deviation in reward normalization, default value is false
+- `norm_mean_type`: Mean type for reward normalization: the options are "batch", "group", "running", or None; the default is None
+- `norm_std_type`: Std type for reward normalization: the options are "batch", "group", "running", or None; the default is None
 
 ## Reference Example
 

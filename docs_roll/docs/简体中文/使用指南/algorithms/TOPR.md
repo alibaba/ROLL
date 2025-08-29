@@ -46,9 +46,8 @@ init_kl_coef: 0.2
 kl_horizon: 10000
 add_token_level_kl: false
 # normalize
-reward_norm: null
-reward_shift: false
-reward_scale: false
+norm_mean_type: None
+norm_std_type: None
 ```
 
 ### 核心参数说明
@@ -83,9 +82,8 @@ reward_scale: false
 - `init_kl_coef`: 初始 KL 惩罚系数，默认值为 0.2
 - `kl_horizon`: 自适应 KL 控制的范围，默认值为 10000
 - `add_token_level_kl`: 是否添加 token 级别的 KL 惩罚，默认值为 false
-- `reward_norm`: 奖励归一化类型，可选值为 "batch", "group", "running", null，默认值为 null
-- `reward_shift`: 是否在奖励归一化中仅减去均值，默认值为 false
-- `reward_scale`: 是否在奖励归一化中仅除以标准差，默认值为 false
+- `norm_mean_type`: 奖励归一化均值类型，可选值为 "batch", "group", "running", None，默认值为None
+- `norm_std_type`: 奖励归一化标准差类型，可选值为 "batch", "group", "running", None，默认值为None
 
 ## 参考示例
 

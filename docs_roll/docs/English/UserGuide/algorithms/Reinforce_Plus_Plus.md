@@ -17,9 +17,8 @@ In ROLL, the Reinforce++ algorithm-specific configuration parameters are as foll
 adv_estimator: "reinforce"
 
 # normalize
-reward_norm: batch
-reward_shift: false
-reward_scale: false
+norm_mean_type: batch
+norm_std_type: batch
 
 # reward
 add_token_level_kl: false
@@ -48,9 +47,8 @@ reward_clip: 10
 ### Core Parameter Descriptions
 
 - `adv_estimator`: Advantage estimator type, set to "reinforce", which is the core configuration of the Reinforce++ algorithm
-- `reward_norm`: Reward normalization type, optional values are "batch", "group", "running", null, default value is "batch"
-- `reward_shift`: Whether to only subtract mean in reward normalization, default value is false
-- `reward_scale`: Whether to only divide by standard deviation in reward normalization, default value is false
+- `norm_mean_type`: Mean type for reward normalization: the options are "batch", "group", "running", or None; the default is None
+- `norm_std_type`: Std type for reward normalization: the options are "batch", "group", "running", or None; the default is None
 - `add_token_level_kl`: Whether to add token-level KL penalty, default value is false
 - `whiten_advantages`: Whether to whiten advantage values, default value is false
 

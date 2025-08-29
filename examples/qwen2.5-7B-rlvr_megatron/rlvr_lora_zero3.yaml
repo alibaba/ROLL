@@ -57,9 +57,8 @@ advantage_clip: 2.0
 dual_clip_loss: true
 
 # normalize
-reward_norm: null
-reward_shift: false
-reward_scale: false
+norm_mean_type: None
+norm_std_type: None
 
 # data mask
 max_len_mask: true

@@ -17,9 +17,8 @@ Reinforce++ 是一种基于策略梯度的强化学习算法，它是经典 REIN
 adv_estimator: "reinforce"
 
 # normalize
-reward_norm: batch
-reward_shift: false
-reward_scale: false
+norm_mean_type: batch
+norm_std_type: batch
 
 # reward
 add_token_level_kl: false
@@ -48,9 +47,8 @@ reward_clip: 10
 ### 核心参数说明
 
 - `adv_estimator`: 优势估计器类型，设置为 "reinforce"，这是 Reinforce++ 算法的核心配置
-- `reward_norm`: 奖励归一化类型，可选值为 "batch", "group", "running", null，默认值为 "batch"
-- `reward_shift`: 是否在奖励归一化中仅减去均值，默认值为 false
-- `reward_scale`: 是否在奖励归一化中仅除以标准差，默认值为 false
+- `norm_mean_type`: 奖励归一化均值类型，可选值为 "batch", "group", "running", None，默认值为None
+- `norm_std_type`: 奖励归一化标准差类型，可选值为 "batch", "group", "running", None，默认值为None
 - `add_token_level_kl`: 是否添加 token 级别的 KL 惩罚，默认值为 false
 - `whiten_advantages`: 是否对优势值进行白化处理，默认值为 false
 

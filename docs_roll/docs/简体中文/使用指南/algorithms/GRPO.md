@@ -37,9 +37,8 @@ dual_clip_loss: true
 # clip
 reward_clip: 10
 # normalize
-reward_norm: null
-reward_shift: false
-reward_scale: false
+norm_mean_type: None
+norm_std_type: None
 
 # reward
 add_token_level_kl: false
@@ -64,9 +63,8 @@ add_token_level_kl: false
 - `advantage_clip`: 优势值裁剪范围
 - `dual_clip_loss`: 是否使用双重裁剪损失
 - `reward_clip`: 奖励值裁剪范围
-- `reward_norm`: 奖励归一化类型
-- `reward_shift`: 是否在奖励归一化中仅减去均值
-- `reward_scale`: 是否在奖励归一化中仅除以标准差
+- `norm_mean_type`: 奖励归一化均值类型，可选值为 "batch", "group", "running", None，默认值为None
+- `norm_std_type`: 奖励归一化标准差类型，可选值为 "batch", "group", "running", None，默认值为None
 - `add_token_level_kl`: 是否添加 token 级别的 KL 惩罚
 
 ## GRPO 与 PPO 的区别
