@@ -5,6 +5,7 @@ from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
 from vllm.engine.metrics_types import StatLoggerBase
 
+import roll.third_party.vllm.fp8 as fp8
 from roll.utils.logging import get_logger
 
 logger = get_logger()
@@ -55,6 +56,8 @@ class LLMEngine0100(LLMEngine):
 
         # change worker cls to custom
         cls.update_worker_cls_config(vllm_config)
+
+        fp8.update_quant_config(vllm_config)
 
         engine_cls = cls
         if envs.VLLM_USE_V1:

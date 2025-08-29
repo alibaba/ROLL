@@ -37,7 +37,8 @@ def patch_vllm_moe_model_weight_loader(model):
         mlp = getattr(layer, "mlp")
         param_dict = dict(mlp.named_parameters())
         for name, param in param_dict.items():
-            if "w13_weight" in name or "w2_weight" in name:
+            skip_patch = getattr(param, "roll_skip_patch_moe", False)
+            if ("w13_weight" in name or "w2_weight" in name) and not skip_patch:
                 param.weight_loader = mlp.experts.weight_loader
 
 class TensorLoRARequest(LoRARequest):
