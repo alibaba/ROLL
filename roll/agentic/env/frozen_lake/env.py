@@ -123,9 +123,16 @@ class FrozenLakeEnv(Env, GymFrozenLakeEnv):
             "success": self.desc[self.player_pos] == b"G",
             "format_penalty": self.format_penalty
         }
+        metrics_agg_mode = {
+            "action_is_effective": "mean",
+            "action_is_valid": "mean",
+            "success": "last",
+            "format_penalty": "mean",
+        }
         info = {
             "suffix": self.get_task_suffix(),
             "metrics": metrics,
+            "metrics_agg_mode": metrics_agg_mode,
         }
         info.update(action_info)
         if terminated:

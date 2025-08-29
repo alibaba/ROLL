@@ -14,7 +14,7 @@ gem_math:
     env_config:
       dataset_name: axon-rl/ASDIV-2k
   GSM8K:
-    env_type: "math:GSM8K"
+    env_type: "roll_math"
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
@@ -22,6 +22,27 @@ gem_math:
     agent_template: ${math_agent_template}
     env_config:
       dataset_name: axon-rl/GSM-8k
+  GSM8K_with_python_code:
+    env_type: "roll_math"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      max_steps: ${max_actions_per_traj}
+      dataset_name: axon-rl/GSM-8k
+    tool_wrapper:
+      wrapper_args:
+        tool_reward: 0
+        tool_success_reward: 0
+        max_tool_uses: 5
+      tool_configs:
+        - tool_id: python_code
+          tool_args:
+            timeout: 5
+            sandbox_type: none
+            keep_error_last_line: false
   Math12K:
     env_type: "math:Math12K"
     max_steps: ${max_actions_per_traj}
@@ -41,7 +62,7 @@ gem_math:
     env_config:
       dataset_name: axon-rl/MATH-lvl3to5-8k
   Orz57K:
-    env_type: "math:Orz57K"
+    env_type: "roll_math"
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
@@ -49,6 +70,27 @@ gem_math:
     agent_template: ${math_agent_template}
     env_config:
       dataset_name: axon-rl/ORZ-57k
+  Orz57K_with_python_code:
+    env_type: "roll_math"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      max_steps: ${max_actions_per_traj}
+      dataset_name: axon-rl/ORZ-57k
+    tool_wrapper:
+      wrapper_args:
+        tool_reward: 0
+        tool_success_reward: 0
+        max_tool_uses: 5
+      tool_configs:
+        - tool_id: python_code
+          tool_args:
+            timeout: 5
+            sandbox_type: none
+            keep_error_last_line: false
   DeepScaleR40K:
     env_type: "math:DeepScaleR40K"
     max_steps: ${max_actions_per_traj}

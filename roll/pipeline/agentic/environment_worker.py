@@ -12,9 +12,6 @@ from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider, default_processor_provider
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig
-from roll.pipeline.agentic.env_manager.step_env_manager import StepEnvManager
-from roll.pipeline.agentic.env_manager.traj_env_manager import TrajEnvManager
-from roll.pipeline.agentic.env_manager.vl_traj_env_manager import VLTrajEnvManager
 from roll.utils.import_utils import safe_import_class
 
 
@@ -50,36 +47,24 @@ class EnvironmentWorker(Worker):
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
         def create_env_manager(env_id, env_config):
-            self.logger.info(f"use env_manager_cls: {env_config['env_manager_cls']}")
+            if env_id == 0:
+                self.logger.info(f"use env_manager_cls: {env_config['env_manager_cls']}")
             env_manager_cls = safe_import_class(env_config["env_manager_cls"])
 
             assert env_manager_cls is not None
-
-            if env_manager_cls in [TrajEnvManager, StepEnvManager]:
-                return env_id, env_manager_cls(
-                    worker_config=self.worker_config,
-                    pipeline_config=pipeline_config,
-                    env_config=env_config,
-                    tokenizer=copy.deepcopy(self.tokenizer),  # https://github.com/huggingface/tokenizers/issues/537
-                    generate_scheduler=generate_scheduler,
-                    output_queue=output_queue,
-                    thread_lock=self.thread_lock,
-                    mode=mode
-                )
-            elif env_manager_cls == VLTrajEnvManager:
-                tokenizer = copy.deepcopy(self.tokenizer)
-                processor = copy.deepcopy(self.processor)
-                return env_id, env_manager_cls(
-                    worker_config=self.worker_config,
-                    pipeline_config=pipeline_config,
-                    env_config=env_config,
-                    tokenizer=tokenizer,  # https://github.com/huggingface/tokenizers/issues/537
-                    processor=processor,
-                    generate_scheduler=generate_scheduler,
-                    output_queue=output_queue,
-                    thread_lock=self.thread_lock,
-                    mode=mode
-                )
+            tokenizer = copy.deepcopy(self.tokenizer)
+            processor = copy.deepcopy(self.processor)
+            return env_id, env_manager_cls(
+                worker_config=self.worker_config,
+                pipeline_config=pipeline_config,
+                env_config=env_config,
+                tokenizer=tokenizer,  # https://github.com/huggingface/tokenizers/issues/537
+                processor=processor,
+                generate_scheduler=generate_scheduler,
+                output_queue=output_queue,
+                thread_lock=self.thread_lock,
+                mode=mode
+            )
         with ThreadPoolExecutor(max_workers=min(len(self.env_configs), 64)) as executor:
             futures = [
                 executor.submit(create_env_manager, env_id, env_config)

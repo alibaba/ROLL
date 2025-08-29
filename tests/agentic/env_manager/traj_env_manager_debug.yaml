@@ -33,6 +33,10 @@ custom_envs:
     ${custom_env.NaturalQuestions}
   GemGame:
     ${gem_games.Hangman}
+  GSM_8k:
+    ${custom_env.GSM_8k}
+  CodeContest:
+    ${custom_env.CodeContest}
 
 actor_infer:
   generating_args:
@@ -43,7 +47,7 @@ actor_infer:
     temperature: 0.99
     num_return_sequences: 1
 
-max_tokens_per_step: 128
+max_tokens_per_step: 2048
 max_actions_per_traj: 10
 
 env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
@@ -60,18 +64,6 @@ custom_env:
       action_pattern: ${all_response_pattern}
       dim_room: [10, 10]
       num_boxes: 1
-    wrappers:
-      - python_tool:
-          tool_type: python_code
-          tool_args:
-            timeout: 5
-            sandbox_type: none
-            keep_error_last_line: false
-          wrapper_cls: gem.tools.tool_env_wrapper.ToolEnvWrapper
-          wrapper_args:
-            tool_reward: 0.05
-            tool_success_reward: 0.25
-            max_tool_uses: 5
   FrozenLake:
     env_type: frozen_lake
     max_steps: ${max_actions_per_traj}
@@ -92,7 +84,60 @@ custom_env:
     agent_system_template: ${single_prompt_agent_system_template}
     agent_template: ${single_prompt_agent_template}
     env_config:
-      action_pattern: ${all_response_pattern}
-      max_steps: 1
-      is_slippery: false
-      dataset_name: axon-rl/NaturalQuestions
+      max_steps: 10
+      dataset_name: NaturalQuestions
+    tool_wrapper:
+      wrapper_args:
+        tool_reward: 0.05
+        tool_success_reward: 0.25
+        max_tool_uses: 5
+      tool_configs:
+        - tool_id: search
+          tool_args:
+            search_url: http://localhost:8000/retrieve
+            topk: 3
+  GSM_8k:
+    env_type: "math:GSM8K"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${single_prompt_agent_system_template}
+    agent_template: ${single_prompt_agent_template}
+    env_config:
+      max_steps: 10
+      dataset_name: GSM-8k
+    tool_wrapper:
+      wrapper_args:
+        tool_reward: 0.05
+        tool_success_reward: 0.25
+        max_tool_uses: 5
+      tool_configs:
+#        - tool_id: python_code
+#          tool_args:
+#            timeout: 5
+#            sandbox_type: none
+#            keep_error_last_line: false
+        - tool_id: mcp
+          tool_args:
+            server_url: xxx
+  CodeContest:
+    env_type: "code:CodeContest"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${single_prompt_agent_system_template}
+    agent_template: ${single_prompt_agent_template}
+    env_config:
+      max_steps: 10
+      dataset_name: CodeContest
+    tool_wrapper:
+      wrapper_args:
+        tool_reward: 0.05
+        tool_success_reward: 0.25
+        max_tool_uses: 5
+      tool_configs:
+        - tool_id: python_code
+          tool_args:
+            timeout: 5
+            sandbox_type: none
+            keep_error_last_line: false

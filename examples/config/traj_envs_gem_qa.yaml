@@ -61,7 +61,7 @@ gem_qa:
     env_config:
       dataset_name: axon-rl/NaturalQuestions
   HotpotQA:
-    env_type: "qa:HotpotQA"
+    env_type: "roll_qa"
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
@@ -69,6 +69,31 @@ gem_qa:
     agent_template: ${qa_agent_template}
     env_config:
       dataset_name: axon-rl/HotpotQA
+      split: train
+      question_key: problem
+      answer_key: answer
+  HotpotQA_with_mcp:
+    env_type: "roll_qa"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${qa_agent_system_template}
+    agent_template: ${qa_agent_template}
+    max_env_step_concurrent: 10
+    env_config:
+      dataset_name: axon-rl/HotpotQA
+      split: train
+      question_key: problem
+      answer_key: answer
+    tool_wrapper:
+      wrapper_args:
+        tool_reward: 0.0
+        tool_success_reward: 0.0
+        max_tool_uses: 1
+      tool_configs:
+        - tool_id: mcp
+          tool_args:
+            server_url: https://chatos-mcp-servers.alibaba-inc.com/search/web/sse
 
 qa_agent_system_template: You're a helpful assistant.
 qa_agent_template: "{observation}"

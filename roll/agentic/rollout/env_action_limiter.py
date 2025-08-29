@@ -104,6 +104,12 @@ class LimiterClient:
             self._initialize_limiter()
         ray.get(self.limiter.update_limit.remote(new_limit))
 
+    def __enter__(self):
+        self._acquire_id = self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release(self._acquire_id)
 
 # Global singleton instances
 _global_limiters = {}

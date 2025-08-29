@@ -23,7 +23,7 @@ from roll.models.model_providers import get_extra_data_provider
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig, AgenticConfig
 from roll.pipeline.agentic.env_manager.traj_env_manager import TrajEnvManager
 from roll.utils.constants import GenerateStopReason
-from roll.utils.functionals import pad_to_length
+from roll.utils.functionals import pad_to_length, aggregate_metrics
 from roll.utils.logging import get_logger
 
 
@@ -276,22 +276,10 @@ class VLTrajEnvManager(TrajEnvManager):
             "episode_scores": np.array([episode_score], dtype=object),
         })
 
-        metrics = self.rollout_cache.history[-1].get('metrics', {})
-        env_metric = {
-            'success': float(metrics.get('success', episode_score > 0)),
-            'num_actions': rollout_cache.step,
-        }
-        custom_metric = {}
-        for turn in self.rollout_cache.history:
-            for k, v in turn.get('metrics', {}).items():
-                if k == 'success':
-                    continue
-                if k not in custom_metric:
-                    custom_metric[k] = []
-                custom_metric[k].append(float(v))
-
-        for k, v in custom_metric.items():
-            env_metric[k] = np.sum(v) / len(self.rollout_cache.history)
+        metrics_agg_mode = self.rollout_cache.history[-1].get('metrics_agg_mode', {})
+        history_metrics = [item.get("metrics", {}) for item in self.rollout_cache.history]
+        env_metric = aggregate_metrics(history_metrics=history_metrics, metrics_agg_mode=metrics_agg_mode)
+        env_metric["num_actions"] = rollout_cache.step
 
         env_metric = {f"env/{rollout_cache.tag}/{k}": v for k, v in env_metric.items()}
         env_metric["env/response_length"] = response_length

@@ -8,6 +8,9 @@ logger = get_logger()
 
 gem.register("sokoban", entry_point="roll.agentic.env.sokoban:SokobanEnv")
 gem.register("frozen_lake", entry_point="roll.agentic.env.frozen_lake:FrozenLakeEnv")
+gem.register("roll_math", entry_point="roll.agentic.env.gem.math_env:MathEnv")
+gem.register("roll_code", entry_point="roll.agentic.env.gem.code_env:CodeEnv")
+gem.register("roll_qa", entry_point="roll.agentic.env.gem.qa_env:QaEnv")
 
 
 try:

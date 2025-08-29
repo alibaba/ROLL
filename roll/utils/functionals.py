@@ -889,3 +889,46 @@ def filter_func_args(func, forward_args):
     forward_params = signature.parameters.keys()
     valid_args = {k: v for k, v in forward_args.items() if k in forward_params}
     return valid_args
+
+
+def aggregate_metrics(history_metrics: List[Dict], metrics_agg_mode: Dict[str, str]) -> Dict[str, float]:
+    """
+    Aggregate metrics from history based on the specified aggregation modes.
+
+    Args:
+        history_metrics: List of dictionaries containing metrics for each step
+        metrics_agg_mode: Dictionary mapping metric names to aggregation modes
+                         Supported modes: "sum", "mean", "min", "max", "last", "first"
+
+    Returns:
+        Dictionary of aggregated metrics
+    """
+    # Collect all metrics from history
+    all_metrics = {}
+    for metrics in history_metrics:
+        for k, v in metrics.items():
+            if k not in all_metrics:
+                all_metrics[k] = []
+            all_metrics[k].append(float(v))
+
+    # Aggregate metrics based on mode
+    aggregated_metrics = {}
+    for metric_name, values in all_metrics.items():
+        mode = metrics_agg_mode.get(metric_name, "mean")  # default to mean
+        if mode == "sum":
+            aggregated_metrics[metric_name] = float(np.sum(values))
+        elif mode == "mean":
+            aggregated_metrics[metric_name] = float(np.mean(values))
+        elif mode == "min":
+            aggregated_metrics[metric_name] = float(np.min(values))
+        elif mode == "max":
+            aggregated_metrics[metric_name] = float(np.max(values))
+        elif mode == "last":
+            aggregated_metrics[metric_name] = values[-1]
+        elif mode == "first":
+            aggregated_metrics[metric_name] = values[0]
+        else:
+            # Default to mean for unknown modes
+            aggregated_metrics[metric_name] = float(np.mean(values))
+
+    return aggregated_metrics

@@ -132,9 +132,16 @@ class SokobanEnv(Env, GymSokobanEnv):
             "success": self.boxes_on_target == self.num_boxes,
             "format_penalty": 0,
         }
+        metrics_agg_mode = {
+            "action_is_effective": "mean",
+            "action_is_valid": "mean",
+            "success": "last",
+            "format_penalty": "mean",
+        }
         info = {
             "suffix": self.get_task_suffix(),
             "metrics": metrics,
+            "metrics_agg_mode": metrics_agg_mode
         }
         info.update(action_info)
         truncated = False

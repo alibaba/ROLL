@@ -269,19 +269,15 @@ class AgenticPipeline(BasePipeline):
                 for group_name, group_batch in batch_grouped.items():
                     group_batch = group_batch.select_idxs(idxs=[random.choice(range(len(group_batch)))])
                     prompt_mask = group_batch.batch["prompt_mask"]
-                    non_prompt_mask = torch.logical_not(group_batch.batch["prompt_mask"])
+                    non_prompt_mask = torch.logical_not(group_batch.batch["prompt_mask"]) * group_batch.batch["attention_mask"]
                     input_ids = group_batch.batch["input_ids"]
-                    prompt_ids = torch.where(
-                        prompt_mask.bool(), input_ids, torch.full_like(input_ids, self.tokenizer.pad_token_id)
-                    )
-                    response_ids = torch.where(
-                        non_prompt_mask.bool(), input_ids, torch.full_like(input_ids, self.tokenizer.pad_token_id)
-                    )
-                    prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
-                    responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+                    prompt_ids_list = [input_ids[i][mask.bool()] for i, mask in enumerate(prompt_mask)]
+                    response_ids_list = [input_ids[i][mask.bool()] for i, mask in enumerate(non_prompt_mask)]
+                    prompts = self.tokenizer.batch_decode(prompt_ids_list, skip_special_tokens=False)
+                    responses = self.tokenizer.batch_decode(response_ids_list, skip_special_tokens=False)
                     episode_scores = group_batch.non_tensor_batch["episode_scores"].tolist()
-                    for prompt, prompt_id, response, response_id, episode_score in zip(
-                            prompts, prompt_ids, responses, response_ids, episode_scores
+                    for prompt, response, episode_score in zip(
+                            prompts, responses, episode_scores
                     ):
                         log_res.append(
                             {
@@ -416,7 +412,7 @@ def compute_data_metrics(batch):
     prompt_lengths = prompt_mask.sum(-1).float()  # (batch_size,)
     response_length = response_mask.sum(-1).float()  # (batch_size,)
     returns = batch.batch["returns"]
-    non_prompt_mask = torch.logical_not(batch.batch["prompt_mask"]).float()
+    non_prompt_mask = (torch.logical_not(batch.batch["prompt_mask"]) * batch.batch["attention_mask"]).float().sum(-1)
 
     metrics = {
         # score, sequence_score from env
