@@ -10,6 +10,7 @@ from transformers import (
     AutoTokenizer,
 )
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from transformers.models.auto.auto_factory import _get_model_class
 
 from ...checkpointing import get_checkpoint_name
 from ...utils import get_logger
@@ -112,6 +113,9 @@ def convert_checkpoint_to_hf(model_name_or_path: str, save_directory: str, torch
     if has_remote_code:
         class_ref = hf_config.auto_map["AutoModelForCausalLM"]
         model_class = get_class_from_dynamic_module(class_ref, mca_config.name_or_path)
+    else:
+        model_class = _get_model_class(hf_config, model_class._model_mapping)
+
     model = model_class.from_pretrained(
         None,
         config=hf_config,
