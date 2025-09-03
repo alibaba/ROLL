@@ -140,7 +140,7 @@ class HfInferStrategy(InferenceStrategy):
         collective.broadcast(tensor=buffer, src_rank=0, group_name=comm_plan["group_name"])
         self.update_parameter_in_bucket(model_update_name, meta_infos, buffer, [dist.get_rank()])
 
-    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
+    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name, is_lora=False):
         assert (
             self.worker_config.num_gpus_per_worker == 1
         ), "hf generate only support on device, please use vllm instead."

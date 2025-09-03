@@ -223,7 +223,7 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         return self.model.module
 
     # 参数同步相关接口
-    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
+    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name, is_lora=False):
         comm_plan = self.model_update_comm_plan[model_update_name][src_pp_rank]
         weight = torch.empty(shape, dtype=dtype, device="cuda")
         collective.broadcast(tensor=weight, src_rank=0, group_name=comm_plan["group_name"])
