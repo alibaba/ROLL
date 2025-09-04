@@ -307,6 +307,8 @@ def create_sampling_params_for_sglang(gen_kwargs):
         stop_token_ids=gen_kwargs["eos_token_id"],
         repetition_penalty=gen_kwargs["repetition_penalty"],
         n=gen_kwargs["num_return_sequences"],
+        return_logprob=gen_kwargs.get("logprobs", 0) > 0,
+        stop=gen_kwargs["stop_strings"],
     )
 
 

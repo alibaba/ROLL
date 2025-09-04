@@ -127,9 +127,7 @@ class ActorWorker(Worker):
         else:
             generation_config = data.meta_info["generation_config"]
 
-        generation_config["eos_token_id"] = [
-            self.tokenizer.eos_token_id
-        ] + self.tokenizer.additional_special_tokens_ids
+        generation_config["eos_token_id"] = [self.tokenizer.eos_token_id, self.tokenizer.pad_token_id]
         generation_config["pad_token_id"] = self.tokenizer.pad_token_id
 
         global_step = data.meta_info.get("global_step", 0)
@@ -371,9 +369,7 @@ class ActorWorker(Worker):
                     self.logger.info(f"is_num_return_sequences_expand is True, set num_return_sequences to 1.")
             else:
                 generation_config = data.meta_info["generation_config"]
-            generation_config["eos_token_id"] = [
-                self.tokenizer.eos_token_id
-            ] + self.tokenizer.additional_special_tokens_ids
+            generation_config["eos_token_id"] = [self.tokenizer.eos_token_id, self.tokenizer.pad_token_id]
             generation_config["pad_token_id"] = self.tokenizer.pad_token_id
             data.meta_info["generation_config"] = generation_config
             self.response_call_back_fns[data.meta_info["request_id"]] = data.meta_info.pop("response_callback_fn")

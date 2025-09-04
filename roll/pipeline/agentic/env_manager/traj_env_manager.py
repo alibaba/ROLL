@@ -171,10 +171,7 @@ class TrajEnvManager(BaseEnvManager):
         return self.rollout_cache
 
     def step(self, llm_output: DataProto):
-        responses = self.tokenizer.batch_decode(
-            llm_output.batch['responses'],
-            skip_special_tokens=True
-        )
+        responses = self.tokenizer.batch_decode(llm_output.batch['responses'], skip_special_tokens=False)
 
         with self.thread_lock, self.env_step_limiter:
             observation, reward, terminated, truncated, info = self.env.step(action=responses[0])

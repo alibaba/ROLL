@@ -26,7 +26,7 @@ class SokobanEnv(Env, GymSokobanEnv):
                  env_instruction=None,
                  format_penalty=0.0,
                  action_pattern="^<answer>(.*?)</answer>$",
-                 special_token_list=("<think>", "</think>", "<answer>","</answer>", "<|im_start|>", "<|im_end|>"),
+                 special_token_list=("<|im_start|>", "<|im_end|>"),
                  **kwargs):
         self.GRID_VOCAB = {"#": "wall", "_": "empty", "O": "target", "√": "box on target", "X": "box", "P": "player", "S": "player on target"}
         self.GRID_LOOKUP = {0: "#", 1: "_", 2: "O", 3: "√", 4: "X", 5: "P", 6: "S"}
@@ -184,7 +184,8 @@ if __name__ == "__main__":
             break
         action = int(keyboard)
         assert action in env.ACTION_LOOKUP, f"Invalid action: {action}"
-        action_text = f"<answer>{env.ACTION_LOOKUP[action]}</answer>"
+        action_text = f"<answer>{env.ACTION_LOOKUP[action]}</answer><|im_end|>"
+        import pdb; pdb.set_trace()
         obs, reward, terminate, truncated, info = env.step(action_text)
         print(obs, reward, terminate, info["suffix"])
         if terminate:

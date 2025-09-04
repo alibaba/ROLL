@@ -25,7 +25,7 @@ class FrozenLakeEnv(Env, GymFrozenLakeEnv):
                  env_instruction=None,
                  format_penalty=0.0,
                  action_pattern="^<answer>(.*?)</answer>$",
-                 special_token_list=("<think>", "</think>", "<answer>","</answer>", "<|im_start|>", "<|im_end|>"),
+                 special_token_list=("<|im_start|>", "<|im_end|>"),
                  **kwargs
                  ):
         self.GRID_LOOKUP = {0: "P", 1: "_", 2: "O", 3: "G", 4: "X", 5: "√"}

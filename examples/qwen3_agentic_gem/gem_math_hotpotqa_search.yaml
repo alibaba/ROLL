@@ -94,6 +94,7 @@ actor_infer:
     num_beams: 1
     temperature: 0.99
     num_return_sequences: 1
+    stop_strings: ["</tool_call>"]
   strategy_args:
     strategy_name: vllm
     strategy_config:

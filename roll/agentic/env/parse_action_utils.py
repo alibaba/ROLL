@@ -2,6 +2,10 @@ import re
 
 
 def default_parser_action_func(text, action_pattern, action_lookup, special_token_list):
+    if special_token_list is not None:
+        for special_token in special_token_list:
+            text = text.replace(special_token, "").strip()
+
     action = None
     match = re.search(action_pattern, text, re.DOTALL)
     if not match:
@@ -17,11 +21,6 @@ def default_parser_action_func(text, action_pattern, action_lookup, special_toke
         think_content, action_content = match.group(1).strip(), match.group(2).strip()
     action_content = action_content.strip()
     think_content = think_content.strip()
-
-    if special_token_list is not None:
-        for special_token in special_token_list:
-            action_content = action_content.replace(special_token, "").strip()
-            think_content = think_content.replace(special_token, "").strip()
 
     action = action_content
     if action_lookup is not None:

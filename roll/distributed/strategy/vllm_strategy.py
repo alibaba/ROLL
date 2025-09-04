@@ -345,6 +345,7 @@ def create_sampling_params_for_vllm(gen_kwargs):
             best_of=gen_kwargs["num_beams"],
             use_beam_search=True,
             logprobs=0,
+            stop=gen_kwargs["stop_strings"],
         )
     return SamplingParams(
         max_tokens=gen_kwargs["max_new_tokens"],
@@ -355,6 +356,7 @@ def create_sampling_params_for_vllm(gen_kwargs):
         repetition_penalty=gen_kwargs["repetition_penalty"],
         n=gen_kwargs["num_return_sequences"],
         logprobs=0,
+        stop=gen_kwargs["stop_strings"],
     )
 
 
