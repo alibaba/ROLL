@@ -380,7 +380,7 @@ class AgenticPipeline(BasePipeline):
             metrics["system/batch_remove_count"] = len(remove_indices)
         elif mode == "copy":
             to_add = size_divide - threshold
-            dup_indices = np.random.choice(batch_size, to_add, replace=False)
+            dup_indices = np.random.choice(batch_size, to_add, replace=True) if to_add > batch_size else np.random.choice(batch_size, to_add, replace=False)
             dup_proto = data.select_idxs(dup_indices)
             # TODO: set dup_proto response_mask to 0
             adjusted_batch = DataProto.concat([data, dup_proto])
