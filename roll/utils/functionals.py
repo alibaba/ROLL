@@ -264,18 +264,14 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int = None) -> to
         mask_sum = mask.sum(axis=dim)
         return torch.where(mask_sum > 0, (tensor * mask).sum(axis=dim) / (mask_sum + 1e-8), torch.zeros_like(mask_sum))
     else:
-        return (
-            (tensor * mask).sum() / (mask.sum() + 1e-8) if mask.sum() > 0 else torch.tensor(0.0, device=tensor.device)
-        )
+        return (tensor * mask).sum() / (mask.sum() + 1e-8)
 
 def masked_sum(tensor: torch.Tensor, mask: torch.Tensor, dim: int = None) -> torch.Tensor:
     if dim is not None:
         mask_sum = mask.sum(axis=dim)
         return torch.where(mask_sum > 0, (tensor * mask).sum(axis=dim), torch.zeros_like(mask_sum))
     else:
-        return (
-            (tensor * mask).sum() if mask.sum() > 0 else torch.tensor(0.0, device=tensor.device)
-        )
+        return (tensor * mask).sum()
 
 
 def masked_var(values, mask, unbiased=True):
