@@ -35,6 +35,10 @@ class WorkerConfig:
         default=None,
         metadata={"help": "The class of the worker."}
     )
+    pg_variant: Optional[str] = field(
+        default=None,
+        metadata={"help": "The variant of the policy gradient."}
+    )
     model_args: ModelArguments = field(
         default_factory=ModelArguments,
         metadata={"help": "The arguments for the model, encapsulated in a ModelArguments object."},
@@ -85,6 +89,18 @@ class WorkerConfig:
     system_envs: dict = field(
         default_factory=dict,
         metadata={"help": "system environment variables for this worker."}
+    )
+    topr_positive_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for positive samples in TOPR loss."}
+    )
+    topr_negative_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for negative samples in TOPR loss."}
+    )
+    use_remove_padding: bool = field(
+        default=False,
+        metadata={"help": "Remove tail padding token in a micro batch, don't pack sequences(different from verl). must set `variable_seq_lengths` for megatron."}
     )
 
     def __post_init__(self):

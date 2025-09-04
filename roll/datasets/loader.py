@@ -1,3 +1,4 @@
+import json
 from typing import Union
 
 from datasets import Dataset, IterableDataset, load_dataset
@@ -22,7 +23,7 @@ def get_dataset(
 
     def encode_function(example):
         if data_args.messages is not None:
-            messages = example[data_args.messages]
+            messages = example[data_args.messages] if not isinstance(example[data_args.messages], str) else json.loads(example[data_args.messages])
         else:
             messages = [{"role": "user", "content": example[data_args.prompt]}]
         text = chat_template_func(messages)

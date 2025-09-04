@@ -1,0 +1,161 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "log_probs_megatron_debug"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+system_envs:
+  USE_MODELSCOPE: '1'
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/rl_examples/models/${exp_name}
+
+#track_with: wandb
+#tracker_kwargs:
+#  api_key:
+#  project: roll_examples
+#  notes: roll_examples
+#  tags:
+#    - rlvr
+#    - baseline
+
+# openlm_hub 模型下载
+model_download_type: OPENLM_HUB
+
+# ml_tracker的实验名，自行设置，不要和别人重复，否则没有权限写入报错
+track_with: ml_tracker
+tracker_kwargs:
+ project: roll_pipeline_example # ml_tracker的实验名，
+ notes: "scale aligner pipeline"
+ tags: # mltracker job tags，后续方便管理实验
+   - pipeline
+   - roll
+   - qwen2.5
+
+num_gpus_per_node: 8
+
+max_steps: 500
+save_steps: 100
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+
+rollout_batch_size: 512  # prompt
+prompt_length: 2048
+response_length: 4096
+
+num_return_sequences_in_group: 8
+ppo_epochs: 1
+adv_estimator: "reinforce"
+
+# clip
+value_clip: 0.5
+reward_clip: 10
+advantage_clip: 2.0
+dual_clip_loss: true
+
+# normalize
+reward_norm: null
+reward_shift: false
+reward_scale: false
+
+# data mask
+max_len_mask: true
+difficulty_mask: true
+difficulty_low_threshold: 0.1
+difficulty_high_threshold: 0.95
+error_max_len_clip: false
+
+# data weight
+difficulty_loss_weight: false
+length_loss_weight: false
+
+# reward
+add_token_level_kl: false
+
+# advantage
+whiten_advantages: true
+
+# dynamic sampling scheduler
+# use_additional_prompts: true
+# max_running_requests: 256
+# is_num_return_sequences_expand: false
+
+pretrain: Qwen/Qwen2.5-7B
+reward_pretrain: Qwen/Qwen2.5-7B
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 32
+    warmup_steps: 20
+    num_train_epochs: 50
+  data_args:
+    template: qwen2_5
+    file_name: data/math_deepmath_deal.jsonl
+    dataset_dir: data
+    messages: messages
+    preprocessing_num_workers: 16
+
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 2
+      use_distributed_optimizer: true
+      recompute_granularity: full
+      variable_seq_lengths: true
+      moe_token_dispatcher_type: alltoall
+  device_mapping: list(range(0,8))
+  infer_batch_size: 4
+  use_remove_padding: true
+
+reference:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: qwen2_5
+    file_name: data/math_deepmath_deal.jsonl
+    dataset_dir: data
+    messages: messages
+    preprocessing_num_workers: 16
+
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+      variable_seq_lengths: true
+      moe_token_dispatcher_type: alltoall
+  device_mapping: list(range(0,8))
+  infer_batch_size: 4
+  use_remove_padding: false
