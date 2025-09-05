@@ -920,9 +920,9 @@ def aggregate_metrics(history_metrics: List[Dict], metrics_agg_mode: Dict[str, s
         elif mode == "max":
             aggregated_metrics[metric_name] = float(np.max(values))
         elif mode == "last":
-            aggregated_metrics[metric_name] = values[-1]
+            aggregated_metrics[metric_name] = float(values[-1])
         elif mode == "first":
-            aggregated_metrics[metric_name] = values[0]
+            aggregated_metrics[metric_name] = float(values[0])
         else:
             # Default to mean for unknown modes
             aggregated_metrics[metric_name] = float(np.mean(values))
