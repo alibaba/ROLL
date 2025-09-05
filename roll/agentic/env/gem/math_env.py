@@ -41,7 +41,7 @@ class MathEnv(GEMMathEnv):
             )
             try:
                 is_correct = res.get(timeout=1)
-            except multiprocessing.context.TimeoutError:
+            except (multiprocessing.context.TimeoutError, Exception):
                 is_correct = False
             reward = 1.0 if is_correct else 0
 
