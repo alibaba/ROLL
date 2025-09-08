@@ -17,8 +17,8 @@ RAFT++ (Reward rAnked Fine-Tuning) 是一种基于排序的强化学习算法，
 adv_estimator: "reinforce"
 
 # normalize
-norm_mean_type: None
-norm_std_type: None
+norm_mean_type: ~
+norm_std_type: ~
 
 # advantage
 whiten_advantages: false

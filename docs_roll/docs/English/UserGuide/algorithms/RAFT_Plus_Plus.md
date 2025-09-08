@@ -17,8 +17,8 @@ In ROLL, the RAFT++ algorithm-specific configuration parameters are as follows (
 adv_estimator: "reinforce"
 
 # normalize
-norm_mean_type: None
-norm_std_type: None
+norm_mean_type: ~
+norm_std_type: ~
 
 # advantage
 whiten_advantages: false

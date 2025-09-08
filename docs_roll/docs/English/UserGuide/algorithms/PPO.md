@@ -44,8 +44,8 @@ init_kl_coef: 0.2
 kl_horizon: 10000
 add_token_level_kl: false
 # normalize
-norm_mean_type: None
-norm_std_type: None
+norm_mean_type: ~
+norm_std_type: ~
 ```
 
 ### PPO Parameter Descriptions

@@ -37,8 +37,8 @@ dual_clip_loss: true
 # clip
 reward_clip: 10
 # normalize
-norm_mean_type: None
-norm_std_type: None
+norm_mean_type: ~
+norm_std_type: ~
 
 # reward
 add_token_level_kl: false
