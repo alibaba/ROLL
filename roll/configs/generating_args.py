@@ -54,6 +54,10 @@ class GeneratingArguments:
         default=None,
         metadata={"help": "A list of strings that should terminate generation if the model outputs them."},
     )
+    include_stop_str_in_output: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Whether to include the stop strings in output text."},
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         args = asdict(self)
@@ -61,4 +65,6 @@ class GeneratingArguments:
             args.pop("max_length", None)
         else:
             args.pop("max_new_tokens", None)
+        if self.include_stop_str_in_output is None:
+            args.pop("include_stop_str_in_output", None)
         return args

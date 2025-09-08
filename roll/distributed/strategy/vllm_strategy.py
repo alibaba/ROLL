@@ -346,6 +346,7 @@ def create_sampling_params_for_vllm(gen_kwargs):
             use_beam_search=True,
             logprobs=0,
             stop=gen_kwargs["stop_strings"],
+            include_stop_str_in_output=gen_kwargs.get("include_stop_str_in_output", True),
         )
     return SamplingParams(
         max_tokens=gen_kwargs["max_new_tokens"],
@@ -357,6 +358,7 @@ def create_sampling_params_for_vllm(gen_kwargs):
         n=gen_kwargs["num_return_sequences"],
         logprobs=0,
         stop=gen_kwargs["stop_strings"],
+        include_stop_str_in_output=gen_kwargs.get("include_stop_str_in_output", True),
     )
 
 
