@@ -294,7 +294,7 @@ bash examples/qwen2.5-vl-7B-rlvr/run_rlvr_pipeline.sh
 * 确保安装了所有必要的依赖。注意：VLM 流水线当前只支持使用 VLLM 作为推理引擎，因而需要选择使用对应的requirement文件：
 
   ```bash
-  pip install -r requirements_torch251_vllm.txt
+  pip install -r requirements_torch260_vllm.txt
   ```
 
 * 验证配置中的所有模型路径是否可访问。

@@ -300,7 +300,7 @@ bash examples/qwen2.5-vl-7B-rlvr/run_rlvr_pipeline.sh
 * Ensure all necessary dependencies are installed. NOTE: VLLM is the only supported inference engine for VLM pipeline currently, thus use the corresponding requirement files:
 
   ```bash
-  pip install -r requirements_torch251_vllm.txt
+  pip install -r requirements_torch260_vllm.txt
   ```
 
 * Verify that all model paths in the configuration are accessible.
