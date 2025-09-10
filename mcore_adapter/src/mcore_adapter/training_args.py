@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass, field, fields
 from typing import Literal, Optional, Union
 
+from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from transformers import Seq2SeqTrainingArguments as HFSeq2SeqTrainingArguments
 from transformers import TrainingArguments as HFTrainingArguments
 
@@ -54,6 +55,15 @@ class DistributingParallelArguments:
             "layer in the context of partition and placement for pipeline parallelism."
         },
     )
+    pipeline_model_parallel_layout: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Custom definition of the pipeline parallel partitioning. "
+            "Can be a string like 'E,t*3|t*4,L' or a list of lists of layer types. "
+            "'E' is embedding, 't' is a transformer layer, 'L' is the loss/output layer. "
+            "Stages are separated by '|' in the string representation."
+        },
+    )
     overlap_p2p_comm: bool = field(
         default=True,
         metadata={
@@ -69,10 +79,6 @@ class DistributingParallelArguments:
         },
     )
     # recompute
-    distribute_saved_activations: Optional[bool] = field(
-        default=None,
-        metadata={"help": "If True, distribute recomputed activations across the model parallel group."},
-    )
     recompute_granularity: Optional[Literal["full", "selective"]] = field(
         default=None,
         metadata={
@@ -216,8 +222,26 @@ class DistributingParallelArguments:
                 f"variable sequence length, please use alltoall dispatcher instead."
             )
 
+        if (
+            self.pipeline_model_parallel_layout is not None
+            and self.pipeline_model_parallel_size
+            and self.virtual_pipeline_model_parallel_size is None
+        ):
+            num_stages = PipelineParallelLayerLayout.get_num_stages_from_str(self.pipeline_model_parallel_layout)
+            assert num_stages % self.pipeline_model_parallel_size == 0, (
+                f"The length of pipeline_model_parallel_layout must be divisible"
+                f" by pipeline_model_parallel_size ({num_stages=},"
+                f" {self.pipeline_model_parallel_size=})"
+            )
+            self.virtual_pipeline_model_parallel_size = num_stages // self.pipeline_model_parallel_size
+            if self.virtual_pipeline_model_parallel_size == 1:
+                self.virtual_pipeline_model_parallel_size = None
+
     def get_config_dict(self):
-        return {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) is not None}
+        config_dict = {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) is not None}
+        additional_configs = config_dict.pop("additional_configs", {})
+        config_dict.update(additional_configs or {})
+        return config_dict
 
 
 @dataclass
@@ -281,9 +305,9 @@ class MegatronArguments(DistributingParallelArguments):
         super().__post_init__()
         if self.overlap_param_gather:
             assert self.use_distributed_optimizer, "--overlap_param_gather only supported with distributed optimizer"
-            assert (
-                self.overlap_grad_reduce
-            ), "--overlap_grad_reduce should be turned on when using --overlap_param_gather"
+            assert self.overlap_grad_reduce, (
+                "--overlap_grad_reduce should be turned on when using --overlap_param_gather"
+            )
 
     @classmethod
     def from_json_file(cls, json_file_path) -> "MegatronArguments":

@@ -7,7 +7,7 @@ from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from ...constants import MCA_CONFIG_NAME
 from ...utils import get_logger
-from ..model_config import McaModelConfig, MLAMcaModelConfig
+from ..model_config import McaModelConfig
 
 
 logger = get_logger(__name__)
@@ -31,10 +31,6 @@ def register_config(model_type, cls=None):
 def get_config_cls(model_type) -> "McaModelConfig":
     cls = CONFIG_MAPPING.get(model_type)
     if cls is None:
-        if model_type in ("llama", "qwen2", "qwen3", "qwen2_moe", "qwen3_moe"):
-            return McaModelConfig
-        if model_type in ("deepseek_v3",):
-            return MLAMcaModelConfig
         logger.warning(f"No config found for model type {model_type}, use McaModelConfig!")
         cls = McaModelConfig
     return cls

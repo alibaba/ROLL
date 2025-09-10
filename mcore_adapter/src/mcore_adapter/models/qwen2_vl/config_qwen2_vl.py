@@ -17,15 +17,11 @@ class Qwen2VLConfig(McaModelConfig):
     video_token_id: int = 151656
     vision_config: Optional[dict] = field(
         default=None,
-        metadata={
-            "help": "Vision model config."
-        },
+        metadata={"help": "Vision model config."},
     )
     rope_scaling: Optional[dict] = field(
         default=None,
-        metadata={
-            "help": "Rope scaling."
-        },
+        metadata={"help": "Rope scaling."},
     )
 
     def __post_init__(self):
@@ -42,5 +38,6 @@ class Qwen2VLConfig(McaModelConfig):
             * vision_config_obj.in_channels
             * vision_config_obj.temporal_patch_size
         )  # 1176
+        self.mrope_section = self.rope_scaling.get("mrope_section")
 
         assert self.hidden_dropout == 0.0, "hidden dropout is Not supported for qwen2_vl yet."

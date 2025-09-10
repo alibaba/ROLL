@@ -1,4 +1,15 @@
-from . import qwen2_vl, qwen2_5_vl, deepseek_v3
+from . import (
+    deepseek_v3,
+    llama,
+    mistral,
+    mixtral,
+    qwen2,
+    qwen2_5_vl,
+    qwen2_moe,
+    qwen2_vl,
+    qwen3,
+    qwen3_moe,
+)
 from .auto import AutoConfig, AutoModel
 from .model_config import McaModelConfig
 from .model_factory import McaGPTModel, VirtualModels

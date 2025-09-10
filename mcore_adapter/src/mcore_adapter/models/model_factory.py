@@ -4,27 +4,22 @@ import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
-import torch.distributed
 from megatron.core import mpu, tensor_parallel
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
     get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
+    get_gpt_mtp_block_spec,
 )
 from megatron.core.transformer.module import MegatronModule
 
-from ..checkpointing import (
-    ensure_directory_exists,
-    get_checkpoint_name,
-    get_checkpoint_tracker_filename,
-    load_state_dict_from_checkpoint,
-)
+from ..checkpointing import load_state_dict_from_checkpoint, save_config_and_state_dict
 from ..utils import get_logger
 from .converter.convert_utils import MAX_SHARD_SIZE
 from .converter.model_converter import ModelConverter
 from .model_config import McaModelConfig
-from .model_utils import ModuleUtilsMixin, RMSNorm, exists_hf_config, exists_mca_config
+from .model_utils import ModuleUtilsMixin, RMSNorm, exists_hf_config, exists_mca_config, get_thd_data_on_this_cp_rank
 
 
 if TYPE_CHECKING:
@@ -42,6 +37,7 @@ class VirtualModels:
         for i in range(config.virtual_pipeline_model_parallel_size or 1):
             if (config.virtual_pipeline_model_parallel_size or 1) > 1:
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
+                kwargs["vp_stage"] = i
             self.models.append(cls(config, *args, **kwargs))
 
     def save_pretrained(self, save_directory: str):
@@ -146,11 +142,11 @@ class VirtualModels:
     def sharded_state_dict(self, prefix: str = "", *args, **kwargs):
         state_dict = {}
         if len(self.models) == 1:
-            state_dict['model'] = self.models[0].sharded_state_dict(prefix, *args, **kwargs)
+            state_dict["model"] = self.models[0].sharded_state_dict(prefix, *args, **kwargs)
         else:
             for i in range(len(self.models)):
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
-                state_dict['model%d' % i] = self.models[i].sharded_state_dict(prefix, *args, **kwargs)
+                state_dict["model%d" % i] = self.models[i].sharded_state_dict(prefix, *args, **kwargs)
         return state_dict
 
 
@@ -180,7 +176,6 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
 
         if mca_ckpt_exist and dist_config_match:
             state_dict = load_state_dict_from_checkpoint(model_name_or_path)
-            models.load_state_dict(state_dict)
         else:
             if not exists_hf_config(model_name_or_path):
                 raise ValueError(
@@ -195,31 +190,20 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                     mpu.set_virtual_pipeline_model_parallel_rank(i)
                     key = f"{key}{i}"
                 state_dict[key] = converter.load_mca_state_dict_from_hf()
-            missing_keys, unexpected_keys = models.load_state_dict(state_dict, strict=False)
-            if missing_keys:
-                missing_keys = [key for key in missing_keys if not key.endswith("._extra_state")]
-            if unexpected_keys and config.tie_embeddings_and_output_weights:
-                unexpected_keys = [key for key in unexpected_keys if not key.endswith("output_layer.weight")]
-            assert unexpected_keys is None or len(unexpected_keys) == 0, f"unexpected_keys: {unexpected_keys}"
-            assert missing_keys is None or len(missing_keys) == 0, f"missing_keys: {missing_keys}"
+        missing_keys, unexpected_keys = models.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            missing_keys = [key for key in missing_keys if not key.endswith("._extra_state")]
+        if unexpected_keys and config.tie_embeddings_and_output_weights:
+            unexpected_keys = [key for key in unexpected_keys if not key.endswith("output_layer.weight")]
+        assert unexpected_keys is None or len(unexpected_keys) == 0, f"unexpected_keys: {unexpected_keys}"
+        assert missing_keys is None or len(missing_keys) == 0, f"missing_keys: {missing_keys}"
         logger.info(f"End loading, cost: {time.time() - load_start_time:0.3f}s")
         return models
 
     def save_pretrained(self, save_directory: str, state_dict=None):
         os.makedirs(save_directory, exist_ok=True)
-        # TODO: better directory structure
-        tracker_file = get_checkpoint_tracker_filename(save_directory)
-        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            self.config.save_pretrained(save_directory)
-            with open(tracker_file, "w") as f:
-                f.write("1")
-        if not torch.distributed.is_initialized() or mpu.get_expert_data_parallel_rank() == 0:
-            checkpoint_name = get_checkpoint_name(save_directory)
-            ensure_directory_exists(checkpoint_name)
-            if state_dict is None:
-                state_dict = {"model": self.state_dict_for_save_checkpoint()}
-            torch.save(state_dict, checkpoint_name)
-            logger.info(f"Saving model checkpoint to {checkpoint_name}")
+        state_dict = state_dict if state_dict is not None else {"model": self.state_dict_for_save_checkpoint()}
+        save_config_and_state_dict(save_directory, self.config, state_dict)
 
     def get_batch_on_this_cp_rank(self, batch: Dict[str, "torch.Tensor"], dim3_keys: List[str] = ["attention_mask"]):
         # copy from Megatron-LM
@@ -234,6 +218,11 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
         # that we can get balanced workload among GPUs in a context parallel group.
         cp_size = self.config.context_parallel_size
         if cp_size > 1:
+            if "packed_seq_params" in batch and batch["packed_seq_params"].qkv_format == "thd":
+                packed_seq_params = batch.pop("packed_seq_params")
+                cp_batch = get_thd_data_on_this_cp_rank(batch, packed_seq_params, dim3_keys)
+                return cp_batch
+
             cp_rank = mpu.get_context_parallel_rank()
             for key, val in batch.items():
                 if val is not None and isinstance(val, torch.Tensor):
@@ -259,33 +248,36 @@ class McaGPTModel(GPTModel, PretrainedModel):
     config_class = McaModelConfig
 
     def __init__(self, config: "McaModelConfig", **kwargs):
+        self.vp_stage = kwargs.pop("vp_stage", mpu.get_virtual_pipeline_model_parallel_rank())
+        self.pre_process = kwargs.pop("pre_process", mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=self.vp_stage))
+        self.post_process = kwargs.pop("post_process", mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=self.vp_stage))
         transformer_layer_spec = self._get_transformer_layer_spec(config)
-        pre_process = kwargs.pop("pre_process", mpu.is_pipeline_first_stage())
-        post_process = kwargs.pop("post_process", mpu.is_pipeline_last_stage())
+
         super().__init__(
             config=config,
             transformer_layer_spec=transformer_layer_spec,
             vocab_size=config.padded_vocab_size,
             max_sequence_length=config.max_sequence_length,
-            pre_process=pre_process,
-            post_process=post_process,
+            pre_process=self.pre_process,
+            post_process=self.post_process,
             parallel_output=True,
             share_embeddings_and_output_weights=config.tie_embeddings_and_output_weights,
             position_embedding_type=config.position_embedding_type,
             rotary_percent=config.rotary_percent,
             rotary_base=config.rotary_base,
-            mtp_block_spec=kwargs.get("mtp_block_spec", None),
+            mtp_block_spec=self._get_mtp_block_spec(config),
+            vp_stage=self.vp_stage,
         )
         for param in self.parameters():
             tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
         if not config.use_cpu_initialization:
             self.cuda(torch.cuda.current_device())
 
-    def _get_transformer_layer_spec(self, config: Optional["McaModelConfig"]=None):
+    def _get_transformer_layer_spec(self, config: Optional["McaModelConfig"] = None):
         config = config or self.config
         use_te = config.transformer_impl == "transformer_engine"
         if config.num_moe_experts:
-            transformer_block_spec = get_gpt_decoder_block_spec(config, use_transformer_engine=use_te)
+            transformer_block_spec = get_gpt_decoder_block_spec(config, use_transformer_engine=use_te, vp_stage=self.vp_stage)
             if not use_te and config.normalization == "RMSNorm":
                 transformer_block_spec.layer_norm = RMSNorm
             for transformer_layer_spec in transformer_block_spec.layer_specs:
@@ -293,13 +285,29 @@ class McaGPTModel(GPTModel, PretrainedModel):
                     transformer_layer_spec.submodules.input_layernorm = RMSNorm
                     transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
                 if hasattr(transformer_layer_spec.submodules.mlp.submodules, "shared_experts"):
-                    transformer_layer_spec.submodules.mlp.submodules.shared_experts.params["gate"] = config.moe_use_shared_expert_gate
+                    transformer_layer_spec.submodules.mlp.submodules.shared_experts.params["gate"] = (
+                        config.moe_use_shared_expert_gate
+                    )
             return transformer_block_spec
         if use_te:
-            return get_gpt_layer_with_transformer_engine_spec(config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm)
+            return get_gpt_layer_with_transformer_engine_spec(
+                config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
+            )
         else:
-            module_spec = get_gpt_layer_local_spec(config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm)
+            module_spec = get_gpt_layer_local_spec(
+                config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
+            )
             if config.normalization == "RMSNorm":
                 module_spec.submodules.input_layernorm = RMSNorm
                 module_spec.submodules.pre_mlp_layernorm = RMSNorm
             return module_spec
+
+    def _get_mtp_block_spec(self, config: Optional["McaModelConfig"] = None):
+        config = config or self.config
+        if config.mtp_num_layers and config.mtp_num_layers > 0:
+            transformer_layer_spec = self._get_transformer_layer_spec(config)
+            use_te = config.transformer_impl == "transformer_engine"
+            spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, use_te)
+            return spec
+        else:
+            return None

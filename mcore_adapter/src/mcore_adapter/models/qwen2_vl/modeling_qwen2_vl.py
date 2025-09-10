@@ -2,8 +2,6 @@ from typing import List, Optional, Tuple
 
 import torch
 from megatron.core import mpu
-from megatron.core.transformer.attention import SelfAttention
-from torch import nn
 
 from ..auto.modeling_auto import register_model
 from ..model_factory import McaGPTModel
@@ -11,186 +9,8 @@ from ..model_utils import ModuleUtilsMixin
 from .config_qwen2_vl import Qwen2VLConfig
 
 
-# copy from transformers
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-# copy from transformers
-def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
-    """
-    q: [s, b, head_num, dim]
-    k: [s, b, grouped_head_num, dim]
-    """
-    mrope_section = mrope_section * 2
-    cos = (
-        torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1)
-        .unsqueeze(unsqueeze_dim)
-        .transpose(0, 2)
-        .transpose(1, 2)
-    )
-    sin = (
-        torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1)
-        .unsqueeze(unsqueeze_dim)
-        .transpose(0, 2)
-        .transpose(1, 2)
-    )
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-class Qwen2VLRotaryEmbedding(nn.Module):
-    def __init__(
-        self,
-        kv_channels: int,
-        rotary_percent: float,
-        rotary_interleaved: bool = False,
-        seq_len_interpolation_factor: float = None,
-        rotary_base: int = 10000,
-        use_cpu_initialization: bool = False,
-    ) -> None:
-        super().__init__()
-
-        dim = kv_channels
-        if rotary_percent < 1.0:
-            dim = int(dim * rotary_percent)
-        self.rotary_interleaved = rotary_interleaved
-
-        self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        device = "cpu" if use_cpu_initialization else torch.cuda.current_device()
-        self.inv_freq = 1.0 / (rotary_base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        # Core RoPE block. In contrast to other models, Qwen2_VL has different position ids for thw grids
-        # So we expand the inv_freq to shape (3, ...)
-        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
-        position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
-            emb = torch.cat((freqs, freqs), dim=-1)
-        return emb
-
-
-# TODO: support generation
-class Qwen2VLAttention(SelfAttention):
-    def forward(
-        self,
-        hidden_states,
-        attention_mask,
-        key_value_states=None,
-        inference_params=None,
-        rotary_pos_emb=None,
-        rotary_pos_cos=None,
-        rotary_pos_sin=None,
-        attention_bias=None,
-        packed_seq_params=None,
-        **kwargs,
-    ):
-        query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
-        assert packed_seq_params is None, "Qwen2VLAttention does not support packed seq."
-        query, key = apply_multimodal_rotary_pos_emb(
-            query,
-            key,
-            rotary_pos_emb.cos().to(query.dtype),
-            rotary_pos_emb.sin().to(query.dtype),
-            mrope_section=self.config.rope_scaling["mrope_section"],
-        )
-        if self.checkpoint_core_attention and self.training:
-            core_attn_out = self._checkpointed_attention_forward(
-                query,
-                key,
-                value,
-                attention_mask,
-                attn_mask_type=self.attn_mask_type,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-            )
-        else:
-            core_attn_out = self.core_attention(
-                query,
-                key,
-                value,
-                attention_mask,
-                attn_mask_type=self.attn_mask_type,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-            )
-
-        output, bias = self.linear_proj(core_attn_out)
-        return output, bias
-
-
-# language model for Qwen2VL
-class Qwen2VLBaseModel(McaGPTModel):
-    config_class = Qwen2VLConfig
-
-    def __init__(self, config: "Qwen2VLConfig", **kwargs):
-        super().__init__(config, **kwargs)
-        self.rotary_pos_emb = Qwen2VLRotaryEmbedding(
-            kv_channels=self.config.kv_channels,
-            rotary_percent=self.config.rotary_percent,
-            rotary_interleaved=self.config.rotary_interleaved,
-            rotary_base=self.config.rotary_base,
-        )
-
-    def forward(
-        self,
-        input_ids,
-        position_ids,
-        attention_mask,
-        decoder_input=None,
-        labels=None,
-        inference_params=None,
-        packed_seq_params=None,
-        extra_block_kwargs=None,
-    ):
-        if decoder_input is not None:
-            pass
-        elif self.pre_process:
-            decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
-        else:
-            # intermediate stage of pipeline
-            # decoder will get hidden_states from encoder.input_tensor
-            decoder_input = self.decoder.input_tensor
-        rotary_pos_emb = self.rotary_pos_emb(decoder_input, position_ids)
-        # Run decoder.
-        hidden_states = self.decoder(
-            hidden_states=decoder_input,
-            attention_mask=attention_mask,
-            inference_params=inference_params,
-            rotary_pos_emb=rotary_pos_emb,
-            packed_seq_params=packed_seq_params,
-            **(extra_block_kwargs or {}),
-        )
-        if not self.post_process:
-            return hidden_states
-        # logits and loss
-        output_weight = None
-        if self.share_embeddings_and_output_weights:
-            output_weight = self.shared_embedding_or_output_weight()
-        logits, _ = self.output_layer(hidden_states, weight=output_weight)
-        if labels is None:
-            # [s b h] => [b s h]
-            return logits.transpose(0, 1).contiguous()
-        loss = self.compute_language_model_loss(labels, logits)
-        return loss
-
-    def _get_transformer_layer_spec(self, config=None):
-        module_spec = super()._get_transformer_layer_spec(config)
-        module_spec.submodules.self_attention.module = Qwen2VLAttention
-        return module_spec
-
-
 @register_model("qwen2_vl")
-class Qwen2VLModel(Qwen2VLBaseModel, ModuleUtilsMixin):
+class Qwen2VLModel(McaGPTModel, ModuleUtilsMixin):
     config_class = Qwen2VLConfig
 
     def __init__(self, config: "Qwen2VLConfig", **kwargs):
@@ -198,7 +18,7 @@ class Qwen2VLModel(Qwen2VLBaseModel, ModuleUtilsMixin):
         from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 
         super().__init__(config, **kwargs)
-        self.pre_process = kwargs.get("pre_process", mpu.is_pipeline_first_stage())
+
         if self.pre_process:
             self.vision_model = Qwen2VisionTransformerPretrainedModel._from_config(
                 Qwen2VLVisionConfig(**config.vision_config),
@@ -236,12 +56,12 @@ class Qwen2VLModel(Qwen2VLBaseModel, ModuleUtilsMixin):
         flatten_grid_thw = torch.repeat_interleave(grid_thw, grid_thw[:, 0], dim=0)
         flatten_grid_thw[:, 0] = 1
         image_embeds_seqlens = image_seqlens // (self.config.merge_size**2)
-        assert (
-            image_seqlens[-1] == pixel_values.shape[0]
-        ), f"pixel_values.shape[0] {pixel_values.shape[0]} != image_seqlens[-1] {image_seqlens[-1]}"
-        assert (
-            sum([r[1] - r[0] for r in input_ranges]) == inputs_embeds.shape[0]
-        ), f"sum of input_ranges {input_ranges} not match inputs_embeds.shape {inputs_embeds.shape}"
+        assert image_seqlens[-1] == pixel_values.shape[0], (
+            f"pixel_values.shape[0] {pixel_values.shape[0]} != image_seqlens[-1] {image_seqlens[-1]}"
+        )
+        assert sum([r[1] - r[0] for r in input_ranges]) == inputs_embeds.shape[0], (
+            f"sum of input_ranges {input_ranges} not match inputs_embeds.shape {inputs_embeds.shape}"
+        )
         image_mask = input_ids == media_token_id
 
         valid_image_embeds_nums = []  # indicate the ranges of needed image embeds
@@ -482,7 +302,6 @@ class Qwen2VLModel(Qwen2VLBaseModel, ModuleUtilsMixin):
             position_ids, _ = self.get_rope_index(input_ids, image_grid_thw, video_grid_thw)
 
         cp_batch = {
-            "position_ids": position_ids,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
         }
@@ -491,11 +310,13 @@ class Qwen2VLModel(Qwen2VLBaseModel, ModuleUtilsMixin):
             cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=["attention_mask", "position_ids"])
 
         if not self.pre_process or (pixel_values is None and pixel_values_videos is None) or decoder_input is not None:
-            return super().forward(decoder_input=decoder_input, labels=labels, **cp_batch, **kwargs)
+            return super().forward(
+                decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
+            )
 
         inputs_ranges = self.get_input_ranges(input_ids.shape[1])
 
-        inputs_embeds = self.embedding(input_ids=cp_batch["input_ids"], position_ids=cp_batch["position_ids"])
+        inputs_embeds = self.embedding(input_ids=cp_batch["input_ids"], position_ids=None)
         if pixel_values is not None:
             inputs_embeds = self.construct_inputs_embeds(
                 input_ids,
@@ -516,4 +337,6 @@ class Qwen2VLModel(Qwen2VLBaseModel, ModuleUtilsMixin):
             )
         decoder_input = inputs_embeds
 
-        return super().forward(decoder_input=decoder_input, labels=labels, **cp_batch, **kwargs)
+        return super().forward(
+            decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
+        )

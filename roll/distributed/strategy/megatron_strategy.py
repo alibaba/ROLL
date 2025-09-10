@@ -1,51 +1,55 @@
+import math
 import os
 import random
 from collections import defaultdict
 from functools import partial
-from typing import List, Dict, Iterator, Callable, Tuple
+from typing import Callable, Dict, Iterator, List, Tuple
 
-import math
 import numpy as np
 import ray
 import torch
 import torch.distributed as dist
 from codetiming import Timer
-from megatron.core import mpu, DistributedDataParallel, dist_checkpointing, tensor_parallel
+from megatron.core import DistributedDataParallel, dist_checkpointing, mpu, tensor_parallel
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
 from megatron.core.distributed import DistributedDataParallelConfig, finalize_model_grads
 from megatron.core.models.common.embeddings import RotaryEmbedding
-from megatron.core.optimizer import OptimizerConfig, MegatronOptimizer
+from megatron.core.optimizer import MegatronOptimizer, OptimizerConfig
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from megatron.core.transformer.moe.moe_utils import clear_aux_losses_tracker, reduce_aux_losses_tracker_across_ranks
 from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region
+from megatron.core.transformer.moe.moe_utils import (
+    clear_aux_losses_tracker,
+    get_moe_layer_wise_logging_tracker,
+    reduce_aux_losses_tracker_across_ranks,
+)
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
-from mcore_adapter.initialize import initialize_megatron
-from mcore_adapter.parallel_functions import vocab_parallel_logprobs, context_parallel_gather
+from mcore_adapter.parallel_functions import context_parallel_gather, vocab_parallel_logprobs
 from mcore_adapter.trainer.utils import get_megatron_lr_scheduler
 from roll.datasets.collator import collate_fn_to_dict_list
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
-from roll.models.model_providers import default_tokenizer_provider, default_processor_provider
+from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
 from roll.third_party.megatron.offload_states_patch import (
+    MegatronOffloadStateType,
     bind_megatron_offload_states_func,
     offload_megatron_no_grad_module,
     reload_megatron_no_grad_module,
-    MegatronOffloadStateType,
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
 from roll.utils.collective import collective
-from roll.utils.constants import SCHEDULER_NAME, OPTIMIZER_NAME, DIST_OPTIMIZER_DIR, RNG_STATE_DIR, IGNORE_INDEX
+from roll.utils.constants import DIST_OPTIMIZER_DIR, IGNORE_INDEX, OPTIMIZER_NAME, RNG_STATE_DIR, SCHEDULER_NAME
 from roll.utils.context_managers import disable_gradients
 from roll.utils.functionals import append_to_dict
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
+
 
 logger = get_logger()
 
@@ -72,8 +76,6 @@ class MegatronInferStrategy(InferenceStrategy):
             assert self.megatron_train_args.allow_variable_seq_lengths(), "when use_remove_padding=True, must set variable_seq_lengths=True for megatron."
 
     def initialize(self, model_provider):
-        initialize_megatron(args=self.megatron_train_args)
-
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.model = model_provider(
             tokenizer=self.tokenizer,
@@ -320,21 +322,21 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.models_wrapped = None
         self.models_unwrapped = None
         self.processor = None
+        self._validate_access_integrity = True
 
     def initialize(self, model_provider):
-        initialize_megatron(args=self.megatron_train_args)
-
-        self.forward_backward_func = get_forward_backward_func()
         self.seq_length = self.worker.pipeline_config.sequence_length
 
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
+        # model provider will initialize megatron distributed groups
         self.model = model_provider(
             tokenizer=self.tokenizer,
             model_args=self.worker_config.model_args,
             training_args=self.megatron_train_args,
             is_trainable=True,
         )
+        self.forward_backward_func = get_forward_backward_func()
         self.model.config.finalize_model_grads_func = finalize_model_grads
         ddp_config = DistributedDataParallelConfig(
             grad_reduce_in_fp32=self.megatron_train_args.accumulate_allreduce_grads_in_fp32,
@@ -472,7 +474,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         if self.model.config.num_moe_experts is not None and self.model.config.num_moe_experts > 1:
             reduce_aux_losses_tracker_across_ranks()
-            tracker = mpu.get_moe_layer_wise_logging_tracker()
+            tracker = get_moe_layer_wise_logging_tracker()
             loss_scale = 1 / self.megatron_train_args.gradient_accumulation_steps
             moe_losses = {
                 self.worker_config.name + "/" + k: (v["values"].float() * loss_scale).mean().item()
@@ -586,7 +588,9 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 checkpoint_dir=checkpoint_dir,
                 sharded_strategy=self.save_strategy,
                 async_sharded_save=False,
+                validate_access_integrity=self._validate_access_integrity,
             )
+            self._validate_access_integrity = False
         elif not dist.is_initialized() or mpu.get_data_modulo_expert_parallel_rank() == 0:
             torch.save(self.optimizer.state_dict(), os.path.join(checkpoint_dir, OPTIMIZER_NAME))
             logger.info(f"Saving optimizer state to {os.path.join(checkpoint_dir, OPTIMIZER_NAME)}")

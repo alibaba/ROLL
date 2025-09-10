@@ -271,3 +271,17 @@ def _load_base_checkpoint(
 def load_state_dict_from_checkpoint(checkpoint_dir):
     # TODO(LZC): support distributed checkpoint
     return _load_base_checkpoint(checkpoint_dir, exit_on_missing_checkpoint=False)[0]
+
+
+def save_config_and_state_dict(save_directory, config, state_dict):
+    # TODO: better directory structure
+    tracker_file = get_checkpoint_tracker_filename(save_directory)
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        config.save_pretrained(save_directory)
+        with open(tracker_file, "w") as f:
+            f.write("1")
+    if not torch.distributed.is_initialized() or mpu.get_expert_data_parallel_rank() == 0:
+        checkpoint_name = get_checkpoint_name(save_directory)
+        ensure_directory_exists(checkpoint_name)
+        torch.save(state_dict, checkpoint_name)
+        logger.info(f"Saving model checkpoint to {checkpoint_name}")

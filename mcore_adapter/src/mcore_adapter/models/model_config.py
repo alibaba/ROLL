@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 import torch
 import torch.nn.functional as F
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
+from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from transformers import AutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
@@ -55,6 +56,8 @@ class PretrainedConfig:
                 continue
             if callable(v) or isinstance(v, (torch.dtype, enum.Enum)):
                 continue
+            if isinstance(v, PipelineParallelLayerLayout):
+                v = str(v)
             save_dict[f.name] = v
         return json.dumps(save_dict, indent=2, sort_keys=True) + "\n"
 
@@ -146,7 +149,7 @@ class PretrainedConfig:
         return config
 
     def distribute_config_match(self, other):
-        """check the config corresponding ckpt can be used for current config training"""
+        "check the config corresponding ckpt can be used for current config training"
         raise NotImplementedError("distribute_config_match not implemented")
 
 
@@ -241,8 +244,10 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         self.attention_backend = check_and_get_attention_backend_by_env(self.attention_backend)
         if self.num_moe_experts is not None and self.num_moe_experts >= 32 and self.moe_router_dtype is None:
             self.moe_router_dtype = "fp32"
-            logger.warning(f"Using {self.moe_router_dtype} for moe_router_dtype, "
-                           "since num_moe_experts is large and moe_router_dtype not set.")
+            logger.warning(
+                f"Using {self.moe_router_dtype} for moe_router_dtype, "
+                "since num_moe_experts is large and moe_router_dtype not set."
+            )
         if self.variable_seq_lengths and self.moe_token_dispatcher_type in ["allgather"]:
             if self.num_moe_experts is not None:
                 logger.warning(
@@ -250,6 +255,12 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                     f"variable sequence length, use alltoall dispatcher instead."
                 )
             self.moe_token_dispatcher_type = "alltoall"
+        if isinstance(self.pipeline_model_parallel_layout, str) and not torch.distributed.is_initialized():
+            # when pipeline_model_parallel_layout is str, dist.get_rank would be called
+            self.pipeline_model_parallel_layout = PipelineParallelLayerLayout(
+                layout=self.pipeline_model_parallel_layout,
+                pipeline_model_parallel_size=self.pipeline_model_parallel_size,
+            )
 
         super().__post_init__()
         pipeline_size = self.pipeline_model_parallel_size
@@ -260,7 +271,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             num_layers += 1
         if self.account_for_loss_in_pipeline_split:
             num_layers += 1
-        if num_layers % pipeline_size != 0:
+        if self.pipeline_model_parallel_layout is None and num_layers % pipeline_size != 0:
             raise ValueError(
                 f"The number of layers ({num_layers}) must be a multiple of the pipeline_model_parallel_size"
                 f" ({self.pipeline_model_parallel_size}) and virtual_pipeline_model_parallel_size "
@@ -286,12 +297,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
 
 @dataclass
 class MLAMcaModelConfig(McaModelConfig, MLATransformerConfig):
-    multi_latent_attention: Optional[bool] = field(
-        default=True,
-        metadata={
-            "help": "Whether use mla"
-        }
-    )
+    multi_latent_attention: Optional[bool] = field(default=True, metadata={"help": "Whether use mla"})
 
     def __post_init__(self):
         super().__post_init__()

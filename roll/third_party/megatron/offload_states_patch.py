@@ -22,7 +22,6 @@ from megatron.core.distributed.param_and_grad_buffer import BufferType
 from megatron.core.optimizer import MegatronOptimizer, ChainedOptimizer, FP32Optimizer, DistributedOptimizer, \
     Float16OptimizerWithFloat16Params
 from megatron.core.transformer import MegatronModule
-from megatron.core.transformer.moe.legacy_a2a_token_dispatcher import MoEAlltoAllSEQTokenDispatcher
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher, MoEAllGatherTokenDispatcher
 from megatron.core.fp8_utils import is_float8tensor
@@ -469,7 +468,7 @@ def offload_megatron_no_grad_module(model_chunks: List[Union[DistributedDataPara
                 setattr(model_chunk.decoder, "input_tensor", None)
                 for layer in model_chunk.decoder.layers:
                     if isinstance(layer.mlp, MoELayer):
-                        if isinstance(layer.mlp.token_dispatcher, MoEAlltoAllTokenDispatcher | MoEAlltoAllSEQTokenDispatcher):
+                        if isinstance(layer.mlp.token_dispatcher, MoEAlltoAllTokenDispatcher):
                             layer.mlp.token_dispatcher.probs = None
                             layer.mlp.token_dispatcher.routing_map = None
                             layer.mlp.token_dispatcher.hidden_shape = None

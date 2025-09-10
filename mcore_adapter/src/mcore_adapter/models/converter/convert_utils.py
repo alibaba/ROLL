@@ -146,12 +146,12 @@ class StateDictSplitState:
         filename_to_tensors = {}
         tensor_to_filename = {}
         for state in states:
-            assert all(
-                file_name not in filename_to_tensors for file_name in state.filename_to_tensors
-            ), f"file name conflict {filename_to_tensors} {state.filename_to_tensors}"
-            assert all(
-                tensor not in tensor_to_filename for tensor in state.tensor_to_filename
-            ), f"tensor name conflict {tensor_to_filename} {state.tensor_to_filename}"
+            assert all(file_name not in filename_to_tensors for file_name in state.filename_to_tensors), (
+                f"file name conflict {filename_to_tensors} {state.filename_to_tensors}"
+            )
+            assert all(tensor not in tensor_to_filename for tensor in state.tensor_to_filename), (
+                f"tensor name conflict {tensor_to_filename} {state.tensor_to_filename}"
+            )
             filename_to_tensors.update(state.filename_to_tensors)
             tensor_to_filename.update(state.tensor_to_filename)
         return cls(

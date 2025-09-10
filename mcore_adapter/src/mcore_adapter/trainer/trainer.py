@@ -22,18 +22,29 @@ from megatron.core.distributed import DistributedDataParallel, DistributedDataPa
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from megatron.core.transformer.moe.moe_utils import clear_aux_losses_tracker, reduce_aux_losses_tracker_across_ranks
+from megatron.core.transformer.moe.moe_utils import (
+    clear_aux_losses_tracker,
+    get_moe_layer_wise_logging_tracker,
+    reduce_aux_losses_tracker_across_ranks,
+)
 from torch._tensor import Tensor
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from transformers import PreTrainedTokenizerBase
-from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME, Trainer, safe_globals
+from transformers.trainer import (
+    OPTIMIZER_NAME,
+    PREFIX_CHECKPOINT_DIR,
+    SCHEDULER_NAME,
+    TRAINER_STATE_NAME,
+    Trainer,
+    safe_globals,
+)
 from transformers.trainer_callback import ExportableState, TrainerState
 from transformers.trainer_pt_utils import get_dataloader_sampler, get_model_param_count, reissue_pt_warnings
 from transformers.trainer_utils import (
     EvalLoopOutput,
     TrainOutput,
     has_length,
-    seed_worker,
+    set_seed,
     speed_metrics,
 )
 
@@ -42,7 +53,12 @@ from ..constants import DIST_OPTIMIZER_DIR, IGNORE_INDEX
 from ..initialize import initialize_megatron
 from ..training_args import TrainingArguments
 from ..utils import distributed_reduce, get_logger
-from .utils import get_ltor_masks_and_position_ids, get_megatron_lr_scheduler, get_seqlens_in_batch
+from .utils import (
+    check_pack_seq_aligned,
+    get_ltor_masks_and_position_ids,
+    get_megatron_lr_scheduler,
+    get_seqlens_in_batch,
+)
 
 
 if TYPE_CHECKING:
@@ -158,7 +174,7 @@ class McaTrainer(Trainer):
                 logger.warning("Currently, train dataloader drop_last must be set to True!")
             dataloader_params["sampler"] = self._get_train_sampler()
             dataloader_params["drop_last"] = True
-            dataloader_params["worker_init_fn"] = seed_worker
+            dataloader_params["worker_init_fn"] = lambda _: set_seed(torch.initial_seed() % 2**32)
             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
         return prepare_data_loader(
             DataLoader(train_dataset, **dataloader_params),
@@ -264,6 +280,13 @@ class McaTrainer(Trainer):
             attention_mask = torch.ones_like(inputs["input_ids"])
         seqlens, max_seq_len = get_seqlens_in_batch(attention_mask)
 
+        cp_size = mpu.get_context_parallel_world_size()
+
+        if cp_size > 1:
+            assert check_pack_seq_aligned(attention_mask, 2 * cp_size), (
+                f"neat_packing + cp requires packing data's each sub-sequence is 2 * cp_size aligned, please padding each sub-sequence to {2 * cp_size}(2 * cp_size)."
+            )
+
         packing_inputs = {
             k: v.view(1, -1, *v.shape[2:]) if v is not None and isinstance(v, Tensor) else v
             for k, v in inputs.items()
@@ -286,7 +309,9 @@ class McaTrainer(Trainer):
         )
         return inputs
 
-    def _get_step_iterator_and_seq_length(self, epoch_iterator: Iterator[Dict[str, Tensor | Any]], standard_batch_size: Optional[int] = None):
+    def _get_step_iterator_and_seq_length(
+        self, epoch_iterator: Iterator[Dict[str, Tensor | Any]], standard_batch_size: Optional[int] = None
+    ):
         """
         construct data iterator for gradient accumulation
         """
@@ -342,9 +367,9 @@ class McaTrainer(Trainer):
             if isinstance(self.processing_class, PreTrainedTokenizerBase)
             else getattr(self.processing_class, "tokenizer", self.processing_class)
         )
-        padding_inputs = tokenizer.pad(padding_inputs, padding="max_length", max_length=seq_length, return_tensors="pt").to(
-            self.args.device
-        )
+        padding_inputs = tokenizer.pad(
+            padding_inputs, padding="max_length", max_length=seq_length, return_tensors="pt"
+        ).to(self.args.device)
         inputs.update(padding_inputs)
         return inputs
 
@@ -413,9 +438,9 @@ class McaTrainer(Trainer):
         metrics = {}
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             get_metrics_keys = metrics_tensors[0].keys()
-            assert all(
-                key in get_metrics_keys for key in self.metrics_keys
-            ), f"some keys in self.metrics_keys: {self.metrics_keys} not get in metrics_tensors: {get_metrics_keys}"
+            assert all(key in get_metrics_keys for key in self.metrics_keys), (
+                f"some keys in self.metrics_keys: {self.metrics_keys} not get in metrics_tensors: {get_metrics_keys}"
+            )
             diff_keys = set(self.metrics_keys) - set(get_metrics_keys)
             if len(diff_keys) > 0 and not getattr(self, "warned_metrics", False):
                 logger.warning(f"some metrics_tensors: {diff_keys} not set in self.metrics_keys: {self.metrics_keys}")
@@ -753,7 +778,11 @@ class McaTrainer(Trainer):
                 else args.max_steps
             )
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
-            if epoch == epochs_trained and resume_from_checkpoint is not None and batches_trained_in_current_epoch == 0:
+            if (
+                epoch == epochs_trained
+                and resume_from_checkpoint is not None
+                and batches_trained_in_current_epoch == 0
+            ):
                 self._load_rng_state(resume_from_checkpoint)
             rng_to_sync = False
             steps_skipped = 0
@@ -871,9 +900,9 @@ class McaTrainer(Trainer):
         if self.model.config.num_moe_experts is not None and self.model.config.num_moe_experts > 1:
             if self.control.should_log:
                 reduce_aux_losses_tracker_across_ranks()
-                tracker = mpu.get_moe_layer_wise_logging_tracker()
+                tracker = get_moe_layer_wise_logging_tracker()
                 loss_scale = 1 / self.args.gradient_accumulation_steps
-                moe_losses = {k: (v['values'].float() * loss_scale).mean().item() for k, v in tracker.items()}
+                moe_losses = {k: (v["values"].float() * loss_scale).mean().item() for k, v in tracker.items()}
 
             clear_aux_losses_tracker()
 
@@ -914,6 +943,8 @@ class McaTrainer(Trainer):
         if self.control.should_save:
             self._save_checkpoint(model, trial)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
+            ckpt_id = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+            checkpoint_path = os.path.join(self.args.output_dir, ckpt_id)
 
         if eval_or_save:
             self.enable_ddp_forward_pre_hook()

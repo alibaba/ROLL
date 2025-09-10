@@ -1,29 +1,23 @@
-from ..converter.dist_converter import DistParallelConfig, default_dist_config, register_dist_config
+from ..auto.config_auto import register_config
+from ..auto.modeling_auto import register_model
+from ..converter.dist_converter import default_dist_config, register_dist_config
 from ..converter.template import (
-    QKVBiasConverOp,
     QKVConverOp,
     RenameConverOp,
     StackConverOp,
     register_template,
 )
-from .config_qwen2_5_vl import Qwen2_5_VLConfig
-from .modeling_qwen2_5_vl import Qwen2_5_VLModel
+from ..model_config import McaModelConfig
+from ..model_factory import McaGPTModel
 
 
-register_dist_config(
-    "qwen2_5_vl",
-    [
-        default_dist_config,
-        DistParallelConfig(
-            module_prefix="vision_model.",
-            pre_process_weights=["*"],
-            duplicated_weights=["*"],
-        ),
-    ],
-)
+register_config("llama", McaModelConfig)
+register_model("llama", McaGPTModel)
+register_dist_config("llama", default_dist_config)
+
 
 register_template(
-    "qwen2_5_vl",
+    "llama",
     hf_layer_prefix="model.layers.",
     config_hf_to_mca={
         "max_position_embeddings": "max_sequence_length",
@@ -34,24 +28,17 @@ register_template(
         "rms_norm_eps": "layernorm_epsilon",
         "vocab_size": "padded_vocab_size",
         "intermediate_size": "ffn_hidden_size",
+        "attention_bias": "add_qkv_bias",
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
-        # vit related
-        "vision_start_token_id": "vision_start_token_id",
-        "vision_end_token_id": "vision_end_token_id",
-        "vision_token_id": "vision_token_id",
-        "image_token_id": "image_token_id",
-        "video_token_id": "video_token_id",
-        "vision_config": "vision_config",
-        "rope_scaling": "rope_scaling",
     },
+    hf_invalid_keys=[".self_attn.rotary_emb.inv_freq"],
     constant_mca_config={
         "swiglu": True,
-        "position_embedding_type": "mrope",
+        "position_embedding_type": "rope",
         "normalization": "RMSNorm",
         "add_bias_linear": False,
-        "add_qkv_bias": True,
         "hidden_dropout": 0.0,
         "rotary_percent": 1.0,
     },
@@ -70,13 +57,5 @@ register_template(
             hf_names=[".self_attn.q_proj.weight", ".self_attn.k_proj.weight", ".self_attn.v_proj.weight"],
             mca_names=".self_attention.linear_qkv.weight",
         ),
-        QKVBiasConverOp(
-            hf_names=[".self_attn.q_proj.bias", ".self_attn.k_proj.bias", ".self_attn.v_proj.bias"],
-            mca_names=".self_attention.linear_qkv.bias",
-        ),
-        RenameConverOp(hf_names="visual.{}", mca_names="vision_model.{}"),
     ],
 )
-
-
-__all__ = ["Qwen2_5_VLConfig", "Qwen2_5_VLModel"]

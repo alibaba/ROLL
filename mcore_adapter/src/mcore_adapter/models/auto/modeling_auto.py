@@ -31,8 +31,6 @@ def register_model(model_type, cls=None):
 def get_model_cls(model_type) -> "McaGPTModel":
     cls = MODEL_MAPPING.get(model_type)
     if cls is None:
-        if model_type in ("llama", "qwen2", "qwen3", "qwen2_moe", "qwen3_moe"):
-            return McaGPTModel
         logger.warning(f"No model found for model type {model_type}, use McaGPTModel!")
         cls = McaGPTModel
     return cls

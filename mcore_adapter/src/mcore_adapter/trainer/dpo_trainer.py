@@ -48,9 +48,9 @@ class DPOTrainer(McaTrainer):
         if ref_model is not None:
             self.ref_model.eval()
         else:
-            assert (
-                not train_config.use_ref_model
-            ), f"ref_model must be provided when using pref_loss: {train_config.pref_loss}"
+            assert not train_config.use_ref_model, (
+                f"ref_model must be provided when using pref_loss: {train_config.pref_loss}"
+            )
         self.train_config = train_config
         super().__init__(
             model=model,
@@ -66,7 +66,8 @@ class DPOTrainer(McaTrainer):
     def _get_batch_on_this_cp_rank(self, batch: Dict[str, "Tensor"]):
         not_cp_parallel_keys = ["reference_chosen_logps", "reference_rejected_logps"]
         not_cp_parallel_dict = {key: batch.pop(key) for key in not_cp_parallel_keys if key in batch}
-        batch = self.model.get_batch_on_this_cp_rank(batch)
+        dim3_keys = [] if self.model_impl == "transformer_engine" else ["attention_mask"]
+        batch = self.model.get_batch_on_this_cp_rank(batch, dim3_keys=dim3_keys)
         return {**batch, **not_cp_parallel_dict}
 
     def _pre_compute_loss(self, data_iterator: Iterator, model: DistributedDataParallel, compute_ref_logps=False):
@@ -80,7 +81,9 @@ class DPOTrainer(McaTrainer):
         output_tensor = model(**inputs)
         return output_tensor, *outputs
 
-    def _post_compute_log_probs(self, labels: "torch.Tensor", loss_mask: "torch.Tensor", logits: "torch.Tensor", non_loss_data: bool=False):
+    def _post_compute_log_probs(
+        self, labels: "torch.Tensor", loss_mask: "torch.Tensor", logits: "torch.Tensor", non_loss_data: bool = False
+    ):
         batch_size = labels.size(0) // 2
         logprobs = vocab_parallel_logprobs(logits, labels)
         logprobs = (logprobs * loss_mask).sum(-1)
@@ -247,7 +250,7 @@ class DPOTrainer(McaTrainer):
             loss = torch.tensor(0.0, device=self.args.device)
         return loss, metrics_tensors, skipped_iter, grad_norm, num_zeros_in_grad
 
-    def _get_step_iterator_and_seq_length(self, epoch_iterator, standard_batch_size = None):
+    def _get_step_iterator_and_seq_length(self, epoch_iterator, standard_batch_size=None):
         standard_batch_size = standard_batch_size or self.args.per_device_train_batch_size * 2
         return super()._get_step_iterator_and_seq_length(epoch_iterator, standard_batch_size)
 

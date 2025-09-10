@@ -1,7 +1,6 @@
 import gc
 import json
 import os
-import time
 from typing import TYPE_CHECKING, Dict, Optional, Union
 
 import torch
@@ -65,9 +64,6 @@ class ModelConverter:
         expert_model_parallel_rank: Optional[int] = None,
         virtual_pipeline_model_parallel_rank: Optional[int] = None,
     ):
-        logger.info("Begin converting mca state dict from hf ckpt...")
-        convert_start_time = time.time()
-
         tensor_model_parallel_rank = tensor_model_parallel_rank or mpu.get_tensor_model_parallel_rank()
         pipeline_model_parallel_rank = pipeline_model_parallel_rank or mpu.get_pipeline_model_parallel_rank()
         expert_model_parallel_rank = expert_model_parallel_rank or mpu.get_expert_model_parallel_rank()
@@ -84,7 +80,6 @@ class ModelConverter:
         )
         state_dict_iter = self.hf_state_dict_iter(self.model_name_or_path, dist_converter)
         mca_state_dict = self.get_mca_state_dict(dist_converter, state_dict_iter)
-        logger.info(f"End converting, cost: {time.time() - convert_start_time:0.3f}s")
         return mca_state_dict
 
     def get_needed_hf_files(self, path, dist_converter: "DistConverter"):
@@ -205,9 +200,9 @@ class ModelConverter:
             converted_state_dict = {}
             for mca_name, mca_weight in mca_named_weights.items():
                 converted = self.template.add_mca_weight(mca_name, mca_weight)
-                assert (
-                    len(set(converted_state_dict.keys()).intersection(converted.keys())) == 0
-                ), f"converted_state_dict: {converted_state_dict.keys()} converted: {converted.keys()}"
+                assert len(set(converted_state_dict.keys()).intersection(converted.keys())) == 0, (
+                    f"converted_state_dict: {converted_state_dict.keys()} converted: {converted.keys()}"
+                )
                 if converted:
                     converted_state_dict.update(converted)
             self.save_hf_shard_state_dict(shard_state, save_directory, converted_state_dict, save_safetensors)
@@ -219,7 +214,9 @@ class ModelConverter:
         expert_parallel = self.mca_config.expert_model_parallel_size > 1
         for dist_reverter, mca_name, weight in self._mca_named_params_with_reverter(models):
             moe_index = dist_reverter.get_local_moe_index(mca_name)
-            group = mpu.get_tensor_model_parallel_group() if moe_index is None else mpu.get_expert_tensor_parallel_group()
+            group = (
+                mpu.get_tensor_model_parallel_group() if moe_index is None else mpu.get_expert_tensor_parallel_group()
+            )
             if dist.get_world_size(group) == 1:
                 weights = [weight]
             else:
@@ -233,7 +230,9 @@ class ModelConverter:
                 for name, weight in converted.items():
                     if expert_parallel and moe_index is not None:
                         names = allgather_parallel_objs(name, group=mpu.get_expert_model_parallel_group())
-                        weights = all_gather_tensors(weight, async_op=False, group=mpu.get_expert_model_parallel_group())
+                        weights = all_gather_tensors(
+                            weight, async_op=False, group=mpu.get_expert_model_parallel_group()
+                        )
                         for name, weight in zip(names, weights):
                             yield name, weight
                     else:

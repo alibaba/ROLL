@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Dict
 
 import torch
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
@@ -66,6 +66,35 @@ def get_seqlens_in_batch(attention_mask: "torch.Tensor") -> "torch.Tensor":
     seqlens = torch.cumsum(seqlens, dim=-1)
     seqlens = torch.nn.functional.pad(seqlens, (1, 0), value=0)
     return seqlens.to(torch.int32), max_seq_len.to(torch.int32)
+
+
+def check_pack_seq_aligned(attention_mask: "torch.Tensor", align_size: int):
+    r"""
+    Check if all sub-sequence is aligned with `align_size` for packed data.
+
+    e.g.
+    ```python
+    # input
+    [
+        [1, 1, 2, 2, 2, 0],
+        [1, 2, 2, 3, 3, 3],
+    ],
+    2
+    # output
+    False
+    ```
+    """
+    bsz = attention_mask.size(0)
+    dtype, device = attention_mask.dtype, attention_mask.device
+    max_num = torch.max(attention_mask).item()
+    is_valid = True
+    for i in range(max_num):
+        if not is_valid:
+            break
+        i_th_seq_lens = torch.sum(attention_mask == (i + 1), dim=-1)
+        i_th_seq_valid = (i_th_seq_lens % align_size == 0).all()
+        is_valid = is_valid and i_th_seq_valid.item()
+    return is_valid
 
 
 class MegatronLRScheduler(OptimizerParamScheduler):
