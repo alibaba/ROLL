@@ -1,14 +1,31 @@
+import logging
 import multiprocessing
 import random
 from typing import Optional, Tuple, Any, SupportsFloat
 
+from datasets import load_dataset, Dataset, DatasetDict
 from gem import Env
 from gem.envs.math_env import MathEnv as GEMMathEnv
 from gem.utils.constants import TERMINAL_STATE
 from gem.utils.parsing import extract_last_boxed_answer
 
+logger = logging.getLogger(__name__)
 
 class MathEnv(GEMMathEnv):
+
+    def __init__(
+            self,
+            dataset_name: Optional[str] = "",
+            split: Optional[str] = None,
+            dataset: Optional[Dataset] = None,
+            question_key: str = "problem",
+            answer_key: str = "answer",
+            seed: int = 0,
+            **_,
+    ):
+        from datasets import tqdm
+        tqdm.set_lock(tqdm.get_lock())
+        super().__init__(dataset_name, split, dataset, question_key, answer_key, seed, **_)
 
     def reset(self, seed: Optional[None] = None) -> Tuple[str, dict[str, Any]]:
         """Sample a question from the dataset."""

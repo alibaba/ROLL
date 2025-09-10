@@ -1,10 +1,34 @@
 import random
 from typing import Tuple, Any, SupportsFloat, Optional
+
+from datasets import Dataset
 from gem.envs.qa_env import QaEnv as GEMQaEnv
 from gem.core import Env
 from gem.utils.constants import TERMINAL_STATE
 
 class QaEnv(GEMQaEnv):
+    def __init__(
+        self,
+        dataset_name: Optional[str] = "",
+        split: Optional[str] = None,
+        dataset: Optional[Dataset] = None,
+        question_key: str = "question",
+        answer_key: str = "answer",
+        seed: int = 0,
+        extract_boxed: bool = False,
+        load_from_cache_file: bool = True,  # False to force re-run the apply_prompt_func, useful when apply_prompt is changed
+        **_,
+    ):
+        from datasets import tqdm
+        tqdm.set_lock(tqdm.get_lock())
+        super().__init__(dataset_name=dataset_name,
+                         split=split,
+                         dataset=dataset,
+                         question_key=question_key,
+                         answer_key=answer_key,
+                         seed=seed,
+                         extract_boxed=extract_boxed,
+                         load_from_cache_file=load_from_cache_file, **_)
 
     def step(
         self, action: str
