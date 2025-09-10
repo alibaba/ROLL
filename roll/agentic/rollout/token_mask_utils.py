@@ -1,9 +1,21 @@
 from typing import List, Dict
-
+from functools import lru_cache
 from transformers import PreTrainedTokenizer
 
 from roll.datasets.collator import DataCollatorWithPaddingForMM
 
+
+@lru_cache(maxsize=10)
+def compute_conversation_end_token_id(tokenizer: PreTrainedTokenizer) -> List[int]:
+    """
+    find '<|im_end|>' token id
+    """
+    assistant_mock = [{"role": "user", "content": ""}]
+    assistant_token_ids_mock: List[int] = tokenizer.apply_chat_template(assistant_mock, tokenize=True)
+    for token_id in reversed(assistant_token_ids_mock):
+        if token_id in tokenizer.all_special_ids:
+            return [token_id]
+    return []
 
 def custom_apply_chat_template(messages: List[Dict], tokenizer: PreTrainedTokenizer, add_generation_prompt=True) -> List:
     if len(messages) == 0:

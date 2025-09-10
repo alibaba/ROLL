@@ -16,7 +16,7 @@ from roll.agentic.llm_proxy import create_llm_proxy, BaseLLMProxy
 from roll.agentic.rollout.base_env_manager import RolloutCache, BaseEnvManager
 from roll.agentic.rollout.env_action_limiter import get_global_limiter
 from roll.agentic.rollout.rollout_scheduler import GroupQueueManager
-from roll.agentic.rollout.token_mask_utils import custom_apply_chat_template
+from roll.agentic.rollout.token_mask_utils import custom_apply_chat_template, compute_conversation_end_token_id
 from roll.agentic.tools.tool_env_wrapper import tool_wrapper
 from roll.distributed.scheduler.generate_scheduler import RequestScheduler
 from roll.distributed.scheduler.protocol import DataProto
@@ -263,6 +263,8 @@ class TrajEnvManager(BaseEnvManager):
         for items in self.rollout_cache.history[:-1]:
             history_token_ids.extend(items["prompt_ids"])
             history_token_ids.extend(items["response_ids"])
+        if len(history_token_ids):
+            prompt_ids = compute_conversation_end_token_id(self.tokenizer) + prompt_ids
         input_ids = history_token_ids + prompt_ids
 
         input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
