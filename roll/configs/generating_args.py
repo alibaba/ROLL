@@ -68,3 +68,7 @@ class GeneratingArguments:
         if self.include_stop_str_in_output is None:
             args.pop("include_stop_str_in_output", None)
         return args
+
+    def __post_init__(self):
+        if self.stop_strings is not None:
+            self.stop_strings = list(self.stop_strings)
