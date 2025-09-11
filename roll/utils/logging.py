@@ -1,8 +1,11 @@
+import logging
 import os
 import sys
-import logging
-import time
 from typing import Optional
+
+
+def is_roll_debug_mode():
+    return os.getenv("ROLL_DEBUG", os.getenv("RAY_PROFILING", "0")) == "1"
 
 
 class CustomFormatter(logging.Formatter):

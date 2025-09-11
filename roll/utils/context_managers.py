@@ -13,7 +13,8 @@ from codetiming import Timer
 from ray._private import profiling
 
 from roll.utils.offload_states import OffloadStateType
-from roll.utils.logging import get_logger
+from roll.utils.logging import get_logger, is_roll_debug_mode
+
 
 logger = get_logger()
 
@@ -95,6 +96,46 @@ def cpu_memory_info():
     return memory_info
 
 
+def _get_gpu_memory_metrics(metric_infix: str, stage: str, with_max_frac: bool = False) -> Dict:
+    if not is_roll_debug_mode():
+        return {}
+
+    metrics = {}
+    for device_id in range(torch.cuda.device_count()):
+        metrics[f"memory/{metric_infix}/{stage}/allocated/{device_id}"] = (
+            torch.cuda.memory_allocated(device_id) / 1024**3
+        )
+        metrics[f"memory/{metric_infix}/{stage}/reserved/{device_id}"] = (
+            torch.cuda.memory_reserved(device_id) / 1024**3
+        )
+        metrics[f"memory/{metric_infix}/{stage}/max_allocated/{device_id}"] = (
+            torch.cuda.max_memory_allocated(device_id) / 1024**3
+        )
+        metrics[f"memory/{metric_infix}/{stage}/max_reserved/{device_id}"] = (
+            torch.cuda.max_memory_reserved(device_id) / 1024**3
+        )
+
+        if with_max_frac:
+            total_cuda_memory = torch.cuda.mem_get_info(device_id)[1]
+            metrics[f"memory/{metric_infix}/{stage}/max_allocated_frac/{device_id}"] = (
+                torch.cuda.max_memory_allocated(device_id) / total_cuda_memory
+            )
+            metrics[f"memory/{metric_infix}/{stage}/max_reserved_frac/{device_id}"] = (
+                torch.cuda.max_memory_reserved(device_id) / total_cuda_memory
+            )
+    return metrics
+
+
+def _get_cpu_memory_metrics(metric_infix: str, stage: str) -> Dict:
+    if not is_roll_debug_mode():
+        return {}
+    memory_info = cpu_memory_info()
+    return {
+        f"memory/cpu/{metric_infix}/{stage}/rss": memory_info.rss / 1024**3,
+        f"memory/cpu/{metric_infix}/{stage}/vms": memory_info.vms / 1024**3,
+    }
+
+
 @contextmanager
 def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_states=True, load_kwargs={}):
     """
@@ -109,18 +150,8 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
                 torch.cuda.reset_max_memory_allocated(device_id)
                 torch.cuda.reset_max_memory_cached(device_id)
                 torch.cuda.reset_peak_memory_stats(device_id)
-                metrics[f"memory/{metric_infix}/start/offload/allocated/{device_id}"] = (
-                    torch.cuda.memory_allocated(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/start/offload/reserved/{device_id}"] = (
-                    torch.cuda.memory_reserved(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/start/offload/max_allocated/{device_id}"] = (
-                    torch.cuda.max_memory_allocated(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/start/offload/max_reserved/{device_id}"] = (
-                    torch.cuda.max_memory_reserved(device_id) / 1024**3
-                )
+
+            metrics.update(_get_gpu_memory_metrics(metric_infix, "start/offload"))
 
             log_gpu_memory_usage(head=f"{metric_infix}_start_offload", logger=logger, rank=None)
             strategy.load_states(**load_kwargs)
@@ -128,48 +159,14 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
                 strategy.offload_states(**get_load_exclude_kwargs(load_kwargs))
             log_gpu_memory_usage(head=f"{metric_infix}_start_onload", logger=logger, rank=None)
 
-            for device_id in range(torch.cuda.device_count()):
-                metrics[f"memory/{metric_infix}/start/onload/allocated/{device_id}"] = (
-                    torch.cuda.memory_allocated(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/start/onload/reserved/{device_id}"] = (
-                    torch.cuda.memory_reserved(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/start/onload/max_allocated/{device_id}"] = (
-                    torch.cuda.max_memory_allocated(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/start/onload/max_reserved/{device_id}"] = (
-                    torch.cuda.max_memory_reserved(device_id) / 1024**3
-                )
-
-            memory_info = cpu_memory_info()
-            metrics[f"memory/cpu/{metric_infix}/start/rss"] = memory_info.rss / 1024**3
-            metrics[f"memory/cpu/{metric_infix}/start/vms"] = memory_info.vms / 1024**3
+            metrics.update(_get_gpu_memory_metrics(metric_infix, "start/onload"))
+            metrics.update(_get_cpu_memory_metrics(metric_infix, "start"))
 
         with Timer(name=f"{metric_infix}_execute") as execute_timer, profiling.profile("execute"):
             yield
 
         with Timer(name=f"{metric_infix}_offload") as offload_timer, profiling.profile("offload_states"):
-            for device_id in range(torch.cuda.device_count()):
-                total_cuda_memory = torch.cuda.mem_get_info(device_id)[1]
-                metrics[f"memory/{metric_infix}/end/onload/allocated/{device_id}"] = (
-                    torch.cuda.memory_allocated(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/end/onload/reserved/{device_id}"] = (
-                    torch.cuda.memory_reserved(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/end/onload/max_allocated/{device_id}"] = (
-                    torch.cuda.max_memory_allocated(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/end/onload/max_reserved/{device_id}"] = (
-                    torch.cuda.max_memory_reserved(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/end/onload/max_allocated_frac/{device_id}"] = (
-                    torch.cuda.max_memory_allocated(device_id) / total_cuda_memory
-                )
-                metrics[f"memory/{metric_infix}/end/onload/max_reserved_frac/{device_id}"] = (
-                    torch.cuda.max_memory_reserved(device_id) / total_cuda_memory
-                )
+            metrics.update(_get_gpu_memory_metrics(metric_infix, "end/onload", with_max_frac=True))
 
             log_gpu_memory_usage(head=f"{metric_infix}_end_onload", logger=logger, rank=None)
             if is_offload_states:
@@ -177,28 +174,14 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
                 strategy.offload_states()
             log_gpu_memory_usage(head=f"{metric_infix}_end_offload", logger=logger, rank=None)
 
-            for device_id in range(torch.cuda.device_count()):
-                metrics[f"memory/{metric_infix}/end/offload/allocated/{device_id}"] = (
-                    torch.cuda.memory_allocated(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/end/offload/reserved/{device_id}"] = (
-                    torch.cuda.memory_reserved(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/end/offload/max_allocated/{device_id}"] = (
-                    torch.cuda.max_memory_allocated(device_id) / 1024**3
-                )
-                metrics[f"memory/{metric_infix}/end/offload/max_reserved/{device_id}"] = (
-                    torch.cuda.max_memory_reserved(device_id) / 1024**3
-                )
-
-            memory_info = cpu_memory_info()
-            metrics[f"memory/cpu/{metric_infix}/end/rss"] = memory_info.rss / 1024**3
-            metrics[f"memory/cpu/{metric_infix}/end/vms"] = memory_info.vms / 1024**3
+            metrics.update(_get_gpu_memory_metrics(metric_infix, "end/offload"))
+            metrics.update(_get_cpu_memory_metrics(metric_infix, "end"))
 
     metrics[f"time/{metric_infix}/total"] = timer.last
-    metrics[f"time/{metric_infix}/execute"] = execute_timer.last
-    metrics[f"time/{metric_infix}/onload"] = onload_timer.last
-    metrics[f"time/{metric_infix}/offload"] = offload_timer.last
+    if is_roll_debug_mode():
+        metrics[f"time/{metric_infix}/execute"] = execute_timer.last
+        metrics[f"time/{metric_infix}/onload"] = onload_timer.last
+        metrics[f"time/{metric_infix}/offload"] = offload_timer.last
     del os.environ["roll_EXEC_FUNC_NAME"]
 
 
