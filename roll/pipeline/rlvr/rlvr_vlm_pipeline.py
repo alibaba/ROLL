@@ -38,6 +38,7 @@ from roll.utils.functionals import (
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
+from roll.utils.packages import is_transformers_version_greater_than
 
 
 logger = get_logger()
@@ -195,7 +196,6 @@ def get_extra_data_provider(model_name_or_path: str, processor=None):
         import types
 
         from transformers import BatchFeature  # help define a object to accesss attr
-        from transformers.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
         dummy_self = BatchFeature(
             {
@@ -209,7 +209,14 @@ def get_extra_data_provider(model_name_or_path: str, processor=None):
                 )
             }
         )
-        get_rope_index = types.MethodType(Qwen2VLForConditionalGeneration.get_rope_index, dummy_self)
+        if is_transformers_version_greater_than("4.52.0"):
+            from transformers.models.qwen2_vl import Qwen2VLModel
+
+            get_rope_index = types.MethodType(Qwen2VLModel.get_rope_index, dummy_self)
+        else:
+            from transformers.models.qwen2_vl import Qwen2VLForConditionalGeneration
+
+            get_rope_index = types.MethodType(Qwen2VLForConditionalGeneration.get_rope_index, dummy_self)
 
         def extra_data_provider(
             input_ids: torch.LongTensor,
