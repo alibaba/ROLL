@@ -291,18 +291,17 @@ class ActorWorker(Worker):
         clipped_high = (ratio > 1 + pg_clip_high).float()
         clipped = (clipped_low + clipped_high).float()
 
-        entropy = self.strategy.op_compute_entropy(logits=output_tensor, attention_mask=data.batch["response_mask"])
-        entropy_loss = agg_loss(
-            loss_mat=entropy,
-            loss_mask=response_mask,
-            loss_agg_mode=self.pipeline_config.loss_agg_mode,
-        )
-
         if self.pipeline_config.use_kl_loss:
             total_loss = pg_loss + kl_loss * self.pipeline_config.kl_loss_coef
         else:
             total_loss = pg_loss
         if self.pipeline_config.entropy_loss_coef > 0:
+            entropy = self.strategy.op_compute_entropy(logits=output_tensor, attention_mask=data.batch["response_mask"])
+            entropy_loss = agg_loss(
+                loss_mat=entropy,
+                loss_mask=response_mask,
+                loss_agg_mode=self.pipeline_config.loss_agg_mode,
+            )
             total_loss = total_loss - entropy_loss * self.pipeline_config.entropy_loss_coef
 
         pg_metrics = {
