@@ -10,5 +10,8 @@ elif sgl.__version__ == '0.4.6.post1':
 elif sgl.__version__ == '0.4.10.post2':
     from roll.third_party.sglang import v0410post2_patch
     patch = v0410post2_patch
+elif sgl.__version__ == '0.5.2':
+    from roll.third_party.sglang import v052_patch
+    patch = v052_patch
 else:
      raise NotImplementedError(f"Scale aligner version sglang:{sgl.__version__} is not supported.")

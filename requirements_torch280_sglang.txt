@@ -1,0 +1,5 @@
+-r requirements_common.txt
+
+deepspeed==0.16.4
+
+sglang[srt,torch-memory-saver]==0.5.2
