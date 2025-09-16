@@ -349,7 +349,7 @@ class AgenticPipeline(BasePipeline):
         critic_train_bsz = 1
         critic_infer_bsz = 1
         if self.pipeline_config.adv_estimator == "gae":
-            critic_train_bsz = self.pipeline_config.critic.training_args.per_device_train_batch_size * self.pipeline_config.critic.training_args.gradiation_accumulation_steps * self.critic.dp_size
+            critic_train_bsz = self.pipeline_config.critic.training_args.per_device_train_batch_size * self.pipeline_config.critic.training_args.gradient_accumulation_steps * self.critic.dp_size
             critic_infer_bsz = self.pipeline_config.critic.infer_batch_size * self.critic.dp_size
 
         size_divide = np.lcm.reduce(np.array([actor_train_train_bsz, actor_train_infer_bsz, ref_infer_bsz, critic_infer_bsz, critic_train_bsz])).item()
