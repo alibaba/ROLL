@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+import asyncio
 
 import ray
 from ray import WORKER_MODE
@@ -97,3 +98,21 @@ def wait_for_nodes(expected):
             time.sleep(1)
         else:
             break
+
+@ray.remote(num_cpus=0)
+class Barrier:
+    def __init__(self, num_workers):
+        self.num_workers = num_workers
+        self.arrived = 0
+        self.event = asyncio.Event()
+        self._lock = asyncio.Lock()
+
+    async def wait(self):
+        async with self._lock:
+            self.arrived += 1
+            if self.arrived == self.num_workers:
+                self.event.set()
+                self.arrived = 0
+                self.event.clear()
+                return
+        await self.event.wait()

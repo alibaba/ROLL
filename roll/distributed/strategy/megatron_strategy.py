@@ -33,6 +33,7 @@ from mcore_adapter.trainer.utils import get_megatron_lr_scheduler
 from roll.datasets.collator import collate_fn_to_dict_list
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
+from roll.distributed.scheduler.driver_utils import Barrier
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
 from roll.third_party.megatron.offload_states_patch import (
@@ -44,7 +45,7 @@ from roll.third_party.megatron.offload_states_patch import (
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
 from roll.utils.collective import collective
-from roll.utils.constants import DIST_OPTIMIZER_DIR, IGNORE_INDEX, OPTIMIZER_NAME, RNG_STATE_DIR, SCHEDULER_NAME
+from roll.utils.constants import DIST_OPTIMIZER_DIR, IGNORE_INDEX, OPTIMIZER_NAME, RNG_STATE_DIR, SCHEDULER_NAME, RAY_NAMESPACE, BARRIER_NAME
 from roll.utils.context_managers import disable_gradients
 from roll.utils.functionals import append_to_dict
 from roll.utils.logging import get_logger
@@ -393,6 +394,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.worker.rank_info.cp_size = mpu.get_context_parallel_world_size()
         self.worker.rank_info.cp_rank = mpu.get_context_parallel_rank()
 
+        self.barrier = Barrier.options(
+            name=BARRIER_NAME, get_if_exists=True, namespace=RAY_NAMESPACE
+        ).remote(self.worker.world_size / self.worker.rank_info.pp_size)
+
         logger.info(f"max steps pipeline {self.worker_config.training_args.max_steps}")
         self.worker_config.training_args.max_steps = (
             self.worker_config.training_args.max_steps // self.worker.rank_info.dp_size
@@ -492,6 +497,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             for meta_infos, buffer in self.model.all_gather_weights_as_hf_bucket(
                 models=self.models_unwrapped, bucket_size=256 * 1024 * 1024
             ):
+                ray.get(self.barrier.wait.remote())
                 refs = []
                 with Timer("broadcast") as timer_broadcast:
                     for p2p_tgt_device in p2p_tgt_devices:
@@ -517,6 +523,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     if len(broadcast_tgt_devices) > 0:
                         collective.broadcast(tensor=buffer, src_rank=0, group_name=comm_plan["group_name"])
                     ray.get(refs)
+                ray.get(self.barrier.wait.remote())
                 broadcast_time_cost += timer_broadcast.last
 
         metrics = {

@@ -60,6 +60,8 @@ class RayUtils:
         elif DeviceType.UNKNOWN == device_type:
             env_vars.update({
                 "TORCHINDUCTOR_COMPILE_THREADS": "2",
+                "HGGC_ENABLE_KERNEL_COPY": "0",
+                "NCCL_PF_U2MM_HOST": "0",
             })
 
         # used for debug
