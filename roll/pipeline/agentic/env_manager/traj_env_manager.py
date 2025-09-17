@@ -1,7 +1,7 @@
 import copy
 from contextlib import nullcontext
 from threading import Lock
-from typing import Optional, List, Dict
+from typing import Optional
 
 import gem
 import numpy as np
@@ -12,12 +12,12 @@ from omegaconf import DictConfig
 from tensordict import TensorDict
 from transformers import PreTrainedTokenizer
 
-from roll.agentic.llm_proxy import create_llm_proxy, BaseLLMProxy
-from roll.agentic.rollout.base_env_manager import RolloutCache, BaseEnvManager
-from roll.agentic.rollout.env_action_limiter import get_global_limiter
-from roll.agentic.rollout.rollout_scheduler import GroupQueueManager
-from roll.agentic.rollout.token_mask_utils import custom_apply_chat_template, compute_conversation_end_token_id
-from roll.agentic.tools.tool_env_wrapper import tool_wrapper
+from roll.pipeline.agentic.llm_proxy import create_llm_proxy, BaseLLMProxy
+from roll.pipeline.agentic.env_manager.base_env_manager import RolloutCache, BaseEnvManager
+from roll.utils.env_action_limiter import get_global_limiter
+from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
+from roll.pipeline.agentic.env_manager.token_mask_utils import custom_apply_chat_template, compute_conversation_end_token_id
+from roll.pipeline.agentic.tools.tool_env_wrapper import tool_wrapper
 from roll.distributed.scheduler.generate_scheduler import RequestScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig, AgenticConfig

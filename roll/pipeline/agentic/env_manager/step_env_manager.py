@@ -4,8 +4,8 @@ import numpy as np
 import torch
 from tensordict import TensorDict
 
-from roll.agentic.rollout.base_env_manager import RolloutCache
-from roll.agentic.rollout.token_mask_utils import custom_apply_chat_template
+from roll.pipeline.agentic.env_manager.base_env_manager import RolloutCache
+from roll.pipeline.agentic.env_manager.token_mask_utils import custom_apply_chat_template
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.env_manager.traj_env_manager import TrajEnvManager
 from roll.utils.functionals import pad_to_length, aggregate_metrics

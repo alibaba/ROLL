@@ -1,12 +1,12 @@
 import numpy as np
 import random
 from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv as GymFrozenLakeEnv
-from typing import Optional, Any
+from typing import Optional
 
 import gem
 from gem import Env
-from roll.agentic.env.parse_action_utils import default_parser_action_func
-from roll.agentic.utils import all_seed
+from roll.pipeline.agentic.env.parse_action_utils import default_parser_action_func
+from roll.pipeline.agentic.utils import all_seed
 from .utils import generate_random_map
 
 

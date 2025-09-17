@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from roll.distributed.scheduler.protocol import DataProto
-from roll.agentic.env import gem
+from roll.pipeline.agentic.env import gem
 
 
 @dataclass

@@ -1,16 +1,14 @@
 import gem
 import random
 
-from typing import Any
-
 from gem import Env
 from gym_sokoban.envs.sokoban_env import SokobanEnv as GymSokobanEnv
 import numpy as np
 
-from roll.agentic.env.parse_action_utils import default_parser_action_func
+from roll.pipeline.agentic.env.parse_action_utils import default_parser_action_func
 from .utils import generate_room
 
-from roll.agentic.utils import all_seed
+from roll.pipeline.agentic.utils import all_seed
 
 
 class SokobanEnv(Env, GymSokobanEnv):

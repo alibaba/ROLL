@@ -6,7 +6,7 @@ from typing import Dict, Optional
 
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from roll.agentic.rollout.base_env_manager import BaseEnvManager
+from roll.pipeline.agentic.env_manager.base_env_manager import BaseEnvManager
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto

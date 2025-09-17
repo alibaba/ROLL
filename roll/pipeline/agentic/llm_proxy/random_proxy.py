@@ -1,10 +1,8 @@
-
-import random
 from typing import List, Dict, Any
 
 import numpy as np
 
-from roll.agentic.llm_proxy import BaseLLMProxy, register_llm_proxy
+from roll.pipeline.agentic.llm_proxy import BaseLLMProxy, register_llm_proxy
 from roll.distributed.scheduler.protocol import DataProto
 
 

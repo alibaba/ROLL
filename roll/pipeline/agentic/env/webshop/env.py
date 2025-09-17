@@ -5,10 +5,11 @@ from typing import Optional, Union, Any
 from gem import Env
 from webshop_minimal import WebAgentTextEnv
 from webshop_minimal import init_basedir
+init_basedir()  # init DEFAULT_FILE_PATH, hardcoded dataset to small
 from webshop_minimal.utils import DEFAULT_FILE_PATH
 
-from roll.agentic.env.parse_action_utils import default_parser_action_func
-from roll.agentic.utils import all_seed
+from roll.pipeline.agentic.env.parse_action_utils import default_parser_action_func
+from roll.pipeline.agentic.utils import all_seed
 
 
 class WebShopEnv(Env, WebAgentTextEnv):
@@ -91,7 +92,7 @@ class WebShopEnv(Env, WebAgentTextEnv):
         self.step_count += 1
         action_info = self.parse_action(action)
         if action_info["action"] is None:
-            action_desc = f"At turn {self.num_env_steps}, You did not provide a valid action."
+            action_desc = f"At turn {self.step_count}, You did not provide a valid action."
 
             metrics = {
                 "action_is_effective": False,
@@ -105,8 +106,8 @@ class WebShopEnv(Env, WebAgentTextEnv):
                 "action_desc": action_desc,
             }
             info.update(action_info)
-            truncated = self.step_count >= self.config.max_steps
-            return self.render(), -self.format_penalty, truncated, truncated, info
+            truncated = self.step_count >= self.max_steps
+            return self.render(), self.format_penalty, truncated, truncated, info
 
         state, reward, done, info = WebAgentTextEnv.step(self, action_info["action"])
         self.prepare_render_cache(self.observation)
@@ -125,7 +126,7 @@ class WebShopEnv(Env, WebAgentTextEnv):
         obs_with_actions = self._attach_actions(state)
         terminated, truncated = done, False
         if terminated:
-            if not metrics["success"] and self.step_count >= self.config.max_steps:
+            if not metrics["success"] and self.step_count >= self.max_steps:
                 truncated = True
         return obs_with_actions, reward, terminated, truncated, info
 
@@ -134,7 +135,7 @@ class WebShopEnv(Env, WebAgentTextEnv):
         return observation + "\n" + "Available actions: " + actions
 
     def parse_action(self, text):
-        return default_parser_action_func(text, self.config.action_pattern, None, None)
+        return default_parser_action_func(text, self.action_pattern, None, None)
 
     def render(self, mode=None):
         """

@@ -10,7 +10,7 @@ from codetiming import Timer
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.util.timer import _Timer
 
-from roll.agentic.rollout.rollout_scheduler import RolloutScheduler
+from roll.distributed.scheduler.rollout_scheduler import RolloutScheduler
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider

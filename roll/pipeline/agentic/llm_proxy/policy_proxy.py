@@ -1,8 +1,8 @@
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Any
 
 import ray
 
-from roll.agentic.llm_proxy import BaseLLMProxy, register_llm_proxy
+from roll.pipeline.agentic.llm_proxy import BaseLLMProxy, register_llm_proxy
 from roll.distributed.scheduler.protocol import DataProto
 
 

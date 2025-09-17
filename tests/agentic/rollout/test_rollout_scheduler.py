@@ -4,7 +4,7 @@ import threading
 import sys
 import ray
 
-from roll.agentic.rollout.rollout_scheduler import GroupQueueManager
+from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
 
 TEST_EXCEPTION = False
 

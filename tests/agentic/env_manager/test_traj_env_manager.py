@@ -12,7 +12,7 @@ import threading
 
 import ray
 
-from roll.agentic.rollout.rollout_scheduler import GroupQueueManager
+from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider, default_processor_provider
 from roll.pipeline.agentic.agentic_config import AgenticConfig

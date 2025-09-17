@@ -1,5 +1,4 @@
 import base64
-import copy
 import gem
 from contextlib import nullcontext
 from threading import Lock
@@ -10,11 +9,11 @@ import numpy as np
 import torch
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from roll.agentic.llm_proxy import BaseLLMProxy, create_llm_proxy
-from roll.agentic.rollout.base_env_manager import RolloutCache, BaseEnvManager
-from roll.agentic.rollout.env_action_limiter import get_global_limiter
-from roll.agentic.rollout.rollout_scheduler import GroupQueueManager
-from roll.agentic.rollout.token_mask_utils import split_by_token, \
+from roll.pipeline.agentic.llm_proxy import BaseLLMProxy, create_llm_proxy
+from roll.pipeline.agentic.env_manager.base_env_manager import RolloutCache, BaseEnvManager
+from roll.utils.env_action_limiter import get_global_limiter
+from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
+from roll.pipeline.agentic.env_manager.token_mask_utils import split_by_token, \
     token_ids_to_assistant_mask
 from roll.datasets.collator import DataCollatorWithPaddingForMM
 from roll.distributed.scheduler.generate_scheduler import RequestScheduler

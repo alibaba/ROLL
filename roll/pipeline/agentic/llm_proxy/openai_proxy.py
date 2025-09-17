@@ -1,5 +1,4 @@
 import gem
-import gym
 import time
 from typing import List, Dict, Any, Optional
 
@@ -7,7 +6,7 @@ import numpy as np
 from openai import OpenAI, OpenAIError
 from transformers import PreTrainedTokenizer
 
-from roll.agentic.llm_proxy import BaseLLMProxy, register_llm_proxy
+from roll.pipeline.agentic.llm_proxy import BaseLLMProxy, register_llm_proxy
 from roll.distributed.scheduler.generate_scheduler import RequestScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import LLMProxyConfig

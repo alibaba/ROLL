@@ -1,10 +1,8 @@
-from roll.agentic.env import FrozenLakeEnvConfig, FrozenLakeEnv
-from roll.agentic.utils import dump_frames_as_gif
+from roll.pipeline.agentic.env import FrozenLakeEnvConfig, FrozenLakeEnv
+from roll.pipeline.agentic.utils import dump_frames_as_gif
 
 
 def test_frozen_lake():
-    import matplotlib.pyplot as plt
-
     config = FrozenLakeEnvConfig(size=4, p=0.8, is_slippery=False, map_seed=42)
     env = FrozenLakeEnv(config)
     frames = []

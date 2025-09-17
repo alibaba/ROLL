@@ -1,16 +1,19 @@
+import os
 import os.path
+import random
 import shutil
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime
 from multiprocessing import Pool
 from typing import List, Callable, Dict
 
+import imageio
 import numpy as np
 import torch
 from codetiming import Timer
 from torch import Tensor
 
-from roll.agentic.utils import dump_frames_as_gif
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import AgenticConfig, RewardNormalizationConfig
 from roll.utils.logging import get_logger
@@ -176,3 +179,36 @@ def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticC
         batch.batch["response_level_rewards"] = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
 
     return batch
+
+
+@contextmanager
+def all_seed(seed):
+    random_state = random.getstate()
+    np_random_state = np.random.get_state()
+
+    try:
+        random.seed(seed)
+        np.random.seed(seed)
+        yield
+    finally:
+        random.setstate(random_state)
+        np.random.set_state(np_random_state)
+
+
+print_only_once = False
+
+
+def dump_frames_as_gif(filename, frames, duration=0.2):
+    global print_only_once
+    try:
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+        with imageio.get_writer(filename, mode="v", duration=duration) as writer:
+            for frame in frames:
+                writer.append_data(frame.astype(np.uint8))
+
+    except Exception as e:
+        if not print_only_once:
+            print(f"Error saving gif: {e}")
+        print_only_once = True
+        pass

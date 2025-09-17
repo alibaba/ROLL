@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple, Any, SupportsFloat
 from gem import Env
 from gem.tools.tool_env_wrapper import ToolEnvWrapper as GEMToolEnvWrapper
 
-from roll.agentic.tools.registration import make_tool
+from roll.pipeline.agentic.tools.registration import make_tool
 
 class ToolEnvWrapper(GEMToolEnvWrapper):
     def reset(self, seed: Optional[int] = None) -> Tuple[str, dict[str, Any]]:
