@@ -364,6 +364,9 @@ class AgenticPipeline(BasePipeline):
                 mode = "copy"
             else:
                 mode = "delete"
+        elif mode == "random_sample":
+            if batch_size < size_divide:
+                mode = "copy"
 
         metrics = data.meta_info.get("metrics", {})
         metrics["system/batch_add_count"] = 0
@@ -385,6 +388,11 @@ class AgenticPipeline(BasePipeline):
             # TODO: set dup_proto response_mask to 0
             adjusted_batch = DataProto.concat([data, dup_proto])
             metrics["system/batch_add_count"] = to_add
+        elif mode == "random_sample":
+            select_indices = np.random.choice(batch_size, size_divide, replace=False)
+            select_indices = np.sort(select_indices)
+            adjusted_batch = data.select_idxs(select_indices)
+            metrics["system/batch_remove_count"] = batch_size - size_divide
         else:
             raise ValueError(f"Unsupported mode: {mode}")
 

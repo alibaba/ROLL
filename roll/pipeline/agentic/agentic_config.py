@@ -110,7 +110,7 @@ class AgenticConfig(BaseConfig):
         metadata={"help": "Configuration for the reference role."}
     )
 
-    batch_adjust_mode: Literal["copy", "delete", "auto"] = field(
+    batch_adjust_mode: Literal["copy", "delete", "auto", "random_sample"] = field(
         default="copy", metadata={"help": "batch adjust mode: copy or delete"}
     )
     episode_reward_weight: float = field(default=1.0, metadata={"help": "Episode reward weight, used in GiGPO."})
@@ -152,7 +152,7 @@ class AgenticConfig(BaseConfig):
     whiten_rewards: bool = field(default=False, metadata={"help": "Whiten the rewards before compute advantages."})
     whiten_advantages: bool = field(default=False, metadata={"help": "Whiten the advantage."})
     advantage_clip: float = field(default=None, metadata={"help": "advantage_clip value"})
-    adv_estimator: Literal["gae", "reinforce", "grpo", "gigpo"] = field(
+    adv_estimator: Literal["gae", "reinforce", "grpo", "gigpo", "step_reinforce"] = field(
         default="gae", metadata={"help": "advantage estimator: gae (GAE)."}
     )
     norm_mean_type: Literal["batch", "group", "running", None] = field(

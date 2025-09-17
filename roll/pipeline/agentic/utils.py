@@ -83,7 +83,7 @@ def compute_discounted_returns(batch: DataProto, adv_estimator, gamma=1.0) -> Da
         DataProto: Updated batch where each trajectory contains an extra tensor key
                    `"step_rewards"` holding the computed discounted returns.
     """
-    if adv_estimator == "gigpo":
+    if adv_estimator in ["gigpo", "step_reinforce" ]:
         batch.batch["sample_order_placeholder"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
         batch_group_by_traj: Dict[str, DataProto] = batch.group_by(keys="traj_id")
         for traj_id,  traj_batch in batch_group_by_traj.items():
@@ -166,6 +166,10 @@ def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticC
         batch.batch["response_level_rewards"] = pipeline_config.episode_reward_weight * episode_rewards + pipeline_config.step_reward_weight * step_rewards
         batch.batch["episode_rewards_norm"] = episode_rewards
         batch.batch["step_rewards_norm"] = step_rewards
+    elif pipeline_config.adv_estimator == "step_reinforce":
+        scores_to_group = DataProto.from_dict({"scores": batch.batch["step_rewards"]})
+        scores_to_group.non_tensor_batch = batch.non_tensor_batch
+        batch.batch["response_level_rewards"] = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
     else:
         scores_to_group = DataProto.from_dict({"scores": batch.batch["scores"].clone().sum(dim=-1)})
         scores_to_group.non_tensor_batch = batch.non_tensor_batch

@@ -88,7 +88,7 @@ class TrainingArguments:
         },
     )
     warmup_ratio: float = field(
-        default=0.03,
+        default=0.0,
         metadata={"help": "Linear warmup over warmup_ratio fraction of total steps."}
     )
     warmup_steps: int = field(default=0, metadata={"help": "Linear warmup over warmup_steps."})

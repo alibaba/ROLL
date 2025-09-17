@@ -705,15 +705,7 @@ def compute_advantage(
         advantages, returns = compute_gae_advantage_return(
             token_level_rewards=token_level_rewards, values=values, gamma=gamma, lambd=lambd
         )
-    elif adv_estimator == "reinforce":
-        advantages, returns = compute_reinforce_return(
-            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
-        )
-    elif adv_estimator == "grpo":
-        advantages, returns = compute_reinforce_return(
-            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
-        )
-    elif adv_estimator == "gigpo":
+    elif adv_estimator in ["reinforce", "grpo", "gigpo", "step_reinforce"]:
         advantages, returns = compute_reinforce_return(
             token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
         )

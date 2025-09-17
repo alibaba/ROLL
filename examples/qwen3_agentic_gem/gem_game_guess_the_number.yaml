@@ -30,7 +30,6 @@ track_with: tensorboard
 tracker_kwargs:
   log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban
 
-
 checkpoint_config:
   type: file_system
   output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
@@ -45,18 +44,21 @@ resume_from_checkpoint: false
 
 rollout_batch_size: 128
 val_batch_size: 128
-sequence_length: 4096
+sequence_length: 12800
 
 advantage_clip: 20
-ppo_epochs: 1
-adv_estimator: "reinforce"
+ppo_epochs: 2
+adv_estimator: "step_reinforce"
+batch_adjust_mode: "delete"
+step_reward_gamma: 1.0
 
 #pg_clip: 0.1
 #dual_clip_loss: True
 init_kl_coef: 0.0
-whiten_advantages: true
+whiten_advantages: false
 entropy_loss_coef: 0
 max_grad_norm: 1.0
+loss_agg_mode: token-mean
 
 pretrain: Qwen/Qwen3-1.7B-Base
 reward_pretrain: Qwen/Qwen3-1.7B-Base
@@ -72,8 +74,7 @@ actor_train:
     weight_decay: 0
     per_device_train_batch_size: 2
     gradient_accumulation_steps: 8
-    warmup_steps: 10
-    lr_scheduler_type: cosine
+    lr_scheduler_type: constant
   strategy_args:
 #    strategy_name: deepspeed_train
 #    strategy_config: ${deepspeed_zero3}
@@ -93,10 +94,10 @@ actor_infer:
     dtype: bf16
   generating_args:
     max_new_tokens: ${max_tokens_per_step} # single-turn response length
-    top_p: 0.99
-    top_k: 100
+    top_p: 1.0
+    top_k: -1
     num_beams: 1
-    temperature: 0.99
+    temperature: 1.0
     num_return_sequences: 1
   strategy_args:
     strategy_name: vllm
@@ -120,10 +121,9 @@ reference:
 
 reward_normalization:
   grouping: batch # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
-  method: identity # asym_clip / identity / mean_std
+  method: mean_std # asym_clip / identity / mean_std
 
 train_env_manager:
-  format_penalty: 0
   max_env_num_per_worker: 16
   num_env_groups: 128
   # under the same group, the env config and env seed are ensured to be equal
@@ -141,7 +141,30 @@ val_env_manager:
 
 # Here, you can override variables defined in the imported envs. max_tokens_per_step: 128 in custom_env.SimpleSokoban, here replaced by 64
 max_tokens_per_step: 512
+max_actions_per_traj: 20
+default_history_length: ${max_actions_per_traj}
+env_manager_cls: roll.pipeline.agentic.env_manager.step_concat_env_manager.StepConcatEnvManager
 
 custom_envs:
   GuessTheNumber:
-    ${gem_games.GuessTheNumber}
+    env_type: game:GuessTheNumber-v0
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    history_length: ${default_history_length}
+    agent_system_template: ${agent_system_template}
+    agent_template: ${agent_template}
+    env_config:
+      min_number: 1
+      max_number: 20
+      max_turns: ${max_actions_per_traj} # From GuessTheNumber-v0 registration
+
+agent_system_template: ~
+agent_template: |
+  You are playing language games. Make valid actions to win.
+  Observation:
+  {history}
+  {current_observation}
+  Please reason step by step, and put your final answer within \\boxed{{}}.
+  
