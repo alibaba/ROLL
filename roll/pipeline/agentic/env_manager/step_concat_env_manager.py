@@ -31,17 +31,8 @@ class StepConcatEnvManager(StepEnvManager):
 
         current_observation = f"{current_cache['observation']}\n{current_cache.get('suffix', '')}"
         render_dict = {"history": "\n".join(sar_history)}
-        # env_instruction is saved in s0
-        if contains_renderable_field(self.agent_template, "step_count"):
-            render_dict["step_count"] = self.rollout_cache.step
-        if contains_renderable_field(self.agent_template, "history_length"):
-            render_dict["history_length"] = len(memory_history)
-        if contains_renderable_field(self.agent_template, "current_step"):
-            render_dict["current_step"] = self.rollout_cache.step + 1
         if contains_renderable_field(self.agent_template, "current_observation"):
             render_dict["current_observation"] = current_observation
-        if contains_renderable_field(self.agent_template, "max_response_length"):
-            render_dict["max_response_length"] = self.env_config["max_tokens_per_step"]
         messages = []
         if self.agent_system_template is not None:
             messages.append({"role": "system", "content": self.agent_system_template})

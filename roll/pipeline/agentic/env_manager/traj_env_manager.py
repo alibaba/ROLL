@@ -241,8 +241,10 @@ class TrajEnvManager(BaseEnvManager):
         content = self.rollout_cache.history[-1]
 
         messages = []
+        user_content = ""
         if self.rollout_cache.step == 0:
             messages.append({"role": "system", "content": self.agent_system_template})
+            user_content =  f"{history.history[0]['env_instruction']}\n"
         if len(self.rollout_cache.history) > 1 and self.rollout_cache.history[-2].get("use_tool", False):
             messages.append({"role": "tool", "content": content["observation"]})
         else:
@@ -255,9 +257,9 @@ class TrajEnvManager(BaseEnvManager):
                 render_dict["actions_left"] = content["actions_left"]
             if contains_renderable_field(self.agent_template, "max_response_length"):
                 render_dict["max_response_length"] = self.env_config["max_tokens_per_step"]
-            messages.append({"role": "user", "content": self.agent_template.format(**render_dict)})
+            user_content += self.agent_template.format(**render_dict)
+            messages.append({"role": "user", "content": user_content})
 
-        content["messages"] = messages
         prompt_ids = custom_apply_chat_template(messages=messages, tokenizer=self.tokenizer, add_generation_prompt=True)
         history_token_ids = []
         for items in self.rollout_cache.history[:-1]:
@@ -277,6 +279,7 @@ class TrajEnvManager(BaseEnvManager):
             "position_ids": position_ids,
         }, batch_size=input_ids.shape[0])
         content["prompt_ids"] = prompt_ids
+        content["messages"] = messages
         return lm_input
 
     def formulate_rollouts(self, rollout_cache: RolloutCache):

@@ -24,21 +24,16 @@ class StepEnvManager(TrajEnvManager):
         memory_history = []
         if "history_length" in self.cfg_template:
             memory_history = rollout_cache.history[-self.cfg_template["history_length"]:-1]
-        env_instruction = rollout_cache.history[0]["observation"]
-
-        def get_observation(inner_entry):
-            if env_instruction == inner_entry["observation"]:
-                obs = inner_entry['suffix']
-            else:
-                obs = f"{inner_entry['observation']} {inner_entry['suffix']}"
-            return obs
-
+        env_instruction = rollout_cache.history[0]["env_instruction"]
         sar_history = []
         for history_step, entry in enumerate(memory_history):
-            observation = get_observation(entry)
-            sar_history.append(f"(step:{self.rollout_cache.step - len(memory_history) + history_step + 1}, observation: {observation}, action: {entry.get('action_content')})")
+            action = entry.get('action_content', entry.get('action_content', entry.get('llm_response')))
+            action_is_valid = entry['metrics'].get("action_is_valid", True)
+            if not action_is_valid:
+                action += "(IMPORTANT TIPS: this action is not valid, your new response *must* strictly adhere to the format according to env instructions.)"
+                sar_history.append(f"(step: {self.rollout_cache.step - len(memory_history) + history_step + 1}, observation: {entry['observation']}, action: {action}, reward: {entry['reward']})")
 
-        current_observation = get_observation(rollout_cache.history[-1])
+        current_observation = current_cache["observation"]
         render_dict = {"env_instruction": env_instruction, "history": ", ".join(sar_history)}
         if contains_renderable_field(self.agent_template, "step_count"):
             render_dict["step_count"] = self.rollout_cache.step

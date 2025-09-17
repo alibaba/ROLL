@@ -3,7 +3,7 @@ import copy
 import gem
 from contextlib import nullcontext
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import PIL
 import numpy as np
@@ -40,7 +40,6 @@ class VLTrajEnvManager(TrajEnvManager):
                  mode='train',
                  *args, **kwargs):
         """
-        TODO: GEM currently does not support VL scenarios and requires extension.
         """
         BaseEnvManager.__init__(self)
         self.logger = get_logger()
@@ -74,7 +73,7 @@ class VLTrajEnvManager(TrajEnvManager):
 
         # Set environment step concurrency limit
         self.max_env_step_concurrent = self.env_config.get("max_env_step_concurrent", 0)
-        self.env_step_limiter = None
+        self.env_step_limiter = nullcontext()
         if self.max_env_step_concurrent > 0:
             env_tag = self.env_config.get("tag", "default")
             self.env_step_limiter = get_global_limiter(tag=env_tag, max_concurrent_calls=self.max_env_step_concurrent)
@@ -117,33 +116,19 @@ class VLTrajEnvManager(TrajEnvManager):
 
 
     def make_decision(self, rollout_cache: RolloutCache):
-        messages = self.format_messages(rollout_cache.history)
+        lm_input, messages = self.format_messages(rollout_cache)
 
-        lm_input_texts = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-
-        images = []
-        for message in messages:
-            if message["role"] == "user":
-                content: List[Dict] = message["content"]
-                images.extend([content[i].pop("image_PIL") for i in range(len(content)) if content[i]["type"] == "image"])
-
-        features = [{
-            self.collator.prompt_key: lm_input_texts,
-            self.collator.image_key: images,
-            self.collator.image_flag_key: True
-        }]
-        inputs = self.collator(features)
-        lm_input: DataProto = DataProto.from_single_dict(inputs)
-
-        max_new_tokens = min(self.env_config["max_tokens_per_step"], self.worker_config.generating_args.max_new_tokens)
-        generation_config = self.worker_config.generating_args.to_dict()
-
-        generation_config["max_new_tokens"] = min(max_new_tokens,
-                                                  max(self.pipeline_config.sequence_length - lm_input.batch['input_ids'].shape[1] - max_new_tokens, 1))
-        if generation_config["max_new_tokens"] <= 1:
-            self.logger.warning(f"sequence_length = {self.pipeline_config.sequence_length} input_ids length = {lm_input.batch['input_ids'].shape[1]},"
+        input_ids = lm_input.batch["input_ids"]
+        if input_ids.shape[1] >= self.pipeline_config.sequence_length:
+            self.logger.warning(f"sequence_length = {self.pipeline_config.sequence_length} input_ids length = {input_ids.shape[1]},"
                                 f"maybe you should increase the response_length")
             return DataProto(meta_info={"stop_reason": GenerateStopReason.MAX_LENGTH})
+
+        max_new_tokens = min(self.env_config["max_tokens_per_step"],
+                             self.worker_config.generating_args.max_new_tokens,
+                             self.pipeline_config.sequence_length-input_ids.shape[1])
+        generation_config = self.worker_config.generating_args.to_dict()
+        generation_config["max_new_tokens"] = min(max_new_tokens, self.pipeline_config.sequence_length)
         lm_input.meta_info["src_rank"] = self.env_config["env_id"]
 
         lm_output: DataProto = self.llm_proxy.generate(messages=messages,
@@ -152,30 +137,27 @@ class VLTrajEnvManager(TrajEnvManager):
 
         if lm_output is None:
             return DataProto(meta_info={"stop_reason": GenerateStopReason.ABORT})
-
-        lm_output.non_tensor_batch.update({
-            "env_ids": np.array([rollout_cache.env_id], dtype=object),
-            "group_ids": np.array([rollout_cache.group_id], dtype=object),
-            "messages_list": np.array([messages], dtype=object),
-            "tags": np.array([rollout_cache.tag], dtype=object),
-        })
         lm_output.meta_info["stop_reason"] = GenerateStopReason.FINISH
         return lm_output
 
-    def format_messages(self, history: List[Dict]):
+    def format_messages(self, history: RolloutCache) -> Tuple[DataProto, List[Dict]]:
+
         messages = [
             {"role": "system", "content": self.agent_system_template},
         ]
+        images = []
 
-        for idx, content in enumerate(history):
+        for idx, content in enumerate(history.history):
 
             assert "observation" in content, ("The current EnvManager is specifically tailored for standard RL interaction "
                                         "sequences, following the format of (s, a, r, s, a, r...).")
 
-            pre_step_content = self.pre_step_template.format(observation=content["observation"], turn_idx=idx + 1)
+            pre_step_content = self.pre_step_template.format(turn_idx=idx + 1)
+            if self.rollout_cache.step == 0:
+                pre_step_content = history.history[0]["env_instruction"] + pre_step_content
             next_step_content = self.next_step_template.format(actions_left=content["actions_left"],
                                                                max_response_length=self.env_config["max_tokens_per_step"])
-            base64_image = base64.b64encode(content["suffix"]).decode("utf-8")
+            base64_image = base64.b64encode(content["observation"]).decode("utf-8")
             user_content_list_dict = [
                 {
                     "type": "text",
@@ -184,7 +166,6 @@ class VLTrajEnvManager(TrajEnvManager):
                 {
                     "type": "image",
                     "image": f"data:image/jpeg;base64,{base64_image}",
-                    "image_PIL": PIL.Image.fromarray(content["suffix"], mode='RGB')
                 },
                 {
                     "type": "text",
@@ -192,46 +173,40 @@ class VLTrajEnvManager(TrajEnvManager):
                 }
             ]
             messages.append({"role": "user", "content": user_content_list_dict})
+            images.append(PIL.Image.fromarray(content["observation"], mode='RGB'))
 
             if "llm_response" in content:
                 messages.append({"role": "assistant", "content": content["llm_response"]})
-        return messages
+
+        lm_input_texts = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        features = [{
+            self.collator.prompt_key: lm_input_texts,
+            self.collator.image_key: images,
+            self.collator.image_flag_key: True
+        }]
+        inputs = self.collator(features)
+        lm_input: DataProto = DataProto.from_single_dict(inputs)
+
+        return lm_input, messages
 
     def formulate_rollouts(self, rollout_cache: RolloutCache):
         # TODO: check inconsistent tokenization between successive encode-decode operations
         #  can potentially lead to a training crash. check token in token out
         #  the same as TrajEnvManager.
+
         if 'observation' in rollout_cache.history[-1]:
             rollout_cache.history.pop(-1)
-        history = rollout_cache.history[:-1]
-        last_cache = copy.deepcopy(rollout_cache.history[-1])
-        last_cache.pop("reward", None)
-        history.append(last_cache)
 
         scores = [i['reward'] for i in self.rollout_cache.history]
         episode_score = sum(scores)
-        penalty = [i['penalty'] for i in self.rollout_cache.history]
-        episode_penalty = sum(penalty)
 
-        messages = self.format_messages(history)
+        lm_input, messages = self.format_messages(rollout_cache)
 
-        messages_text = self.processor.apply_chat_template(messages)
+        input_ids = lm_input.batch["input_ids"]
+        attention_mask = lm_input.batch["attention_mask"]
+        position_ids = lm_input.batch["position_ids"]
 
-        images = []
-        for message in messages:
-            if message["role"] == "user":
-                content: List[Dict] = message["content"]
-                images.extend([content[i].pop("image_PIL") for i in range(len(content)) if content[i]["type"] == "image"])
-
-        features = [{
-            self.collator.prompt_key: messages_text,
-            self.collator.image_key: images,
-            self.collator.image_flag_key: True
-        }]
-
-        inputs = self.collator(features)
-
-        token_ids = inputs.input_ids[0].tolist()
+        token_ids = input_ids[0].tolist()
         token_ids_split = split_by_token(token_ids, token_ids[0])
         response_masks_list = token_ids_to_assistant_mask(messages=messages, input_ids_list=token_ids_split, tokenizer=self.tokenizer)
         response_masks = [item for items in response_masks_list for item in items]
@@ -245,10 +220,10 @@ class VLTrajEnvManager(TrajEnvManager):
         score_tensor = torch.tensor([0] * len(token_ids), dtype=torch.float).unsqueeze(0)
         score_tensor[0][last_response_idx] = episode_score
 
-        input_ids = inputs.input_ids[:, :last_response_idx+1]
-        attention_mask = inputs.attention_mask[:, :last_response_idx+1]
-        position_ids = inputs.position_ids[:, :, :last_response_idx+1]
-        lm_input: DataProto = DataProto.from_single_dict(inputs)
+        input_ids = input_ids[:, :last_response_idx+1]
+        attention_mask = attention_mask[:, :last_response_idx+1]
+        position_ids = position_ids[:, :, :last_response_idx+1]
+
         response_length = response_mask.sum(dim=-1).float().mean().item()
         input_ids = pad_to_length(input_ids, length=self.pipeline_config.sequence_length, pad_value=self.tokenizer.pad_token_id)
         attention_mask = pad_to_length(attention_mask, length=self.pipeline_config.sequence_length, pad_value=0)
@@ -261,7 +236,6 @@ class VLTrajEnvManager(TrajEnvManager):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "position_ids": position_ids,
-            "penalty": torch.Tensor([episode_penalty]),
             "response_mask": response_mask,
             "prompt_mask": prompt_mask,
             "scores": score_tensor,
@@ -271,7 +245,6 @@ class VLTrajEnvManager(TrajEnvManager):
             "group_ids": np.array([self.rollout_cache.group_id], dtype=object),
             "messages_list": np.array([messages], dtype=object),
             "tags": np.array([self.rollout_cache.tag], dtype=object),
-            "frames": np.array([self.rollout_cache.frames], dtype=object),
             "step_scores": np.array([scores], dtype=object),
             "episode_scores": np.array([episode_score], dtype=object),
         })

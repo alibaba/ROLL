@@ -92,13 +92,11 @@ custom_env:
       render_mode: "rgb_array"
 
 agent_system_template: "You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game."
-pre_step_template: |
-  {observation}
-  Turn {turn_idx}:
-  Current state is:
 
+pre_step_template: "\nTurn {turn_idx}:\nState:\n"
 next_step_template: |
-  Enter your move.
-  Strictly follow this format.
-  You have {actions_left} actions left. 
-  Max response length: {max_response_length} words (tokens).
+    You have {actions_left} actions left. 
+    Always output: <answer> [your answer] </answer> with no extra text. 
+    Strictly follow this format.
+    Max response length: {max_response_length} words (tokens).
+    Decide the next action:

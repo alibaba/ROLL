@@ -19,7 +19,7 @@ train_env_manager:
 #    proxy_type: openai
 #    proxy_config:
 #      base_url: https://offline-whale-wave.alibaba-inc.com/api/v2/services/aigc/text-generation/v1/chat/completions
-#      api_key: U91RQVCIEV
+#      api_key: xxx
 #      model_name: Qwen2.5-72B-Instruct-Chatflow
 
 custom_envs:
