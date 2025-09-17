@@ -67,14 +67,6 @@ class FrozenLakeEnv(Env, GymFrozenLakeEnv):
             [f"{v}" for k, v in self.ACTION_LOOKUP.items()])
         return self.env_instruction + grid_vocab_str + action_lookup_str
 
-    def get_task_suffix(self) -> Any:
-        if self.render_mode == "text":
-            return (
-                f"Here is the current state of the FrozenLake:\n{self.render(mode='text')}\n"
-            )
-        else:
-            return self.render(mode=self.render_mode)
-
     def reset(self, seed=None):
         Env.reset(self, seed)
         self.step_count = 0
@@ -83,16 +75,24 @@ class FrozenLakeEnv(Env, GymFrozenLakeEnv):
                 random_map = generate_random_map(size=self.size, p=self.p, seed=seed)
                 GymFrozenLakeEnv.__init__(self, desc=random_map, is_slippery=self.is_slippery, render_mode=self.render_mode)
                 GymFrozenLakeEnv.reset(self, seed=seed)
-                return self.get_instructions(), {"suffix": self.get_task_suffix()}
+                return self.render(mode=self.render_mode), {"env_instruction": self.get_instructions()}
         except (RuntimeError, RuntimeWarning) as e:
             next_seed = abs(hash(str(seed))) % (2**32) if seed is not None else None
             return self.reset(next_seed)
 
     def step(self, action: str):
+        metrics_agg_mode = {
+            "action_is_effective": "mean",
+            "action_is_valid": "mean",
+            "success": "last",
+            "format_penalty": "mean",
+        }
+
         self.step_count += 1
         action_info = self.parse_action(action)
         if action_info["action"] is None:
-            terminate_obs = f"At turn {self.step_count}, You did not provide a valid action."
+            next_obs = self.render()
+            action_desc = f"At turn {self.step_count}, You did not provide a valid action."
             reward = self.format_penalty
             metrics = {
                 "action_is_effective": False,
@@ -101,21 +101,23 @@ class FrozenLakeEnv(Env, GymFrozenLakeEnv):
                 "format_penalty": self.format_penalty
             }
             info = {
-                "suffix": self.get_task_suffix(),
                 "metrics": metrics,
+                "metrics_agg_mode": metrics_agg_mode,
+                "action_desc": action_desc
             }
             info.update(action_info)
 
-            return terminate_obs, reward, False, False, info
+            return next_obs, reward, False, False, info
 
         prev_pos = int(self.s)
         _, reward, terminated, truncated, _ = GymFrozenLakeEnv.step(self, action_info["action"])
+        next_obs = self.render()
 
         action_effective = prev_pos != int(self.s)
         if not action_effective:
-            next_obs = f"At turn {self.step_count}, you tried to move {action_info['action_content']}, which is not effective yet."
+            action_desc = f"At turn {self.step_count}, you tried to move {action_info['action_content']}, which is not effective yet."
         else:
-            next_obs = f"At turn {self.step_count}, you moved {action_info['action_content']}, which is effective."
+            action_desc = f"At turn {self.step_count}, you moved {action_info['action_content']}, which is effective."
 
         metrics = {
             "action_is_effective": action_effective,
@@ -123,16 +125,10 @@ class FrozenLakeEnv(Env, GymFrozenLakeEnv):
             "success": self.desc[self.player_pos] == b"G",
             "format_penalty": self.format_penalty
         }
-        metrics_agg_mode = {
-            "action_is_effective": "mean",
-            "action_is_valid": "mean",
-            "success": "last",
-            "format_penalty": "mean",
-        }
         info = {
-            "suffix": self.get_task_suffix(),
             "metrics": metrics,
             "metrics_agg_mode": metrics_agg_mode,
+            "action_desc": action_desc
         }
         info.update(action_info)
         if terminated:
@@ -176,7 +172,7 @@ class FrozenLakeEnv(Env, GymFrozenLakeEnv):
 if __name__ == "__main__":
     env: FrozenLakeEnv = gem.make(env_id="frozen_lake", size=4, p=0.8, is_slippery=False, map_seed=42)
     obs, info = env.reset(seed=42)
-    print(obs, info["suffix"])
+    print(obs, info["env_instruction"])
     while True:
         keyboard = input("Enter action: ")
         if keyboard == "q":
@@ -185,7 +181,7 @@ if __name__ == "__main__":
         assert action in env.ACTION_LOOKUP, f"Invalid action: {action}"
         action_text = f"<answer>{env.ACTION_LOOKUP[action]}</answer>"
         obs, reward, terminate, truncated, info = env.step(action_text)
-        print(obs, reward, terminate, info["suffix"])
+        print(obs, reward, terminate, info["action_desc"])
         if terminate:
             break
     # np_img = env.render("rgb_array")

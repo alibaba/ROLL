@@ -68,15 +68,11 @@ class SokobanEnv(Env, GymSokobanEnv):
             [f"{v}" for k, v in self.ACTION_LOOKUP.items()])
         return self.env_instruction + grid_vocab_str + action_lookup_str
 
-    def get_task_suffix(self) -> Any:
-        if self.render_mode == "text":
-            return (
-                f"Here is the current state of the Sokoban puzzle:\n{self.render(mode='text')}\n"
-            )
-        else:
-            return self.render(mode=self.render_mode)
-
     def reset(self, seed=None):
+        """
+        @yali: The previous observation definition was inappropriate. env.reset()/env.step() should return the environment's state directly,
+                and any other information should be moved into the info dict. prefix/suffix are extra information, which is not part of the observation.
+        """
         Env.reset(self, seed)
         try:
             with all_seed(seed):
@@ -88,22 +84,27 @@ class SokobanEnv(Env, GymSokobanEnv):
                 )
             self.num_env_steps, self.reward_last, self.boxes_on_target = 0, 0, 0
             self.player_position = np.argwhere(self.room_state == 5)[0]
-
-            # TODO: `env.reset()` does not return the raw state; how should we describe the image-based state?
-            #       Currently returning the image via suffix instead.
-            return self.get_instructions(), {"suffix": self.get_task_suffix()}
+            return self.render(mode=self.render_mode), {"env_instruction": self.get_instructions()}
         except (RuntimeError, RuntimeWarning) as e:
             next_seed = abs(hash(str(seed))) % (2**32) if seed is not None else None
             return self.reset(next_seed)
 
     def step(self, action: str):
+        metrics_agg_mode = {
+            "action_is_effective": "mean",
+            "action_is_valid": "mean",
+            "success": "last",
+            "format_penalty": "mean",
+        }
         action_info = self.parse_action(action)
 
         if action_info["action"] is None:
             _, reward, terminated, _ = GymSokobanEnv.step(self, 0)
+            next_obs = self.render()
+
             reward += self.format_penalty
 
-            terminate_obs = f"At turn {self.num_env_steps}, You did not provide a valid action."
+            action_desc = f"At turn {self.num_env_steps}, You did not provide a valid action."
             metrics = {
                 "action_is_effective": False,
                 "action_is_valid": False,
@@ -111,20 +112,23 @@ class SokobanEnv(Env, GymSokobanEnv):
                 "format_penalty": self.format_penalty
             }
             info = {
-                "suffix": self.get_task_suffix(),
                 "metrics": metrics,
+                "metrics_agg_mode": metrics_agg_mode,
+                "action_desc": action_desc
             }
             info.update(action_info)
-            return terminate_obs, reward, False, False, info
+            return next_obs, reward, False, False, info
 
         previous_pos = self.player_position
         _, reward, terminated, _ = GymSokobanEnv.step(self, action_info["action"])
 
+        next_obs = self.render()
+
         action_effective = not np.array_equal(previous_pos, self.player_position)
         if not action_effective:
-            next_obs = f"At turn {self.num_env_steps}, you tried to move {action_info['action_content']}, which is not effective yet."
+            action_desc = f"At turn {self.num_env_steps}, you tried to move {action_info['action_content']}, which is not effective yet."
         else:
-            next_obs = f"At turn {self.num_env_steps}, you moved {action_info['action_content']}, which is effective."
+            action_desc = f"At turn {self.num_env_steps}, you moved {action_info['action_content']}, which is effective."
 
         metrics = {
             "action_is_effective": action_effective,
@@ -132,16 +136,10 @@ class SokobanEnv(Env, GymSokobanEnv):
             "success": self.boxes_on_target == self.num_boxes,
             "format_penalty": 0,
         }
-        metrics_agg_mode = {
-            "action_is_effective": "mean",
-            "action_is_valid": "mean",
-            "success": "last",
-            "format_penalty": "mean",
-        }
         info = {
-            "suffix": self.get_task_suffix(),
             "metrics": metrics,
-            "metrics_agg_mode": metrics_agg_mode
+            "metrics_agg_mode": metrics_agg_mode,
+            "action_desc": action_desc,
         }
         info.update(action_info)
         truncated = False
@@ -176,7 +174,7 @@ if __name__ == "__main__":
     env: SokobanEnv = gem.make(env_id="sokoban", dim_room=(6, 6), num_boxes=1, max_steps=100, search_depth=10)
     for i in range(10):
         obs, info = env.reset(seed=1010 + i)
-        print(obs, info["suffix"])
+        print(obs)
         print()
     while True:
         keyboard = input("Enter action: ")
@@ -185,9 +183,8 @@ if __name__ == "__main__":
         action = int(keyboard)
         assert action in env.ACTION_LOOKUP, f"Invalid action: {action}"
         action_text = f"<answer>{env.ACTION_LOOKUP[action]}</answer><|im_end|>"
-        import pdb; pdb.set_trace()
         obs, reward, terminate, truncated, info = env.step(action_text)
-        print(obs, reward, terminate, info["suffix"])
+        print(obs, reward, terminate)
         if terminate:
             break
     np_img = env.get_image("rgb_array")
