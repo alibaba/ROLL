@@ -13,6 +13,7 @@ from vllm.engine.arg_utils import HfOverrides, PoolerConfig, TaskOption
 from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
+from vllm.envs import get_default_cache_root
 
 from roll.third_party.vllm.vllm_0_10_0.llm_engine import LLMEngine0100
 from roll.utils.send_recv_utils import SendBucketManager
@@ -57,6 +58,9 @@ class Llm0100(LLM):
         # torch.cuda may already init, explicitly disable expandable_segments
         # here (only matters when VLLM_USE_RAY_SPMD_WORKER=0)
         torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+
+        os.environ["VLLM_CACHE_ROOT"] = os.path.join(
+            get_default_cache_root(), "vllm", os.environ.get("WORKER_NAME", ""))
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
