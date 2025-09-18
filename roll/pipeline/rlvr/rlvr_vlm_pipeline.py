@@ -640,6 +640,11 @@ class RLVRVLMPipeline(BasePipeline):
                 batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
                 batch.pop("prompt_id")
 
+                metrics_mgr.timers["tps"] = tps_timer
+                metrics_mgr.timers["actor_infer"] = actor_infer_timer
+                metrics_mgr.timers["actor_infer_response"] = actor_infer_response_timer
+                metrics_mgr.timers["actor_train"] = actor_train_timer
+
                 metrics_mgr.add_all_metrics(
                     global_step,
                     batch,
