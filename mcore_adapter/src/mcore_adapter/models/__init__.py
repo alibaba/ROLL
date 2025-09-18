@@ -9,6 +9,7 @@ from . import (
     qwen2_vl,
     qwen3,
     qwen3_moe,
+    qwen3_next,
 )
 from .auto import AutoConfig, AutoModel
 from .model_config import McaModelConfig

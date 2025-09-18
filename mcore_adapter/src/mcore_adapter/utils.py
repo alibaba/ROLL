@@ -1,3 +1,4 @@
+import importlib.util
 import logging
 import sys
 from typing import Any, Mapping
@@ -64,3 +65,11 @@ def divide(numerator, denominator):
     the division value."""
     ensure_divisibility(numerator, denominator)
     return numerator // denominator
+
+
+def _is_package_available(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+
+def is_fla_available() -> bool:
+    return _is_package_available("fla")
