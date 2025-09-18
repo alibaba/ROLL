@@ -23,7 +23,7 @@ class SokobanEnv(Env, GymSokobanEnv):
                  action_lookup=None,
                  env_instruction=None,
                  format_penalty=0.0,
-                 action_pattern="^<answer>(.*?)</answer>$",
+                 action_pattern="<answer>(.*?)</answer>",
                  special_token_list=("<|im_start|>", "<|im_end|>"),
                  **kwargs):
         self.GRID_VOCAB = {"#": "wall", "_": "empty", "O": "target", "√": "box on target", "X": "box", "P": "player", "S": "player on target"}

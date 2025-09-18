@@ -24,7 +24,7 @@ class FrozenLakeEnv(Env, GymFrozenLakeEnv):
                  action_lookup=None,
                  env_instruction=None,
                  format_penalty=0.0,
-                 action_pattern="^<answer>(.*?)</answer>$",
+                 action_pattern=r"<answer>(.*?)</answer>",
                  special_token_list=("<|im_start|>", "<|im_end|>"),
                  **kwargs
                  ):

@@ -1,5 +1,5 @@
 all_response_pattern: ^(.*)$
-action_pattern: ^<answer>(.*?)</answer>$
+action_pattern: <answer>(.*?)</answer>
 think_action_pattern: <think>(.*?)</think>\s*<answer>(.*?)</answer>
 
 max_tokens_per_step: 128
