@@ -83,8 +83,42 @@ gem_math:
     tool_wrapper:
       wrapper_args:
         tool_reward: 0
+        tool_success_reward: 0.1
+        max_tool_uses: 1
+      tool_configs:
+        - tool_id: python_code
+          tool_args:
+            timeout: 5
+            sandbox_type: none
+            keep_error_last_line: false
+  dapo_17k:
+    env_type: "roll_math"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      dataset_name: open-r1/DAPO-Math-17k-Processed
+      question_key: prompt
+      answer_key: solution
+  dapo_17k_with_python_code:
+    env_type: "roll_math"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${math_agent_system_template}
+    agent_template: ${math_agent_template}
+    env_config:
+      max_steps: ${max_actions_per_traj}
+      dataset_name: open-r1/DAPO-Math-17k-Processed
+      question_key: prompt
+      answer_key: solution
+    tool_wrapper:
+      wrapper_args:
+        tool_reward: 0
         tool_success_reward: 0
-        max_tool_uses: 5
+        max_tool_uses: 1
       tool_configs:
         - tool_id: python_code
           tool_args:

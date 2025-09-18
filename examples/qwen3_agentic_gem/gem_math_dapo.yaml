@@ -40,7 +40,7 @@ resume_from_checkpoint: false
 
 rollout_batch_size: 128
 val_batch_size: 128
-sequence_length: 5120
+sequence_length: 8192
 
 advantage_clip: 20
 ppo_epochs: 1
@@ -53,8 +53,8 @@ whiten_advantages: true
 entropy_loss_coef: 0
 max_grad_norm: 1.0
 
-pretrain: Qwen/Qwen3-1.7B-Base
-reward_pretrain: Qwen/Qwen3-1.7B-Base
+pretrain: Qwen/Qwen3-4B-Base
+reward_pretrain: Qwen/Qwen3-4B-Base
 
 actor_train:
   model_args:
@@ -67,8 +67,9 @@ actor_train:
     weight_decay: 0
     per_device_train_batch_size: 2
     gradient_accumulation_steps: 8
-    warmup_steps: 10
-    lr_scheduler_type: cosine
+    warmup_steps: 0
+    warmup_ratio: 0
+    lr_scheduler_type: constant
   strategy_args:
 #    strategy_name: deepspeed_train
 #    strategy_config: ${deepspeed_zero3}
@@ -122,22 +123,24 @@ train_env_manager:
   num_env_groups: 128
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
-  tags: [Orz57K_with_python_code]
+  tags: [dapo_17k]
   num_groups_partition: [128] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 val_env_manager:
   max_env_num_per_worker: 32
   num_env_groups: 128
   group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
-  tags: [Orz57K_with_python_code]
+  tags: [dapo_17k]
   num_groups_partition: [128] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 
 # Here, you can override variables defined in the imported envs. max_tokens_per_step: 128 in custom_env.SimpleSokoban, here replaced by 64
 max_tokens_per_step: 4096
 
+math_agent_system_template: Please reason step by step, and put your final answer within '\\boxed{}', e.g. \\boxed{{A}}..
+math_agent_template: "{observation}\nEnsure that your response includes the format of '\\boxed{{answer}}', e.g. \\boxed{{A}}."
 custom_envs:
-  Orz57K:
-    ${gem_math.Orz57K}
-  Orz57K_with_python_code:
-    ${gem_math.Orz57K_with_python_code}
+  dapo_17k:
+    ${gem_math.dapo_17k}
+  dapo_17k_with_python_code:
+    ${gem_math.dapo_17k_with_python_code}

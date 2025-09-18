@@ -22,6 +22,10 @@ output_dir: ./output
 #    - roll
 #    - baseline
 
+#track_with: tensorboard
+#tracker_kwargs:
+#  log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban
+
 track_with: tensorboard
 tracker_kwargs:
   log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_sokoban
@@ -53,8 +57,8 @@ whiten_advantages: true
 entropy_loss_coef: 0
 max_grad_norm: 1.0
 
-pretrain: Qwen/Qwen3-1.7B-Base
-reward_pretrain: Qwen/Qwen3-1.7B-Base
+pretrain: Qwen/Qwen3-4B-Base
+reward_pretrain: Qwen/Qwen3-4B-Base
 
 actor_train:
   model_args:
@@ -65,8 +69,8 @@ actor_train:
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 2
-    gradient_accumulation_steps: 8
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
     warmup_steps: 10
     lr_scheduler_type: cosine
   strategy_args:
@@ -80,7 +84,7 @@ actor_train:
       use_distributed_optimizer: true
       recompute_granularity: full
   device_mapping: list(range(0,8))
-  infer_batch_size: 2
+  infer_batch_size: 1
 
 actor_infer:
   model_args:
@@ -111,14 +115,14 @@ reference:
     strategy_name: hf_infer
     strategy_config: ~
   device_mapping: list(range(0,8))
-  infer_batch_size: 2
+  infer_batch_size: 1
 
 reward_normalization:
   grouping: batch # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
   method: identity # asym_clip / identity / mean_std
 
 train_env_manager:
-  max_env_num_per_worker: 16
+  max_env_num_per_worker: 32
   num_env_groups: 128
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
@@ -139,5 +143,7 @@ max_tokens_per_step: 4096
 custom_envs:
   HotpotQA:
     ${gem_qa.HotpotQA}
-  HotpotQA_with_python_code:
+  HotpotQA_with_mcp:
     ${gem_qa.HotpotQA_with_mcp}
+  HotpotQA_with_search:
+    ${gem_qa.HotpotQA_with_search}
