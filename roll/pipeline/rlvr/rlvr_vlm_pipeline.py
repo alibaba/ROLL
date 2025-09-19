@@ -2,21 +2,22 @@ import copy
 import json
 import os
 from functools import partial
-from typing import Any, Dict, List, Tuple, Union, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import ray
-import torch
 import datasets
 import PIL.Image as Image
-from transformers import ProcessorMixin, AutoConfig
-from transformers.image_utils import load_images
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from datasets import load_dataset, load_from_disk
+import ray
+import torch
 from codetiming import Timer
+from datasets import load_dataset, load_from_disk
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.util.timer import _Timer
+from transformers import AutoConfig, ProcessorMixin
+from transformers.image_utils import load_images
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from roll.datasets.collator import DataCollatorWithPaddingForMM
+from roll.datasets.dataset import get_dataset
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.generate_scheduler import DynamicSamplingScheduler
 from roll.distributed.scheduler.protocol import DataProto
@@ -26,13 +27,13 @@ from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.rlvr_pipeline import query_filter_fn, update_dataset_domain
 from roll.utils.checkpoint_manager import download_model
 from roll.utils.functionals import (
-    compute_advantage,
-    reduce_metrics,
     RunningMoments,
-    get_sample_level_mask,
-    reward_postprocess,
-    compute_token_reward,
     agg_loss,
+    compute_advantage,
+    compute_token_reward,
+    get_sample_level_mask,
+    reduce_metrics,
+    reward_postprocess,
 )
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
@@ -144,48 +145,15 @@ def encode_function(
     return encodings
 
 
-def get_dataset(data_args, encode_function, processor, get_eval=False):
+def get_vlm_dataset(data_args, encode_function, processor, get_eval=False):
     cache_path = getattr(data_args, "cache_path", None)
     if cache_path:
         cache_path = os.path.join(cache_path, "val" if get_eval else "train")
     if cache_path and os.path.exists(cache_path):
         dataset = load_from_disk(cache_path)
         return dataset
-    data_path = None
-    data_name = data_args.file_name
-    data_files = []
-    dataset_dir = getattr(data_args, "dataset_dir", ".")
-    FILEEXT2TYPE = {
-        "arrow": "arrow",
-        "csv": "csv",
-        "json": "json",
-        "jsonl": "json",
-        "parquet": "parquet",
-        "txt": "text",
-    }
-    if isinstance(data_name, list):
-        local_path = ""
-    else:
-        local_path: str = os.path.join(dataset_dir, data_name)
-    if os.path.isdir(local_path):
-        for file_name in os.listdir(local_path):
-            data_files.append(os.path.join(local_path, file_name))
-            if data_path is None:
-                data_path = FILEEXT2TYPE.get(file_name.split(".")[-1], None)
-            elif data_path != FILEEXT2TYPE.get(file_name.split(".")[-1], None):
-                raise ValueError("File types should be identical.")
-    elif os.path.isfile(local_path):  # is file
-        data_files.append(local_path)
-        data_path = FILEEXT2TYPE.get(local_path.split(".")[-1], None)
-    else:
-        assert local_path == ""
-        for file_name in data_name:
-            data_files.append(os.path.join(dataset_dir, file_name))
-            if data_path is None:
-                data_path = FILEEXT2TYPE.get(file_name.split(".")[-1], None)
-            elif data_path != FILEEXT2TYPE.get(file_name.split(".")[-1], None):
-                raise ValueError("File types should be identical.")
-    dataset = load_dataset(path=data_path, data_files=data_files)["train"]
+
+    dataset = get_dataset(data_args=data_args)
     # regularized data filed
     features = datasets.Features(
         {
@@ -285,7 +253,7 @@ class RLVRVLMPipeline(BasePipeline):
         self.tokenizer = self.processor.tokenizer
         self.tokenizer.padding_side = "left"
 
-        dataset = get_dataset(
+        dataset = get_vlm_dataset(
             self.pipeline_config.actor_train.data_args, encode_function, self.processor, get_eval=False
         )
         # update domain field, DynamicSamplingScheduler requires
@@ -307,7 +275,7 @@ class RLVRVLMPipeline(BasePipeline):
 
         self.val_dataset = None
         if self.pipeline_config.validation and self.pipeline_config.validation.data_args:
-            self.val_dataset = get_dataset(
+            self.val_dataset = get_vlm_dataset(
                 self.pipeline_config.validation.data_args, encode_function, self.processor, get_eval=True
             )
             self.val_dataset = self.val_dataset.map(
