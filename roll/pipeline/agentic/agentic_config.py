@@ -32,6 +32,7 @@ class EnvManagerConfig(WorkerConfig):
     group_size: int = field(
         default=1, metadata={"help": "Under the same group, the env config and env seed are ensured to be equal"}
     )
+    group_size_redundancy: int = field(default=0, metadata={"help": "Redundancy num of group size."})
     tags: List[str] = field(default_factory=lambda: ["SimpleSokoban"], metadata={"help": "Environment tags."})
     num_groups_partition: List[int] = field(
         default_factory=lambda: [128],
@@ -57,12 +58,11 @@ class EnvManagerConfig(WorkerConfig):
         根据es config计算world_size
         """
         if self.max_env_num_per_worker <= 0:
-            self.max_env_num_per_worker = self.num_env_groups * self.group_size
+            self.max_env_num_per_worker = self.num_env_groups * self.final_group_size
             logger.warning("all env in one worker by default, you can set max_env_num_per_worker to scale env.")
         logger.info(f"max_env_num_per_worker: {self.max_env_num_per_worker}")
 
-        assert self.num_env_groups * self.group_size % self.max_env_num_per_worker == 0
-        self.world_size = (self.num_env_groups * self.group_size + self.max_env_num_per_worker - 1) // self.max_env_num_per_worker
+        self.world_size = (self.num_env_groups * self.final_group_size + self.max_env_num_per_worker - 1) // self.max_env_num_per_worker
         self.env_configs: Optional[Dict[int, Dict[int, Dict]]] = None
         """
         worker_rank: 
@@ -70,6 +70,9 @@ class EnvManagerConfig(WorkerConfig):
                 env_config
         """
 
+    @property
+    def final_group_size(self):
+        return self.group_size + self.group_size_redundancy
 
 @dataclass
 class AgenticConfig(BaseConfig):
@@ -257,12 +260,12 @@ class AgenticConfig(BaseConfig):
         max_env_num_per_worker = env_manager_config.max_env_num_per_worker
         for tag, n_group in zip(env_manager_config.tags, env_manager_config.num_groups_partition):
             for env_id in range(
-                done_groups * env_manager_config.group_size, (done_groups + n_group) * env_manager_config.group_size
+                done_groups * env_manager_config.final_group_size, (done_groups + n_group) * env_manager_config.final_group_size
             ):
                 cfg_template = self.custom_envs[tag]
                 env_class = cfg_template.env_type
 
-                group_id = env_id // env_manager_config.group_size
+                group_id = env_id // env_manager_config.final_group_size
 
                 if "env_config" not in cfg_template:
                     cfg_template.env_config = {}

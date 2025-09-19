@@ -23,6 +23,7 @@ class GroupQueue:
         self.group_size = group_size
         self.max_group_num = max_group_num
         self.max_traj_per_env = max_traj_per_env
+        self.processed_episodes = set()
         self.clear(progress_bar)
 
     def prepare_clear(self):
@@ -50,9 +51,10 @@ class BoundedGroupQueue(GroupQueue):
         self.groups: Dict[str, List[DataProto]] = {}
         self.inprogress = asyncio.Event()
         self.completed = asyncio.Semaphore(value=0)
+        self.processed_episodes.clear()
 
     async def put(self, episode_id, start_step, rollout):
-        if self.quit:
+        if self.quit or episode_id in self.processed_episodes:
             return
         if episode_id not in self.groups:
             while episode_id not in self.groups and len(self.groups) >= self.max_group_num:
@@ -75,6 +77,7 @@ class BoundedGroupQueue(GroupQueue):
                 target = min(episode_id, target) if target is not None else episode_id 
         assert target is not None
         ret = self.groups.pop(target)
+        self.processed_episodes.add(target)
         self.inprogress.set()
         return ret
 
@@ -95,9 +98,10 @@ class PipeGroupQueue(GroupQueue):
         self.completed = asyncio.Event()
         self.episode_ids = set()
         self.max_episode_id = None
+        self.processed_episodes.clear()
 
     async def put(self, episode_id, start_step, rollout):
-        if self.quit:
+        if self.quit or episode_id in self.processed_episodes:
             return
 
         self.episode_ids.add(episode_id)
@@ -128,6 +132,7 @@ class PipeGroupQueue(GroupQueue):
                 self.completed.clear()
                 await self.completed.wait()
         group = self.groups.pop(target)
+        self.processed_episodes.add(target)
 
         ret = [rollout for rollout, _ in group]
         events = [event for _, event in group]
@@ -232,7 +237,7 @@ class GroupQueueManager:
                     while done and len(ret) < batch_size:
                         d = done.pop()
                         group_rollout = await d
-                        assert len(group_rollout) == self.group_size, f"group_rollout size {len(group_rollout)} != group_size {self.group_size}"
+                        group_rollout = group_rollout[:self.group_size]
                         self.total -= len(group_rollout)
                         ret.extend(group_rollout)
                     assert (done and len(ret) >= batch_size) or (not done and len(ret) <= batch_size)
