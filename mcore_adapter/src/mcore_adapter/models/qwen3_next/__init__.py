@@ -159,6 +159,7 @@ register_template(
         "qk_layernorm": True,
         "moe_use_shared_expert_gate": True,
         "layernorm_zero_centered_gamma": True,
+        "hetereogenous_dist_checkpoint": True,
     },
     weight_converters=[
         RenameConverOp(hf_names="lm_head.weight", mca_names="output_layer.weight"),

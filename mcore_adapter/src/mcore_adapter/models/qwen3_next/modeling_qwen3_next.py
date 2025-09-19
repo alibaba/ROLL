@@ -53,7 +53,7 @@ class Qwen3NextGatedDeltaNet(MegatronModule):
             from fla.modules import FusedRMSNormGated
             from fla.ops.gated_delta_rule import chunk_gated_delta_rule
         except ImportError:
-            raise ImportError("Please install fla to use Qwen3NextGatedDeltaNet")
+            raise ImportError("Please install flash-linear-attention to use Qwen3NextGatedDeltaNet")
 
         self.chunk_gated_delta_rule = chunk_gated_delta_rule
         super().__init__(config=config)
