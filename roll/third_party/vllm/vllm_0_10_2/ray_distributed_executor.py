@@ -107,7 +107,10 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
         for rank in range(self.parallel_config.world_size):
             pg = placement_group[rank]['placement_group']
             gpu_rank = placement_group[rank]['gpu_rank']
-            runtime_env = RuntimeEnv(env_vars=RayUtils.get_vllm_run_time_env_vars(gpu_rank))
+            env_vars = {}
+            env_vars.update(RayUtils.get_custom_env_env_vars())
+            env_vars.update(RayUtils.get_vllm_run_time_env_vars(gpu_rank))
+            runtime_env = RuntimeEnv(env_vars=env_vars)
             assert current_platform.ray_device_key == "GPU"
             # NV+AMD GPUs, and Intel XPUs
             worker = ray.remote(
