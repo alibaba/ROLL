@@ -267,7 +267,6 @@ class AgenticPipeline(BasePipeline):
                 log_res = []
                 batch_grouped = batch.group_by(keys="traj_id")
                 for group_name, group_batch in batch_grouped.items():
-                    group_batch = group_batch.select_idxs(idxs=[random.choice(range(len(group_batch)))])
                     prompt_mask = group_batch.batch["prompt_mask"]
                     non_prompt_mask = torch.logical_not(group_batch.batch["prompt_mask"]) * group_batch.batch["attention_mask"]
                     input_ids = group_batch.batch["input_ids"]
@@ -276,16 +275,23 @@ class AgenticPipeline(BasePipeline):
                     prompts = self.tokenizer.batch_decode(prompt_ids_list, skip_special_tokens=False)
                     responses = self.tokenizer.batch_decode(response_ids_list, skip_special_tokens=False)
                     episode_scores = group_batch.non_tensor_batch["episode_scores"].tolist()
-                    for prompt, response, episode_score in zip(
-                            prompts, responses, episode_scores
+                    step_scores = group_batch.non_tensor_batch["step_scores"].tolist()
+                    if not isinstance(step_scores[0], float):
+                        step_scores = [t.tolist() for t in step_scores]
+
+                    log_item = []
+                    for prompt, response, episode_score, step_score in zip(
+                            prompts, responses, episode_scores, step_scores
                     ):
-                        log_res.append(
+                        log_item.append(
                             {
                                 "prompt": prompt,
                                 "response": response,
                                 "episode_score": episode_score,
+                                "step_score": step_score,
                             }
                         )
+                    log_res.append(log_item)
                     if len(log_res) >= 10:
                         break
                 logger.info(json.dumps(log_res, ensure_ascii=False))
