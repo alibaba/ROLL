@@ -96,7 +96,7 @@ custom_env:
     history_length: ${default_history_length}
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
-    max_env_step_concurrent: 10
+    max_env_step_concurrent: 5
     env_config:
       observation_mode: text
       max_steps: ${max_actions_per_traj}

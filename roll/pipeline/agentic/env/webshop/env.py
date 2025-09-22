@@ -75,10 +75,10 @@ class WebShopEnv(Env, WebAgentTextEnv):
         self.step_count = 0
         if session is None:
             with all_seed(seed):
-                session = "".join(random.choices(string.ascii_lowercase, k=10))
+                session = random.randint(0, len(self.server.weights) - 1)
         obs, _ = WebAgentTextEnv.reset(self, session=session, instruction_text=instruction_text)
-        self.prepare_render_cache(WebAgentTextEnv.get_instruction_text(self))
-        self.prepare_render_cache(obs)
+        self.prepare_render_cache(self.get_instruction_text() + obs)
+        self.obs_with_actions = self._attach_actions(self.get_instruction_text() + obs)
         return self.render(), {"env_instruction": self.env_instruction}
 
     def step(self, action):
