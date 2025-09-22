@@ -28,7 +28,7 @@ teacher_pretrain: Qwen/Qwen2.5-7B-Instruct
 # distill config
 distill_loss_weight: 0.85
 kd_objective: forward_kl
-distill_on_prompt: True
+distill_on_prompt: False
 
 sequence_length: 1024
 max_grad_norm: 1.0
@@ -69,6 +69,9 @@ teacher:
     dtype: bf16
   data_args:
     template: qwen2_5
+  training_args:
+    # teacher forward micro_batch_size
+    per_device_train_batch_size: 1
   strategy_args:
     strategy_name: deepspeed_infer
     strategy_config: ${deepspeed_zero3}

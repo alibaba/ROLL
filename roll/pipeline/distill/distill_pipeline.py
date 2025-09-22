@@ -21,101 +21,133 @@ from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.distill.distill_config import DistillConfig
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
+from roll.utils.constants import IGNORE_INDEX
 
 logger = get_logger()
 
-
 def is_valid_example(example):
-    for i, msg in enumerate(example["conversation"]):
-        if msg.get("role") is None or msg.get("content") is None:
-            return False
-    if ('split' in example) and (example['split'] != 'train'):
+    """check if data are valid"""
+    if "conversation" in example:
+        for msg in example["conversation"]:
+            if not msg.get("role") or not msg.get("content"):
+                return False
+    if "split" in example and example["split"] != "train":
         return False
     return True
 
 
-def preprocess_dataset(dataset, template_function, encode_function, pipeline_config):
-    num_proc = pipeline_config.student.data_args.preprocessing_num_workers
-    dataset = dataset.map(
-        sample2conversation,
-        batched=True,
-        num_proc=num_proc,
-        desc="Sample to conversation",
-        load_from_cache_file=False,
-        fn_kwargs={'question_key': pipeline_config.question_key, 'answer_key': pipeline_config.answer_key}
+def preprocess_dataset(dataset, tokenizer, pipeline_config):
+    """
+    Data preprocessing:
+        - Automatically obtain template_name / keys / parameters from pipeline_config
+        - Build encode_function
+        - Filter out invalid data & apply map encoding
+    """
+    logger.info(f"Begin process dataset: {dataset}")
+
+    template_name = (
+        pipeline_config.global_template
+        if getattr(pipeline_config, "global_template", None)
+        else pipeline_config.student.data_args.template
     )
+
+    num_proc = getattr(pipeline_config.student.data_args, "preprocessing_num_workers", 1)
+    sequence_length = getattr(pipeline_config, "sequence_length", 2048)
+
+    encode_func = get_encode_function(
+        template_name=template_name,
+        tokenizer=tokenizer,
+        prompt_key=getattr(pipeline_config, "prompt_key", None),
+        question_key=getattr(pipeline_config, "question_key", None),
+        answer_key=getattr(pipeline_config, "answer_key", None),
+        system_key=getattr(pipeline_config, "system_key", None),
+        distill_on_prompt=getattr(pipeline_config, "distill_on_prompt", False),
+        sequence_length=sequence_length
+    )
+
     dataset = dataset.filter(
         is_valid_example,
         num_proc=num_proc,
         desc="Filtering dataset"
     )
+
     dataset = dataset.map(
-        template_function,
-        batched=True,
-        num_proc=num_proc,
-        desc="Apply template",
-        load_from_cache_file=False,
-    )
-    dataset = dataset.map(
-        encode_function,
+        encode_func,
         batched=True,
         num_proc=num_proc,
         desc="Encoding dataset",
         load_from_cache_file=False,
     )
 
+    logger.info(f"Encoding: {dataset}")
     return dataset
 
 
-def sample2conversation(examples, *, question_key, answer_key):
-    conversations = []
+def get_encode_function(template_name, tokenizer, prompt_key, question_key, answer_key, system_key=None, distill_on_prompt=False, sequence_length=2048):
+    chat_template_func = get_chat_template(template_name, tokenizer)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-    for i in range(len(examples[question_key])):
+    def safe_get(batch, key, i):
+        if key is None or key not in batch:
+            return None
+        value = batch[key]
+        if isinstance(value, list) and i < len(value):
+            return value[i]
+        return None
+
+    def build_conversation(system_prompt, prompt, query, response):
         conversation = []
-        conversation.append({"role": "user", "content": examples[question_key][i]})
-        conversation.append({"role": "assistant", "content": examples[answer_key][i]})
+        if system_prompt:
+            conversation.append({"role": "system", "content": system_prompt})
+        conversation.append({"role": "user", "content": (prompt or "") + (("\n" + query) if query else "")})
+        if response:
+            conversation.append({"role": "assistant", "content": response})
+        return conversation
 
-        conversations.append(conversation)
+    def encode_function(batch):
+        tokenized_encodings = []
+        responses = batch.get(answer_key, [None]*len(next(iter(batch.values()))))
 
-    return {"conversation": conversations}
+        for i, response in enumerate(responses):
+            system_prompt = safe_get(batch, system_key, i)
+            prompt = safe_get(batch, prompt_key, i)
+            query = safe_get(batch, question_key, i)
 
+            # prompt text
+            conv_prompt = build_conversation(system_prompt, prompt, query, None)
+            prompt_text = chat_template_func(conv_prompt, add_generation_prompt=True)
 
-def get_template_function(tokenizer):
-    def template_function_batch(examples):
-        text = [
-            tokenizer.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=False
-            )
-            for conversation in examples["conversation"]
-        ]
-        return {"text": text}
+            # full text
+            conv_full = build_conversation(system_prompt, prompt, query, response)
+            full_text = chat_template_func(conv_full, add_generation_prompt=False)
+            if full_text.endswith("\n"):
+                full_text = full_text[:-1]
 
-    return template_function_batch
+            tokenized = tokenizer(full_text, truncation=True, max_length=sequence_length, padding="max_length")
+            full_ids = tokenized["input_ids"]
 
+            if distill_on_prompt:
+                labels = [tid if tid != tokenizer.pad_token_id else IGNORE_INDEX for tid in full_ids]
+            else:
+                # match cut-off
+                prompt_ids = tokenizer(prompt_text, padding=False)["input_ids"]
+                cutoff = None
+                for j in range(len(full_ids) - len(prompt_ids) + 1):
+                    if full_ids[j:j+len(prompt_ids)] == prompt_ids:
+                        cutoff = j + len(prompt_ids)
+                        break
+                if cutoff is None:
+                    cutoff = len(prompt_ids)
+                labels = [IGNORE_INDEX if idx < cutoff else (tid if tid != tokenizer.pad_token_id else IGNORE_INDEX)
+                          for idx, tid in enumerate(full_ids)]
 
-def get_tokenize_function(tokenizer, pipeline_config):
-    def tokenize_function_batch(examples):
-        model_inputs = tokenizer(
-            examples["text"],
-            truncation=True,
-            padding="max_length",
-            max_length=pipeline_config.sequence_length,
-            return_tensors="pt"
-        )
-        input_ids_list = model_inputs["input_ids"].tolist()
-        labels = [
-            [-100 if tid == tokenizer.pad_token_id else tid for tid in input_ids]
-            for input_ids in input_ids_list
-        ]
-        return {
-            "input_ids": input_ids_list,
-            "attention_mask": model_inputs["attention_mask"].tolist(),
-            "labels": labels
-        }
-    return tokenize_function_batch
+            tokenized["labels"] = labels
+            tokenized_encodings.append(tokenized)
 
+        return {k: [d[k] for d in tokenized_encodings] for k in tokenized_encodings[0]}
+
+    return encode_function
 
 def get_dataloader(dataset, batch_size, data_collator, num_proc):
     dataloader = DataLoader(
@@ -146,14 +178,12 @@ class DistillPipeline(BasePipeline):
 
         # Currently, only models where the student and teacher are of the same type are supported.
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.student.model_args)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        template_function = get_template_function(self.tokenizer)
-        encode_function = get_tokenize_function(self.tokenizer, self.pipeline_config)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
         dataset = preprocess_dataset(
             dataset,
-            template_function,
-            encode_function,
+            self.tokenizer,
             pipeline_config,
         )
 

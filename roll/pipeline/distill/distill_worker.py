@@ -73,6 +73,9 @@ class StudentWorker(Worker):
         ):
             data = data.to("cuda")
             data = self.strategy.get_data_input(data)
+            if "labels" in data.batch.keys():
+                # rename key: labels -> labels_for_loss
+                data.batch.rename_key_("labels", "labels_for_loss")
             self.logger.info(f"global_step: {data.meta_info.get('global_step',0)}")
             per_device_train_batch_size = self.worker_config.training_args.per_device_train_batch_size
             backward_batch_size = (
@@ -84,7 +87,7 @@ class StudentWorker(Worker):
             data.to("cpu")
             metrics["student/lr"] = self.strategy.scheduler.get_last_lr()[0]
 
-        output = DataProto(meta_info=metrics).to("cpu")
+        output = DataProto(meta_info={"metrics": metrics}).to("cpu")
 
         return output
 
@@ -98,7 +101,7 @@ class StudentWorker(Worker):
         teacher_logits = self.teacher_logits
         student_logits = self.strategy.op_compute_logits(output_tensor)
 
-        labels = data.batch['labels']
+        labels = data.batch['labels_for_loss']
         attention_mask = data.batch['attention_mask']
         gpt_loss = self.gpt_loss_func(student_logits, labels)
         if teacher_logits.shape[-1] != student_logits.shape[-1]:
@@ -163,6 +166,9 @@ class TeacherWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST_COLLECT_ALL, clear_cache=False)
     def forward(self, data: DataProto):
         data = self.strategy.get_data_input(data)
+        if "labels" in data.batch.keys():
+            keep_keys = [k for k in data.batch.keys() if k != "labels"]
+            data = data.select(batch_keys=keep_keys, deepcopy=False)
         is_offload_states = data.meta_info.get("is_offload_states", False)
         metrics = {}
         with state_offload_manger(
@@ -173,7 +179,7 @@ class TeacherWorker(Worker):
                 load_kwargs={"include": None},
         ):
             data = data.to("cuda")
-            data.meta_info["micro_batch_size"] = self.pipeline_config.student.training_args.per_device_train_batch_size
+            data.meta_info["micro_batch_size"] = self.pipeline_config.teacher.training_args.per_device_train_batch_size
             data.meta_info["output_on_all_tp_ranks"] = True
             self.logger.info(f"global_step: {data.meta_info.get('global_step', 0)}")
             with torch.no_grad():

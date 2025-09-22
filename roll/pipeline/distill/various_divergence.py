@@ -3,8 +3,7 @@ import torch.nn as nn
 
 from roll.pipeline.distill.distill_config import DistillConfig
 
-IGNORE_INDEX = -100
-
+from roll.utils.constants import IGNORE_INDEX
 class GPTLMLoss(nn.Module):
     """
     GPT Language Model Loss
