@@ -58,7 +58,14 @@ class TrajEnvManager(BaseEnvManager):
         self.running = False
         self.use_thread_lock = self.env_config.get("use_thread_lock", False) # 避免同时执行大量cpu操作, 可以通过env_config配置
         self.thread_lock = thread_lock if self.use_thread_lock else nullcontext()
-        with self.thread_lock:
+        # Set environment step concurrency limit
+        self.max_env_step_concurrent = self.env_config.get("max_env_step_concurrent", 0)
+        self.env_step_limiter = nullcontext()
+        if self.max_env_step_concurrent > 0:
+            env_tag = self.env_config.get("tag", "default")
+            self.env_step_limiter = get_global_limiter(tag=env_tag, max_concurrent_calls=self.max_env_step_concurrent)
+
+        with self.thread_lock, self.env_step_limiter:
             if "seed" in self.env_config['config']:
                 self.env_config['config']["seed"] = self.env_config['group_seed']
             self.env = gem.make(env_id=self.env_config["env_type"], **self.env_config['config'])
@@ -66,13 +73,6 @@ class TrajEnvManager(BaseEnvManager):
                 self.env = tool_wrapper(self.env,
                                         wrapper_args=self.env_config.tool_wrapper.wrapper_args,
                                         tool_configs=self.env_config.tool_wrapper.tool_configs)
-
-        # Set environment step concurrency limit
-        self.max_env_step_concurrent = self.env_config.get("max_env_step_concurrent", 0)
-        self.env_step_limiter = nullcontext()
-        if self.max_env_step_concurrent > 0:
-            env_tag = self.env_config.get("tag", "default")
-            self.env_step_limiter = get_global_limiter(tag=env_tag, max_concurrent_calls=self.max_env_step_concurrent)
 
         self.cfg_template = self.pipeline_config.custom_envs[self.env_config["tag"]]
         self.agent_system_template = self.cfg_template["agent_system_template"]
