@@ -1,27 +1,26 @@
 import base64
-import gem
 from contextlib import nullcontext
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
 import PIL
+import gem
 import numpy as np
 import torch
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from roll.pipeline.agentic.llm_proxy import BaseLLMProxy, create_llm_proxy
-from roll.pipeline.agentic.env_manager.base_env_manager import RolloutCache, BaseEnvManager
-from roll.utils.env_action_limiter import get_global_limiter
-from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
-from roll.pipeline.agentic.env_manager.token_mask_utils import split_by_token, \
-    token_ids_to_assistant_mask
 from roll.datasets.collator import DataCollatorWithPaddingForMM
 from roll.distributed.scheduler.generate_scheduler import RequestScheduler
 from roll.distributed.scheduler.protocol import DataProto
-from roll.models.model_providers import get_extra_data_provider
+from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig, AgenticConfig
+from roll.pipeline.agentic.env_manager.base_env_manager import RolloutCache, BaseEnvManager
+from roll.pipeline.agentic.env_manager.token_mask_utils import split_by_token, \
+    token_ids_to_assistant_mask
 from roll.pipeline.agentic.env_manager.traj_env_manager import TrajEnvManager
+from roll.pipeline.agentic.llm_proxy import BaseLLMProxy, create_llm_proxy
 from roll.utils.constants import GenerateStopReason
+from roll.utils.env_action_limiter import get_global_limiter
 from roll.utils.functionals import pad_to_length, aggregate_metrics
 from roll.utils.logging import get_logger
 
@@ -37,6 +36,7 @@ class VLTrajEnvManager(TrajEnvManager):
                  output_queue: GroupQueueManager,
                  thread_lock: Lock,
                  mode='train',
+                 extra_data_provider=None,
                  *args, **kwargs):
         """
         """
@@ -47,13 +47,12 @@ class VLTrajEnvManager(TrajEnvManager):
         self.env_config: Dict = env_config
         self.tokenizer: PreTrainedTokenizer = tokenizer
         self.processor: ProcessorMixin = processor
+        self.extra_data_provider = extra_data_provider
         self.collator = DataCollatorWithPaddingForMM(
                     tokenizer=self.tokenizer,
                     processor=self.processor,
                     answer_key=None,
-                    extra_data_provider=get_extra_data_provider(
-                        pipeline_config.actor_train.model_args.model_name_or_path,
-                        processor=processor)
+                    extra_data_provider=self.extra_data_provider,
                 )
         self.output_queue = output_queue
         self.mode = mode

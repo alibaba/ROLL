@@ -4,14 +4,16 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional
 
+from codetiming import Timer
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from roll.pipeline.agentic.env_manager.base_env_manager import BaseEnvManager
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
-from roll.models.model_providers import default_tokenizer_provider, default_processor_provider
+from roll.models.model_providers import default_tokenizer_provider, default_processor_provider, get_extra_data_provider
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig
+from roll.utils.checkpoint_manager import download_model
 from roll.utils.import_utils import safe_import_class
 
 
@@ -43,9 +45,11 @@ class EnvironmentWorker(Worker):
                    collator: Optional[callable] = None,
                    mode: str = "train"):
         super().initialize(pipeline_config)
+
         self.output_queue = output_queue
-        self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
-        self.processor = default_processor_provider(model_args=self.worker_config.model_args)
+        model_name_or_path = download_model(self.worker_config.model_args.model_name_or_path)
+        self.tokenizer = default_tokenizer_provider(self.worker_config.model_args, model_name_or_path)
+        self.processor = default_processor_provider(self.worker_config.model_args, model_name_or_path)
         def create_env_manager(env_id, env_config):
             if env_id == 0:
                 self.logger.info(f"use env_manager_cls: {env_config['env_manager_cls']}")
@@ -54,6 +58,9 @@ class EnvironmentWorker(Worker):
             assert env_manager_cls is not None
             tokenizer = copy.deepcopy(self.tokenizer)
             processor = copy.deepcopy(self.processor)
+            extra_data_provider = None
+            if processor is not None and isinstance(processor, ProcessorMixin):
+                extra_data_provider = get_extra_data_provider(model_name_or_path, processor=processor)
             return env_id, env_manager_cls(
                 worker_config=self.worker_config,
                 pipeline_config=pipeline_config,
@@ -63,7 +70,8 @@ class EnvironmentWorker(Worker):
                 generate_scheduler=generate_scheduler,
                 output_queue=output_queue,
                 thread_lock=self.thread_lock,
-                mode=mode
+                mode=mode,
+                extra_data_provider=extra_data_provider,
             )
         with ThreadPoolExecutor(max_workers=min(len(self.env_configs), 64)) as executor:
             futures = [

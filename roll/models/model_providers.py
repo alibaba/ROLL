@@ -44,8 +44,10 @@ def prepare_automap_files(model_path: str):
             get_cached_module_file(model_path, file_name)
 
 
-def default_tokenizer_provider(model_args: "ModelArguments"):
-    model_name_or_path = download_model(model_args.model_name_or_path)
+def default_tokenizer_provider(model_args: "ModelArguments", model_name_or_path: str=None):
+    if model_name_or_path is None:
+        model_name_or_path = model_args.model_name_or_path
+    model_name_or_path = download_model(model_name_or_path)
     prepare_automap_files(model_name_or_path)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_or_path,
@@ -57,8 +59,10 @@ def default_tokenizer_provider(model_args: "ModelArguments"):
     return tokenizer
 
 
-def default_processor_provider(model_args: "ModelArguments"):
-    model_name_or_path = download_model(model_args.model_name_or_path)
+def default_processor_provider(model_args: "ModelArguments", model_name_or_path: str=None):
+    if model_name_or_path is None:
+        model_name_or_path = model_args.model_name_or_path
+    model_name_or_path = download_model(model_name_or_path)
     prepare_automap_files(model_name_or_path)
     try:
         processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
