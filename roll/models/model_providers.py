@@ -45,6 +45,8 @@ def prepare_automap_files(model_path: str):
 
 
 def default_tokenizer_provider(model_args: "ModelArguments", model_name_or_path: str=None):
+    if model_args.model_type == "diffusion_module":
+        return None
     if model_name_or_path is None:
         model_name_or_path = model_args.model_name_or_path
     model_name_or_path = download_model(model_name_or_path)
@@ -60,9 +62,11 @@ def default_tokenizer_provider(model_args: "ModelArguments", model_name_or_path:
 
 
 def default_processor_provider(model_args: "ModelArguments", model_name_or_path: str=None):
+    if model_args.model_type == "diffusion_module":
+        return None
     if model_name_or_path is None:
         model_name_or_path = model_args.model_name_or_path
-    model_name_or_path = download_model(model_name_or_path)
+    model_name_or_path = download_model(model_args.model_name_or_path)
     prepare_automap_files(model_name_or_path)
     try:
         processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
@@ -362,6 +366,22 @@ def patch_model(model, config, use_mcore):
                 model.get_base_model().forward = types.MethodType(forward_patch, model.get_base_model())
             else:
                 model.forward = types.MethodType(forward_patch, model)
+
+
+def default_diffusion_module_provider(
+    tokenizer: None,
+    model_args: ModelArguments,
+    training_args: TrainingArguments = None,
+    is_trainable: Optional[bool] = False,
+):
+    if model_args.model_config_kwargs["model_name"] == "wan2_2":
+        from roll.pipeline.diffusion.modules.wan_module import WanTrainingModule
+        print(f"{model_args.model_config_kwargs=}")
+        training_module =  WanTrainingModule(**model_args.model_config_kwargs)
+    else:
+        raise NotImplementedError(f"model_type {model_args.model_type} not implemented yet")
+
+    return training_module
 
 
 def default_actor_model_provider(

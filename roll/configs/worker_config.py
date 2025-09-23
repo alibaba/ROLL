@@ -12,12 +12,12 @@ logger = get_logger()
 @dataclass
 class StrategyArguments:
     strategy_name: Literal[
-        "deepspeed_train", "hf_infer", "deepspeed_infer", "vllm", "sglang", "megatron_infer", "megatron_train"
+        "deepspeed_train", "hf_infer", "deepspeed_infer", "vllm", "sglang", "megatron_infer", "megatron_train", "diffusion_deepspeed_train",
     ] = field(
         default="deepspeed_train",
         metadata={
             "help": "The name of the strategy. Options: 'deepspeed_train', 'hf_infer', 'deepspeed_infer', 'vllm', 'sglang', "
-            "'megatron_infer', 'megatron_train'."
+            "'megatron_infer', 'megatron_train', 'diffusion_deepspeed_train'."
         },
     )
     strategy_config: Optional[Dict] = field(
@@ -77,6 +77,12 @@ class WorkerConfig:
     model_update_frequency: int = field(
         default=1,
         metadata={"help": "Frequency of model updates."}
+    )
+    model_update_method: Literal["nccl", "rpc"] = field(
+        default="nccl",
+        metadata={
+            "help": "The method of model updates. Options: 'nccl', 'rpc', rpc only for RTP recently."
+        },
     )
     infer_batch_size: int = field(
         default=16,

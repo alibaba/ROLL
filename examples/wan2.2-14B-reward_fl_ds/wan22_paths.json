@@ -1,0 +1,6 @@
+[
+    "/data/models/Wan22/high_noise_model/diffusion_pytorch_model.safetensors",
+    "/data/models/Wan22/low_noise_model/diffusion_pytorch_model.safetensors",
+    "/data/models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth",
+    "/data/models/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth"
+]

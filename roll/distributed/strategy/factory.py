@@ -12,6 +12,8 @@ def create_strategy(worker: Worker) -> Union[InferenceStrategy, TrainStrategy]:
         from roll.distributed.strategy.deepspeed_strategy import DeepSpeedInferStrategy as strategy_cls
     elif strategy_name == "deepspeed_train":
         from roll.distributed.strategy.deepspeed_strategy import DeepSpeedTrainStrategy as strategy_cls
+    elif strategy_name == "diffusion_deepspeed_train":
+        from roll.distributed.strategy.diffusion_strategy import DeepSpeedTrainStrategy as strategy_cls    
     elif strategy_name == "hf_infer":
         from roll.distributed.strategy.hf_strategy import HfInferStrategy as strategy_cls
     elif strategy_name == "vllm":

@@ -339,22 +339,23 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
 
         model = model_provider(tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=True)
 
-        try:
-            num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
-        except AttributeError:
-            num_attention_heads, num_key_value_heads = (
-                model.config.text_config.num_attention_heads,
-                model.config.text_config.num_key_value_heads,
-            )
+        if cp_size > 1:
+            try:
+                num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
+            except AttributeError:
+                num_attention_heads, num_key_value_heads = (
+                    model.config.text_config.num_attention_heads,
+                    model.config.text_config.num_key_value_heads,
+                )
 
-        assert num_attention_heads % cp_size == 0, (
-            f"num_attention_heads {num_attention_heads} must be divisible by ulysses_size {cp_size}"
-        )
-        assert num_key_value_heads % cp_size == 0 or cp_size % num_key_value_heads == 0, (
-            f"num_key_value_heads {num_key_value_heads} must be divisible by ulysses_size "
-            f"{cp_size}or vise versa. Upon ulysses_size % num_key_value_heads == 0,"
-            f"kv heads are repeated to ensure correctness."
-        )
+            assert num_attention_heads % cp_size == 0, (
+                f"num_attention_heads {num_attention_heads} must be divisible by ulysses_size {cp_size}"
+            )
+            assert num_key_value_heads % cp_size == 0 or cp_size % num_key_value_heads == 0, (
+                f"num_key_value_heads {num_key_value_heads} must be divisible by ulysses_size "
+                f"{cp_size}or vise versa. Upon ulysses_size % num_key_value_heads == 0,"
+                f"kv heads are repeated to ensure correctness."
+            )
 
         adam_optimizer = DeepSpeedCPUAdam if self.ds_config.is_offload() else FusedAdam
         optim_params = get_optimizer_grouped_parameters(

@@ -1,0 +1,24 @@
+-r requirements_common.txt
+
+torch==2.6.0.*
+torchvision==0.21.0.*
+torchaudio==2.6.0.*
+
+flash-attn
+
+deepspeed==0.16.4
+
+diffsynth
+
+transformers==4.52.4
+decord
+pyext
+codetiming
+more_itertools
+pybase64
+
+pycocotools
+scikit-image
+diffusers==0.31.0
+onnx
+onnx2torch

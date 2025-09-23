@@ -88,6 +88,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [GSPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/GSPO)  
 [RAFT++](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/RAFT_Plus_Plus)  
 [StarPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/agentic_StarPO)
+[RewardFL](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/Reward_FL)
 
 #### Backend
 [DeepSeed](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/deepspeed)  
@@ -163,6 +164,7 @@ The following repositories have been used in ROLL, either in their close-to-orig
   * [microsoft/DeepSpeed](https://github.com/microsoft/DeepSpeed)
   * [sgl-project/sglang](https://github.com/sgl-project/sglang)
   * [vllm-project/vllm](https://github.com/vllm-project/vllm)
+  * [modelscope/DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio)
 
 If you use ROLL in your research or project, please consider citing us:
 
