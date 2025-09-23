@@ -104,7 +104,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
         }
 
         val_pipeline_config = copy.deepcopy(self.pipeline_config)
-        val_pipeline_config.use_additional_prompts = False
+        val_pipeline_config.is_use_additional_prompts = False
         self.val_generate_scheduler = scheduler_cls.options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=ray.get_runtime_context().get_node_id(),

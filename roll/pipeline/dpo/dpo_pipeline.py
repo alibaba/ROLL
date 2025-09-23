@@ -162,7 +162,7 @@ class DPOPipeline(BasePipeline):
 
         if self.val_dataset:
             val_pipeline_config = copy.deepcopy(self.pipeline_config)
-            val_pipeline_config.use_additional_prompts = False
+            val_pipeline_config.is_use_additional_prompts = False
 
         refs: List[ray.ObjectRef] = []
         refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=False))
