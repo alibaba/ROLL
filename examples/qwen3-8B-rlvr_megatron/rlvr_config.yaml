@@ -162,7 +162,7 @@ reference:
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
   device_mapping: list(range(0,16))
-  infer_batch_size: 8
+  infer_batch_size: 4
 
 rewards:
   crossthinkqa:
