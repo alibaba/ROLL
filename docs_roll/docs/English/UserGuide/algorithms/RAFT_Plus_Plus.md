@@ -14,7 +14,7 @@ In ROLL, the RAFT++ algorithm-specific configuration parameters are as follows (
 
 ```yaml
 # RAFT++ core config
-adv_estimator: "reinforce"
+adv_estimator: "grpo"
 
 # normalize
 norm_mean_type: ~
@@ -31,7 +31,7 @@ response_length: 4096
 ppo_epochs: 1
 use_kl_loss: true
 kl_loss_coef: 0.001
-loss_agg_mode: "seq-mean-token-sum"
+loss_agg_mode: "seq-mean-token-mean"
 
 # advantage
 advantage_clip: 2.0

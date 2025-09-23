@@ -16,7 +16,7 @@ Group Sequence Policy Optimization (GSPO) 是阿里巴巴Qwen团队提出的一�
 
 ```yaml
 # GSPO related
-adv_estimator: "reinforce"
+adv_estimator: "grpo"
 importance_sampling: seq
 rollout_batch_size: 64  # prompt
 num_return_sequences_in_group: 8
@@ -30,7 +30,7 @@ kl_loss_coef: 0.001
 loss_agg_mode: "seq-mean-token-mean"
 
 # advantage
-whiten_advantages: true
+whiten_advantages: false
 advantage_clip: 2.0
 dual_clip_loss: true
 # clip

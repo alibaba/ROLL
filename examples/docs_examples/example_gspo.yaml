@@ -56,7 +56,7 @@ kl_loss_coef: 0.001
 loss_agg_mode: "seq-mean-token-mean"
 
 # advantage
-whiten_advantages: true
+whiten_advantages: false
 advantage_clip: 2.0
 dual_clip_loss: true
 # clip

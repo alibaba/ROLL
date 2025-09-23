@@ -31,7 +31,7 @@ num_return_sequences_in_group: 1
 ppo_epochs: 1
 use_kl_loss: true
 kl_loss_coef: 0.001
-loss_agg_mode: "seq-mean-token-sum"
+loss_agg_mode: "seq-mean-token-mean"
 
 
 whiten_advantages: true

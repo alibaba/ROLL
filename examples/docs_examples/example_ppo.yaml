@@ -59,7 +59,7 @@ num_return_sequences_in_group: 1
 ppo_epochs: 1
 use_kl_loss: true
 kl_loss_coef: 0.001
-loss_agg_mode: "seq-mean-token-sum"
+loss_agg_mode: "seq-mean-token-mean"
 
 
 whiten_advantages: true
@@ -174,7 +174,7 @@ critic:
   model_args:
     disable_gradient_checkpointing: false
     dtype: bf16
-    model_type: ~
+    model_type: trl
   training_args:
     learning_rate: 1.0e-5
     weight_decay: 0
