@@ -28,12 +28,14 @@ swanlab
 math-verify
 openai
 langdetect
-nltk==3.8
+nltk>=3.8
 
 gym
 gymnasium[toy-text]
 gym_sokoban
-# gem-llm==0.0.4
+
+# # for torch 280
+gem-llm==0.0.4
 mcp
 
 hydra-core
