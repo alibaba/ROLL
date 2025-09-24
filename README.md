@@ -37,6 +37,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 | 📣   Updates                                                                                                                                                                                                                                                                                                                            |
 |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **[09/24/2025]** 🎉 Support [Wan2_2 Reward FL pipeline](examples/wan2.2-14B-reward_fl_ds/reward_fl_config.yaml). Explore the new capabilities!                                                                                                                                                                                          |
 | **[09/23/2025]** 🎉 ROLL aligns with GEM environment definition, providing agentic Tool Use training capabilities, [ToolUse docs](docs_roll/docs/English/UserGuide/agentic/Tool_Use.md).                                                                                                                                                |
 | **[09/16/2025]** 🎉 Qwen3-Next model training is supported, refer to [configuration](examples/qwen3-next-80BA3B-rlvr_megatron/rlvr_config.yaml).                                                                                                                                                                                        |
 | **[09/04/2025]** 🎉 ROLL supports vLLM dynamic FP8 rollout and remove_padding for acceleration.                                                                                                                                                                                                                                         |
@@ -87,7 +88,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [GRPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/GRPO)  
 [GSPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/GSPO)  
 [RAFT++](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/RAFT_Plus_Plus)  
-[StarPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/agentic_StarPO)
+[StarPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/agentic_StarPO)   
 [RewardFL](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/Reward_FL)
 
 #### Backend
