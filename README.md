@@ -151,6 +151,7 @@ We are continuously working to expand ROLL's capabilities:
 ## 🏆 Notable work based on ROLL
 - [RecGPT](https://www.arxiv.org/abs/2507.22879): a next-generation, LLM-driven framework that places user intent at the core of recommender systems, fostering a more sustainable and mutually beneficial ecosystem.
 - [TaoSR1](https://arxiv.org/abs/2508.12365): A novel LLM framework directly deploying Chain-of-Thought (CoT) reasoning for e-commerce query-product relevance prediction, overcoming deployment challenges for superior performance.
+- [AIGB-Pearl](https://www.arxiv.org/abs/2509.15927): a novel auto-bidding method that integrates generative planning and policy optimization, utilizing an LLM-enhanced trajectory evaluator to iteratively refine bidding strategies for state-of-the-art advertising performance.
 -----
 
 ## 🙏 Citation and Acknowledgement
