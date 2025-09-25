@@ -62,7 +62,7 @@ Wan2_2 相关参数如下：
 
 ## 注意事项
 - 奖励模型分数是基于人脸信息，因此请确保视频的第一帧包含人脸。
-- 将人脸模型相关 onnx 文件下载到 `reward_model_path` 目录. [Detection](), [Landmark](), [Arcface]().
+- 将人脸模型相关 onnx 文件下载到 `reward_model_path` 目录.
 - 下载官方 Wan2.2 pipeline 和 蒸馏 Wan2.2 safetensors, 并放在 `model_paths` 目录，例如 `wan22_paths.json` 文件。
 - 根据 data/example_video_dataset/metadata.csv 文件，将你的视频数据集适配到对应的格式
 
