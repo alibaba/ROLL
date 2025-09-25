@@ -99,7 +99,7 @@ num_return_sequences_in_group: 8
 - `adv_estimator`: 优势值的估计方法。
     - 'gae': 广义优势估计（GAE）。
     - 'reinforce': REINFORCE 算法中的优势估计。
-    - 'grpo': Gated Recurrent Policy Optimization 中的优势估计。
+    - 'grpo': Grouped Relative Policy Optimization 中的优势估计。
 - `norm_mean_type`: 奖励归一化的均值计算方式。
     - 'batch': 批次内的所有奖励的均值。
     - 'group': 提示组内部的均值。
