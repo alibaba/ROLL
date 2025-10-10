@@ -75,6 +75,10 @@ class McaTrainer(Trainer):
     _language_input_names = ["input_ids", "attention_mask", "labels", "position_ids"]
     ckpt_sharding_type = "fully_sharded_model_space"
 
+    if hasattr(Trainer, "_align_special_tokens"): # skip for transformers==4.57.0
+        def _align_special_tokens(self, *args, **kwargs):
+            return
+
     def __init__(
         self,
         model: "VirtualModels" = None,
