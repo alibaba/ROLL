@@ -203,6 +203,16 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
     )
 
     def __post_init__(self):
+        if self.hf_config_json:
+            hf_config = json.loads(self.hf_config_json)
+            if "text_config" in hf_config:
+                hf_config = hf_config["text_config"] # for multimodal model
+
+            for special_token_name in ["eos_token_id", "bos_token_id"]:
+                setattr(self, special_token_name, hf_config.get(special_token_name))
+
+            setattr(self, "pad_token_id", self.eos_token_id)
+
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:
             self.overlap_p2p_comm = False
             logger.warning("Non-interleaved pipeline parallelism does not support overlapping p2p communication!")
