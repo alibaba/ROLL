@@ -16,7 +16,8 @@ output_dir: ./output
 
 checkpoint_config:
   type: file_system
-  output_dir: /data/oss_bucket_0/chuye/roll/distill/models/zero3
+  output_dir: /var/tmp/ckpt
+
 
 save_steps: 100
 logging_steps: 1
@@ -26,9 +27,12 @@ student_pretrain: Qwen/Qwen2.5-1.5B-Instruct
 teacher_pretrain: Qwen/Qwen2.5-7B-Instruct
 
 # distill config
+logits_topk: 64
 distill_loss_weight: 0.85
 kd_objective: forward_kl
 distill_on_prompt: False
+
+logits_transfer_backend: "nccl-only" # support "ipc+nccl", "nccl_only" and "ray"
 
 sequence_length: 1024
 max_grad_norm: 1.0

@@ -1,8 +1,7 @@
 import asyncio
-import json
 import random
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -14,140 +13,141 @@ from roll.distributed.scheduler.generate_scheduler import RequestScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig
 from roll.utils.functionals import append_to_dict, GenerateRequestType
+from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
 
 logger = get_logger()
 
+@dataclass
+class GroupData:
+    group_id: int
+    episode_id: int
+    create_step: int
+    rollouts: List[DataProto] = field(default_factory=list)
+    running_rollouts: int = 0 
+
 class GroupQueue:
-    def __init__(self, progress_bar: tqdm, group_size, max_group_num, max_traj_per_env):
+    def __init__(
+        self,
+        group_id,
+        progress_bar: tqdm,
+        group_size,
+        group_size_redundancy,
+        max_traj_per_env,
+        async_generation_ratio,
+        group_filter,
+    ):
+        self.group_id = group_id
+        self.progress_bar = progress_bar
+
         self.group_size = group_size
-        self.max_group_num = max_group_num
+        self.group_size_redundancy = group_size_redundancy
         self.max_traj_per_env = max_traj_per_env
-        self.processed_episodes = set()
-        self.clear(progress_bar)
+        self.async_generation_ratio = async_generation_ratio
+        self.group_filter = group_filter
+        self.group_filter_count = 0
 
-    def prepare_clear(self):
-        raise NotImplementedError
+        self.current_step = None
+        self.next_episode_id = 0
+        self.groups: Dict[int, GroupData] = {}
 
-    def clear(self, progress_bar):
-        raise NotImplementedError
+        self.progress = asyncio.Event()
+        self.complete = asyncio.Event()
 
-    # assume episode_id start from 0 and increase monotonically (not across GroupQueue.clear)
-    async def put(self, episode_id, start_step, rollout):
-        raise NotImplementedError
-
-    async def get(self):
-        raise NotImplementedError
-
-class BoundedGroupQueue(GroupQueue):
-    def prepare_clear(self):
-        self.quit = True
-        self.inprogress.set()
-
-    def clear(self, progress_bar):
-        # assume no blocking put when clear called
         self.quit = False
-        self.progress_bar = progress_bar
-        self.groups: Dict[str, List[DataProto]] = {}
-        self.inprogress = asyncio.Event()
-        self.completed = asyncio.Semaphore(value=0)
-        self.processed_episodes.clear()
 
-    async def put(self, episode_id, start_step, rollout):
-        if self.quit or episode_id in self.processed_episodes:
-            return
-        if episode_id not in self.groups:
-            while episode_id not in self.groups and len(self.groups) >= self.max_group_num:
-                self.inprogress.clear()
-                await self.inprogress.wait()
-                if self.quit:
-                    return
-            if episode_id not in self.groups:
-                self.groups[episode_id] = []
-        self.groups[episode_id].append(rollout)
-        if len(self.groups[episode_id]) == self.group_size:
-            self.completed.release()
-            self.progress_bar.update(self.group_size)
+    def clear(self):
+        self.current_step = None
+        self.next_episode_id = 0
+        self.groups.clear()
 
-    async def get(self):
-        await self.completed.acquire()
-        target = None
-        for (episode_id, rollouts) in self.groups.items():
-            if len(rollouts) >= self.group_size:
-                target = min(episode_id, target) if target is not None else episode_id 
-        assert target is not None
-        ret = self.groups.pop(target)
-        self.processed_episodes.add(target)
-        self.inprogress.set()
-        return ret
+        self.progress = asyncio.Event()
+        self.complete = asyncio.Event()
 
-class PipeGroupQueue(GroupQueue):
-    def prepare_clear(self):
+    def shutdown(self):
         self.quit = True
-        # release current waiting put
-        for group in self.groups.values():
-            for _, event in group:
-                if event is not None:
-                    event.set()
+        self.groups.clear()
+        self.progress.set()
 
-    def clear(self, progress_bar):
-        # assume no more put when clear called
-        self.quit = False
-        self.progress_bar = progress_bar
-        self.groups: Dict[str, List[tuple[DataProto, asyncio.Event|None]]] = {}
-        self.completed = asyncio.Event()
-        self.episode_ids = set()
-        self.max_episode_id = None
-        self.processed_episodes.clear()
+    def advance_group(self, create_step):
+        assert not self.quit
+        self.groups[self.next_episode_id] = GroupData(
+            group_id=self.group_id, episode_id=self.next_episode_id, create_step=create_step)
+        self.next_episode_id += 1
 
-    async def put(self, episode_id, start_step, rollout):
-        if self.quit or episode_id in self.processed_episodes:
+    def _advance_step(self, create_step):
+        if self.max_traj_per_env is None:
             return
+        for _ in range(self.max_traj_per_env):
+            self.advance_group(create_step)
 
-        self.episode_ids.add(episode_id)
-        assert len(self.episode_ids) <= self.max_traj_per_env
-        self.max_episode_id = episode_id if self.max_episode_id is None else max(episode_id, self.max_episode_id)
+    def advance_step(self, step):
+        if self.current_step is None:
+            # first time into advance_step, generate extra groups for async training
+            for _ in range(self.async_generation_ratio):
+                self._advance_step(step)
+        else:
+            # remove outdated groups for async training
+            expired_episodes = []
+            for episode_id, group in self.groups.items():
+                if step - group.create_step > self.async_generation_ratio:
+                    expired_episodes.append(episode_id)
+            for episode_id in expired_episodes:
+                self.groups.pop(episode_id)
 
-        event = None
-        if len(self.episode_ids) == self.max_traj_per_env and episode_id == self.max_episode_id:
-            event = asyncio.Event()
+        self.current_step = step
+        self._advance_step(step)
+        self.progress.set()
 
-        if episode_id not in self.groups:
-            self.groups[episode_id] = []
-            assert len(self.groups) <= self.max_traj_per_env
-        self.groups[episode_id].append((rollout, event))
-        self.completed.set()
-        if event is not None:
-            await event.wait()
-            if self.quit:
-                return
+    async def get_episode_id(self) -> Optional[int]:
+        while not self.quit:
+            # iterate over groups in order
+            for episode_id, group in self.groups.items():
+                if group.running_rollouts < self.group_size + self.group_size_redundancy:
+                    group.running_rollouts += 1
+                    return episode_id
+            if self.max_traj_per_env is None:
+                while self.current_step is None:
+                    self.progress.clear()
+                    await self.progress.wait()
+                self.advance_group(self.current_step)
+                continue
+            else:
+                self.progress.clear()
+                await self.progress.wait()
+        return None
 
-    async def get(self):
-        target = None
-        while target is None:
-            for (episode_id, rollouts) in self.groups.items():
-                if len(rollouts) >= self.group_size:
-                    target = min(episode_id, target) if target is not None else episode_id
-            if target is None:
-                self.completed.clear()
-                await self.completed.wait()
-        group = self.groups.pop(target)
-        self.processed_episodes.add(target)
+    def put(self, episode_id, start_step, rollout):
+        if episode_id not in self.groups: # ignore rollouts from outdated episode
+            return
+        group = self.groups[episode_id]
+        assert start_step >= group.create_step, f"{start_step=} {group.create_step=}"
+        group.rollouts.append(rollout)
+        if len(group.rollouts) == self.group_size:
+            if all(rollout is None for rollout in group.rollouts):
+                logger.info(f"GroupQueue: group {self.group_id} exit")
+                self.complete.set()
+            elif self.group_filter.filter(group_id=self.group_id, episode_id=episode_id, group=group.rollouts):
+                logger.info(f"filter rollout group {group.group_id} episode {group.episode_id}")
+                self.group_filter_count += 1
+                self.groups.pop(episode_id)
+                self.advance_group(create_step=self.current_step)
+            else:
+                self.complete.set()
+                self.progress_bar.update(self.group_size)
 
-        ret = [rollout for rollout, _ in group]
-        events = [event for _, event in group]
-
-        last_group = all(event is not None for event in events)
-        assert last_group or all(event is None for event in events), f"last_group {last_group}, events {events}"
-        if last_group:
-            assert target == self.max_episode_id
-            assert len(self.groups) == 0
-            self.max_episode_id = None
-            self.episode_ids.clear()
-            for event in events:
-                event.set()
-
-        return ret
+    async def get(self) -> GroupData:
+        while True:
+            while not self.groups:
+                self.complete.clear()
+                await self.complete.wait()
+            episode_id = next(iter(self.groups)) # must consume the first group (smallest episode_id)
+            group = self.groups[episode_id]
+            if len(group.rollouts) >= self.group_size:
+                self.groups.pop(episode_id)
+                return group
+            self.complete.clear()
+            await self.complete.wait()
 
 @ray.remote
 class GroupQueueManager:
@@ -156,122 +156,149 @@ class GroupQueueManager:
         self.env_manager_config = env_manager_config
         self.group_size = self.env_manager_config.group_size
         self.progress_bar = tqdm(desc=f"{self.mode} rollout progress(trajectory)", mininterval=self.env_manager_config.max_traj_per_env)
-        self.wait_task = None
-        self.exception = None
         self.pending_gets = set()
+        self.rollout_complete = {}
 
-        if config.async_generation_ratio > 0 and self.mode == "train":
-            # Async training use GroupQueue to implement rate limit.
-            # There are at most `async_generation_ratio - 1` in-progress steps.
-            max_group_num = env_manager_config.max_traj_per_env * (config.async_generation_ratio - 1)
-            if max_group_num == 0:
-                queue_cls = PipeGroupQueue
-            else:
-                queue_cls = BoundedGroupQueue
+        group_filter_cls = safe_import_class(env_manager_config.group_filter_cls)
+        assert group_filter_cls
+        self.group_filter = group_filter_cls(config, env_manager_config, mode)
+
+        if self.mode == "train":
+            self.async_generation_ratio = config.async_generation_ratio
+            self.max_traj_per_env = env_manager_config.max_traj_per_env if config.rollout_batch_size > 0 else None
         else:
-            # Sync training do not need rate limit, and finished rollouts will never exceed limit
-            max_group_num = env_manager_config.max_traj_per_env
-            queue_cls = PipeGroupQueue # both GroupQueue and PipeGroupQueue are ok here
+            self.async_generation_ratio = 0
+            self.max_traj_per_env = env_manager_config.max_traj_per_env if config.val_batch_size > 0 else None
         self.group_queue: Dict[int, GroupQueue] = {}
         for rank, rank_env_configs in env_manager_config.env_configs.items():
             for env_id, env_config in rank_env_configs.items():
                 group_id = env_config["group_id"]
                 if group_id not in self.group_queue:
-                    self.group_queue[group_id] = queue_cls(self.progress_bar, env_manager_config.group_size, max_group_num, env_manager_config.max_traj_per_env)
+                    self.group_queue[group_id] = GroupQueue(
+                        group_id=group_id,
+                        progress_bar=self.progress_bar,
+                        group_size=env_manager_config.group_size,
+                        group_size_redundancy=env_manager_config.group_size_redundancy,
+                        max_traj_per_env=self.max_traj_per_env,
+                        async_generation_ratio=self.async_generation_ratio,
+                        group_filter=self.group_filter,
+                    )
 
         # for debug
         self.total = 0
         self.waiting = 0
 
-    def prepare_clear(self):
+    def collect_metrics(self):
+        group_filter_count = 0
         for group_queue in self.group_queue.values():
-            group_queue.prepare_clear()
+            group_filter_count += group_queue.group_filter_count
+            group_queue.group_filter_count = 0
+        return {"scheduler/group_filter_count": group_filter_count}
 
-    def clear(self, batch_size):
-        self.progress_bar = tqdm(total=batch_size, desc=f"{self.mode} rollout progress(trajectory)", mininterval=self.env_manager_config.max_traj_per_env)
-        assert self.wait_task is None
-        assert self.exception is None
+    def clear(self):
+        self.rollout_complete = {}
         for get_task in self.pending_gets:
             get_task.cancel()
         self.pending_gets = set()
         for group_queue in self.group_queue.values():
-            group_queue.clear(self.progress_bar)
+            group_queue.clear()
 
-    def put_exception(self, exception):
-        self.exception = exception
-        if self.wait_task is not None:
-            self.wait_task.cancel()
+    def advance_step(self, step):
+        for group_queue in self.group_queue.values():
+            group_queue.advance_step(step)
 
-    def _check_exception(self):
-        if self.exception is not None:
-            raise self.exception
+    async def get_episode_id(self, group_id):
+        assert group_id in self.group_queue
+        return await self.group_queue[group_id].get_episode_id()
 
-    async def put(self, group_id, episode_id, start_step, rollout: DataProto):
+    def shutdown(self):
+        for get_task in self.pending_gets:
+            get_task.cancel()
+        self.pending_gets = set()
+        for group_queue in self.group_queue.values():
+            group_queue.shutdown()
+
+    def put(self, group_id, episode_id, start_step, rollout: DataProto):
         assert group_id in self.group_queue
         self.waiting += 1
-        await self.group_queue[group_id].put(episode_id, start_step, rollout)
+        self.group_queue[group_id].put(episode_id, start_step, rollout)
         self.waiting -= 1
         self.total += 1
 
-    async def get_batch(self, batch_size) -> List[DataProto]:
+    async def get_batch(self, batch_size, current_step) -> List[DataProto]:
         """
         return completed rollouts group by group_id with least start_step
         """
-        self._check_exception()
         # TODO: No need to get from every group queue, instead we can reuse 
         # a group queue as long as there are enough rollouts to avoid tail-latency?
         # But this will cause im-balance in episode_id.
+
+        # When batch_size < 0, iterate until exit run_rollout_loop immediately.
         ret: List[DataProto] = []
-        while len(ret) < batch_size:
+        while batch_size < 0 or len(ret) < batch_size:
+
+            if len(self.rollout_complete) == len(self.group_queue):
+                break
+
             async def wait_a_episode():
                 # Only wait for new episode when there are no pending GroupQueue.get,
                 # this way we can avoid starvation of some env.
                 if not self.pending_gets:
-                    pending = set([asyncio.create_task(self.group_queue[group_id].get()) for group_id in self.group_queue])
+                    pending = set(
+                        [
+                            asyncio.create_task(self.group_queue[group_id].get(), name=str(group_id))
+                            for group_id in self.group_queue if str(group_id) not in self.rollout_complete
+                        ]
+                    )
                 else:
                     pending = self.pending_gets
                     self.pending_gets = set()
 
-                while pending and len(ret) < batch_size:
+                while pending and (batch_size < 0 or len(ret) < batch_size):
+
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                    while done and len(ret) < batch_size:
+                    while done and (batch_size < 0 or len(ret) < batch_size):
                         d = done.pop()
-                        group_rollout = await d
-                        group_rollout = group_rollout[:self.group_size]
+                        group = await d
+                        group_rollout = group.rollouts
                         self.total -= len(group_rollout)
+
+                        group_rollout = [rollout for rollout in group_rollout if rollout is not None]
+                        if len(group_rollout) == 0:
+                            self.rollout_complete[d.get_name()] = True
+                            continue
+
+                        if current_step - group.create_step > self.async_generation_ratio:
+                            logger.info(f"ignore rollout, current_step({current_step}) - create_step({group.create_step}) "
+                                        f"exceed async_generation_ratio({self.async_generation_ratio}) "
+                                        f"{group.group_id=} {group.episode_id=}")
+                            continue
+
+                        group_rollout = group_rollout[:self.group_size]
                         ret.extend(group_rollout)
-                    assert (done and len(ret) >= batch_size) or (not done and len(ret) <= batch_size)
+                    assert batch_size < 0 or (done and len(ret) >= batch_size) or (not done and len(ret) <= batch_size)
                     if done:
                         self.pending_gets.update(done)
                 self.pending_gets.update(pending)
 
-            assert self.wait_task is None
-            self._check_exception()
-            self.wait_task = asyncio.create_task(wait_a_episode())
-            try:
-                await self.wait_task
-            except asyncio.CancelledError:
-                self._check_exception()
-            self.wait_task = None
-        assert len(ret) == batch_size
+            await wait_a_episode()
         return ret
 
-@ray.remote
 class RolloutScheduler:
     """
     Usage:
+        # User should control load_states/offload_states in pipeline by themselves.
         actor_infer
         train_rollout_scheduler = RolloutScheduler(actor_infer)
         val_rollout_scheduler = RolloutScheduler(actor_infer)
         while True:
-            ray.get(train_rollout_scheduler.suspend.remote()) # not neccessary in sync traing
+            ray.get(train_rollout_scheduler.suspend.remote())
             model_update()
-            ray.get(train_rollout_scheduler.resume.remote()) # not neccessary in sync traing
             if val:
                 ray.get(val_rollout_scheduler.get_batch.remote())
             ray.get(train_rollout_scheduler.get_batch.remote())
             rollout()
-        ray.get(train_rollout_scheduler.stop.remote()) # not neccessary in sync traing
+        ray.get(train_rollout_scheduler.shutdown.remote())
     """
     def __init__(self, config, env_manager_config: EnvManagerConfig, resource_manager, infer_cluster, mode, collator=None):
         self.config = config
@@ -312,143 +339,54 @@ class RolloutScheduler:
             mode=self.mode,
         )
 
-        self.running = False
-        self.rollout_refs = None # only used by async training
+        self.rollout_task = None
 
-    async def _start_env_manager(self, global_step):
-        assert self.running
-        if self.config.async_generation_ratio > 0 and self.mode == "train" and self.rollout_refs is None:
-            # async training will only call es_manager.run_rollout_loop once
-            seed = self.config.seed
-            self.rollout_refs: List[ray.ObjectRef] = self.es_manager.run_rollout_loop(None, seed, blocking=False)
-        elif self.config.async_generation_ratio == 0 or self.mode != "train":
-            # sync and async val will call es_manager.run_rollout_loop every time get_batch called
-            assert self.rollout_refs is None
-            if self.mode == "train":
-                seed = random.randint(0, 1000000)
-            else:
-                seed = self.config.seed
-            self.rollout_refs: List[ray.ObjectRef] = self.es_manager.run_rollout_loop(global_step, seed, blocking=False)
-
-    async def _stop_env_manager(self, batch_size=None):
-        assert self.running # generate_scheudler should be running to avoid block env manager
-        # dry event env_output_queue, env_output_queue may block EnvManager
-        await self.env_output_queue.prepare_clear.remote()
-        await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in self.es_manager.stop(blocking=False)])
+    async def shutdown(self):
+        if self.rollout_task is None:
+            return
+        await asyncio.gather(*self.es_manager.stop(blocking=False))
+        await self.env_output_queue.shutdown.remote()
         await self.generate_scheduler.abort_request.remote()
-        await asyncio.gather(*self.rollout_refs)
-        self.rollout_refs = None
-        # reset env_output_queue
-        await self.env_output_queue.clear.remote(batch_size)
+        await self.rollout_task
+        self.rollout_task = None
 
-    async def stop(self):
-        """
-        Stop env manager for async training, called by user!!!
-        """
-        if self.config.async_generation_ratio > 0 and self.mode == "train" and self.rollout_refs is not None:
-            await self._stop_env_manager()
-            await self._stop_server()
-
-    async def _stop_server(self):
-        if not self.running:
-            return
-        self.running = False
-        stop_server_tasks = [
-            asyncio.wrap_future(ref.obj_ref.future())
-            for ref in self.infer_cluster.stop_server(blocking=False)
-        ]
-        if self.config.async_generation_ratio == 0 or self.mode == "train":
-            await asyncio.gather(
-                self.alive_check_task,
-            )
-        gen_metrics = await asyncio.gather(*stop_server_tasks)
-        gen_metrics = gen_metrics[0]
-        return gen_metrics.meta_info.pop("metrics", {})
-
-    async def suspend(self, global_step):
-        if self.config.async_generation_ratio == 0 or self.mode != "train":
-            return {}
-
-        if not self.running:
-            return {}
-        # self.running will be set to False in self._stop_server
-
+    async def suspend(self):
         await self.generate_scheduler.suspend.remote()
-        return await self._stop_server()
 
-    async def _start_server(self, global_step):
-        if self.running:
-            return
-        self.running = True
-        data = DataProto()
-        data.meta_info["global_step"] = global_step
-        data.meta_info["is_offload_states"] = self.config.async_generation_ratio == 0
-        await asyncio.gather(
-            *[
-                asyncio.wrap_future(ref.obj_ref.future())
-                for ref in self.infer_cluster.start_server(data, blocking=False)
-            ],
-        )
-        if self.config.async_generation_ratio == 0 or self.mode == "train":
-            self.alive_check_task = asyncio.create_task(self.alive_check())
+    async def _run_rollout_loop(self, seed):
+        await asyncio.gather(*self.es_manager.run_rollout_loop(seed, blocking=False))
 
-    async def resume(self, global_step):
-        if self.config.async_generation_ratio == 0 or self.mode != "train":
-            return
-
-        if self.running:
-            return
-        # self.running will be set to True in self._start_server
-
-        await asyncio.gather(
-            self._start_server(global_step),
-            *[
-                asyncio.wrap_future(ref.future())
-                for ref in self.es_manager.update_step(global_step, blocking=False)
-            ],
-        )
-        await self.generate_scheduler.resume.remote()
+    async def _get_batch(self, batch_size, global_step):
+        return await self.env_output_queue.get_batch.remote(batch_size, global_step)
 
     async def get_batch(self, data: DataProto, batch_size):
         global_step = data.meta_info["global_step"]
 
-        await self._start_server(global_step)
-        await self._start_env_manager(global_step)
+        # start env manager
+        if self.rollout_task is None:
+            seed = random.randint(0, 1000000) if self.mode == "train" else self.config.seed
+            self.rollout_task = asyncio.create_task(self._run_rollout_loop(seed))
 
-        ref = self.env_output_queue.get_batch.remote(batch_size)
-        data_batch: List[DataProto] = await asyncio.wrap_future(ref.future())
+        await asyncio.gather(*self.es_manager.update_step(global_step, blocking=False))
+        await self.env_output_queue.advance_step.remote(global_step)
+        await self.generate_scheduler.resume.remote()
+
+        get_task = asyncio.create_task(self._get_batch(batch_size, global_step))
+        await asyncio.wait({get_task, self.rollout_task}, return_when=asyncio.FIRST_COMPLETED)
+        if self.rollout_task.done() and self.rollout_task.exception() is not None:
+            await self.rollout_task
+        data_batch = await get_task
+        if batch_size <= 0:
+            await self.rollout_task
+            self.rollout_task = None
+            await self.env_output_queue.clear.remote()
+
+        if len(data_batch) == 0:
+            return None
+
         metrics = {}
         [append_to_dict(metrics, meta_info.meta_info["metrics"]) for meta_info in data_batch]
+        metrics.update(await self.env_output_queue.collect_metrics.remote())
         batch = DataProto.concat(data_batch)
-
-        if self.config.async_generation_ratio == 0 or self.mode != "train":
-            await self._stop_env_manager(batch_size)
-            # stop server in both async val and sync training, assume train_rollout_manager is suspended or stopped
-            actor_infer_metrics = await self._stop_server()
-            if self.mode == "train":
-                metrics.update(actor_infer_metrics)
-
         batch.meta_info["metrics"] = metrics
         return batch
-
-    # TODO: do not need alive_check if use async_generate
-    async def alive_check(self):
-        alive_check_interval = self.config.alive_check_interval
-        while self.running:
-            await asyncio.sleep(alive_check_interval)
-            try:
-                outputs: List[DataProto] = await asyncio.gather(
-                    *[
-                        asyncio.wrap_future(ref.future())
-                        for ref in self.infer_cluster.add_request(
-                                command=GenerateRequestType.ALIVE_CHECK, data=DataProto(), blocking=False)
-                    ]
-                )
-            except Exception as e:
-                if not self.running:
-                    return
-                self.env_output_queue.put_exception(e)
-                return
-            request_counts = {key: output.meta_info["request_counts"] for key, output in enumerate(outputs)}
-            metrics = {"time": datetime.now().strftime("%Y%m%d-%H%M%S"), "metrics": request_counts}
-            logger.debug(f"generate flow: {json.dumps(metrics)}")

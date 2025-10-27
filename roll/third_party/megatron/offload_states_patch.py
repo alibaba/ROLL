@@ -216,8 +216,9 @@ def move_ddp_model_params_tensor_to_device(optimizer: DistributedOptimizer,
                 param_range = gbuf_range["param_map"][model_param]["param"]
 
                 # fp16, bf16 params.
-                if model_param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor',
-                                          'torch.BFloat16Tensor', 'torch.HalfTensor']:
+                if model_param.type() in [f'torch.{current_platform.device_type}.HalfTensor', f'torch.{current_platform.device_type}.BFloat16Tensor',
+                                          'torch.BFloat16Tensor', 'torch.HalfTensor'] or \
+                   (current_platform.device_type == "cuda" and model_param.type() in ['torch.HalfTensor', 'torch.BFloat16Tensor']):
                     # Clone model -> main.
                     shard_model_param = model_param.detach().view(-1)[param_range.start: param_range.end]
 
@@ -229,7 +230,7 @@ def move_ddp_model_params_tensor_to_device(optimizer: DistributedOptimizer,
                         len(shard_float16_params_this_group)] = shard_model_param
                     shard_float16_params_this_group.append(shard_model_param)
                 # fp32 params.
-                elif model_param.type() in ['torch.cuda.FloatTensor', 'torch.FloatTensor']:
+                elif model_param.type() in [f'torch.{current_platform.device_type}.FloatTensor', 'torch.FloatTensor']:
                     shard_model_param = model_param.view(-1)[param_range.start: param_range.end]
                     optimizer.shard_fp32_groups[group_index][
                         len(shard_fp32_params_this_group)].data = shard_model_param.data

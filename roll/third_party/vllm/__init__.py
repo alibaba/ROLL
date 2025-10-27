@@ -21,6 +21,9 @@ elif Version("0.10.0") <= Version(vllm.__version__) < Version("0.10.2"):
 elif Version("0.10.2") == Version(vllm.__version__):
     from roll.third_party.vllm.vllm_0_10_2.llm import Llm0102
     LLM = Llm0102
+elif Version("0.11.0") == Version(vllm.__version__):
+    from roll.third_party.vllm.vllm_0_11_0.llm import Llm0110
+    LLM = Llm0110
 else:
     raise NotImplementedError(f"roll vllm version {vllm.__version__} is not supported.")
 

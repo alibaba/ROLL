@@ -111,6 +111,11 @@ reference:
     attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
+    # In transformers>=4.50.0, if model.from_pretrained with auto device_map, None
+    # tp_plan (and tp_plan of model is not None) and WORLD_SIZE>1, TP would be used.
+    # Thus using device_map=0 to disable HF transformers parallel, otherwise use
+    # zero3 for reference model
+    device_map: "cuda:0"
     model_type: ~
   data_args:
     template: qwen2-vl

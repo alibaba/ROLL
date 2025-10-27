@@ -17,7 +17,7 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams, RequestOutputKind
+from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.core_client import SyncMPClient
@@ -194,9 +194,6 @@ class LLMEngine0100(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> None:
-        if isinstance(params, SamplingParams):
-            params.output_kind = RequestOutputKind.FINAL_ONLY
-
         prompt_str, request = self.processor.custom_process_inputs(request_id, processed_inputs, params,
                                                 arrival_time, lora_request,
                                                 trace_headers,

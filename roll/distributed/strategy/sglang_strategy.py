@@ -1,32 +1,27 @@
+import asyncio
 import copy
 import gc
 import io
-import queue
-import time
 import os
+import queue
 from concurrent import futures
 from datetime import timedelta
-from typing import Optional, List
+from typing import List, Optional
 
 import torch
 import torch.distributed as dist
+from sglang.srt.hf_transformers_utils import get_tokenizer
 from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
-import sglang as sgl
-
-from roll.third_party.sglang import patch as sglang_patch
-
-from sglang.srt.hf_transformers_utils import get_tokenizer
-from mcore_adapter.models.converter.convert_utils import RecvBucketManager
-from roll.utils.collective import collective
-
 
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy
+from roll.third_party.sglang import async_engine
+from roll.third_party.sglang import patch as sglang_patch
+from roll.utils.functionals import GenerateRequestType, concatenate_input_and_output
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
-from roll.utils.functionals import concatenate_input_and_output, GenerateRequestType
 from roll.platforms import current_platform
 
 
@@ -45,21 +40,11 @@ class SgLangStrategy(InferenceStrategy):
         self.executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=1)
         self.sglang_outputs_list: List = []
         self.input_ids_list: List = []
-        self.recv_manager = RecvBucketManager()
         self.command_queue: Optional[queue.Queue] = None
 
         self.request_ids = set()
         self.generation_config = None
-
-        self.group_name = "sglang_worker_default"
-        collective.init_collective_group(
-            world_size=self.worker.world_size,
-            rank=self.worker.rank,
-            group_name=self.group_name,
-            master_addr=self.worker.master_addr,
-            master_port=self.worker.master_port,
-        )
-        self.running = False
+        self.running = None
 
     def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
@@ -86,6 +71,7 @@ class SgLangStrategy(InferenceStrategy):
         else:
             dtype = "auto"
 
+        sglang_config.setdefault("enable_memory_saver", True)
         sglang_config.update(
             {
                 "model_path": self.worker_config.model_args.model_name_or_path,
@@ -95,9 +81,7 @@ class SgLangStrategy(InferenceStrategy):
                 "mem_fraction_static": sglang_config["mem_fraction_static"],
                 "trust_remote_code": True,
                 "tp_size": tp_size,
-                "log_level": "info",
-                "enable_memory_saver": True,
-                "random_seed": self.worker.pipeline_config.seed,
+                "log_level": sglang_config.get("log_level", "info"),
                 "port": 30000 + dp_rank * 500,
                 # 'disable_cuda_graph': True,
                 "disable_custom_all_reduce": sglang_config.get("disable_custom_all_reduce", True),
@@ -107,8 +91,6 @@ class SgLangStrategy(InferenceStrategy):
 
         os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
         self.model = sglang_patch.engine.EngineSA(**sglang_config)
-
-        # 用于标记显存是否释放
         self.model.is_model_in_gpu = True
 
         self.tokenizer = get_tokenizer(self.worker_config.model_args.model_name_or_path, trust_remote_code=True)
@@ -123,19 +105,20 @@ class SgLangStrategy(InferenceStrategy):
             {"additional_special_tokens": special_tokens}, replace_additional_special_tokens=False
         )
         logger.info(f"add {special_tokens} to additional_special_tokens: {self.tokenizer.additional_special_tokens}")
-
-        import asyncio
-
         self.event_loop = asyncio.get_event_loop()
 
     def op_compute_log_probs(self, logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         pass
 
     def start_server(self, data: DataProto, request_complete_callback):
-        collective.barrier(group_name=self.group_name)
         self.running = True
-        sglang_patch.async_engine.start_async_sglang(
-            self.event_loop, self.model, request_complete_callback, self.command_queue
+        self.command_queue = queue.Queue()
+        async_engine.start_async_sglang(
+            self.event_loop,
+            self.model,
+            request_complete_callback,
+            self.command_queue,
+            max_running_requests=self.worker.pipeline_config.max_running_requests,
         )
 
     def add_request(self, command, data: DataProto):
@@ -151,17 +134,15 @@ class SgLangStrategy(InferenceStrategy):
                 gen_kwargs={**generation_config, "max_new_tokens": max_new_tokens}
             )
             prompt_token_ids = gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
-            sglang_patch.async_engine.add_request(
+            async_engine.add_request(
                 self.command_queue, ([request_id], prompt_token_ids, sampling_params, data.meta_info)
             )
 
         elif command == GenerateRequestType.ABORT:
             request_id = data.meta_info["request_id"]
-            sglang_patch.async_engine.abort_request(self.command_queue, rid=request_id)
+            async_engine.abort_request(self.command_queue, rid=request_id)
 
         elif command == GenerateRequestType.STOP:
-            for abort_rid in self.request_ids:
-                sglang_patch.async_engine.abort_request(self.command_queue, rid=abort_rid)
             self.command_queue.put(None)
             self.request_ids.clear()
             self.running = False
@@ -231,16 +212,6 @@ class SgLangStrategy(InferenceStrategy):
 
         return output
 
-    def resume_model(self):
-        if self.model.release_memory_state:
-            self.model.resume_memory_occupation()
-            self.model.release_memory_state = False
-
-    def release_model(self):
-        if not self.model.release_memory_state:
-            self.model.release_memory_occupation()
-            self.model.release_memory_state = True
-
     # 参数同步相关接口
     def setup_collective_group(self, model_update_name, comm_plan, backend=None):
         if backend is None:
@@ -260,6 +231,7 @@ class SgLangStrategy(InferenceStrategy):
         self.model.update_parameter_in_bucket(meta_infos, buffer, ranks_in_worker)
 
     def load_states(self, *args, **kwargs):
+        self.model.flush_cache()
         if not self.model.is_model_in_gpu:
             self.model.resume_memory_occupation()
             logger.info("self.model.resume_memory_occupation exec ....")
@@ -267,11 +239,10 @@ class SgLangStrategy(InferenceStrategy):
 
     def offload_states(self, include=None, non_blocking=False):
         if include is None or OffloadStateType.model_params in include:
-            if self.model.is_model_in_gpu:
+            if self.worker.pipeline_config.is_train_infer_colocated and self.model.is_model_in_gpu:
                 self.model.release_memory_occupation()
                 logger.info("self.model.release_memory_occupation exec ....")
                 self.model.is_model_in_gpu = False
-        self.recv_manager.clear()
         gc.collect()
         current_platform.empty_cache()
 
@@ -281,7 +252,9 @@ def gather_unpadded_input_ids(input_ids: torch.Tensor, attention_mask: torch.Ten
     return gathered_input_ids
 
 
-def gather_outputs_to_pad_tensor(request_outputs, pad_token_id, device="cuda") -> torch.Tensor:
+def gather_outputs_to_pad_tensor(request_outputs, pad_token_id, device=None) -> torch.Tensor:
+    if device is None:
+        device = current_platform.device_type
     token_ids_list_of_lists = [
         torch.tensor(request_output["output_ids"], device=device) for request_output in request_outputs
     ]
@@ -301,7 +274,7 @@ def concatenate_input_and_output(input_ids, output_ids, num_return_sequences):
     return sequences
 
 
-def create_sampling_params_for_sglang(gen_kwargs):
+def create_sampling_params_for_sglang(gen_kwargs: dict):
     return dict(
         max_new_tokens=gen_kwargs["max_new_tokens"],
         temperature=gen_kwargs["temperature"],
@@ -310,6 +283,7 @@ def create_sampling_params_for_sglang(gen_kwargs):
         stop_token_ids=gen_kwargs["eos_token_id"],
         repetition_penalty=gen_kwargs["repetition_penalty"],
         n=gen_kwargs["num_return_sequences"],
+        return_logprob=gen_kwargs.get("logprobs", 0) > 0,
         stop=gen_kwargs["stop_strings"],
         no_stop_trim=gen_kwargs.get("include_stop_str_in_output", True),
     )
@@ -335,7 +309,7 @@ def compare_sampling_params(params1: dict, params2: dict) -> bool:
     # 比较每个采样参数
     for attr in param_attrs:
         if attr in params1 and attr in params2:
-            if params1[attr] != params1[attr]:
-                print(f"采样参数 {attr} 不同: {params1[attr]} != {params1[attr]}")
+            if params1[attr] != params2[attr]:
+                print(f"采样参数 {attr} 不同: {params1[attr]} != {params2[attr]}")
                 return False
     return True

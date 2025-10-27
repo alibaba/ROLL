@@ -1,9 +1,9 @@
 import asyncio
 import copy
 import gc
-import itertools
 import os
 import queue
+import time
 from concurrent import futures
 from typing import Dict, List, Optional, Union
 
@@ -14,9 +14,9 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
 from vllm import RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import RequestOutputKind
 from vllm.utils import random_uuid
 
-from mcore_adapter.models.converter.convert_utils import RecvBucketManager
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy
@@ -39,11 +39,9 @@ class VllmStrategy(InferenceStrategy):
         self.model: Union[LLM, AsyncLLM]
         self.executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=1)
         self.pending_size = 1
-        self.recv_manager = RecvBucketManager()
         self.command_queue: Optional[queue.Queue] = None
 
         self.request_metas = {}
-        self.group_name = "vllm_worker_default"
         self.running = False
 
     def initialize(self, model_provider):
@@ -72,10 +70,11 @@ class VllmStrategy(InferenceStrategy):
                 "disable_custom_all_reduce": vllm_config.get(
                     "disable_custom_all_reduce", True
                 ),  # potentially hangs in tp>1
-                "enable_prefix_caching": vllm_config.get("enable_prefix_caching", False),
+                "enable_prefix_caching": vllm_config.get("enable_prefix_caching", True),
                 "load_format": vllm_config.get("load_format", "dummy"),  # use model update passed value
             }
         )
+
         self.is_lora = self.worker_config.model_args.lora_target is not None
         if self.is_lora:
             lora_kwargs = {
@@ -85,6 +84,7 @@ class VllmStrategy(InferenceStrategy):
             }
             vllm_config.update(lora_kwargs)
             vllm_config["load_format"] = "auto"  # enables vLLM to load the base model for add_lora
+
         logger.info(f"vllm_config: {vllm_config}")
         assert not dist.is_initialized()
 
@@ -114,13 +114,8 @@ class VllmStrategy(InferenceStrategy):
 
         self.worker.rank_info.dp_rank = self.worker.rank
         self.worker.rank_info.dp_size = self.worker.world_size
-        collective.init_collective_group(
-            world_size=self.worker.world_size,
-            rank=self.worker.rank,
-            group_name=self.group_name,
-            master_addr=self.worker.master_addr,
-            master_port=self.worker.master_port,
-        )
+
+        self.is_model_in_gpu = True
 
     def op_compute_log_probs(self, logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         """
@@ -153,6 +148,7 @@ class VllmStrategy(InferenceStrategy):
                         lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="dummy_lora_path"
                     )
                 ] * batch_size
+
         vllm_outputs = self.model.generate(
             sampling_params=sampling_params,
             use_tqdm=False,
@@ -174,21 +170,40 @@ class VllmStrategy(InferenceStrategy):
 
         return output
 
-    def process_vllm_output(self, vllm_outputs: List[RequestOutput], request_complete_callback):
+    def process_vllm_output(self, vllm_outputs: List[RequestOutput], request_complete_callback, collect_unfinished=False):
         # 转成response id, request_complete_callback
+        report_request_ids = []
         for request_output in vllm_outputs:
-            output_token_ids = []
-            request_id = request_output.request_id
-            if request_id not in self.request_metas:
+            if not (request_output.finished or collect_unfinished):
                 continue
+            request_id = request_output.request_id
+            meta_info = self.request_metas.pop(request_id, None)
+            if meta_info is None:
+                continue
+            output_token_ids, finish_reasons, logprobs = [], [], []
             for completion_output in request_output.outputs:
                 output_token_ids.append(completion_output.token_ids)
-            output_data = DataProto(meta_info=self.request_metas[request_id])
+                finish_reasons.append(completion_output.finish_reason)
+                if completion_output.logprobs is not None:
+                    logprobs.append(
+                        [
+                            float(lps[token_id].logprob)
+                            for token_id, lps in zip(completion_output.token_ids, completion_output.logprobs)
+                        ]
+                    )
+            output_data = DataProto(meta_info=meta_info)
             output_data.meta_info["output_token_ids"] = output_token_ids
+            output_data.meta_info["finish_reasons"] = finish_reasons
+            output_data.meta_info["output_logprobs"] = logprobs
             request_complete_callback(data=output_data)
+            report_request_ids.append(request_id)
+        return report_request_ids
 
     def start_server(self, data: DataProto, request_complete_callback):
+        self.command_queue = queue.Queue()
         self.running = True
+        collect_unfinished = data.meta_info.get("collect_unfinished", False)
+
         while True:
             while not self.command_queue.empty():
                 command, batch = self.command_queue.get_nowait()
@@ -200,12 +215,20 @@ class VllmStrategy(InferenceStrategy):
                     generation_config = batch.meta_info.get("generation_config")
                     max_new_tokens = batch.meta_info.get("max_new_tokens", generation_config["max_new_tokens"])
                     max_new_tokens = min(max_new_tokens, generation_config["max_new_tokens"])
+                    output_kind = RequestOutputKind.CUMULATIVE if collect_unfinished else RequestOutputKind.FINAL_ONLY
                     sampling_params = create_sampling_params_for_vllm(
-                        gen_kwargs={**generation_config, "max_new_tokens": max_new_tokens}
+                        gen_kwargs={**generation_config, "max_new_tokens": max_new_tokens, "output_kind": output_kind}
                     )
                     if "multi_modal_data" in batch.non_tensor_batch:
-                        prompt_token_ids = [batch.non_tensor_batch["multi_modal_data"][0]["prompt_token_ids"]]
-                        multi_modal_data = [batch.non_tensor_batch["multi_modal_data"][0]["multi_modal_data"]]
+                        prompt_token_ids = [
+                            batch.non_tensor_batch["multi_modal_data"][0]
+                            ["prompt_token_ids"]
+                        ]
+                        multi_modal_data = (
+                            [batch.non_tensor_batch["multi_modal_data"][0]["multi_modal_data"]]
+                            if "multi_modal_data" in batch.non_tensor_batch["multi_modal_data"][0]
+                            else None
+                        )
                     else:
                         prompt_token_ids = gather_unpadded_input_ids(
                             input_ids=input_ids, attention_mask=attention_mask
@@ -233,6 +256,20 @@ class VllmStrategy(InferenceStrategy):
                     request_id = batch.meta_info["request_id"]
                     self.model.abort_request(request_id=request_id)
                 elif command == GenerateRequestType.STOP:
+                    stop_time = time.time()
+                    wait_seconds = 120
+                    while collect_unfinished and len(self.request_metas) > 0:  # for partial rollout
+                        vllm_outputs: List[RequestOutput] = self.model.fetch_output()
+                        processed_request_ids = self.process_vllm_output(
+                            vllm_outputs=vllm_outputs,
+                            request_complete_callback=request_complete_callback,
+                            collect_unfinished=collect_unfinished,
+                        )
+                        if time.time() - stop_time > wait_seconds:
+                            logger.warning(f"Timeout after {wait_seconds}s waiting for running requests to complete. "
+                                           f"Remaining running requests: {len(self.request_metas)}")
+                            break
+                        self.model.abort_request(request_id=processed_request_ids)
                     self.model.abort_request(request_id=list(self.request_metas.keys()))
                     self.request_metas.clear()
                     while not self.command_queue.empty():
@@ -288,12 +325,16 @@ class VllmStrategy(InferenceStrategy):
 
     # offload/reload 接口
     def load_states(self, *args, **kwargs):
-        self.model.load_states()
+        self.model.reset_prefix_cache()
+        if not self.is_model_in_gpu:
+            self.model.load_states()
+            self.is_model_in_gpu = True
 
     def offload_states(self, include=None, non_blocking=False):
         if include is None or OffloadStateType.model_params in include:
-            self.model.offload_states(self.sleep_level)
-        self.recv_manager.clear()
+            if self.is_model_in_gpu and self.worker.pipeline_config.is_train_infer_colocated:
+                self.model.offload_states(self.sleep_level)
+                self.is_model_in_gpu = False
         gc.collect()
         current_platform.empty_cache()
 
@@ -324,7 +365,9 @@ def gather_unpadded_input_ids(input_ids: torch.Tensor, attention_mask: torch.Ten
     return gathered_input_ids
 
 
-def gather_outputs_to_pad_tensor(request_outputs: List["RequestOutput"], pad_token_id, device="cuda") -> torch.Tensor:
+def gather_outputs_to_pad_tensor(request_outputs: List["RequestOutput"], pad_token_id, device=None) -> torch.Tensor:
+    if device is None:
+        device = current_platform.device_type
     token_ids_list_of_lists = [
         torch.tensor(completion_output.token_ids, device=device)
         for request_output in request_outputs
@@ -335,6 +378,12 @@ def gather_outputs_to_pad_tensor(request_outputs: List["RequestOutput"], pad_tok
 
 
 def create_sampling_params_for_vllm(gen_kwargs):
+    output_kind = gen_kwargs.get("output_kind", RequestOutputKind.FINAL_ONLY)
+    if output_kind != RequestOutputKind.FINAL_ONLY:
+        assert gen_kwargs["num_return_sequences"] == 1, (
+            "fetch_output only supports num_return_sequences=1 or output_kind=FINAL"
+        )
+
     if gen_kwargs["num_beams"] > 1:
         return SamplingParams(
             max_tokens=gen_kwargs["max_new_tokens"],
@@ -343,8 +392,9 @@ def create_sampling_params_for_vllm(gen_kwargs):
             n=gen_kwargs["num_return_sequences"],
             best_of=gen_kwargs["num_beams"],
             use_beam_search=True,
-            logprobs=0,
             stop=gen_kwargs["stop_strings"],
+            logprobs=gen_kwargs.get("logprobs", 0),
+            output_kind=output_kind,
             include_stop_str_in_output=gen_kwargs.get("include_stop_str_in_output", True),
         )
     return SamplingParams(
@@ -355,8 +405,9 @@ def create_sampling_params_for_vllm(gen_kwargs):
         stop_token_ids=gen_kwargs["eos_token_id"],
         repetition_penalty=gen_kwargs["repetition_penalty"],
         n=gen_kwargs["num_return_sequences"],
-        logprobs=0,
         stop=gen_kwargs["stop_strings"],
+        logprobs=gen_kwargs.get("logprobs", 0),
+        output_kind=output_kind,
         include_stop_str_in_output=gen_kwargs.get("include_stop_str_in_output", True),
     )
 

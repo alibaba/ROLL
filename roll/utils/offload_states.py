@@ -22,6 +22,7 @@ def offload_hf_model(model: PreTrainedModel):
     """
     根据 hf_device_map 将模型的各个层卸载到 CPU
     """
+    from trl import AutoModelForCausalLMWithValueHead
     if isinstance(model, AutoModelForCausalLMWithValueHead):
         offload_hf_model(model=model.pretrained_model)
         offload_hf_model(model=model.v_head)
@@ -37,6 +38,7 @@ def load_hf_model(model: PreTrainedModel):
     """
     根据 hf_device_map 将模型的各个层卸载到 对应的GPU
     """
+    from trl import AutoModelForCausalLMWithValueHead
     if isinstance(model, AutoModelForCausalLMWithValueHead):
         load_hf_model(model=model.pretrained_model)
         load_hf_model(model=model.v_head)

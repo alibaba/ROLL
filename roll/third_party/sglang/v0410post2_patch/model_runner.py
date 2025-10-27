@@ -4,6 +4,8 @@ import torch
 import torch.distributed as dist
 import datetime
 
+from roll.platforms import current_platform
+
 
 from sglang.srt.model_executor.model_runner import ModelRunner, UNBALANCED_MODEL_LOADING_TIMEOUT_S
 from sglang.srt.configs.device_config import DeviceConfig
@@ -37,13 +39,12 @@ class ModelRunnerSA(ModelRunner):
         if self.device != "cpu":
             torch.set_num_threads(1)
         if self.device == "cuda":
-            if torch.cuda.get_device_capability()[0] < 8:
+            if current_platform.get_device_capability()[0] < 8:
                 logger.info(
                     "Compute capability below sm80. Use float16 due to lack of bfloat16 support."
                 )
-                self.server_args.dtype = "float16"
                 self.model_config.dtype = torch.float16
-                if torch.cuda.get_device_capability()[1] < 5:
+                if current_platform.get_device_capability()[1] < 5:
                     raise RuntimeError("SGLang only supports sm75 and above.")
 
         set_cuda_arch()

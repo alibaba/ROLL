@@ -42,7 +42,7 @@ resume_from_checkpoint: false
 #  please refer to configurations without the "example_" prefix.
 
 # GSPO related
-adv_estimator: "reinforce"
+adv_estimator: "grpo"
 importance_sampling: seq
 rollout_batch_size: 64  # prompt
 num_return_sequences_in_group: 8

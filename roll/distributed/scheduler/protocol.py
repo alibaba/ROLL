@@ -335,6 +335,33 @@ class DataProto:
 
         return self
 
+    def clone(self) -> "DataProto":
+        """
+        Create a deep copy of this DataProto, including tensors,
+        non-tensor data, and meta_info.
+
+        The new DataProto will share no underlying storage with the original.
+
+        Returns:
+            DataProto: A new DataProto instance with the same content but
+                       independent memory.
+        """
+        # Copy batch
+        batch_copy = self.batch.clone() if self.batch is not None else None
+
+        # Copy non-tensor objects (numpy arrays)
+        non_tensor_copy = {k: np.copy(v) for k, v in self.non_tensor_batch.items()}
+
+        # Deep copy meta_info to avoid shared mutable objects
+        meta_copy = copy.deepcopy(self.meta_info)
+
+        # Return new DataProto instance
+        return DataProto(
+            batch=batch_copy,
+            non_tensor_batch=non_tensor_copy,
+            meta_info=meta_copy
+        )
+
     def select(self, batch_keys=None, non_tensor_batch_keys=None, meta_info_keys=None, deepcopy=False) -> "DataProto":
         """Select a subset of the DataProto via batch_keys and meta_info_keys
 
@@ -668,9 +695,9 @@ class DataProto:
                 for sub_key, sub_list in sub_dict.items():
                     try:
                         if np.isscalar(sub_list[0]):
-                            sub_dict[sub_key] = np.array(sub_list)
+                            sub_dict[sub_key] = np.array(sub_list).tolist()
                         else:
-                            sub_dict[sub_key] = np.concatenate(sub_list, axis=0)
+                            sub_dict[sub_key] = np.concatenate(sub_list, axis=0).tolist()
                     except Exception:
                         # fallback: keep as list
                         sub_dict[sub_key] = sub_list

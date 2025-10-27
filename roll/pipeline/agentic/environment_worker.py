@@ -87,21 +87,16 @@ class EnvironmentWorker(Worker):
                     raise e
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
-    async def run_rollout_loop(self, current_step, seed):
+    async def run_rollout_loop(self, seed):
         loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=len(self.env_managers)) as pool:
-            try:
-                await asyncio.gather(
-                    *[
-                        loop.run_in_executor(pool, env_manager.run_rollout_loop, DataProto(meta_info={"current_step": current_step, "seed": seed}))
-                        for env_manager in self.env_managers.values()
-                    ]
-                )
-            except Exception as e:
-                self.logger.error(f"EnvManager run with except: {e}", exc_info=True)
-                ref = self.output_queue.put_exception.remote(e)
-                await asyncio.wrap_future(ref.future())
-                raise e
+        pool = ThreadPoolExecutor(max_workers=len(self.env_managers))
+        await asyncio.gather(
+            *[
+                loop.run_in_executor(pool, env_manager.run_rollout_loop, DataProto(meta_info={"seed": seed}))
+                for env_manager in self.env_managers.values()
+            ]
+        )
+        pool.shutdown()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
     async def update_step(self, global_step):

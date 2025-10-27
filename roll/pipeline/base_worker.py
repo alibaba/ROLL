@@ -27,6 +27,7 @@ from roll.utils.functionals import (
     agg_loss,
 )
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.dynamic_batching import make_mini_batch_iter_for_dynamic_batching
 from roll.platforms import current_platform
 
 
@@ -60,10 +61,10 @@ class ActorWorker(Worker):
 
         self.strategy.offload_states()
 
-        # Cuda must have been initialized when calling torch.cuda.reset_max_memory_allocated
-        # with arguments (inside state_offload_manager). We explicitly init cuda here because
+        # Platform must have been initialized when calling current_platform.reset_max_memory_allocated
+        # with arguments (inside state_offload_manager). We explicitly init platform here because
         # current process is used as engine client when using vllm v1 engine, and
-        # there is no chance to init cuda context.
+        # there is no chance to init platform context.
         current_platform.init()
 
     @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST)
@@ -85,23 +86,25 @@ class ActorWorker(Worker):
         ):
             data = data.to(current_platform.device_type)
             data = self.strategy.get_data_input(data)
-            per_device_train_batch_size = self.worker_config.training_args.per_device_train_batch_size
-            backward_batch_size = (
-                per_device_train_batch_size * self.worker_config.training_args.gradient_accumulation_steps
-            )
+            if self.worker_config.use_dynamic_batching_in_train:
+                dataloader = make_mini_batch_iter_for_dynamic_batching(
+                    data = data,
+                    epochs=self.pipeline_config.ppo_epochs,
+                    ga_steps = self.worker_config.training_args.gradient_accumulation_steps
+                )
+            else:
+                per_device_train_batch_size = self.worker_config.training_args.per_device_train_batch_size
+                backward_batch_size = (
+                    per_device_train_batch_size * self.worker_config.training_args.gradient_accumulation_steps
+                )
+                dataloader = data.make_iterator(
+                    mini_batch_size=backward_batch_size,
+                    epochs=self.pipeline_config.ppo_epochs,
+                    seed=self.pipeline_config.seed,
+                    dataloader_kwargs={"shuffle": True},
+                )
 
-            dataloader = data.make_iterator(
-                mini_batch_size=backward_batch_size,
-                epochs=self.pipeline_config.ppo_epochs,
-                seed=self.pipeline_config.seed,
-                dataloader_kwargs={"shuffle": True},
-            )
-
-            for batch_idx, data in tqdm(
-                enumerate(dataloader),
-                desc=f"{self.worker_name} train global step {global_step}",
-                total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size,
-            ):
+            for batch_idx, data in enumerate(dataloader):
                 pg_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
                 append_to_dict(metrics, pg_metrics)
 

@@ -12,6 +12,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.diffusion.reward_fl.reward_fl_config import RewardFLConfig
 from roll.utils.logging import get_logger
+from roll.utils.metrics.metrics_manager import MetricsManager
 
 from diffsynth.trainers.unified_dataset import UnifiedDataset
 
@@ -68,7 +69,7 @@ class RewardFLPipeline(BasePipeline):
     @torch.no_grad()
     def run(self):
         global_step = 0
-        metrics = {}
+        metrics_mgr = MetricsManager()
 
         for epoch in range(int(self.pipeline_config.actor_train.training_args.num_train_epochs)):
             logger.info(f"epoch {epoch} start...")
@@ -78,7 +79,7 @@ class RewardFLPipeline(BasePipeline):
                     continue
                 
                 logger.info(f"pipeline step {global_step} start...")
-                metrics.clear()
+                metrics_mgr.clear_metrics()
 
                 with Timer(name="step_total", logger=None) as step_total_timer:
                     batch_dict: Dict
@@ -88,11 +89,13 @@ class RewardFLPipeline(BasePipeline):
                     with Timer(name="actor_train", logger=None) as actor_train_timer:
                         actor_train_refs = self.actor_train.train_step(batch, blocking=False)
                         actor_train_refs: DataProto = DataProto.materialize_concat(data_refs=actor_train_refs)
-                        # metrics.update(actor_train_refs.meta_info.pop("metrics", {}))
+                        metrics_mgr.add_reduced_metrics(actor_train_refs.meta_info.pop("metrics", {}))
 
-                    metrics["time/actor_train"] = actor_train_timer.last
+                        metrics_mgr.add_metric("time/actor_train", actor_train_timer.last)
 
-                metrics["time/step_total"] = step_total_timer.last
+                    metrics_mgr.add_metric("time/step_total", step_total_timer.last)
+
+                metrics = metrics_mgr.get_metrics()
                 
                 self.state.step = global_step
                 self.state.log_history.append(metrics)

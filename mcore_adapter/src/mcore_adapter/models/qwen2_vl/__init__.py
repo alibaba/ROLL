@@ -12,14 +12,12 @@ from .modeling_qwen2_vl import Qwen2VLModel
 
 register_dist_config(
     "qwen2_vl",
-    [
-        default_dist_config,
+    default_dist_config.merge_configs(
         DistParallelConfig(
-            module_prefix="vision_model.",
-            pre_process_weights=["*"],
-            duplicated_weights=["*"],
-        ),
-    ],
+            pre_process_weights=["vision_model.*"],
+            duplicated_weights=["vision_model.*"],
+        )
+    ),
 )
 
 register_template(

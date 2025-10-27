@@ -25,6 +25,7 @@ from megatron.core.transformer.moe.moe_utils import (
     get_moe_layer_wise_logging_tracker,
     reduce_aux_losses_tracker_across_ranks,
 )
+from megatron.core.tensor_parallel.cross_entropy import vocab_parallel_cross_entropy
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
@@ -50,6 +51,7 @@ from roll.utils.context_managers import disable_gradients
 from roll.utils.functionals import append_to_dict
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.dynamic_batching import make_micro_batch_iter_for_dynamic_batching
 from roll.platforms import current_platform
 
 
@@ -139,12 +141,17 @@ class MegatronInferStrategy(InferenceStrategy):
         forward_func: Callable[[DataProto, torch.Tensor], Tuple[torch.Tensor, Dict[str, torch.Tensor]]],
     ) -> Dict[str, torch.Tensor]:
         self.model.eval()
-        batch_size = batch.batch.batch_size[0]
-        micro_batch_size = batch.meta_info["micro_batch_size"]
-        output_on_all_tp_ranks = batch.meta_info.get("output_on_all_tp_ranks", False)
-        num_microbatches = max(batch_size // micro_batch_size, 1)
-        micro_batches = batch.chunk(chunks=num_microbatches)
-        data_iterator = [iter(micro_batches) for _ in range(len(self.model))]
+        output_on_all_tp_cp_ranks = batch.meta_info.get("output_on_all_tp_cp_ranks", False)
+        if self.worker_config.use_dynamic_batching_in_infer:
+            data_iterator = make_micro_batch_iter_for_dynamic_batching(batch)
+            num_microbatches = batch.meta_info["num_micro_batchs"]
+            micro_batch_size = 1
+        else:
+            batch_size = batch.batch.batch_size[0]
+            micro_batch_size = batch.meta_info["micro_batch_size"]
+            num_microbatches = max(batch_size // micro_batch_size, 1)
+            micro_batches = batch.chunk(chunks=num_microbatches)
+            data_iterator = [iter(micro_batches) for _ in range(len(self.model))]
         with disable_gradients(models=self.model.get_models()):
             # List 是每个 micro-batch 构成的
             losses_reduced: List[Dict[str, torch.Tensor]] = self.forward_backward_func(
@@ -156,11 +163,15 @@ class MegatronInferStrategy(InferenceStrategy):
                 micro_batch_size=micro_batch_size,
                 forward_only=True,
             )
+        if self.worker_config.use_dynamic_batching_in_infer:
+            for data in losses_reduced:
+                for k, v in data.items():
+                    data[k] = torch.nn.functional.pad(v, (0, self.seq_length - data[k].size(-1) - 1), "constant", 0)
         results = collate_fn_to_dict_list(losses_reduced)
 
         if not (
-                (self.worker.rank_info.tp_rank == 0 or output_on_all_tp_ranks)
-                and self.worker.rank_info.cp_rank == 0
+                ((self.worker.rank_info.tp_rank == 0
+                and self.worker.rank_info.cp_rank == 0) or output_on_all_tp_cp_ranks)
                 and self.worker.rank_info.is_pipeline_last_stage
         ):
             return None
@@ -224,7 +235,7 @@ class MegatronInferStrategy(InferenceStrategy):
                 # DataProto.to('cuda') in upper frame not work for non_tensor_batch
                 forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
             forward_args.update({"force_vit_image": True})
-        
+
         output_tensor = model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, labels=labels, **forward_args
         )
@@ -285,14 +296,149 @@ class MegatronInferStrategy(InferenceStrategy):
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
         return entropy
 
-    def op_compute_logits(self, logits: torch.Tensor):
+    def op_compute_language_loss_from_logits(self, logits: torch.Tensor, targets: torch.Tensor):
+        """
+        Compute TP + CP aware GPT cross entropy loss.
+
+        Args:
+            logits: [batch_size, local_seq_len, vocab_size/TP]
+                    If CP is not enabled, local_seq_len = global_seq_len.
+            targets: [batch_size, global_seq_len]
+                    Global vocab ids for target tokens.
+        Returns:
+            loss: scalar tensor, global average per-token loss
+        """
+        targets = self._get_feature_on_this_cp_rank(targets, "targets")
+        # shift
+        logits = logits[..., :-1, :].contiguous()
+        targets = targets[..., 1:].contiguous()
+        # TODO: support use remove padding
+        # [L_local, B, V/TP]: Megatron CE expects sequence-first layout
+        logits_tp = logits.transpose(0, 1).contiguous()
+        labels_tp = targets.transpose(0, 1).contiguous()
+
+        # (1) Compute per-token CE loss on the local TP shard
+        #     This function handles TP all-reduce internally to compute
+        #     the global denominator (sum exp logits) and target logits.
+        #     Output shape: [L_local, B]
+        loss_per_token = vocab_parallel_cross_entropy(
+            logits_tp, labels_tp, label_smoothing=0.0
+        )
+
+        # (2) Apply ignore_index mask (set loss to 0 for ignored positions)
+        mask = (labels_tp != IGNORE_INDEX)
+        loss_sum_local = (loss_per_token * mask).sum()
+        token_count_local = mask.sum()
+
+        # (3) If Context Parallel is enabled, aggregate loss and token count
+        #     across the CP group to get global values
+        if mpu.get_context_parallel_world_size() > 1:
+            cp_group = mpu.get_context_parallel_group()
+            # Stack loss sum and token count to reduce in a single communication
+            stats_tensor = torch.stack([loss_sum_local, token_count_local], dim=0)
+            dist.all_reduce(stats_tensor, op=dist.ReduceOp.SUM, group=cp_group)
+            loss_sum, token_count = stats_tensor[0], stats_tensor[1]
+        else:
+            loss_sum, token_count = loss_sum_local, token_count_local
+
+        # (4) Compute global average per-token loss
+        loss = loss_sum / token_count
+        return loss
+
+    def op_compute_logits(self, logits: torch.Tensor, tp_gather: bool = False, cp_gather: bool = False, topk: int = 0):
+        """
+            Post-process logits.
+
+            If topk == 0 (full-vocab mode), optionally gather across TP/CP ranks
+            using tp_gather and cp_gather flags.
+            If topk > 0, return top-K values and indices for each position.
+
+            Args:
+                logits: [B, local_seq_len, local_vocab_size] tensor.
+                tp_gather: Gather full vocab across tensor-parallel ranks (only if topk==0).
+                cp_gather: Gather full sequence across context-parallel ranks (only if topk==0).
+                topk: 0 for full vocab, >0 for top-K mode.
+
+            Returns:
+                (values, indices):
+                    - full-vocab: (logits, dummy indices)
+                    - top-K: (topk_values, topk_indices)"""
+        # TODO: support use remove padding
+        # TP gather vocab
+        full_logits = logits
+        if tp_gather:
+            full_logits = gather_from_tensor_model_parallel_region(full_logits)
+        # CP gather seq
+        if mpu.get_context_parallel_world_size() > 1 and cp_gather:
+            full_logits = context_parallel_gather(full_logits, parallel_dim=1)
+        if topk == 0:
+            batch_size = full_logits.shape[0]
+            # return dummy topk indices for transfer
+            return full_logits, torch.empty([batch_size, 1], device=logits.device)
+        else:
+            return torch.topk(full_logits, k=topk, dim=-1)
+
+    def op_compute_prepare_cp_local_iterator(self, tensor: torch.Tensor, feature_name: str, micro_batch_size: int):
+        """
+        Prepare a microbatch iterator for a tensor that may require Context Parallel (CP) slicing.
+
+        Notes:
+            - If the input `tensor` is None, this function returns None.
+            - The input tensor is assumed to have shape [global_batch, global_seq_len, ...],
+              with batch dimension first and sequence dimension second.
+            - When CP size > 1, the sequence dimension (dim=1) is sliced to the local CP rank
+              using `_get_feature_on_this_cp_rank`.
+            - After CP slicing (if any), the tensor is split along the batch dimension (dim=0)
+              into microbatches of size `micro_batch_size`.
+
+        Args:
+            tensor (torch.Tensor or None): Full tensor before CP slicing. Can be None.
+            feature_name (str): Identifier passed to `_get_feature_on_this_cp_rank` for CP slicing.
+                                e.g., "teacher_logits" or "teacher_topk_indices".
+            micro_batch_size (int): Number of samples per microbatch; splitting is done along dim=0.
+
+        Returns:
+            iterator or None: Iterator over microbatches with shape
+                              [micro_batch_size, local_seq_len, ...].
+                              Returns None if input `tensor` is None.
+        """
+        if tensor is None:
+            return None
+
+        # CP slicing on sequence dimension if enabled
+        if mpu.get_context_parallel_world_size() > 1:
+            local_tensor = self._get_feature_on_this_cp_rank(tensor, feature_name)
+        else:
+            local_tensor = tensor
+
+        # Microbatch split along batch dimension
+        return iter(local_tensor.split(micro_batch_size, dim=0))
+
+    def op_compute_various_divergence(self, loss_callable, logits, teacher_logits, teacher_topk_indices,
+                                      labels, attention_mask=None):
+        """
+            Note:
+                `logits` here are both TP (Tensor Parallel) and CP (Context Parallel) sharded.
+                `logits` here are CP (Context Parallel) sharded.
+                - We gather across TP to get full-vocab logits for the local CP sequence slice.
+                `labels`, and `attention_mask` are provided as full tensors
+                (global sequence length). These are then sliced down to the local CP rank's
+                sequence shard before loss computation.
+            """
+        # TODO: support TP and remove padding
         full_logits = gather_from_tensor_model_parallel_region(logits)
-        #TODO: support CP & use remove padding
-        return full_logits
+        full_logits = self.op_compute_gather_by_teacher_indices(full_logits, teacher_topk_indices)
+        if teacher_logits.shape[-1] != full_logits.shape[-1]:
+            teacher_logits = teacher_logits[:, :, : min(full_logits.shape[-1], teacher_logits.shape[-1])]
+        labels = self._get_feature_on_this_cp_rank(labels, "labels")
+        if attention_mask is not None:
+            attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
+        loss = loss_callable(logits=full_logits, teacher_logits=teacher_logits, labels=labels, attention_mask=attention_mask)
+        return loss
 
     def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor):
         labels = self._get_feature_on_this_cp_rank(labels, "labels")
-        
+
         loss_mask = (labels != IGNORE_INDEX).float()
         loss_mask = loss_mask.view(-1).float()
         losses = torch.sum(losses.view(-1) * loss_mask)
@@ -305,16 +451,15 @@ class MegatronInferStrategy(InferenceStrategy):
             )
             losses, loss_mask = loss_info[0], loss_info[1]
 
-        loss = losses.clone() # clone to make sure loss is not a view 
+        loss = losses.clone() # clone to make sure loss is not a view
 
         local_num_tokens = loss_mask.clone().detach()
         if local_num_tokens == 0:
             local_num_tokens += 1  # avoid divide by zero
 
         metrics = {f"{self.worker_config.name}/loss": (loss / local_num_tokens).clone().detach().unsqueeze(0)}
-        
-        return loss, local_num_tokens.int(), metrics
 
+        return loss, local_num_tokens.int(), metrics
 
 class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
     strategy_name = "megatron_train"
@@ -437,16 +582,22 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
     def train_step(self, batch: DataProto, loss_func: Callable):
         self.model.train()
 
-        mini_batch_size = self.worker_config.training_args.per_device_train_batch_size
-        num_microbatches = batch.batch.batch_size[0] // self.worker_config.training_args.per_device_train_batch_size
         is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
-        assert (
-            num_microbatches == self.megatron_train_args.gradient_accumulation_steps
-        ), f"num_microbatches={num_microbatches} gradient_accumulation_steps={self.megatron_train_args.gradient_accumulation_steps}"
 
-        data_iterator = [
-            batch.make_iterator(mini_batch_size=mini_batch_size, epochs=1) for _ in range(len(self.model))
-        ]
+        if self.worker_config.use_dynamic_batching_in_train:
+            data_iterator = make_micro_batch_iter_for_dynamic_batching(batch)
+            num_microbatches = batch.meta_info["num_micro_batchs"]
+            mini_batch_size = 1
+        else:
+            mini_batch_size = self.worker_config.training_args.per_device_train_batch_size
+            num_microbatches = batch.batch.batch_size[0] // self.worker_config.training_args.per_device_train_batch_size
+            assert (
+                num_microbatches == self.megatron_train_args.gradient_accumulation_steps
+            ), f"num_microbatches={num_microbatches} gradient_accumulation_steps={self.megatron_train_args.gradient_accumulation_steps}"
+            data_iterator = [
+                batch.make_iterator(mini_batch_size=mini_batch_size, epochs=1) for _ in range(len(self.model))
+            ]
+
         metrics_tensors: List[Dict[str, "torch.Tensor"]] = self.forward_backward_func(
             forward_step_func=partial(self.inner_forward_step, loss_func),
             data_iterator=data_iterator,

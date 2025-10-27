@@ -1,0 +1,263 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen2.5-7B-rlvr-config"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+system_envs:
+  USE_MODELSCOPE: '1'
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
+
+#track_with: wandb
+#tracker_kwargs:
+#  api_key:
+#  project: roll_examples
+#  notes: roll_examples
+#  tags:
+#    - rlvr
+#    - baseline
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: /data/oss_bucket_0/rl_examples/llm/tensorboard/roll_exp/rlvr
+
+num_gpus_per_node: 8
+
+max_steps: 500
+save_steps: 500
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+
+rollout_batch_size: 64  # prompt
+prompt_length: 2048
+response_length: 4096
+
+num_return_sequences_in_group: 8
+ppo_epochs: 1
+adv_estimator: "reinforce"
+
+# clip
+value_clip: 0.5
+reward_clip: 10
+advantage_clip: 2.0
+dual_clip_loss: true
+
+# normalize
+reward_norm: null
+reward_shift: false
+reward_scale: false
+
+# data mask
+max_len_mask: true
+difficulty_mask: true
+difficulty_low_threshold: 0.1
+difficulty_high_threshold: 0.95
+error_max_len_clip: false
+
+# data weight
+difficulty_loss_weight: false
+length_loss_weight: false
+
+# reward
+add_token_level_kl: false
+
+# advantage
+whiten_advantages: true
+
+# dynamic sampling scheduler
+# use_additional_prompts: true
+# max_running_requests: 256
+# is_num_return_sequences_expand: false
+global_template: qwen2_5
+
+pretrain: Qwen/Qwen2.5-7B
+reward_pretrain: Qwen/Qwen2.5-7B
+
+validation:
+  data_args:
+    template: qwen2_5
+    file_name:
+      - data/math_benchmarks.jsonl
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.6
+    top_k: 50
+    num_beams: 1
+    temperature: 0.6
+    num_return_sequences: 1
+
+
+actor_train:
+  model_args:
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 64
+    warmup_steps: 20
+    num_train_epochs: 50
+  data_args:
+    template: qwen2_5
+    file_name:
+      - data/code_KodCode_data.jsonl
+      - data/llm_judge_Multi-subject-RLVR_deal_new.jsonl
+      - data/math_deepmath_deal.jsonl
+      - data/general_ifeval_train_deal.jsonl
+      - data/general_CrossThink-QA_deal.jsonl
+    domain_interleave_probs:
+      math_rule: 0.4
+      code_sandbox: 0.3
+      llm_judge: 0.1
+      crossthinkqa: 0.1
+      ifeval: 0.1
+    dataset_dir: data
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  device_mapping: list(range(0,8))
+  infer_batch_size: 4
+  use_dynamic_batching_in_train: true
+  max_tokens_per_microbatch_in_train: 12288
+  sequence_length_round_in_train: 128
+  use_dynamic_batching_in_infer: true
+  max_tokens_per_microbatch_in_infer: 24576
+  sequence_length_round_in_infer: 128
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.8
+      block_size: 16
+      max_model_len: 8000
+      load_format: auto
+  device_mapping: list(range(0,6))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+  device_mapping: list(range(0,8))
+  infer_batch_size: 8
+  use_dynamic_batching_in_infer: true
+  max_tokens_per_microbatch_in_infer: 49125
+  sequence_length_round_in_infer: 128
+
+rewards:
+  crossthinkqa:
+    worker_cls: roll.pipeline.rlvr.rewards.crossthinkqa_rule_reward_worker.CrossThinkQARuleRewardWorker
+    reward_type: soft
+    response_length_penalty_coef: 0.0
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen2_5
+    tag_included: [crossthinkqa]
+    world_size: 8
+    infer_batch_size: 4
+  ifeval:
+    worker_cls: roll.pipeline.rlvr.rewards.ifeval_rule_reward_worker.GeneralRuleRewardWorker
+    reward_type: soft
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen2_5
+    tag_included: [ifeval]
+    world_size: 8
+    infer_batch_size: 4
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen2_5
+    tag_included: [deepmath_103k, aime]
+    world_size: 8
+    infer_batch_size: 1
+# dynamic filter config
+#    query_filter_config:
+#      type: mean_filter
+#      filter_args:
+#        threshold_up: 0.9
+#        threshold_down: 0.1
+  code_sandbox:
+    use_local: true
+    worker_cls: roll.pipeline.rlvr.rewards.code_sandbox_reward_worker.CodeSandboxRewardWorker
+    tag_included: [KodCode]
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen2_5
+    world_size: 8
+    infer_batch_size: 1
+#    query_filter_config:
+#      type: std_filter
+#      filter_args:
+#        std_threshold: 0
+  llm_judge:
+    # NOTE: llm as judge 也需要gpu, 不能和actor infer共享gpu
+    worker_cls: roll.pipeline.rlvr.rewards.llm_judge_reward_worker.LLMJudgeRewardWorker
+    judge_prompt: Qwen2.5-7B-Instruct-RLVR-prompt
+    judge_model_type: inference
+    tag_included: [RLVR]
+    model_args:
+      model_name_or_path: virtuoussy/Qwen2.5-7B-Instruct-RLVR
+      attn_implementation: fa2
+      disable_gradient_checkpointing: true
+      dtype: bf16
+      model_type: trl
+    generating_args:
+      max_new_tokens: 100
+      top_p: 0.8
+      top_k: 50
+      num_beams: 1
+      temperature: 0.8
+      num_return_sequences: 1
+    data_args:
+      template: qwen2_5
+    strategy_args:
+      strategy_name: hf_infer
+      strategy_config: null
+    device_mapping: list(range(6,8))
+    infer_batch_size: 4

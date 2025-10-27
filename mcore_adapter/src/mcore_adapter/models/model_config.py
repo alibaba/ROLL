@@ -1,5 +1,6 @@
 import dataclasses
 import enum
+import hashlib
 import json
 import os
 import shutil
@@ -13,7 +14,7 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import PipelinePar
 from transformers import AutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from ..constants import MCA_CONFIG_NAME
+from ..constants import MCA_CONFIG_NAME, HUGGINGFACE_AUTOMAP_CACHE
 from ..initialize import initialize_megatron
 from ..training_args import DistributingParallelArguments, TrainingArguments
 from ..utils import get_logger
@@ -81,8 +82,10 @@ class PretrainedConfig:
 
     def save_hf_auto_map_files(self, save_directory: str):
         # name_or_path denotes the path of the from_pretrained model, i.e., where auto map files are located
-        # TODO: should archive the auto map files in a cache path
-        hf_files_path = self.name_or_path
+        # should archive the auto map files in a cache path avoiding the remote name_or_path path has been cleaned
+        automap_cache_path = self.get_automap_cache()
+        read_cache = os.path.isdir(automap_cache_path) and any(f.endswith('.py') for f in os.listdir(automap_cache_path))
+        hf_files_path = automap_cache_path if read_cache else self.name_or_path
         if not (hf_files_path and os.path.isdir(hf_files_path)):
             return
         for dirpath, _, files in os.walk(hf_files_path):
@@ -146,11 +149,22 @@ class PretrainedConfig:
         config.post_init()
 
         config.name_or_path = model_name_or_path
+        # set automap cache in local disk
+        if int(os.getenv("RANK", "0")) == 0:
+            automap_cache_path = config.get_automap_cache()
+            if os.path.isdir(automap_cache_path):
+                shutil.rmtree(automap_cache_path)
+            os.makedirs(automap_cache_path)
+            config.save_hf_auto_map_files(save_directory=automap_cache_path)
         return config
 
     def distribute_config_match(self, other):
         "check the config corresponding ckpt can be used for current config training"
         raise NotImplementedError("distribute_config_match not implemented")
+
+    def get_automap_cache(self):
+        return os.path.join(os.getenv("HUGGINGFACE_AUTOMAP_CACHE", HUGGINGFACE_AUTOMAP_CACHE), 
+                            hashlib.sha256(self.name_or_path.encode()).hexdigest())
 
 
 @dataclass
@@ -178,10 +192,6 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         default=False,
         metadata={"help": "Untie embeddings and output weights."},
     )
-    rotary_base: int = field(
-        default=10000,
-        metadata={"help": "Base period for rotary position embeddings. Defaults to 10000."},
-    )
     max_sequence_length: int = field(
         default=0,
         metadata={"help": "Maximum size of sequence. This is used for positional embedding"},
@@ -190,9 +200,17 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         default=False,
         metadata={"help": "Use shared expert use sigmoid gate to control shared outputs."},
     )
+    rotary_base: int = field(
+        default=10000,
+        metadata={"help": "Base period for rotary position embeddings. Defaults to 10000."},
+    )
     rotary_percent: float = field(
         default=1,
         metadata={"help": "Percent of rotary dimension to use, default 1.0"},
+    )
+    rotary_scaling: bool = field(
+        default=False,
+        metadata={"help": "Apply rope scaling as used in llama 3.x."},
     )
     transformer_impl: Literal["local", "transformer_engine"] = field(
         default="transformer_engine",

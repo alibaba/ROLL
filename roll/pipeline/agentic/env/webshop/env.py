@@ -9,7 +9,7 @@ init_basedir()  # init DEFAULT_FILE_PATH, hardcoded dataset to small
 from webshop_minimal.utils import DEFAULT_FILE_PATH
 
 from roll.pipeline.agentic.env.parse_action_utils import default_parser_action_func
-from roll.pipeline.agentic.utils import all_seed
+from roll.utils.random_utils import all_seed
 
 
 class WebShopEnv(Env, WebAgentTextEnv):

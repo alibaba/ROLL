@@ -7,6 +7,8 @@ import ray
 import torch
 from tqdm import tqdm
 
+from roll.platforms import current_platform
+
 from transformers import AutoModelForCausalLM
 from vllm import SamplingParams
 from vllm.utils import GiB_bytes
@@ -19,9 +21,9 @@ from roll.utils.checkpoint_manager import download_model
 USE_CUSTOME_MODEL_UPDATE = True
 
 def print_current_mem_usage(tag):
-    torch.cuda.empty_cache()
+    current_platform.empty_cache()
     gc.collect()
-    free_bytes, total = torch.cuda.mem_get_info()
+    free_bytes, total = current_platform.mem_get_info()
     print(f"[mem_usage] {tag} | current used: {(total - free_bytes) / GiB_bytes}")
 
 def custom_wakeup(self):
@@ -56,7 +58,7 @@ def test_fp8_mem():
 
 @contextmanager
 def mem_usage(mem_profile=False):
-    free_bytes, total = torch.cuda.mem_get_info()
+    free_bytes, total = current_platform.mem_get_info()
     used_bytes_before = total - free_bytes
     MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
     if mem_profile:
@@ -73,7 +75,7 @@ def mem_usage(mem_profile=False):
             torch.cuda.memory._dump_snapshot(dump_file)
             # print(f"{torch.cuda.memory._snapshot()}")
             torch.cuda.memory._record_memory_history(enabled=None)
-        free_bytes, total = torch.cuda.mem_get_info()
+        free_bytes, total = current_platform.mem_get_info()
         used_bytes_after = total - free_bytes
         print(
             f"[mem_usage] before {used_bytes_before / GiB_bytes} after {used_bytes_after / GiB_bytes}, dump to file {dump_file}"

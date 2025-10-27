@@ -27,12 +27,12 @@ def _init_platform() -> Platform:
     """
     if torch.cuda.is_available():
         device_name = torch.cuda.get_device_name().upper()
-        logger.info(f"Detected CUDA device: {device_name}")
+        logger.debug(f"Detected CUDA device: {device_name}")
         if "NVIDIA" in device_name:
-            logger.info("Initializing CUDA platform (NVIDIA).")
+            logger.debug("Initializing CUDA platform (NVIDIA).")
             return CudaPlatform()
         elif "AMD" in device_name:
-            logger.info("Initializing ROCm platform (AMD).")
+            logger.debug("Initializing ROCm platform (AMD).")
             return RocmPlatform()
         logger.warning("Unrecognized CUDA device. Falling back to UnknownPlatform.")
         return UnknownPlatform()
@@ -40,10 +40,10 @@ def _init_platform() -> Platform:
         try:
             import torch_npu  # noqa: F401
 
-            logger.info("Detected torch_npu. Initializing NPU platform.")
+            logger.debug("Detected torch_npu. Initializing NPU platform.")
             return NpuPlatform()
         except ImportError:
-            logger.info("No supported accelerator detected. Initializing CPU platform.")
+            logger.debug("No supported accelerator detected. Initializing CPU platform.")
             return CpuPlatform()
 
 

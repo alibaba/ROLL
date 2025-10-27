@@ -7,7 +7,7 @@ old_update_causal_mask = Qwen2Model._update_causal_mask
 
 
 def apply_ulysses_patch():
-    from ulysses_attention import _flash_attention_forward, _update_causal_mask
+    from .ulysses_attention import _flash_attention_forward, _update_causal_mask
 
     ALL_ATTENTION_FUNCTIONS["flash_attention_2"] = _flash_attention_forward
     Qwen2Model._update_causal_mask = _update_causal_mask

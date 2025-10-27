@@ -514,12 +514,15 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         if not self.ds_config.is_zero3():
             lora_state_dict = get_peft_model_state_dict(peft_model)
             return lora_state_dict
+
         adapter_name = "default"
         state_dict = peft_model.state_dict()
         lora_state_dict = {k: state_dict[k] for k in state_dict if ("lora_" in k and adapter_name in k)}
+
         lora_params = []
         for name, param in lora_state_dict.items():
             lora_params.append((name.replace(f".{adapter_name}", ""), peft_model.get_parameter(name)))
+
         del lora_state_dict
         return lora_params
 
@@ -535,7 +538,9 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         model = self.unwrap_model()
         broadcast_time_cost = 0
         with Timer("model_update_total") as timer_total:
-            for param_name, param in tqdm(all_params, desc="weight update progress", total=len(all_params)):
+            for param_name, param in tqdm(
+                all_params, desc="weight update progress", total=len(all_params)
+            ):
                 shape = param.shape if not self.ds_config.is_zero3() else param.ds_shape
                 if not self.ds_config.is_zero3():
 

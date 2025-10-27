@@ -19,11 +19,22 @@ class ActorWorker(BaseActorWorker):
 
         ref_log_probs = data.batch["ref_log_probs"]
         old_log_probs = data.batch["old_log_probs"]
+        infer_log_probs = data.batch.get("infer_logprobs", old_log_probs)
+        infer_log_probs = infer_log_probs if len(infer_log_probs) > 0 else old_log_probs
+        
         advantages = data.batch["advantages"]
 
         log_probs = self.strategy.op_compute_log_probs(
             logits=output_tensor, input_ids=data.batch["input_ids"], attention_mask=data.batch["response_mask"]
         )
+
+        loss_scale =None
+        if self.worker_config.use_dynamic_batching_in_train and self.pipeline_config.loss_agg_mode == "seq-mean-token-sum":
+            micro_batch_indices = data.meta_info["micro_batch_indices"]
+            mini_batch_size = micro_batch_indices[-1][-1] - micro_batch_indices[0][0]
+            num_micro_batch = len(micro_batch_indices)
+            micro_batch_size = data.batch.batch_size[0]
+            loss_scale = num_micro_batch * micro_batch_size / mini_batch_size
 
         valid_samples = torch.any(final_response_mask > 0, dim=1).float()
         sample_weights = self.compute_sample_weights(data, response_mask)
@@ -34,7 +45,8 @@ class ActorWorker(BaseActorWorker):
         )
         kl_loss = agg_loss(loss_mat=kl_loss,
                         loss_mask=final_response_mask,
-                        loss_agg_mode=self.pipeline_config.loss_agg_mode)
+                        loss_agg_mode=self.pipeline_config.loss_agg_mode,
+                        loss_scale=loss_scale)
 
         approxkl = compute_approx_kl(
             log_probs=log_probs, log_probs_base=old_log_probs, action_mask=response_mask, kl_penalty="mse"
@@ -45,13 +57,15 @@ class ActorWorker(BaseActorWorker):
 
         if self.pipeline_config.importance_sampling == "token":
             ratio = (log_probs - old_log_probs).exp()
+            train_infer_ratio = (log_probs - infer_log_probs).exp()
+            train_infer_diff = log_probs.exp() - infer_log_probs.exp()
         elif self.pipeline_config.importance_sampling == "seq":
             log_ratio = log_probs - old_log_probs
             masked_log_ratio = masked_mean(log_ratio, final_response_mask, dim=-1)
             ratio = masked_log_ratio.exp().unsqueeze(-1).expand_as(log_ratio)
-        
+
         pg_clip_low = self.pipeline_config.pg_clip_low if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip
-        pg_clip_high = self.pipeline_config.pg_clip_high if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip  
+        pg_clip_high = self.pipeline_config.pg_clip_high if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip
         surr1 = ratio * advantages
         surr2 = ratio.clamp(1 - pg_clip_low, 1 + pg_clip_high) * advantages
 
@@ -61,9 +75,11 @@ class ActorWorker(BaseActorWorker):
             loss = torch.where(advantages < 0, dual_clip_loss, loss)
 
         weighted_pg_loss = agg_loss(loss_mat=loss, loss_mask=final_response_mask,
-                                    loss_agg_mode=self.pipeline_config.loss_agg_mode, weights=sample_weights)
+                                    loss_agg_mode=self.pipeline_config.loss_agg_mode,
+                                    weights=sample_weights, loss_scale=loss_scale)
         original_pg_loss = agg_loss(loss_mat=loss, loss_mask=final_response_mask,
-                                    loss_agg_mode=self.pipeline_config.loss_agg_mode)
+                                    loss_agg_mode=self.pipeline_config.loss_agg_mode,
+                                    loss_scale=loss_scale)
 
         clipped_low = (ratio < 1 - pg_clip_low).float()
         clipped_high = (ratio > 1 + pg_clip_high).float()
@@ -82,6 +98,7 @@ class ActorWorker(BaseActorWorker):
                 loss_mat=entropy,
                 loss_mask=data.batch["response_mask"][:, 1:],
                 loss_agg_mode=self.pipeline_config.loss_agg_mode,
+                loss_scale=loss_scale
             )
             total_loss = total_loss - entropy_loss * self.pipeline_config.entropy_loss_coef
 
@@ -90,7 +107,8 @@ class ActorWorker(BaseActorWorker):
             response_positive_mask = (data.batch['scores'] > 0).unsqueeze(-1).expand_as(final_response_mask)
             # TODO: 是否应该乘上adv？
             postive_loss = agg_loss(loss_mat=-log_probs * advantages, loss_mask=final_response_mask * response_positive_mask,
-                                loss_agg_mode=self.pipeline_config.loss_agg_mode, weights=torch.ones_like(sample_weights))
+                                loss_agg_mode=self.pipeline_config.loss_agg_mode, weights=torch.ones_like(sample_weights),
+                                loss_scale=loss_scale)
             total_loss = total_loss + postive_loss * self.pipeline_config.postive_loss_coef
             metrics['actor/postive_loss'] = postive_loss.detach().item()
             
@@ -98,10 +116,16 @@ class ActorWorker(BaseActorWorker):
             response_negative_mask = (data.batch['scores'] <= 0).unsqueeze(-1).expand_as(final_response_mask)
             clipped_ratio = torch.clamp((log_probs.detach() - old_log_probs).exp(), 0 , 1)
             topr_neg_loss = agg_loss(loss_mat=-clipped_ratio * log_probs * advantages, loss_mask=final_response_mask * response_negative_mask,
-                                loss_agg_mode=self.pipeline_config.loss_agg_mode, weights=torch.ones_like(sample_weights))
+                                loss_agg_mode=self.pipeline_config.loss_agg_mode, weights=torch.ones_like(sample_weights),
+                                loss_scale=loss_scale)
             total_loss = total_loss + topr_neg_loss * self.pipeline_config.use_topr_neg_loss_coef
             metrics['actor/topr_neg_loss'] = topr_neg_loss.detach().item()
 
+        train_infer_prob_metric = {
+            "actor/train_infer_ratio_mean": masked_mean(train_infer_ratio, response_mask, dim=-1).mean().detach().item(),
+            "actor/train_infer_diff_mean": masked_mean(train_infer_diff, response_mask, dim=-1).mean().detach().item(),
+        }
+        
         loss_metric = {
             "actor/ppo_ratio_high_clipfrac": clipped_high.mean().detach().item(),
             "actor/ppo_ratio_low_clipfrac": clipped_low.mean().detach().item(),
@@ -110,8 +134,7 @@ class ActorWorker(BaseActorWorker):
             "actor/ratio_max": torch.max(ratio * response_mask).detach().item(),
             "actor/ratio_min": torch.min(ratio * response_mask + (1 - response_mask) * 1e10).detach().item(),
             "actor/clipfrac": agg_loss(loss_mat=torch.lt(surr2, surr1).float(), loss_mask=response_mask,
-                                loss_agg_mode=self.pipeline_config.loss_agg_mode).detach().item(),
-
+                                loss_agg_mode=self.pipeline_config.loss_agg_mode, loss_scale=loss_scale).detach().item(),
         } 
 
         pg_metrics = {
@@ -130,7 +153,8 @@ class ActorWorker(BaseActorWorker):
             "actor/sample_weights_min": sample_weights.min().detach().item(),
             "actor/sample_weights_max": sample_weights.max().detach().item(),
             **metrics,
-            **loss_metric
+            **loss_metric,
+            **train_infer_prob_metric
         }
 
         return total_loss, pg_metrics

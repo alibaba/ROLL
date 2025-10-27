@@ -39,6 +39,12 @@ def get_driver_node_name():
     assert is_driver(), "this function should only be run on a driver"
     return os.getenv("WORKER_ID", f"{get_driver_master_addr()}:{get_driver_rank()}")
 
+
+def get_driver_dashboard_port():
+    assert is_driver(), "this function should only be run on a driver"
+    return os.getenv("DASHBOARD_PORT", "8265")
+
+
 def is_multi_tenant():
     return os.getenv("MULTI_TENANT", "0") == "1"
 

@@ -75,10 +75,6 @@ class McaTrainer(Trainer):
     _language_input_names = ["input_ids", "attention_mask", "labels", "position_ids"]
     ckpt_sharding_type = "fully_sharded_model_space"
 
-    if hasattr(Trainer, "_align_special_tokens"): # skip for transformers==4.57.0
-        def _align_special_tokens(self, *args, **kwargs):
-            return
-
     def __init__(
         self,
         model: "VirtualModels" = None,
@@ -232,7 +228,7 @@ class McaTrainer(Trainer):
             attention_mask = inputs["attention_mask"] if "attention_mask" in inputs else None
 
             # causal attention impl in transformer engine don't need attention mask
-            attention_mask, _ = get_ltor_masks_and_position_ids(
+            attention_mask, position_ids = get_ltor_masks_and_position_ids(
                 inputs["input_ids"],
                 build_attention_mask=self.model_impl != "transformer_engine",
                 attn_mask_1D=attention_mask,
@@ -243,6 +239,8 @@ class McaTrainer(Trainer):
 
         if "position_ids" not in inputs:
             inputs["position_ids"] = None
+        if self.model.config.mtp_num_layers:
+            inputs["position_ids"] = position_ids
         inputs = self._get_batch_on_this_cp_rank(inputs)
         return inputs
 
@@ -355,6 +353,9 @@ class McaTrainer(Trainer):
         for inputs in step_inputs:
             self.current_flos += float(self.floating_point_ops(inputs))
         return iter(step_inputs), max_seq_length
+
+    def _align_special_tokens(self, *args, **kwargs):
+        pass
 
     def _pad_batched_inputs(self, inputs: Dict[str, Tensor | Any], seq_length: int):
         padding_inputs = {
@@ -948,8 +949,6 @@ class McaTrainer(Trainer):
         if self.control.should_save:
             self._save_checkpoint(model, trial)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
-            ckpt_id = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-            checkpoint_path = os.path.join(self.args.output_dir, ckpt_id)
 
         if eval_or_save:
             self.enable_ddp_forward_pre_hook()

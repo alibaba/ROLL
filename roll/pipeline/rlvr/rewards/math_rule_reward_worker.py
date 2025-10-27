@@ -1,3 +1,8 @@
+import logging
+
+# WARNING:latex2sympy2_extended.math_normalization:equations is deprecated, as it handled by the parser now
+logging.getLogger('latex2sympy2_extended.math_normalization').setLevel(logging.ERROR)
+
 from functools import partial
 from typing import Optional, Union, Iterator
 import json
@@ -5,6 +10,7 @@ import re
 
 import ray
 import torch
+from math_verify import parse, verify
 from codetiming import Timer
 from tqdm import tqdm
 import signal
@@ -18,7 +24,6 @@ from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_reward_model_provider, default_tokenizer_provider
 from roll.utils.context_managers import state_offload_manger
-from math_verify import parse, verify
 
 class timeout:
     def __init__(self, seconds=1, error_message="Timeout"):
@@ -34,28 +39,101 @@ class timeout:
 
     def __exit__(self, type, value, traceback):
         signal.alarm(0)
+        
+def _extract_after_last_end_think(response: str) -> str:
+    """
+    提取字符串中最后一个 "</think>" 标签之后的所有文本。
 
+    校验逻辑：
+    - 如果字符串中包含开标签 "<think>"，直接返回空字符串。
+    - 如果字符串中包含超过一个的闭标签 "</think>"，也直接返回空字符串。
+
+    如果校验通过，则执行原有逻辑：
+    1. 优先按最后一个 '</think>' 分割。
+    2. 如果找不到，则回退到按最后一个双换行符 '\n\n' 分割。
+    3. 如果都找不到，则返回空字符串。
+
+    Args:
+        response (str): 输入的完整文本。
+
+    Returns:
+        str: 提取出的文本块（已去除首尾空格），或空字符串。
+    """
+    # 如果检测到 "<think>" 或超过一个 "</think>"，直接返回空字符串
+    if "<think>" in response or response.count('</think>') > 1:
+        return ""
+    
+    # 1. 优先尝试按 '</think>' 分割
+    _before_think, sep_think, after_think = response.rpartition('</think>')
+
+    if sep_think:
+        # 如果找到了 '</think>'，则返回它后面的部分，并清理首尾空格
+        return after_think.strip()
+    else:
+        # 2. 如果没找到 '</think>'，则尝试按最后一个 '\n\n' 分割
+        _before_newline, sep_newline, after_newline = response.rpartition('\n\n')
+        if sep_newline:
+            # 如果找到了 '\n\n'，返回它后面的部分，并清理首尾空格
+            return after_newline.strip()
+        else:
+            # 3. 如果连 '\n\n' 都没找到，则返回空字符串
+            return ""
 
 def _hf_verify_math_sample(response, answer, result):
     try:
+        # 在解析之前，先对模型的原始输出进行预处理
+        cleaned_response = _extract_after_last_end_think(response)
+        """
+        --- `parse` 函数完整参数介绍与使用建议 ---
+        `parse` 函数用于从文本中提取并解析数学答案，其主要参数如下：
+        
+        1. `pred` (位置参数): 需要被解析的输入字符串。
+           => 建议：传入净化后的文本（如 cleaned_response），可以显著提高准确率。
+        
+        2. `extraction_config` (关键字参数): 定义要寻找的答案类型。
+           => 默认值: [LatexExtractionConfig(), ExprExtractionConfig()] (寻找LaTeX和纯数字)
+           => 建议：对于数学计算题，保持默认即可。
+        
+        3. `fallback_mode` (关键字参数): 定义当找到答案文本但无法成功解析时怎么办。
+           => 默认值: "first_match" (返回原始匹配的字符串)
+           => 强烈建议: 设为 "no_fallback"，这样在解析失败时会返回空列表[]，避免输出垃圾内容。
+        
+        4. `extraction_mode` (关键字参数): 定义搜寻答案的范围。
+           => 默认值: "any_match" (搜寻全文，找到第一个能成功解析的答案)
+           => 建议：保持默认值，因为它更可能在复杂文本中找到正确答案。
+        
+        5. `parsing_timeout` (关键字参数): 解析单个表达式的超时时间（秒）。
+           => 默认值: 5
+           => 建议：保留默认值，作为防止程序卡死的安全保护。
+        
+        6. `raise_on_error` (关键字参数): 遇到内部程序错误时是否抛出异常。
+           => 默认值: False (不抛出异常，返回空列表)
+           => 建议：保持默认值，确保程序的健壮性，不会因单个样本出错而中断。
+        """
+        parsed_answers = parse(cleaned_response, fallback_mode="no_fallback")
+        
+        # 如果解析结果为空，则认为提取失败
+        if not parsed_answers:
+            exect_answer = None
+        else:
+            # 通常我们只关心第一个解析出的结果
+            exect_answer = parsed_answers[0]
+
         gold_answer = parse(answer)
-        exect_answer = parse(response)
 
         if gold_answer is None or exect_answer is None:
             result.append((False, "", ""))
         else:
-            ans = verify(gold_answer, exect_answer)
-            result.append((ans, str(gold_answer), str(exect_answer)))
+            # 假设 verify 函数可以处理 parse 返回的对象
+            ans = verify(gold_answer[0], exect_answer)
+            result.append((ans, str(gold_answer[0]), str(exect_answer)))
+            
     except Exception as e:
+        # 捕获任何潜在的异常，确保进程不会崩溃
         result.append((False, "", ""))
 
 
 def hf_verify_math_sample(answer_a, answer_b, timeout_sec=5.0):
-    """
-    在多进程中调用 hf math verify,
-    以在超时时间内完不成时返回 False.
-    使用 multiprocessing.Manager 避免僵尸进程
-    """
     with multiprocessing.Manager() as manager:
         result = manager.list()
         
@@ -81,47 +159,31 @@ def hf_verify_math_sample(answer_a, answer_b, timeout_sec=5.0):
             return False, "", ""
         return result[0]
 
-
 def get_repetition_penalty_reward(ngram_size: int, max_penalty: float):
-    """
-    Reference implementation from: https://github.com/eddycmu/demystify-long-cot/blob/release/openrlhf/openrlhf/reward/repetition.py
-    """
     if max_penalty > 0:
         raise ValueError(f"max_penalty {max_penalty} should not be positive")
-
     def zipngram(text: str, ngram_size: int):
         words = text.lower().split()
         return zip(*[words[i:] for i in range(ngram_size)])
-
     def repetition_penalty_reward(response, **kwargs) -> float:
-        """
-        ref implementation: https://github.com/eddycmu/demystify-long-cot/blob/release/openrlhf/openrlhf/reward/repetition.py
-        """
-
         if response == "" or len(response.split()) < ngram_size:
             return 0.0
-
         ngrams = set()
         total = 0
         for ng in zipngram(response, ngram_size):
             ngrams.add(ng)
             total += 1
-
         scaling = 1 - len(ngrams) / total
         reward = scaling * max_penalty
         return reward
-
     return repetition_penalty_reward
-
 
 def long_block_penalty_reward_fn(text: str, max_length: int = 100) -> float:
     max_block_len = max([len(i) for i in text.split(" ")])
     reward = -float(max_block_len > max_length)
     return reward
 
-
 def format_reward_fn(text: str, pattern: Optional[str] = r"^<think>.*?</think>.*?<answer>.*?</answer>$"):
-    # pattern = r"^<think>\n.*?\n</think>\n<answer>\n.*?\n</answer>$"
     if pattern is None:
         pattern: str = r"^<think>.*?</think>.*?<answer>.*?</answer>$"
     matche = re.match(pattern, text, re.DOTALL | re.MULTILINE)
@@ -142,7 +204,7 @@ class MathRuleRewardWorker(Worker):
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
         self.repetition_penalty_reward_fn = get_repetition_penalty_reward(ngram_size=3, max_penalty=-0.1)
-        self.format_pattern = self.worker_config.format_pattern
+        self.format_pattern = getattr(self.worker_config, "format_pattern", None)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):
@@ -150,78 +212,58 @@ class MathRuleRewardWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, clear_cache=False)
     def compute_rewards(self, data: DataProto):
-        """
-        return DataProto.from_dict(tensors={'rewards': rewards})
-        """
-
         verify_answer = []
         repetition_penalty_rewards = []
         long_block_penalty_rewards = []
         response_length_rewards = []
         format_rewards = []
-        # response_text_list = self.tokenizer.batch_decode(data.batch['responses'], skip_special_tokens=True)
+        
         response_text_list = self.tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=False)
         for response, answer in zip(response_text_list, data.non_tensor_batch["ground_truth"]):
-            # print(f'answer outpus: {outputs}')
-            # verify_answer.append(verify_math_sample(response, answer))
-            response = response.replace("<|endoftext|>", "")
-            response = response.replace("<|im_end|>", "")
-            response = response.replace("<pad>", "")
+            response = response.replace("<|endoftext|>", "").replace("<pad>", "")
+            
             try:
                 with timeout(5):
-                    correct, extracted_response, extracted_ground_truth = hf_verify_math_sample(
+                    correct, extracted_ground_truth, extracted_response = hf_verify_math_sample(
                         response, f"${answer}$"
                     )
+            
+                log_data = {
+                    "response": response,
+                    "extracted_response": extracted_response,
+                    "answer": answer,
+                    "extracted_ground_truth": extracted_ground_truth,
+                    "correct": correct,
+                }
+                # self.logger.info(json.dumps(log_data, ensure_ascii=False))
+
             except Exception as e:
-                self.logger.error(f"timeout answer: {answer}, response: {response}")
+                self.logger.error(f"timeout or error during hf_verify_math_sample. answer: {answer}, response: {response}")
                 correct = False
                 extracted_response = ""
                 extracted_ground_truth = ""
-            # TODO check Answer
-            try:
-                outputs = json.dumps(
-                    {
-                        "correct": correct,
-                        "answer": str(answer),
-                        "extracted_response": str(extracted_response),
-                        "extracted_ground_truth": str(extracted_ground_truth),
-                        "response": str(response),
-                    }
-                )
-                self.logger.debug(f"answer check: {outputs}")
-            except Exception as e:
-                self.logger.error(f"answer check except: {e}")
-
+            
             if correct:
                 verify_answer.append(1)
             else:
-                verify_answer.append(0)  # other?
+                verify_answer.append(0)
             repetition_penalty_rewards.append(self.repetition_penalty_reward_fn(response))
             format_rewards.append(format_reward_fn(response, self.format_pattern))
             long_block_penalty_rewards.append(long_block_penalty_reward_fn(response))
             response_length_rewards.append(len(response) / 20000)
+            
         token_level_rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float16)
         response_length_rewards = torch.tensor(response_length_rewards, dtype=torch.float16)
-        # format
         repetition_penalty_rewards = torch.tensor(repetition_penalty_rewards, dtype=torch.float16)
         long_block_penalty_rewards = torch.tensor(long_block_penalty_rewards, dtype=torch.float16)
         format_rewards = torch.tensor(format_rewards, dtype=torch.float16)
-
-        # for log
         scores = torch.tensor(verify_answer, dtype=torch.float16)
-
-        response_level_rewards = torch.tensor(
-            verify_answer, dtype=torch.float16
-        )  # + repetition_penalty_rewards + 0.1 * long_block_penalty_rewards #+ 0.5 * format_rewards
+        response_level_rewards = torch.tensor(verify_answer, dtype=torch.float16)
 
         output = DataProto.from_dict(
             tensors={
                 "token_level_rewards": token_level_rewards,
                 "response_level_rewards": response_level_rewards,
-                # "long_block_penalty_rewards": long_block_penalty_rewards,
-                # "response_length_rewards": response_length_rewards,
-                # "repetition_penalty_reward": repetition_penalty_rewards,
-                # "format_reward": format_rewards,
                 "scores": scores,
             }
         )

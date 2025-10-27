@@ -12,6 +12,7 @@ from torchvision.io import write_video
 from typing import List, Optional
 from datetime import datetime
 from einops import reduce
+from peft import LoraConfig, inject_adapter_in_model, get_peft_model
 
 from diffsynth.pipelines.wan_video_new import WanVideoPipeline, TeaCache, TemporalTiler_BCTHW
 from diffsynth.models.wan_video_motion_controller import WanMotionControllerModel
@@ -42,7 +43,11 @@ def training_loss(self, **inputs):
     
     timesteps = self.scheduler.timesteps
     models = {name: getattr(self, name) for name in self.in_iteration_models}
+    kl_loss_total = 0
+    kl_steps = 0
     for i, timestep in enumerate(timesteps[:]):
+        current_timestep = timestep.expand([1])
+        current_sigma = current_timestep / self.scheduler.num_train_timesteps
         # switch dit if necessary
         if timestep.item() < 0.9 * self.scheduler.num_train_timesteps and self.dit2 is not None and not models["dit"] is self.dit2:
             models["dit"] = self.dit2
@@ -62,6 +67,16 @@ def training_loss(self, **inputs):
         else:
             inputs["less_mid_step"] = False
             model_pred = self.model_fn(**models, **inputs)
+            with torch.no_grad():
+                inputs["less_mid_step"] = True
+                models["dit"].disable_adapter_layers()
+                model_pred_no_lora = self.model_fn(**models, **inputs)
+            models["dit"].enable_adapter_layers()
+            kl_loss_step = torch.mean(
+                    (model_pred.float() - model_pred_no_lora.float()) ** 2 / (2 * current_sigma.float() ** 2)
+                )
+            kl_loss_total += kl_loss_step
+            kl_steps += 1
 
         noise_pred = model_pred
         
@@ -74,9 +89,10 @@ def training_loss(self, **inputs):
         
         if "first_frame_latents" in inputs:
             inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
-        
+
+    kl_loss = kl_loss_total / kl_steps if kl_steps > 0 else 0.0
     video_decoded = self.vae.decode(inputs["latents"], device=self.device, tiled=True)
-    return video_decoded
+    return video_decoded, kl_loss
 
 
 class WanTrainingModule(DiffusionTrainingModule):
@@ -87,6 +103,9 @@ class WanTrainingModule(DiffusionTrainingModule):
         tokenizer_path,
         trainable_models,
         model_id_with_origin_paths=None,
+        lora_base_model=None,
+        lora_target_modules="q,k,v,o,ffn.0,ffn.2",
+        lora_rank=32,
         use_gradient_checkpointing=True,
         use_gradient_checkpointing_offload=False,
         extra_inputs=None,
@@ -129,7 +148,16 @@ class WanTrainingModule(DiffusionTrainingModule):
         
         # Freeze untrainable models
         self.pipe.freeze_except([] if trainable_models is None else trainable_models.split(","))
-        
+
+        # Add LoRA to the base models
+        if lora_base_model is not None:
+            model = self.add_lora_to_model(
+                getattr(self.pipe, lora_base_model),
+                target_modules=lora_target_modules.split(","),
+                lora_rank=lora_rank
+            )
+            setattr(self.pipe, lora_base_model, model)
+
         # Store other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
@@ -202,12 +230,13 @@ class WanTrainingModule(DiffusionTrainingModule):
     
     
     def forward(self, data, inputs=None):
-        if inputs is None: inputs = self.forward_preprocess(data)
-        
-        face_embeddings = inputs['face_embeddings'].to(device=self.pipe.device, dtype=self.pipe.torch_dtype)
+        if inputs is None:
+            inputs = self.forward_preprocess(data)
+
+        face_embeddings = data['face_embeddings'].unsqueeze(0).to(device=self.pipe.device, dtype=self.pipe.torch_dtype)
 
         # step1: forward latents + vae decode
-        video_decoded = self.pipe.training_loss(**inputs)
+        video_decoded, kl_loss = self.pipe.training_loss(**inputs)
 
         # step2: get video_tensor
         video_tensor = vae_output_to_videotensor(video_decoded)
@@ -253,7 +282,8 @@ class WanTrainingModule(DiffusionTrainingModule):
         gc.collect()
         current_platform.empty_cache()
 
-        loss = -(face_score.bfloat16()-0.54)/0.16 * 0.01
+        loss = -(face_score.bfloat16()-0.54)/0.16 * 0.1
+        loss += kl_loss
         
         loss = loss.to(self.pipe.device)
         
@@ -263,7 +293,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         gc.collect()
         current_platform.empty_cache()
 
-        return loss
+        return loss, face_score, kl_loss
 
     def vae_video2_submit(self, video_tensor, output_path):
         rank = int(os.environ.get("RANK", 0))
@@ -299,6 +329,12 @@ class WanTrainingModule(DiffusionTrainingModule):
             print(f"Error during background video saving: {e}")
             raise e
 
+    def add_lora_to_model(self, model, target_modules, lora_rank, lora_alpha=None):
+        if lora_alpha is None:
+            lora_alpha = lora_rank
+        lora_config = LoraConfig(r=lora_rank, lora_alpha=lora_alpha, target_modules=target_modules)
+        model = get_peft_model(model, lora_config)
+        return model
 
 class WanVideoUnit_Face(PipelineUnit):
     def __init__(self):

@@ -15,6 +15,7 @@ from roll.utils.checkpoint_manager import download_model
 from roll.utils.constants import RAY_NAMESPACE, STORAGE_NAME
 from roll.utils.context_managers import state_offload_manger
 from roll.utils.logging import get_logger
+from roll.utils.network_utils import collect_free_port, get_node_ip
 from roll.utils.offload_states import OffloadStateType
 from roll.platforms import current_platform
 
@@ -86,16 +87,10 @@ class Worker:
 
     @staticmethod
     def get_node_ip():
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
+        return get_node_ip()
 
     @staticmethod
     def get_free_port():
-        def collect_free_port():
-            with socket.socket() as sock:
-                sock.bind(("", 0))
-                return sock.getsockname()[1]
         shared_storage = SharedStorage.options(
             name=STORAGE_NAME, get_if_exists=True, namespace=RAY_NAMESPACE
         ).remote()
@@ -208,3 +203,7 @@ class Worker:
             self.strategy.add_lora(*args, **kwargs)
         else:
             self.logger.warning("worker has not strategy")
+
+    def download_models(self, model_name_or_paths: set[str]):
+        futures.wait([self.thread_executor.submit(download_model, model_name_or_path)
+                      for model_name_or_path in model_name_or_paths])

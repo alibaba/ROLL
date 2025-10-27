@@ -61,9 +61,9 @@ class Cluster:
 
         self.rank2worker = {k: self.workers[k] for k in range(len(self.workers))}
         self.worker2rank = {self.workers[k]: k for k in range(len(self.workers))}
-        self.rank2devices = {
-            self.worker2rank[worker]: ray.get(worker.get_devices_info.remote()) for worker in self.workers
-        }
+        self.rank2devices = dict(zip(map(lambda worker: self.worker2rank[worker], self.workers),
+                                     ray.get([worker.get_devices_info.remote() for worker in self.workers])))
+        self.worker2nodes = dict(zip(self.workers, ray.get([worker.get_node_ip.remote() for worker in self.workers])))
         logger.debug(f"{self.cluster_name} rank2devices {self.rank2devices}")
         # for cluster object can transfer by ray rpc.
         del self.worker_cls

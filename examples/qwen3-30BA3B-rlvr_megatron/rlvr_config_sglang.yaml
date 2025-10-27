@@ -90,6 +90,7 @@ validation:
     num_beams: 1
     temperature: 0.6
     num_return_sequences: 1
+  eval_steps: 10
 
 actor_train:
   model_args:

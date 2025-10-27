@@ -21,7 +21,7 @@
   <a href="./assets/roll_wechat.png" target="_blank">
     <img src="https://img.shields.io/badge/WeChat-green?logo=wechat" alt="WeChat QR">
   </a>
-    <a href="https://deepwiki.com/alibaba/ROLL" target="_blank">
+  <a href="https://deepwiki.com/alibaba/ROLL" target="_blank">
     <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
   </a>
 </p>
@@ -40,7 +40,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 | 📣   Updates                                                                                                                                                                                                                                                                                                                            |
 |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **[10/23/2025]** 🎉 Our Papers released, see [Asymmetric Proximal Policy Optimization: mini-critics boost LLM reasoning](https://arxiv.org/abs/2510.01656) and [Attention Illuminates LLM Reasoning: The Preplan-and-Anchor Rhythm Enables Fine-Grained Policy Optimization](https://arxiv.org/abs/2510.13554).                                                                                                                      |
+| **[10/23/2025]** 🎉 Our Papers released, see [Asymmetric Proximal Policy Optimization: mini-critics boost LLM reasoning](https://arxiv.org/abs/2510.01656) and [Attention Illuminates LLM Reasoning: The Preplan-and-Anchor Rhythm Enables Fine-Grained Policy Optimization](https://arxiv.org/abs/2510.13554).                         |
 | **[10/14/2025]** 🎉 Our Paper released, see [Part II: ROLL Flash -- Accelerating RLVR and Agentic Training with Asynchrony](https://arxiv.org/abs/2510.11345), the code will be released soon.                                                                                                                                          |
 | **[09/28/2025]** 🎉 Ascend NPU support — see [usage guide](https://alibaba.github.io/ROLL/docs/English/UserGuide/ascend/ascend_usage).                                                                                                                                                                                                  |
 | **[09/25/2025]** 🎉 Our Paper released, see [RollPacker: Mitigating Long-Tail Rollouts for Fast, Synchronous RL Post-Training](https://arxiv.org/abs/2509.21009)                                                                                                                                                                        |
@@ -105,8 +105,8 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [SGLang](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/sglang)
 
 #### Advanced Features
-[Agentic Asynchronous Parallel Rollout](https://alibaba.github.io/ROLL/docs/English/UserGuide/agentic_async_parallel_rollout)  
-[Agentic Asynchronous Training Feature](https://alibaba.github.io/ROLL/docs/English/UserGuide/async_training_agentic)  
+[Asynchronous Parallel Rollout](https://alibaba.github.io/ROLL/docs/English/UserGuide/async_parallel_rollout)  
+[Asynchronous Training Feature](https://alibaba.github.io/ROLL/docs/English/UserGuide/async_training)  
 
 #### Performance Optimization & Resource Management 
 [Resource Config](https://alibaba.github.io/ROLL/docs/English/UserGuide/device_mapping)   
@@ -162,7 +162,7 @@ We are continuously working to expand ROLL's capabilities:
 - [IPRO](https://arxiv.org/abs/2510.14255): A novel video diffusion framework using reinforcement learning to enhance identity preservation in human-centric I2V generation, optimizing diffusion models with face identity scorer and KL-divergence regularization.
 - [TaoSR-SHE](https://arxiv.org/abs/2510.07972): Stepwise Hybrid Examination Reinforcement Learning Framework for Taobao Search Relevance, with SRPO (hybrid reward model + offline verifier), diversified data filtering, and multi-stage curriculum learning.
 - [EARL](https://arxiv.org/abs/2510.05943): Efficient Agentic RL Systems for LLMs, introducing a dynamic parallelism selector and a layout-aware data dispatcher to boost throughput, reduce memory and data movement bottlenecks, enabling stable large-scale agentic RL without hard context-length limits.
-- [LiveThinking](https://arxiv.org/abs/2510.07685): Real-time reasoning for AI-powered livestreaming by distilling a 670B teacher LLM to a 30B MoE (3B active) via Rejection Sampling Fine-Tuning, then compressing reasoning with GRPO; delivers sub-second latency and ~30x compute reduction, with gains in response correctness (3.3%), helpfulness (21.8%), and GMV in Taobao Live Digital Live Service.
+- [LiveThinking](https://arxiv.org/abs/2510.07685): Real-time reasoning for AI-powered livestreaming by distilling a 670B teacher LLM to a 30B MoE (3B active) via Rejection Sampling Fine-Tuning, then compressing reasoning with GRPO; delivers sub-second latency and ~30x compute reduction, with gains in response correctness (3.3%), helpfulness (21.8%), and GMV in Taobao Live.
 - [TaoSR-AGRL](https://www.arxiv.org/abs/2510.08048): Adaptive Guided Reinforcement Learning for LLM-based e-commerce relevance, introducing Rule-aware Reward Shaping and Adaptive Guided Replay to improve long-horizon reasoning, rule adherence, and training stability in Taobao Search; deployed in main search handling hundreds of millions of users.
 - [RecGPT](https://www.arxiv.org/abs/2507.22879): a next-generation, LLM-driven framework that places user intent at the core of recommender systems, fostering a more sustainable and mutually beneficial ecosystem.
 - [TaoSR1](https://arxiv.org/abs/2508.12365): A novel LLM framework directly deploying Chain-of-Thought (CoT) reasoning for e-commerce query-product relevance prediction, overcoming deployment challenges for superior performance.

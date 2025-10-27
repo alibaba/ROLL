@@ -26,9 +26,12 @@ student_pretrain: Qwen/Qwen2.5-VL-7B-Instruct
 teacher_pretrain: Qwen/Qwen2.5-VL-32B-Instruct
 
 # distill config
+logits_topk: 64
 distill_loss_weight: 0.85
 kd_objective: forward_kl
 distill_on_prompt: True
+
+logits_transfer_backend: "nccl-only" # support "ipc+nccl", "nccl_only" and "ray"
 
 sequence_length: 1024
 max_grad_norm: 1.0

@@ -109,6 +109,7 @@ actor_infer:
       gpu_memory_utilization: 0.8
       block_size: 16
       load_format: auto
+      enable_prefix_caching: false
       limit_mm_per_prompt:
         image: ${max_actions_per_traj}
   device_mapping: list(range(0,8))

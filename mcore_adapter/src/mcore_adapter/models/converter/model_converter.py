@@ -46,43 +46,42 @@ logger = get_logger(__name__)
 
 
 class ModelConverter:
-    def __init__(self, mca_config: "McaModelConfig", model_name_or_path: str = None, verbose=False):
-        self.model_name_or_path = model_name_or_path
+    def __init__(
+        self,
+        mca_config: "McaModelConfig",
+        tensor_model_parallel_rank: Optional[int] = None,
+        pipeline_model_parallel_rank: Optional[int] = None,
+        expert_model_parallel_rank: Optional[int] = None,
+        to_hf: bool = False,
+        verbose=False,
+        efficient_mode: bool = False,
+    ):
         self.mca_config = mca_config
         self.verbose = verbose
         self.template = get_template(mca_config.hf_model_type)
         self.template.set_mca_config_for_ops(self.mca_config)
+        tensor_model_parallel_rank = tensor_model_parallel_rank or mpu.get_tensor_model_parallel_rank()
+        pipeline_model_parallel_rank = pipeline_model_parallel_rank or mpu.get_pipeline_model_parallel_rank()
+        expert_model_parallel_rank = expert_model_parallel_rank or mpu.get_expert_model_parallel_rank()
+        self.dist_converter = DistConverter(
+            self.mca_config,
+            tensor_model_parallel_rank=tensor_model_parallel_rank,
+            pipeline_model_parallel_rank=pipeline_model_parallel_rank,
+            expert_model_parallel_rank=expert_model_parallel_rank,
+            revert=to_hf,
+            efficient_mode=efficient_mode,
+        )
 
     def log(self, msg):
         if self.verbose:
             logger.info(msg)
 
-    def load_mca_state_dict_from_hf(
-        self,
-        tensor_model_parallel_rank: Optional[int] = None,
-        pipeline_model_parallel_rank: Optional[int] = None,
-        expert_model_parallel_rank: Optional[int] = None,
-        virtual_pipeline_model_parallel_rank: Optional[int] = None,
-    ):
-        tensor_model_parallel_rank = tensor_model_parallel_rank or mpu.get_tensor_model_parallel_rank()
-        pipeline_model_parallel_rank = pipeline_model_parallel_rank or mpu.get_pipeline_model_parallel_rank()
-        expert_model_parallel_rank = expert_model_parallel_rank or mpu.get_expert_model_parallel_rank()
-        virtual_pipeline_model_parallel_rank = (
-            virtual_pipeline_model_parallel_rank or mpu.get_virtual_pipeline_model_parallel_rank()
-        )
-        dist_converter = DistConverter(
-            self.mca_config,
-            tensor_model_parallel_rank=tensor_model_parallel_rank,
-            pipeline_model_parallel_rank=pipeline_model_parallel_rank,
-            expert_model_parallel_rank=expert_model_parallel_rank,
-            virtual_pipeline_model_parallel_rank=virtual_pipeline_model_parallel_rank,
-            revert=False,
-        )
-        state_dict_iter = self.hf_state_dict_iter(self.model_name_or_path, dist_converter)
-        mca_state_dict = self.get_mca_state_dict(dist_converter, state_dict_iter)
+    def load_mca_state_dict_from_hf(self, model_path: str, vp_stage: int):
+        state_dict_iter = self.hf_state_dict_iter(model_path, vp_stage=vp_stage)
+        mca_state_dict = self.get_mca_state_dict(state_dict_iter, vp_stage=vp_stage)
         return mca_state_dict
 
-    def get_needed_hf_files(self, path, dist_converter: "DistConverter"):
+    def get_needed_hf_files(self, path, vp_stage: int):
         files = []
         metadata = None
         hf_weight_index_path = os.path.join(path, SAFE_WEIGHTS_INDEX_NAME)
@@ -106,65 +105,67 @@ class ModelConverter:
 
         needed_files = set()
         for weight_name in metadata["all_checkpoint_keys"]:
-            if self.is_needed_hf_name(weight_name, dist_converter):
+            if self.is_needed_hf_name(weight_name, vp_stage=vp_stage):
                 needed_files.add(metadata["weight_map"][weight_name])
         return {os.path.join(path, file) for file in needed_files}
 
-    def is_needed_hf_name(self, name, dist_converter: "DistConverter"):
+    def is_needed_hf_name(self, name, vp_stage: int):
         mca_names = self.template.hf_name_to_mca_names(name)
         if mca_names is None:
             return False
-        return any(dist_converter.is_on_this_rank(name) for name in mca_names)
+        return any(self.dist_converter.is_on_this_rank(name, vp_stage=vp_stage) for name in mca_names)
 
-    def hf_state_dict_iter(self, path, dist_converter: "DistConverter"):
-        files = self.get_needed_hf_files(path, dist_converter)
+    def hf_state_dict_iter(self, path, vp_stage: int):
+        files = self.get_needed_hf_files(path, vp_stage=vp_stage)
         for file in files:
             state_dict = load_state_dict(file)
             for k, v in state_dict.items():
-                if not self.is_needed_hf_name(k, dist_converter):
+                if not self.is_needed_hf_name(k, vp_stage=vp_stage):
                     continue
                 yield k, v
 
-    def get_mca_state_dict(self, dist_converter: "DistConverter", state_dict_iter):
+    def get_mca_state_dict(self, state_dict_iter, vp_stage: int):
         mca_state_dict = {}
 
         for name, weight in state_dict_iter:
             converted_state_dict = self.template.add_hf_weight(name, weight)
             if converted_state_dict is not None:
                 for mca_name, mca_weight in converted_state_dict.items():
-                    named_weights = dist_converter(mca_name, mca_weight)
-                    if self.mca_config.mtp_num_layers:
-                        named_weights = self.template.convert_mtp_weights(named_weights)
+                    named_weights = self.dist_converter.dist_convert(mca_name, mca_weight, vp_stage=vp_stage)
                     if named_weights is not None:
                         mca_state_dict.update(named_weights)
                         self.log(f"hf_name: {name} -> mca_name: {list(named_weights.keys())}")
                     else:
                         self.log(
-                            f"hf_name: {name} not on this rank: pp {dist_converter.pipeline_model_parallel_rank}"
-                            f" ep: {dist_converter.expert_model_parallel_rank} or not ready to convert"
+                            f"hf_name: {name} not on this rank: pp {self.dist_converter.pipeline_model_parallel_rank}"
+                            f" ep: {self.dist_converter.expert_model_parallel_rank} or not ready to convert"
                         )
             else:
                 self.log(f"hf_name: {name} added but not converted")
         self.template.release()
         return mca_state_dict
 
-    def _mca_named_params_with_reverter(self, models):
-        expert_parallel = self.mca_config.expert_model_parallel_size > 1
-        for vp, model in enumerate(models):
-            dist_reverter = DistConverter(
-                mca_config=self.mca_config,
-                tensor_model_parallel_rank=mpu.get_tensor_model_parallel_rank(),
-                pipeline_model_parallel_rank=mpu.get_pipeline_model_parallel_rank(),
-                expert_model_parallel_rank=mpu.get_expert_model_parallel_rank() if expert_parallel else 0,
-                virtual_pipeline_model_parallel_rank=vp,
-                revert=True,
-            )
+    def _mca_named_params_with_vp_stage(self, models):
+        for vp_stage, model in enumerate(models):
             mca_state_dict = model.state_dict_for_save_checkpoint()
             mca_state_dict = {k: v for k, v in mca_state_dict.items() if not k.endswith("._extra_state")}
-            if self.mca_config.mtp_num_layers:
-                mca_state_dict = self.template.revert_mtp_weights(mca_state_dict)
             for mca_name, weight in sorted(mca_state_dict.items()):
-                yield dist_reverter, mca_name, weight
+                yield vp_stage, mca_name, weight
+
+    def convert_to_hf(self, mca_state_dict: Dict[str, list["Tensor"]], vp_stage: Optional[int] = None) -> Dict[str, "Tensor"]:
+        if vp_stage is None:
+            vp_stage = mpu.get_virtual_pipeline_model_parallel_rank()
+
+        hf_state_dict = {}
+        for mca_name, weights in mca_state_dict.items():
+            merged_named_weights = self.dist_converter.dist_convert(mca_name, weights, vp_stage=vp_stage)
+            if merged_named_weights is None:
+                continue
+            converted = {}
+            for merged_name, merged_weight in merged_named_weights.items():
+                converted.update(self.template.add_mca_weight(merged_name, merged_weight))
+            hf_state_dict.update(converted or {})
+        return hf_state_dict
 
     def save_model_as_hf_inflight(
         self,
@@ -173,9 +174,9 @@ class ModelConverter:
         save_safetensors: bool = True,
         max_shard_size: Union[int, str] = MAX_SHARD_SIZE,
     ):
+        assert self.dist_converter.revert, "save_model_as_hf_inflight only support to_hf ModelConverter"
         if not mpu.model_parallel_is_initialized():
             raise RuntimeError("Model parallelism must be initialized before save as hf inflight.")
-
         if not mpu.get_expert_data_parallel_rank() == 0:
             return
 
@@ -187,33 +188,24 @@ class ModelConverter:
 
         expert_parallel = self.mca_config.expert_model_parallel_size > 1
         only_need_expert = expert_parallel and mpu.get_expert_model_parallel_rank() > 0
-        for dist_reverter, mca_name, weight in self._mca_named_params_with_reverter(models):
-            if only_need_expert and dist_reverter.get_local_moe_index(mca_name) is None:
+        for vp_stage, mca_name, weight in self._mca_named_params_with_vp_stage(models):
+            if only_need_expert and not self.dist_converter.is_expert_parallel_weight(mca_name):
                 continue
             weights = gather_tensor_parallel(weight, async_op=False)
             if weights is None:  # only tp_rank0 need to convert and save
                 continue
-            mca_named_weights = dist_reverter(mca_name, weights)
-            if mca_named_weights is None:
-                continue
-
-            converted_state_dict = {}
-            for mca_name, mca_weight in mca_named_weights.items():
-                converted = self.template.add_mca_weight(mca_name, mca_weight)
-                assert len(set(converted_state_dict.keys()).intersection(converted.keys())) == 0, (
-                    f"converted_state_dict: {converted_state_dict.keys()} converted: {converted.keys()}"
-                )
-                if converted:
-                    converted_state_dict.update(converted)
+            converted_state_dict = self.convert_to_hf(mca_state_dict={mca_name: weights}, vp_stage=vp_stage)
             self.save_hf_shard_state_dict(shard_state, save_directory, converted_state_dict, save_safetensors)
 
         if mpu.get_tensor_model_parallel_rank() == 0:
             self.save_shard_state_meta(shard_state, save_directory, save_safetensors)
 
     def all_gather_weights_as_hf_inflight(self, models):
+        assert self.dist_converter.revert, "save_model_as_hf_inflight only support to_hf ModelConverter"
+
         expert_parallel = self.mca_config.expert_model_parallel_size > 1
-        for dist_reverter, mca_name, weight in self._mca_named_params_with_reverter(models):
-            moe_index = dist_reverter.get_local_moe_index(mca_name)
+        for vp_stage, mca_name, weight in self._mca_named_params_with_vp_stage(models):
+            moe_index = self.dist_converter.get_local_moe_index(mca_name)
             group = (
                 mpu.get_tensor_model_parallel_group() if moe_index is None else mpu.get_expert_tensor_parallel_group()
             )
@@ -221,22 +213,17 @@ class ModelConverter:
                 weights = [weight]
             else:
                 weights = all_gather_tensors(weight, async_op=False, group=group)
-            mca_named_weights = dist_reverter(mca_name, weights)
-            if mca_named_weights is None:
-                continue
-            for mca_name, mca_weight in mca_named_weights.items():
-                converted = self.template.add_mca_weight(mca_name, mca_weight)
-                converted = converted or {}
-                for name, weight in converted.items():
-                    if expert_parallel and moe_index is not None:
-                        names = allgather_parallel_objs(name, group=mpu.get_expert_model_parallel_group())
-                        weights = all_gather_tensors(
-                            weight, async_op=False, group=mpu.get_expert_model_parallel_group()
-                        )
-                        for name, weight in zip(names, weights):
-                            yield name, weight
-                    else:
+            hf_state_dict = self.convert_to_hf(mca_state_dict={mca_name: weights}, vp_stage=vp_stage)
+            for name, weight in hf_state_dict.items():
+                if expert_parallel and moe_index is not None:
+                    names = allgather_parallel_objs(name, group=mpu.get_expert_model_parallel_group())
+                    weights = all_gather_tensors(
+                        weight, async_op=False, group=mpu.get_expert_model_parallel_group()
+                    )
+                    for name, weight in zip(names, weights):
                         yield name, weight
+                else:
+                    yield name, weight
 
     def all_gather_weights_as_hf_bucket(self, models, bucket_size: int = None):
         bucket_manager = SendBucketManager(bucket_size or self._auto_bucket_size())

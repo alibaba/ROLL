@@ -319,6 +319,7 @@ class RLVRVLMPipeline(BasePipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.reference,
         )
+        download_clusters = [self.actor_train, self.actor_infer, self.reference]
         if self.pipeline_config.adv_estimator == "gae":
             self.critic: Any = Cluster(
                 name=self.pipeline_config.critic.name,
@@ -326,6 +327,7 @@ class RLVRVLMPipeline(BasePipeline):
                 resource_manager=self.resource_manager,
                 worker_config=self.pipeline_config.critic,
             )
+            download_clusters.append(self.critic)
         # key must be same as domain, which is used in DynamicSamplingScheduler
         # to get corresponding reward
         self.rewards: Dict[str, Any] = {
@@ -337,6 +339,8 @@ class RLVRVLMPipeline(BasePipeline):
             )
             for key, worker_config in self.pipeline_config.rewards.items()
         }
+        download_clusters.extend(self.rewards.values())
+        self.download_models(*download_clusters)
 
         domain_ratios = self.pipeline_config.actor_train.data_args.domain_interleave_probs
         self.generate_schedulers: Dict[str, DynamicSamplingScheduler] = {}
@@ -614,11 +618,6 @@ class RLVRVLMPipeline(BasePipeline):
                 batch = DataProto.concat(batch_list)
                 batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
                 batch.pop("prompt_id")
-
-                metrics_mgr.timers["tps"] = tps_timer
-                metrics_mgr.timers["actor_infer"] = actor_infer_timer
-                metrics_mgr.timers["actor_infer_response"] = actor_infer_response_timer
-                metrics_mgr.timers["actor_train"] = actor_train_timer
 
                 metrics_mgr.add_all_metrics(
                     global_step,

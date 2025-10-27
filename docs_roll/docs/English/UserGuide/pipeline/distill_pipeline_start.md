@@ -69,7 +69,6 @@ Configuration files (such as `examples/qwen2.5-7B-distill_megatron/distill_megat
    * `output_dir`: Path for saving model checkpoints and output files
 
 2. **Training Control Parameters**
-   * `max_steps`: Maximum number of training steps
    * `save_steps`: Frequency for saving model checkpoints
    * `logging_steps`: Frequency for recording training metrics
    * `resume_from_checkpoint`: Whether to continue training from a checkpoint. Set it to the checkpoint path if you want to resume; otherwise, set it to `False`.
@@ -86,7 +85,12 @@ Configuration files (such as `examples/qwen2.5-7B-distill_megatron/distill_megat
    * `adaptive_kl_alpha`: Weighting factor that blends forward and reverse KL when `kd_objective` is `adaptive_kl`.  
    * `skew_lambda`: Skewing coefficient applied in `skewed_forward_kl` or `skewed_reverse_kl` objectives.
 
-5. **Worker Configuration**
+5. **Logits Transfer Configuration**
+   * `logits_transfer_backend`: Backend used for logits transfer. Supports three modes: 'ipc+nccl', 'nccl-only', and 'ray'.  
+'ipc+nccl' uses CUDA IPC to transfer logits directly via shared GPU memory when running on the same device.  
+If the device does not support IPC, use either 'nccl-only' or 'ray' mode instead.
+
+6. **Worker Configuration**
    Each worker (`student`, `teacher`) configuration contains:
 
    * **Model Parameters** (`model_args`)
@@ -94,6 +98,7 @@ Configuration files (such as `examples/qwen2.5-7B-distill_megatron/distill_megat
      * `dtype`: Computation precision (e.g., `bf16`, `fp16`)
      * ...
    * **Training Parameters** (`training_args`)
+     * `num_train_epochs`: Num of training epochs
      * `learning_rate`: Learning rate
      * `per_device_train_batch_size`: Training batch size per device
      * `gradient_accumulation_steps`: Gradient accumulation steps
@@ -192,7 +197,7 @@ bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
 * Pay special attention to these configuration sections:
   * Data configuration: `student.data_args.file_name`
   * Model configuration: `student_pretrain` and `teacher_pretrain` paths (The distill pipeline currently only supports student and teacher models of the same type, for example, both the student and teacher models are Qwen.)
-  * Distributed strategies: `strategy_args` and `device_mapping` for each worker (The distillation pipeline currently only supports scenarios where the student and teacher models use the same strategy (e.g., the student uses megatron_train while the teacher uses megatron_infer) with identical parallel configurations, as we utilize CudaIPC to transfer logits from the teacher to the student.)
+  * Distributed strategies: `strategy_args` and `device_mapping` for each worker
 
 ### Step 2: Prepare Environment and Dependencies
 

@@ -6,7 +6,7 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.managers.tokenizer_communicator_mixin import _Communicator
 
-from roll.third_party.sglang.v052_patch.io_struct import (
+from roll.third_party.sglang.io_struct import (
     SetupCollectiveGroupReqInput,
     BroadcastBucketReqInput,
     BroadcastParameterReqInput,

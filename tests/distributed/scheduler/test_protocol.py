@@ -224,6 +224,32 @@ def test_concat_global_keys_dict_missing_subkeys():
     assert np.isclose(reduced["acc"], expected_acc.mean())
     assert np.isclose(reduced["precision"], expected_precision.mean())
 
+def test_clone_independence(create_data_proto):
+    """Test that clone() returns an independent copy with the same content."""
+    dp = create_data_proto
+    dp_clone = dp.clone()
+
+    # 1. Not the same object
+    assert dp is not dp_clone
+
+    # 2. Batch contents equal
+    for key in dp.batch.keys():
+        assert torch.equal(dp.batch[key], dp_clone.batch[key])
+
+    # 3. Non-tensor contents equal
+    for key in dp.non_tensor_batch.keys():
+        np.testing.assert_array_equal(dp.non_tensor_batch[key], dp_clone.non_tensor_batch[key])
+
+    # 4. Meta-info equal but mutable objects are independent
+    assert dp.meta_info == dp_clone.meta_info
+    dp_clone.meta_info["new_key"] = "value"
+    assert "new_key" not in dp.meta_info
+
+    # 5. Changing clone's tensor doesn't affect original
+    dp_clone.batch["a"][0] += 100.0
+    assert not torch.equal(dp.batch["a"], dp_clone.batch["a"])
+
+
 
 if __name__ == "__main__":
     pytest.main()

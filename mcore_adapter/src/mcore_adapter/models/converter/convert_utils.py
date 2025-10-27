@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 MCA_LAYER_PREFIX = "decoder.layers."
 MCA_MOE_PREFIX = ".mlp.experts.local_experts."
+MCA_MTP_PREFIX = "mtp.layers."
+MCA_MTP_MOE_PREFIX = ".transformer_layer.mlp.experts.local_experts."
 MAX_SHARD_SIZE = 5_000_000_000  # 5GB
 
 
@@ -77,7 +79,13 @@ def convert_to_hf_prefix(weight_prefix: str, prefix: str, moe_prefix: str = None
 
 
 def get_mca_layer_index(weight_name: str):
+    if weight_name.startswith(MCA_MTP_PREFIX):
+        return get_mca_mtp_layer_index(weight_name)
     return get_layer_index(weight_name, MCA_LAYER_PREFIX)
+
+
+def get_mca_mtp_layer_index(weight_name: str):
+    return get_layer_index(weight_name, MCA_MTP_PREFIX)
 
 
 def get_mca_weight_prefix(weight_name: str):
@@ -85,15 +93,37 @@ def get_mca_weight_prefix(weight_name: str):
 
 
 def remove_mca_weight_prefix(weight_name: str):
+    if weight_name.startswith(MCA_MTP_PREFIX):
+        return remove_mca_mtp_weight_prefix(weight_name)
     return remove_weight_prefix(weight_name, MCA_LAYER_PREFIX, MCA_MOE_PREFIX)
 
 
+def remove_mca_mtp_weight_prefix(weight_name: str):
+    return remove_weight_prefix(weight_name, MCA_MTP_PREFIX, MCA_MTP_MOE_PREFIX).replace(".transformer_layer", "")
+
+
 def get_mca_moe_index(weight_name: str):
+    if weight_name.startswith(MCA_MTP_PREFIX):
+        return get_mca_mtp_moe_index(weight_name)
     return get_moe_index(weight_name, MCA_LAYER_PREFIX, MCA_MOE_PREFIX)
+
+
+def get_mca_mtp_moe_index(weight_name: str):
+    return get_moe_index(weight_name, MCA_MTP_PREFIX, MCA_MTP_MOE_PREFIX)
 
 
 def add_mca_layer_prefix(weight_name: str, layer_index: Union[int, str], moe_index: Union[int, str] = None):
     return add_layer_prefix(weight_name, layer_index, MCA_LAYER_PREFIX, moe_index, MCA_MOE_PREFIX)
+
+
+def add_mca_mtp_layer_prefix(weight_name: str, layer_index: Union[int, str], moe_index: Union[int, str] = None):
+    if not weight_name.startswith("."):
+        # not weight in layer
+        return weight_name
+    if moe_index is not None:
+        weight_name = add_layer_prefix(weight_name, moe_index, MCA_MTP_MOE_PREFIX)
+    has_transformer_layer = "self_attention" in weight_name or "mlp" in weight_name or "input_layernorm" in weight_name
+    return MCA_MTP_PREFIX + str(layer_index) + (".transformer_layer" if has_transformer_layer else "") + weight_name
 
 
 def extract_suffix_number(s):

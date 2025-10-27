@@ -10,14 +10,16 @@ from codetiming import Timer
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.util.timer import _Timer
 
+from roll.datasets.global_dataset import GlobalDatasetManager
 from roll.distributed.scheduler.rollout_scheduler import RolloutScheduler
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
-from roll.pipeline.agentic.agentic_config import AgenticConfig
+from roll.pipeline.agentic.agentic_config import AgenticConfig, EnvManagerConfig
 from roll.pipeline.agentic.utils import (dump_rollout_render, compute_discounted_returns,
-                                         compute_response_level_rewards)
+                                         compute_response_level_rewards, dump_rollout_trajectories)
 from roll.pipeline.base_pipeline import BasePipeline
+from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.functionals import (
     apply_kl_penalty,
     compute_advantage,
@@ -40,7 +42,6 @@ class AgenticPipeline(BasePipeline):
 
         self.pipeline_config.set_max_steps(max_steps=self.pipeline_config.max_steps)
 
-        self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
         self.kl_ctrl = get_kl_controller(
             init_kl_coef=self.pipeline_config.init_kl_coef,
             target_kl=self.pipeline_config.target_kl,
@@ -65,6 +66,8 @@ class AgenticPipeline(BasePipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.reference,
         )
+
+        download_clusters = [self.actor_train, self.actor_infer, self.reference]
         if self.pipeline_config.adv_estimator == "gae":
             self.critic: Any = Cluster(
                 name=self.pipeline_config.critic.name,
@@ -72,8 +75,11 @@ class AgenticPipeline(BasePipeline):
                 resource_manager=self.resource_manager,
                 worker_config=self.pipeline_config.critic,
             )
+            download_clusters.append(self.critic)
+        self.download_models(*download_clusters)
+        self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
 
-        self.train_rollout_scheduler = RolloutScheduler.options(
+        self.train_rollout_scheduler = ray.remote(RolloutScheduler).options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=ray.get_runtime_context().get_node_id(),
                 soft=False)).remote(
@@ -83,7 +89,7 @@ class AgenticPipeline(BasePipeline):
             infer_cluster=self.actor_infer,
             mode="train",
         )
-        self.val_rollout_scheduler = RolloutScheduler.options(
+        self.val_rollout_scheduler = ray.remote(RolloutScheduler).options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=ray.get_runtime_context().get_node_id(),
                 soft=False)).remote(
@@ -93,6 +99,9 @@ class AgenticPipeline(BasePipeline):
             infer_cluster=self.actor_infer,
             mode="val",
         )
+        self.val_dataset_manager = GlobalDatasetManager.options(name=f"val_dataset_manager",
+                                                                get_if_exists=True,
+                                                                namespace=RAY_NAMESPACE).remote()
         refs: List[ray.ObjectRef] = []
         refs.extend(self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
         if self.pipeline_config.adv_estimator == "gae":
@@ -131,9 +140,15 @@ class AgenticPipeline(BasePipeline):
                     self.critic.offload_states(blocking=True)
                 self.actor_train.offload_states(blocking=True)
 
-                ray.get(self.train_rollout_scheduler.suspend.remote(global_step))
+                ray.get(self.train_rollout_scheduler.suspend.remote())
+                if self.pipeline_config.async_generation_ratio > 0:
+                    self.actor_infer.stop_server()
                 model_update_metrics: Dict = self.model_update(global_step)
                 metrics.update(model_update_metrics)
+                if self.pipeline_config.async_generation_ratio > 0:
+                    self.actor_infer.start_server(data=DataProto(meta_info={"global_step": global_step, "is_offload_states": False}))
+                else:
+                    self.actor_infer.start_server(data=DataProto(meta_info={"global_step": global_step, "is_offload_states": True}))
 
                 batch: DataProto = DataProto()
                 batch.meta_info = {"global_step": global_step}
@@ -141,14 +156,16 @@ class AgenticPipeline(BasePipeline):
                 if global_step % self.pipeline_config.eval_steps == 0:
                     metrics.update(self.val(global_step=global_step))
 
-                ray.get(self.train_rollout_scheduler.resume.remote(global_step))
-
                 with Timer(name="rollout", logger=None) as rollout_timer:
                     batch.meta_info["is_offload_states"] = True
                     batch = ray.get(self.train_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
+                    dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, batch)
+
                 metrics["time/rollout"] = rollout_timer.last
                 metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
                 batch.meta_info["global_step"] = global_step
+                if not (self.pipeline_config.async_generation_ratio > 0):
+                    self.actor_infer.stop_server()
 
                 batch = compute_discounted_returns(batch, self.pipeline_config.adv_estimator, self.pipeline_config.step_reward_gamma)
 
@@ -302,8 +319,8 @@ class AgenticPipeline(BasePipeline):
             logger.info(f"epoch {global_step} finished")
 
         ray.get([
-            self.train_rollout_scheduler.stop.remote(),
-            self.val_rollout_scheduler.stop.remote()
+            self.train_rollout_scheduler.shutdown.remote(),
+            self.val_rollout_scheduler.shutdown.remote(),
         ])
         logger.info("pipeline complete!")
 
@@ -312,7 +329,10 @@ class AgenticPipeline(BasePipeline):
         metrics = {}
         batch.meta_info["is_offload_states"] = False
         batch.meta_info["global_step"] = global_step
+        ray.get(self.val_dataset_manager.reset.remote())
         eval_batch = ray.get(self.val_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.val_batch_size))
+
+        dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, eval_batch)
         eval_metrics = reduce_metrics(eval_batch.meta_info.get("metrics", {}))
         eval_score = get_episode_scores(eval_batch)
         eval_metrics["score/mean"] = torch.mean(eval_score).detach().item()
@@ -332,17 +352,9 @@ class AgenticPipeline(BasePipeline):
             eval_metrics[f"{group_name}/score/min"] = torch.min(eval_score).detach().item()
 
         metrics.update({f"val/{k}": v for k, v in eval_metrics.items()})
+        logger.info(f"val_batch_size: {len(eval_batch)}")
+        logger.info(f"val metrics: {metrics}")
 
-        if self.pipeline_config.render_save_dir and "frames" in eval_batch.non_tensor_batch:
-            self.executor.submit(
-                dump_rollout_render,
-                save_dir=self.pipeline_config.render_save_dir,
-                step=global_step,
-                frames=eval_batch.non_tensor_batch["frames"],
-                env_ids=eval_batch.non_tensor_batch["env_ids"],
-                tags=eval_batch.non_tensor_batch["tags"],
-                episode_scores=eval_batch.non_tensor_batch["episode_scores"],
-            )
         return metrics
 
     def adjust_batch(self, data: DataProto, mode="copy") -> DataProto:
@@ -414,20 +426,45 @@ def get_episode_scores(batch: DataProto) -> torch.Tensor:
         scores.append(episode_scores)
     return torch.tensor(scores, dtype=torch.float32)
 
+def get_traj_rollout_time(batch: DataProto) -> torch.Tensor:
+    batch_group_by_traj: Dict[str, DataProto] = batch.group_by(keys="traj_id")
+    scores = []
+    for traj_id,  traj_batch in batch_group_by_traj.items():
+        episode_scores = traj_batch.non_tensor_batch["traj_rollout_time"][0]
+        scores.append(episode_scores)
+    return torch.tensor(scores, dtype=torch.float32)
+
+def get_traj_env_time(batch: DataProto) -> torch.Tensor:
+    batch_group_by_traj: Dict[str, DataProto] = batch.group_by(keys="traj_id")
+    scores = []
+    for traj_id,  traj_batch in batch_group_by_traj.items():
+        episode_scores = traj_batch.non_tensor_batch["traj_env_time"][0]
+        scores.append(episode_scores)
+    return torch.tensor(scores, dtype=torch.float32)
+
 def compute_data_metrics(batch):
     # token_level_scores are per-token scores assigned by the reward model, possibly after normalization/clipping
     # score denotes the raw environment reward
     episode_scores = get_episode_scores(batch)
+    try:
+        traj_rollout_times = get_traj_rollout_time(batch)
+        traj_env_times = get_traj_env_time(batch)
+    except Exception as e:
+        traj_rollout_times = torch.zeros(batch.batch.batch_size[0], dtype=torch.float32)
+        traj_env_times = torch.zeros(batch.batch.batch_size[0], dtype=torch.float32)
+
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
     advantages = batch.batch["advantages"]
     # fix: https://github.com/volcengine/verl/pull/60
-    prompt_mask = batch.batch["prompt_mask"].bool()
     response_mask = batch.batch["response_mask"][:, 1:].bool()
+    prompt_mask = batch.batch["prompt_mask"].bool() # 首轮 prompt length
     prompt_lengths = prompt_mask.sum(-1).float()  # (batch_size,)
     response_length = response_mask.sum(-1).float()  # (batch_size,)
     returns = batch.batch["returns"]
     non_prompt_mask = (torch.logical_not(batch.batch["prompt_mask"]) * batch.batch["attention_mask"]).float().sum(-1)
 
+    # 从 batch 中提取 traj_rollout_time 相关指标
+    # traj_rollout_times = []
     metrics = {
         # score, sequence_score from env
         "critic/score/mean": torch.mean(episode_scores).detach().item(),
@@ -439,12 +476,12 @@ def compute_data_metrics(batch):
         "critic/rewards/min": torch.min(sequence_reward).detach().item(),
         # adv
         "critic/advantages/mean": masked_mean(advantages, response_mask).detach().item(),
-        "critic/advantages/max": torch.max(advantages[response_mask]).detach().item(),
-        "critic/advantages/min": torch.min(advantages[response_mask]).detach().item(),
+        "critic/advantages/max": torch.max(advantages[response_mask]).detach().item() if response_mask.sum() > 0 else 0.0,
+        "critic/advantages/min": torch.min(advantages[response_mask]).detach().item() if response_mask.sum() > 0 else 0.0,
         # returns
         "critic/returns/mean": masked_mean(returns, response_mask).detach().item(),
-        "critic/returns/max": torch.max(returns[response_mask]).detach().item(),
-        "critic/returns/min": torch.min(returns[response_mask]).detach().item(),
+        "critic/returns/max": torch.max(returns[response_mask]).detach().item() if response_mask.sum() > 0 else 0.0,
+        "critic/returns/min": torch.min(returns[response_mask]).detach().item() if response_mask.sum() > 0 else 0.0,
         # response length
         "tokens/response_length/mean": torch.mean(response_length).detach().item(),
         "tokens/response_length/max": torch.max(response_length).detach().item(),
@@ -453,19 +490,35 @@ def compute_data_metrics(batch):
         "tokens/prompt_length/mean": torch.mean(prompt_lengths).detach().item(),
         "tokens/prompt_length/max": torch.max(prompt_lengths).detach().item(),
         "tokens/prompt_length/min": torch.min(prompt_lengths).detach().item(),
+        # prompt length(sys_obs)
+        # "tokens/prompt_length_sys_obs/mean": torch.mean(prompt_lengths_sys_obs).detach().item(),
+        # "tokens/prompt_length_sys_obs/max": torch.max(prompt_lengths_sys_obs).detach().item(),
+        # "tokens/prompt_length_sys_obs/min": torch.min(prompt_lengths_sys_obs).detach().item(),
         # non-prompt length
         "tokens/non_prompt_length/mean": torch.mean(non_prompt_mask).detach().item(),
         "tokens/non_prompt_length/max": torch.max(non_prompt_mask).detach().item(),
         "tokens/non_prompt_length/min": torch.min(non_prompt_mask).detach().item(),
+
+        # # traj_rollout_time
+        "env/traj_rollout_time/mean": torch.mean(traj_rollout_times).detach().item() if traj_rollout_times.numel() > 0 else 0.0,
+        "env/traj_rollout_time/max": torch.max(traj_rollout_times).detach().item() if traj_rollout_times.numel() > 0 else 0.0,
+        "env/traj_rollout_time/min": torch.min(traj_rollout_times).detach().item() if traj_rollout_times.numel() > 0 else 0.0,
+
+        # traj_env_times
+        "env/traj_env_time/mean": torch.mean(traj_env_times).detach().item() if traj_env_times.numel() > 0 else 0.0,
+        "env/traj_env_time/max": torch.max(traj_env_times).detach().item() if traj_env_times.numel() > 0 else 0.0,
+        "env/traj_env_time/min": torch.min(traj_env_times).detach().item() if traj_env_times.numel() > 0 else 0.0,
+
     }
+
     if "values" in batch.batch.keys():
         values = batch.batch["values"]
         # values
         metrics.update(
             {
                 "critic/values/mean": masked_mean(values, response_mask).detach().item(),
-                "critic/values/max": torch.max(values[response_mask]).detach().item(),
-                "critic/values/min": torch.min(values[response_mask]).detach().item(),
+                "critic/values/max": torch.max(values[response_mask]).detach().item() if response_mask.sum() > 0 else 0.0,
+                "critic/values/min": torch.min(values[response_mask]).detach().item() if response_mask.sum() > 0 else 0.0,
             }
         )
     if "episode_rewards_norm" in batch.batch.keys():
@@ -480,3 +533,16 @@ def compute_data_metrics(batch):
             "critic/step_rewards_norm/min": step_rewards_norm.min().detach().item(),
         })
     return metrics
+
+class GroupFilter:
+    """
+    User defined group filter.
+    """
+    def __init__(self, config: AgenticConfig, env_manager_config: EnvManagerConfig, mode: str):
+        pass
+
+    def filter(self, group_id: int, episode_id: int, group: list[DataProto]):
+        """
+        return True to filter out this group
+        """
+        return False

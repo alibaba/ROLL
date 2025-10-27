@@ -104,7 +104,7 @@ def data_collator_wrapper(data_collator):
                 feature[k] = feature[k][:-1]
             for k in ["attention_mask", "position_ids"]:
                 if k in feature:
-                    feature[k] = feature[k][1:]
+                    feature[k] = feature[k][:-1]
         return data_collator(features)
 
     return wrapper
@@ -177,7 +177,7 @@ def sft_mca_train(
         for name, p in model.named_parameters():
             if any(name.startswith(k) for k in ["embedding", "decoder", "output_layer"]):
                 p.requires_grad_(False)
-    pad_to_max = training_args.expert_model_parallel_size is not None and training_args.expert_model_parallel_size > 1
+    pad_to_max = training_args.expert_model_parallel_size is not None and training_args.expert_model_parallel_size > 1 and not training_args.variable_seq_lengths
     data_collator = SFTDataCollatorWith4DAttentionMask(
         template=template,
         padding="max_length" if pad_to_max else "longest",

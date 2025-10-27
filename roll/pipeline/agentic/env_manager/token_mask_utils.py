@@ -17,16 +17,16 @@ def compute_conversation_end_token_id(tokenizer: PreTrainedTokenizer) -> List[in
             return [token_id]
     return []
 
-def custom_apply_chat_template(messages: List[Dict], tokenizer: PreTrainedTokenizer, add_generation_prompt=True) -> List:
+def custom_apply_chat_template(messages: List[Dict], tokenizer: PreTrainedTokenizer, add_generation_prompt=True, enable_thinking=False) -> List:
     if len(messages) == 0:
         return []
     if messages[0]["role"] == "system":
-        token_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=add_generation_prompt)
+        token_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=add_generation_prompt, enable_thinking=enable_thinking)
         return token_ids
     else:
         system_mock = [{"role": "system", "content": ""}]
         system_token_ids_mock = tokenizer.apply_chat_template(system_mock, tokenize=True)
-        token_ids = tokenizer.apply_chat_template(system_mock + messages, tokenize=True, add_generation_prompt=add_generation_prompt)
+        token_ids = tokenizer.apply_chat_template(system_mock + messages, tokenize=True, add_generation_prompt=add_generation_prompt, enable_thinking=enable_thinking)
         return token_ids[len(system_token_ids_mock):]
 
 def custom_vl_apply_chat_template(messages: List[Dict], collator: DataCollatorWithPaddingForMM, add_generation_prompt=True) -> Dict:

@@ -13,7 +13,7 @@ train_env_manager:
   num_env_groups: 1
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
-  tags: [SimpleSokoban]
+  tags: [deep_math]
   num_groups_partition: [1] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
   llm_proxy:
     proxy_type: random
@@ -33,8 +33,10 @@ custom_envs:
     ${custom_env.NaturalQuestions}
   GemGame:
     ${gem_games.Hangman}
-  GSM_8k:
-    ${custom_env.GSM_8k}
+  CliEnv:
+    ${custom_env.CliEnv}
+  deep_math:
+    ${custom_env.deep_math}
   CodeContest:
     ${custom_env.CodeContest}
 
@@ -52,6 +54,20 @@ max_actions_per_traj: 10
 
 env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
 custom_env:
+  CliEnv:
+    env_type: cli
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: ${cli_agent_system_template}
+    agent_template: ${cli_agent_template}
+    env_config:
+      max_steps: ${max_actions_per_traj}
+      workspace_dir: /tmp/cli_workspace
+      sandbox_image: hub.docker.alibaba-inc.com/chatos/iflow-cli:3.0
+      sandbox_base_url: https://xrl-sandbox.alibaba-inc.com
+      auto_clear_seconds: 1200
+      format_penalty: -0.1
   SimpleSokoban:
     env_type: sokoban
     max_steps: ${max_actions_per_traj}
@@ -85,7 +101,7 @@ custom_env:
     agent_template: ${single_prompt_agent_template}
     env_config:
       max_steps: 10
-      dataset_name: NaturalQuestions
+      dataset_name: /Users/pan/Downloads/huggingface/NaturalQuestions
     tool_wrapper:
       wrapper_args:
         tool_reward: 0.05
@@ -96,30 +112,18 @@ custom_env:
           tool_args:
             search_url: http://localhost:8000/retrieve
             topk: 3
-  GSM_8k:
-    env_type: "math:GSM8K"
+  deep_math:
+    env_type: "roll_math"
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
     agent_system_template: ${single_prompt_agent_system_template}
     agent_template: ${single_prompt_agent_template}
     env_config:
-      max_steps: 10
-      dataset_name: GSM-8k
-    tool_wrapper:
-      wrapper_args:
-        tool_reward: 0.05
-        tool_success_reward: 0.25
-        max_tool_uses: 5
-      tool_configs:
-#        - tool_id: python_code
-#          tool_args:
-#            timeout: 5
-#            sandbox_type: none
-#            keep_error_last_line: false
-        - tool_id: mcp
-          tool_args:
-            server_url: xxx
+      dataset_name: data/math_deepmath_deal.jsonl
+      split: train
+      question_key: prompt
+      answer_key: ground_truth
   CodeContest:
     env_type: "code:CodeContest"
     max_steps: ${max_actions_per_traj}
@@ -141,3 +145,13 @@ custom_env:
             timeout: 5
             sandbox_type: none
             keep_error_last_line: false
+
+
+cli_agent_system_template: You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game.
+cli_agent_template: |
+  {observation}
+  Strictly follow this format:
+  1. output format is '<answer> [your answer] </answer>' with no extra text. 
+  2. You have {actions_left} actions left. 
+  3. Max response length: {max_response_length} words (tokens).
+  Decide the next action:

@@ -128,8 +128,10 @@ class SFTPipeline(BasePipeline):
             label_pad_token_id=IGNORE_INDEX,
         )
 
-        assert self.pipeline_config.max_steps > 0, "max_steps must be greater than 0"
-        self.pipeline_config.set_max_steps(max_steps=self.pipeline_config.max_steps)
+        self.pipeline_config.set_max_steps(
+            (self.pipeline_config.sft_train.training_args.num_train_epochs * len(self.dataset)) // \
+            (self.pipeline_config.sft_train.training_args.per_device_train_batch_size * \
+             self.pipeline_config.sft_train.training_args.gradient_accumulation_steps))
 
         self.sft_train: Any = Cluster(
             name=self.pipeline_config.sft_train.name,
@@ -147,7 +149,7 @@ class SFTPipeline(BasePipeline):
                     f"gradient accumulation steps = {ga_steps},\n"
                     f"per device train batch size = {per_device_bs},\n"
                     f"global train batch size = {global_train_batch_size}")
-        
+
         self.dataloader = DataLoader(
             dataset=self.dataset,
             batch_size=global_train_batch_size,
@@ -225,12 +227,6 @@ class SFTPipeline(BasePipeline):
                 logger.info(f"pipeline step {global_step} finished...")
 
                 global_step += 1
-                if global_step >= self.pipeline_config.max_steps:
-                    break
-            
-            if global_step >= self.pipeline_config.max_steps:
-                logger.info(f"The max steps: {self.pipeline_config.max_steps} is reached, train ends.")
-                break
 
         logger.info("pipeline complete!")
 

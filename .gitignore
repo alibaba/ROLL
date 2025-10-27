@@ -1,3 +1,4 @@
+*.png
 *.pyc
 */checkpoint_dir
 */dataset

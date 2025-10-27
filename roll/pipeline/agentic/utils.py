@@ -1,12 +1,12 @@
+import copy
+import multiprocessing
 import os
 import os.path
-import random
 import shutil
 import subprocess
-from contextlib import contextmanager
 from datetime import datetime
 from multiprocessing import Pool
-from typing import List, Callable, Dict
+from typing import List, Callable, Dict, Optional
 
 import imageio
 import numpy as np
@@ -16,6 +16,7 @@ from torch import Tensor
 
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import AgenticConfig, RewardNormalizationConfig
+from roll.pipeline.rlvr.utils import DUMPING_FUNC
 from roll.utils.logging import get_logger
 
 logger = get_logger()
@@ -181,20 +182,6 @@ def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticC
     return batch
 
 
-@contextmanager
-def all_seed(seed):
-    random_state = random.getstate()
-    np_random_state = np.random.get_state()
-
-    try:
-        random.seed(seed)
-        np.random.seed(seed)
-        yield
-    finally:
-        random.setstate(random_state)
-        np.random.set_state(np_random_state)
-
-
 print_only_once = False
 
 
@@ -212,3 +199,40 @@ def dump_frames_as_gif(filename, frames, duration=0.2):
             print(f"Error saving gif: {e}")
         print_only_once = True
         pass
+
+def dump_rollout_trajectories(path, global_step, data: DataProto):
+    """
+    Dumps rollout trajectories to persistent storage.
+
+    The data is written using a column-based configuration defined in COLUMMNS_CONFIG.
+    Each column is specified as a list [column_name, data_type], where:
+    - column_name: string identifier for the column
+    - data_type: data type specification ('bigint', 'string', 'double', etc.)
+
+    Example configuration:
+    colummns_config = [
+        ['global_step', 'bigint'],
+        ['id', 'string'],
+        ['source', 'string'],
+        # ... additional columns
+    ]
+    """
+    if not path:
+        return
+
+    columns_config: Optional[List] = data.meta_info.get("COLUMMNS_CONFIG", None)
+    if columns_config is None:
+        return
+
+    write_data = copy.deepcopy(data.non_tensor_batch)
+    [data.non_tensor_batch.pop(item[0]) for item in columns_config if item[0] in data.non_tensor_batch]
+
+    data_cnt = len(data)
+    write_data['global_step'] = [global_step] * data_cnt
+    columns_config.append(['global_step','bigint'])
+
+    for checker, func in DUMPING_FUNC:
+        if checker(path):
+            p = multiprocessing.Process(target=func, args=(path, write_data, columns_config), daemon=False)
+            p.start()
+

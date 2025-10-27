@@ -45,7 +45,7 @@ add_token_level_kl: false
 
 ### Core Parameter Descriptions
 
-- `adv_estimator`: Advantage estimator type, set to "reinforce", which is the core configuration of RAFT++ algorithm
+- `adv_estimator`: Advantage estimator type, set to "grpo", which is the core configuration of RAFT++ algorithm
 - `norm_mean_type`: Mean type for reward normalization: the options are "batch", "group", "running", or None; the default is None
 - `norm_std_type`: Std type for reward normalization: the options are "batch", "group", "running", or None; the default is None
 - `whiten_advantages`: Whether to whiten advantage values, default value is false

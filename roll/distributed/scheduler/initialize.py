@@ -11,6 +11,7 @@ from roll.distributed.scheduler.driver_utils import (
     get_driver_node_name,
     get_driver_master_port,
     get_driver_world_size,
+    get_driver_dashboard_port,
     get_ray_status,
     is_ray_cluster_running,
     wait_for_nodes,
@@ -29,17 +30,18 @@ def start_ray_cluster():
     master_addr = get_driver_master_addr()
     master_port = get_driver_master_port()
     node_name = get_driver_node_name()
+    dashboard_port = get_driver_dashboard_port()
 
     if is_ray_cluster_running():
         logger.info("Ray cluster already initialized")
         return False
 
     if rank == 0:
-        cmd = f"ray start --head --port={master_port} --node-name={node_name}"
+        cmd = f"ray start --head --port={master_port} --node-name={node_name} --dashboard-port={dashboard_port}"
     else:
         # fix: 处理大规模下可能会出现的head/worker node创建顺序不一致问题
         time.sleep(5)
-        cmd = f"ray start --address={master_addr}:{master_port} --node-name={node_name}"
+        cmd = f"ray start --address={master_addr}:{master_port} --node-name={node_name} --dashboard-port={dashboard_port}"
 
     logger.info(f"Starting ray cluster: {cmd}")
     ret = subprocess.run(cmd, shell=True, capture_output=True)

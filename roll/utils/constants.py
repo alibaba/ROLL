@@ -25,3 +25,16 @@ class GenerateStopReason(enum.Enum):
     FINISH = enum.auto()
     ABORT = enum.auto()
     MAX_LENGTH = enum.auto()
+    
+    
+class EpisodeStopReason(enum.Enum):
+    FINISH = "finish"   
+    MAX_LENGTH = "max_length"         
+    MAX_STEPS = "max_steps" 
+    ABORT = "abort"     
+    ENV_RESET_FAILED = "env_reset_failed" 
+    SANDBOX_INIT_FAILED = "sandbox_init_failed" 
+    ENV_TIMEOUT = "env_timeout"   
+    LLM_GENERATE_FAILED = "llm_generate_failed" 
+    UNKNOWN = "unknown"
+    NO_SYSTEM_PROMPT = "no_system_prompt"

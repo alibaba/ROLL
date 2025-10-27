@@ -35,10 +35,12 @@ def convert_mca_to_hf(convert_args: ConvertArguments):
         torch_dtype = torch.float16
     convert_checkpoint_to_hf(convert_args.checkpoint_path, convert_args.output_path, torch_dtype=torch_dtype)
 
+    config = AutoConfig.from_pretrained(convert_args.output_path, trust_remote_code=True)
     if convert_args.convert_model_max_length is not None:
-        config = AutoConfig.from_pretrained(convert_args.output_path, trust_remote_code=True)
         config.model_max_length = convert_args.convert_model_max_length
+        config.max_position_embeddings = convert_args.convert_model_max_length
         config.save_pretrained(convert_args.output_path)
+    logger.info(f"\n ==============HF config===========: \n {config}")
 
 def main():
     convert_args, dist_args = HfArgumentParser(

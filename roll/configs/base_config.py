@@ -3,11 +3,12 @@ import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Optional, Dict, Union, List
+from typing import Dict, Literal, Optional, Union
 
-from roll.configs.worker_config import WorkerConfig
-from roll.utils.logging import get_logger
+from roll.configs.worker_config import WorkerConfig, is_colocated
 from roll.utils.config_utils import validate_megatron_batch_size
+from roll.utils.logging import get_logger
+
 
 logger = get_logger()
 
@@ -55,9 +56,16 @@ class BaseConfig:
         default="./output",
         metadata={"help": "The output directory where the model predictions and checkpoints will be written."},
     )
+    base_dir: str = field(
+        default="./output",
+        metadata={"help": "The base directory where the model predictions and checkpoints will be written."},
+    )
     logging_dir: str = field(
         default="./output/logs",
         metadata={"help": "Directory to store logs."})
+    rollout_dump_dir: str = field(
+        default=None, metadata={"help": "saving actor_infer rollout to this dir"}
+    )
     track_with: str = field(
         default="tensorboard",
         metadata={"help": "The type of tracker to be used for tracking, one of ['wandb', 'tensorboard', 'stdout', 'swanlab']."}
@@ -85,12 +93,9 @@ class BaseConfig:
     rollout_batch_size: int = field(
         default=128, metadata={"help": "The number of samples to rollout in each inference batch."}
     )
-    async_generation_ratio: float = field(
-        default=0,
-        metadata={
-            "help": "The ratio of ahead generation requests in pipeline, "
-            "0 means synchronous pipeline. currently only integer is supported."
-        },
+    max_running_requests: int = field(
+        default=128,
+        metadata={"help": "The maximum number of running requests."}
     )
     val_batch_size: int = field(
         default=128,
@@ -133,6 +138,13 @@ class BaseConfig:
     )
     profiler_timeline: bool = field(default=False, metadata={"help": "Whether to use profiler mode or not."})
     profiler_memory: bool = field(default=False, metadata={"help": "Whether to use profiler memory or not."})
+    report_length_and_rewards: bool = field(default=False, metadata={"help": "Whether to report lengths and rewards of prompts in each epoch."})
+
+    length_profiler_dir: str = field(
+        default='./output/profiler',
+        metadata={"help": "directory to write length and rewards metric of prompts"}
+    )
+
     profiler_output_dir: str = field(
         default="./output/profiler", metadata={"help": "Directory to write profiler logs."}
     )
@@ -217,6 +229,9 @@ class BaseConfig:
         self.profiler_output_dir = os.path.join(
             self.profiler_output_dir, self.exp_name, datetime.now().strftime("%Y%m%d-%H%M%S")
         )
+        self.length_profiler_dir = os.path.join(
+            self.length_profiler_dir, self.exp_name, datetime.now().strftime("%Y%m%d-%H%M%S")
+        )
 
         os.environ["PROFILER_OUTPUT_DIR"] = self.profiler_output_dir
         if self.profiler_timeline:
@@ -225,7 +240,12 @@ class BaseConfig:
             os.environ["PROFILER_MEMORY"] = "1"
         if self.rpc_timeout is not None:
             os.environ["roll_RPC_TIMEOUT"] = str(self.rpc_timeout)
+        if self.report_length_and_rewards:
+            os.environ["REPORT_LENGTH_AND_REWARDS"] = "1"
         os.environ.update(self.system_envs)
+
+        from ..platforms import current_platform
+        self.num_gpus_per_node = current_platform.device_count()
 
         # Validate rollout_batch_size divisibility for Megatron data parallelism
         if hasattr(self, 'actor_train') and isinstance(self.actor_train, WorkerConfig) and self.actor_train.strategy_args is not None:
@@ -268,3 +288,157 @@ class BaseConfig:
             if isinstance(attribute, WorkerConfig):
                 if hasattr(attribute, "training_args"):
                     setattr(attribute.training_args, "max_steps", max_steps)
+
+@dataclass
+class PPOConfig(BaseConfig):
+    # role related
+    pretrain: str = field(default=None, metadata={"help": "Path to pretrain model directory, if available."})
+    reward_pretrain: str = field(
+        default=None, metadata={"help": "Path to pretrain model directory for the reward model, if available."}
+    )
+    actor_train: WorkerConfig = field(
+        default_factory=WorkerConfig, metadata={"help": "Configuration for the actor's training role."}
+    )
+    actor_infer: WorkerConfig = field(
+        default_factory=WorkerConfig, metadata={"help": "Configuration for the actor's inference role."}
+    )
+    critic: WorkerConfig = field(
+        default_factory=WorkerConfig, metadata={"help": "Configuration for the critic's training role."}
+    )
+    reference: WorkerConfig = field(
+        default_factory=WorkerConfig, metadata={"help": "Configuration for the reference role."}
+    )
+
+    async_generation_ratio: float = field(
+        default=0,
+        metadata={
+            "help": "The ratio of ahead generation requests in pipeline, 0 means synchronous pipeline."
+        },
+    )
+
+    # PPO related
+    ppo_epochs: int = field(default=1, metadata={"help": "Number of optimisation epochs per batch of samples"})
+    max_grad_norm: float = field(default=1.0, metadata={"help": "Maximum norm"})
+    l2: float = field(default=0.0, metadata={"help": "L2 regularization"})
+    lambd: float = field(default=0.95, metadata={"help": "Lambda parameter for advantage calculation"})
+    gamma: float = field(default=1, metadata={"help": "Gamma parameter for advantage calculation"})
+    pg_clip: Optional[float] = field(default=0.2, metadata={"help": "Range for clipping in PPO policy gradient loss"})
+    use_pg_clip_range: bool = field(default=False, metadata={"help": "Use to change the clipping range of pg_clip"})
+    pg_clip_low: Optional[float] = field(
+        default=0.2, metadata={"help": "Range for clipping lower in PPO policy gradient loss"}
+    )
+    pg_clip_high: Optional[float] = field(
+        default=0.2, metadata={"help": "Range for clipping higher in PPO policy gradient loss"}
+    )
+
+    value_clip: Optional[float] = field(
+        default=None, metadata={"help": "Range for clipping values in loss calculation"}
+    )
+    kl_penalty: Literal["kl", "abs", "mse", "full"] = field(
+        default="kl",
+        metadata={
+            "help": "kl penalty options: 'kl': model_logp - ref_logp, 'abs': abs(kl), 'mse': "
+            "mean squared error mse(kl) and 'full': the actual kl for all tokens in the distribution"
+        },
+    )
+    target_kl: Optional[float] = field(default=None, metadata={"help": "Target KL value for adaptive KL control"})
+    init_kl_coef: float = field(
+        default=0.2, metadata={"help": "Initial KL penalty coefficient (used for adaptive and linear control)"}
+    )
+    kl_horizon: int = field(default=10000, metadata={"help": "Horizon for adaptive KL control"})
+    use_reward_scaling: bool = field(default=False, metadata={"help": "Use reward scaling"})
+    add_len_reward: bool = field(default=False)
+    reward_clip: float = field(default=None, metadata={"help": "reward clip value."})
+    use_reward_norm: bool = field(
+        default=False, metadata={"help": "Use reward normalization. Only applicable if use_reward_scaling is True."}
+    )
+    whiten_rewards: bool = field(default=False, metadata={"help": "Whiten the rewards before compute advantages."})
+    whiten_advantages: bool = field(default=False, metadata={"help": "Whiten the advantage."})
+    advantage_clip: float = field(default=None, metadata={"help": "advantage_clip value"})
+    adv_estimator: Literal["gae", "reinforce", "grpo", "gigpo", "step_reinforce"] = field(
+        default="gae", metadata={"help": "advantage estimator: gae (GAE)."}
+    )
+    norm_mean_type: Literal["batch", "group", "running", None] = field(
+        default=None,
+        metadata={
+            "help": "Mean type for reward normalization: 'batch' (normalize across batch), 'group' (normalize within prompt groups), 'running' (use running statistics), None (without subtracting mean)"
+        },
+    )
+    norm_std_type: Literal["batch", "group", "running", None] = field(
+        default=None,
+        metadata={
+            "help": "Std type for reward normalization: 'batch' (normalize across batch), 'group' (normalize within prompt groups), 'running' (use running statistics), None (without dividing by std)"
+        },
+    )
+    add_token_level_kl: bool = field(default=False, metadata={"help": "Add token level kl penalty"})
+    critic_warmup: int = field(
+        default=0,
+        metadata={"help": "Pre-training step for critic model"},
+    )
+    use_kl_loss: bool = field(default=False, metadata={"help": "Use kl loss"})
+    kl_loss_coef: float = field(default=0, metadata={"help": "Loss coefficient for kl loss"})
+    entropy_loss_coef: float = field(default=0, metadata={"help": "Loss coefficient for entropy loss"})
+    loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", "seq-mean-token-sum-norm"] = (
+        field(default="seq-mean-token-mean", metadata={"help": "Loss aggregation mode"})
+    )
+    dual_clip_loss: bool = field(default=False, metadata={"help": "Use dual clip loss"})
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        if (
+            self.actor_train.model_args.model_name_or_path is None
+            or self.actor_infer.model_args.model_name_or_path is None
+            or self.reference.model_args.model_name_or_path is None
+        ):
+            self.actor_train.model_args.model_name_or_path = self.pretrain
+            self.actor_infer.model_args.model_name_or_path = self.pretrain
+            self.reference.model_args.model_name_or_path = self.pretrain
+
+        if self.critic.model_args.model_name_or_path is None:
+            self.critic.model_args.model_name_or_path = self.reward_pretrain
+
+        self.actor_train.training_args.output_dir = self.output_dir
+        self.actor_infer.training_args.output_dir = self.output_dir
+        self.critic.training_args.output_dir = self.output_dir
+
+        self.actor_infer.name = "actor_infer"
+        self.actor_train.name = "actor_train"
+        self.reference.name = "reference"
+        self.critic.name = "critic"
+
+    def set_max_steps(self, max_steps: int):
+        actor_backward_batch_size = (
+            self.actor_train.training_args.per_device_train_batch_size
+            * self.actor_train.training_args.gradient_accumulation_steps
+        )
+        critic_backward_batch_size = (
+            self.critic.training_args.per_device_train_batch_size
+            * self.critic.training_args.gradient_accumulation_steps
+        )
+        # 没有除dp_size，需要在分布式环境初始化后再除
+        self.actor_train.training_args.max_steps = max_steps * (
+            self.rollout_batch_size
+            * self.actor_infer.generating_args.num_return_sequences
+            * self.ppo_epochs
+            // actor_backward_batch_size
+        )
+        self.critic.training_args.max_steps = max_steps * (
+            self.rollout_batch_size
+            * self.actor_infer.generating_args.num_return_sequences
+            // critic_backward_batch_size
+        )
+
+        logger.info(f"pipeline max_steps: {self.max_steps} to {max_steps}")
+        logger.info(f"actor train max_steps without dp_size: {self.actor_train.training_args.max_steps}")
+        logger.info(f"critic train max_steps without dp_size: {self.critic.training_args.max_steps}")
+        self.max_steps = max_steps
+
+    @property
+    def async_pipeline(self) -> bool:
+        return self.async_generation_ratio > 0
+
+    @property
+    def is_train_infer_colocated(self) -> bool:
+        """Whether actor_train and actor_infer are colocated."""
+        return is_colocated(self.actor_train, self.actor_infer)

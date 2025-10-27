@@ -36,38 +36,29 @@ logger = get_logger(__name__)
 
 
 def _add_mca_state_dicts_to_hf(
-    state_dicts, dist_reverter: "DistConverter", template: "Template", hf_state_dict, verbose: bool = True
+    model_converter: "ModelConverter", state_dicts, hf_state_dict, vp_stage: int, verbose: bool = True
 ):
     def log(msg):
         if verbose:
             logger.info(msg)
 
-    tp_rank, pp_rank, ep_rank, vp_rank = (
-        dist_reverter.tensor_model_parallel_rank,
-        dist_reverter.pipeline_model_parallel_rank,
-        dist_reverter.expert_model_parallel_rank,
-        dist_reverter.virtual_pipeline_model_parallel_rank,
+    tp_rank, pp_rank, ep_rank = (
+        model_converter.dist_converter.tensor_model_parallel_rank,
+        model_converter.dist_converter.pipeline_model_parallel_rank,
+        model_converter.dist_converter.expert_model_parallel_rank,
     )
     for mca_name in state_dicts[0].keys():
         if mca_name.endswith("._extra_state"):
             continue
         weights = [state_dict[mca_name] if mca_name in state_dict else None for state_dict in state_dicts]
-        mca_named_weights = dist_reverter(mca_name, weights)
-        converted_state_dict = {}
-        if mca_named_weights is not None:
-            for mca_name, mca_weight in mca_named_weights.items():
-                converted = template.add_mca_weight(mca_name, mca_weight)
-                assert len(set(converted_state_dict.keys()).intersection(converted.keys())) == 0, (
-                    f"converted_state_dict: {converted_state_dict.keys()} converted: {converted.keys()}"
-                )
-                converted_state_dict.update(converted)
+        converted_state_dict = model_converter.convert_to_hf({mca_name: weights}, vp_stage=vp_stage)
         if converted_state_dict is not None and len(converted_state_dict) > 0:
             for hf_name, hf_weight in converted_state_dict.items():
                 if hf_name in hf_state_dict:
                     if not hf_weight.equal(hf_state_dict[hf_name]):
                         raise ValueError(
                             f"weight of hf_name:{hf_name} mca_name:{mca_name} in "
-                            f"tp_rank, pp_rank, ep_rank, vp_rank:{tp_rank} {pp_rank} {ep_rank} {vp_rank} "
+                            f"tp_rank, pp_rank, ep_rank, vp_rank:{tp_rank} {pp_rank} {ep_rank} {vp_stage} "
                             f"diff max:{torch.abs(hf_weight - hf_state_dict[hf_name]).max()}"
                         )
                 hf_state_dict[hf_name] = hf_weight
@@ -112,20 +103,24 @@ def convert_checkpoint_to_hf(
             state_dicts.append(torch.load(ckpt_name, map_location="cpu"))
         virtual_pipe_on = (mca_config.virtual_pipeline_model_parallel_size or 1) > 1
         mpu.set_pipeline_model_parallel_rank(pp_rank)
-        mpu.set_expert_model_parallel_rank(pp_rank)
+        mpu.set_expert_model_parallel_rank(ep_rank)
+        mpu.set_tensor_model_parallel_rank(0)
+        model_converter = ModelConverter(
+            mca_config=mca_config,
+            pipeline_model_parallel_rank=pp_rank,
+            expert_model_parallel_rank=ep_rank,
+            tensor_model_parallel_rank=0,
+            verbose=verbose,
+            to_hf=True,
+        )
         for i in range(mca_config.virtual_pipeline_model_parallel_size or 1):
             if virtual_pipe_on:
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
-            dist_reverter = DistConverter(
-                mca_config=mca_config,
-                revert=True,
-                pipeline_model_parallel_rank=pp_rank,
-                expert_model_parallel_rank=ep_rank,
-                virtual_pipeline_model_parallel_rank=i if virtual_pipe_on else 0,
-            )
             key = "model" + (str(i) if virtual_pipe_on else "")
             virtual_state_dicts = [sd.pop(key) for sd in state_dicts]
-            _add_mca_state_dicts_to_hf(virtual_state_dicts, dist_reverter, template, hf_state_dict, verbose=verbose)
+            _add_mca_state_dicts_to_hf(
+                model_converter, virtual_state_dicts, hf_state_dict, vp_stage=i, verbose=verbose
+            )
 
     has_remote_code = hasattr(hf_config, "auto_map") and "AutoModelForCausalLM" in hf_config.auto_map
     model_class = AutoModelForCausalLM
@@ -185,10 +180,12 @@ def convert_checkpoint_to_mca(
     if dist_args.virtual_pipeline_model_parallel_size is not None:
         mpu.set_virtual_pipeline_model_parallel_world_size(dist_args.virtual_pipeline_model_parallel_size)
 
-    model_converter = ModelConverter(mca_config=mca_config, verbose=verbose)
-
-    for dist_converter in tqdm(
-        DistConverter.dist_converter_iter(mca_config=mca_config),
+    for tp_rank, pp_rank, ep_rank in tqdm(
+        product(
+            range(dist_args.tensor_model_parallel_size),
+            range(dist_args.pipeline_model_parallel_size),
+            range(dist_args.expert_model_parallel_size),
+        ),
         total=(
             dist_args.tensor_model_parallel_size
             * dist_args.pipeline_model_parallel_size
@@ -197,33 +194,27 @@ def convert_checkpoint_to_mca(
         desc="Converting",
         disable=not verbose,
     ):
-        mpu.set_tensor_model_parallel_rank(dist_converter.tensor_model_parallel_rank)
-        mpu.set_pipeline_model_parallel_rank(dist_converter.pipeline_model_parallel_rank)
-        mpu.set_expert_model_parallel_rank(dist_converter.expert_model_parallel_rank)
+        mpu.set_tensor_model_parallel_rank(tp_rank)
+        mpu.set_pipeline_model_parallel_rank(pp_rank)
+        mpu.set_expert_model_parallel_rank(ep_rank)
         model_parallel_cuda_manual_seed(42)
+        model_converter = ModelConverter(
+            mca_config=mca_config,
+            verbose=verbose,
+            tensor_model_parallel_rank=tp_rank,
+            pipeline_model_parallel_rank=pp_rank,
+            expert_model_parallel_rank=ep_rank,
+        )
+
         mca_state_dict = {}
         for i in range(mca_config.virtual_pipeline_model_parallel_size or 1):
             key = "model"
-            dist_converter_vp = DistConverter(
-                mca_config=mca_config,
-                tensor_model_parallel_rank=dist_converter.tensor_model_parallel_rank,
-                pipeline_model_parallel_rank=dist_converter.pipeline_model_parallel_rank,
-                expert_model_parallel_rank=dist_converter.expert_model_parallel_rank,
-                virtual_pipeline_model_parallel_rank=i,
-            )
             if dist_args.virtual_pipeline_model_parallel_size is not None:
                 key = f"model{i}"
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
-            mca_state_dict[key] = model_converter.get_mca_state_dict(
-                dist_converter_vp, model_converter.hf_state_dict_iter(model_name_or_path, dist_converter_vp)
-            )
-
+            mca_state_dict[key] = model_converter.load_mca_state_dict_from_hf(model_name_or_path, vp_stage=i)
         if verbose:
-            logger.info(
-                f"Saving model tp_rank: {dist_converter.tensor_model_parallel_rank} "
-                f"pp_rank: {dist_converter.pipeline_model_parallel_rank} "
-                f"ep_rank: {dist_converter.expert_model_parallel_rank} to {save_directory}"
-            )
+            logger.info(f"Saving ({tp_rank=} {pp_rank=} {ep_rank=}) model to {save_directory}")
         save_config_and_state_dict(save_directory, mca_config, mca_state_dict)
         template.release()
 

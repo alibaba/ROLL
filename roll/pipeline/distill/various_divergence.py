@@ -4,21 +4,6 @@ import torch.nn as nn
 from roll.pipeline.distill.distill_config import DistillConfig
 
 from roll.utils.constants import IGNORE_INDEX
-class GPTLMLoss(nn.Module):
-    """
-    GPT Language Model Loss
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.loss = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
-
-    def __call__(self, logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
-        # Flatten the tokens
-        return self.loss(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
 class VariousDivergence:
     def __init__(self, pipeline_config: DistillConfig, padding_id=IGNORE_INDEX) -> None:
@@ -43,7 +28,7 @@ class VariousDivergence:
         else:
             raise NameError(f"Unsupported kd_objective for `{self.kd_objective}'")
 
-    def __call__(self, logits, teacher_logits, labels,attention_mask=None):
+    def __call__(self, logits, teacher_logits, labels, attention_mask=None):
         kd_loss = self.dist_func(logits, teacher_logits, labels,attention_mask=attention_mask)
         return kd_loss
 

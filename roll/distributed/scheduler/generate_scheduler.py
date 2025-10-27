@@ -18,6 +18,11 @@ from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 from transformers import set_seed
 
+import hashlib
+import base64
+import json
+import os
+
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto, collate_fn
 from roll.models.model_providers import default_tokenizer_provider
@@ -29,7 +34,7 @@ from roll.utils.functionals import (
     GenerateRequestType,
 )
 from roll.utils.logging import get_logger
-from roll.utils.multi_thread_utils import ThreadSafeDict
+
 
 logger = get_logger()
 
@@ -348,6 +353,8 @@ class DynamicSamplingScheduler:
         self.mp_rank_zero = {}
         self.request_id_2_prompt_id: Dict[str, int] = {}
         self.prompt_id_2_request_ids: Dict[int, set] = defaultdict(set)
+        # prompt_id to unique prompt hash value
+        self.prompt_id_2_hash_str: Dict[int, str] = {}
         self.response_batch_size: Optional[int] = None
         self.abort_request_ids: set[str] = set()
         self.request_id_2_dp_rank = {}
@@ -390,6 +397,7 @@ class DynamicSamplingScheduler:
         self.running_prompts = 0
         self.response_cache: Dict[str, List] = None
         self.prompt_use_count = 0
+        self.sequence_length = pipeline_config.sequence_length
 
     def set_scheduler(
         self,
@@ -402,10 +410,18 @@ class DynamicSamplingScheduler:
         query_filter_fn=None,
         response_callback_fn=None,
         state: Dict[str, Any] = None,
+        is_val: bool = False,
     ):
         """
         GenerateScheduler可以由多个实例，不再局限于单例
         """
+        self.is_val = is_val
+        if self.is_val:
+            self.sequence_length = self.pipeline_config.val_sequence_length
+            logger.info(f"validation generate scheduler sequence_length is: {self.sequence_length}")
+        else:
+            logger.info(f"training generate scheduler sequence_length is: {self.sequence_length}")
+
         self.actor_cluster = actor_cluster
         self.reward_clusters = reward_clusters
         self.reward_worker_iters = {}
@@ -451,6 +467,7 @@ class DynamicSamplingScheduler:
         self.load_balance_coordinator = {dp_rank: 0 for dp_rank in self.mp_rank_zero.keys()}
         self.request_id_2_prompt_id.clear()
         self.prompt_id_2_request_ids.clear()
+        self.prompt_id_2_hash_str.clear()
         self.abort_request_ids.clear()
         self.request_id_2_dp_rank.clear()
         self.requests_buffers.clear()
@@ -495,6 +512,10 @@ class DynamicSamplingScheduler:
             # get a query from dataset
             prompt_id = next(prompt_id_counter)
             dataset_item = self.get_next_dataset_item()
+            if int(os.environ.get("REPORT_LENGTH_AND_REWARDS", "0")):
+                prompt_digest = hashlib.md5(
+                    (dataset_item.get('prompt', '') + dataset_item.get('messages', '')).encode()
+                ).digest()
             domain = dataset_item.get("domain", "default")
             collect_data = self.collect_fn([dataset_item])
             request_data: DataProto = DataProto.from_single_dict(collect_data, meta_info=data.meta_info)
@@ -514,6 +535,8 @@ class DynamicSamplingScheduler:
                     self.request_id_2_prompt_id[req.meta_info["request_id"]] = prompt_id
                     self.request_id_2_dp_rank[req.meta_info["request_id"]] = dp_rank
                     self.prompt_id_2_request_ids[prompt_id].add(req.meta_info["request_id"])  # 用于replica情况
+                    if int(os.environ.get("REPORT_LENGTH_AND_REWARDS", "0")):
+                        self.prompt_id_2_hash_str[prompt_id] = base64.urlsafe_b64encode(prompt_digest).decode().rstrip('=') # prompt_id 对应 unique prompt
                     self.requests_buffers[req.meta_info["request_id"]] = req
                     ray.get(
                         self.actor_cluster.workers[dp_rank].add_request.remote(
@@ -621,9 +644,30 @@ class DynamicSamplingScheduler:
                         f"expect to generate {num_return_sequences} results from one prompt, "
                         f"but get {len(self.query_group_buffers[prompt_id])}."
                     )
-
                     self.completed_buffers[prompt_id] = self.query_group_buffers[prompt_id][:num_return_sequences]
                     self.progress_bar.update()
+
+                    if int(os.environ.get("REPORT_LENGTH_AND_REWARDS", "0")):
+                        # report response level rewards
+                        response_level_rewards = [data.batch["response_level_rewards"] for data in self.query_group_buffers[prompt_id]]
+                        response_rewards = torch.cat(response_level_rewards, dim=0).long().cpu().tolist()
+                        prompt_hash = self.prompt_id_2_hash_str.pop(prompt_id)
+                        prompt_response_proto = DataProto.concat(self.query_group_buffers[prompt_id][:num_return_sequences])
+                        # report response level lengths
+                        response_lengths = torch.sum(prompt_response_proto.batch["response_mask"], dim=1).cpu().tolist()
+
+                        lengths_and_rewards = {
+                            'domain': domain,
+                            'prompt_hash': prompt_hash,
+                            'response_lengths': response_lengths,
+                            'response_rewards': response_rewards
+                        }
+                        length_dir = os.path.join(self.pipeline_config.length_profiler_dir, "length")
+                        os.makedirs(length_dir, exist_ok=True)
+                        filename = f"response-length-and-rewards-{domain}-ep{self.dataset_epoch}.jsonl"
+                        length_file_path = os.path.join(length_dir, filename)
+                        with open(length_file_path, "a") as f:
+                            f.write(json.dumps(lengths_and_rewards) + "\n")
 
                     # abort uncompleted request
                     self.abort_requests(self.prompt_id_2_request_ids[prompt_id])
@@ -673,6 +717,9 @@ class DynamicSamplingScheduler:
         pad_token_id = data.meta_info["pad_token_id"]
         output_token_ids = data.meta_info["output_token_ids"]
         output_tokens = [torch.tensor(token_ids) for token_ids in output_token_ids]
+
+        output_logprobs = data.meta_info.get("output_logprobs", None)
+
         output_tensor = pad_sequence(output_tokens, batch_first=True, padding_value=pad_token_id)
         output_tensor = concatenate_input_and_output(
             input_ids=request.batch["input_ids"], output_ids=output_tensor, num_return_sequences=len(output_tokens)
@@ -681,9 +728,10 @@ class DynamicSamplingScheduler:
             prompts=request,
             output=output_tensor,
             num_return_sequences=len(output_tokens),
-            sequence_length=self.pipeline_config.sequence_length,
+            sequence_length=self.sequence_length,
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
+            output_logprobs=output_logprobs,
         )
         request_repeat = request.repeat(repeat_times=len(output_tokens))
         output.non_tensor_batch = request_repeat.non_tensor_batch

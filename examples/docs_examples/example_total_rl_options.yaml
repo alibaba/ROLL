@@ -9,7 +9,6 @@ logging_dir: ./output/logs
 output_dir: ./output
 system_envs:
   USE_MODELSCOPE: '1'
-
 checkpoint_config:
   type: file_system
   output_dir: /data/cpfs_0/rl_examples/models/${exp_name}

@@ -7,12 +7,10 @@ from ..converter.template import (
     StackConverOp,
     register_template,
 )
-from ..model_config import McaModelConfig
-from ..model_factory import McaGPTModel
+from .configuration_llama import LlamaConfig
+from .modeling_llama import LlamaModel
 
 
-register_config("llama", McaModelConfig)
-register_model("llama", McaGPTModel)
 register_dist_config("llama", default_dist_config)
 
 
@@ -31,6 +29,7 @@ register_template(
         "attention_bias": "add_qkv_bias",
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
+        "rope_scaling": "rope_scaling",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
     },
     hf_invalid_keys=[".self_attn.rotary_emb.inv_freq"],
@@ -59,3 +58,6 @@ register_template(
         ),
     ],
 )
+
+
+__all__ = ["LlamaConfig", "LlamaModel"]

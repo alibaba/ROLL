@@ -45,7 +45,7 @@ add_token_level_kl: false
 
 ### Core Parameter Descriptions
 
-- `adv_estimator`: Advantage estimator type, set to "reinforce"
+- `adv_estimator`: Advantage estimator type, set to "grpo"
 - `importance_sampling`: Importance sampling method, set to "seq" for sequence-level sampling
 - `rollout_batch_size`: Number of prompts per rollout_batch_size
 - `num_return_sequences_in_group`: Number of responses generated per prompt (group size), the total number of samples trained per pipeline step is (rollout_batch_size * num_return_sequences_in_group)

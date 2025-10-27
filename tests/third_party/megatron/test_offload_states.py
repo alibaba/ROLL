@@ -4,6 +4,8 @@ from typing import Optional, List
 import pytest
 import torch
 import torch.distributed as dist
+
+from roll.platforms import current_platform
 from megatron.core import DistributedDataParallel
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.optimizer import (
@@ -299,16 +301,16 @@ def run_model_infer(mca_model: TurboModelCreator, included_state, pin_memory, no
 
             model_params_expected = [p.clone() for model in models for p in model.parameters()]
 
-            alloc_before_offload = torch.cuda.memory_allocated()
+            alloc_before_offload = current_platform.memory_allocated()
             offload_megatron_no_grad_module(model_chunks=models, pin_memory=pin_memory, non_blocking=non_blocking)
-            alloc_after_offload = torch.cuda.memory_allocated()
+            alloc_after_offload = current_platform.memory_allocated()
             assert (
                 alloc_after_offload < alloc_before_offload
             ), f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
             check_devices(tensors=[p for model in models for p in model.parameters()], target_device="cpu")
 
             reload_megatron_no_grad_module(model_chunks=models, non_blocking=non_blocking)
-            alloc_after_reload = torch.cuda.memory_allocated()
+            alloc_after_reload = current_platform.memory_allocated()
             assert (
                 alloc_after_offload < alloc_after_reload
             ), f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
@@ -319,7 +321,7 @@ def run_model_infer(mca_model: TurboModelCreator, included_state, pin_memory, no
 
             check_devices(
                 tensors=[p for model in models for p in model.parameters()],
-                target_device=f"cuda:{torch.cuda.current_device()}",
+                target_device=f"{current_platform.device_type}:{current_platform.current_device()}",
             )
 
 
@@ -374,11 +376,11 @@ def run_model_dist_optimizer(mca_model: TurboModelCreator, included_state, pin_m
             for param in group["params"]
         ]
 
-        alloc_before_offload = torch.cuda.memory_allocated()
+        alloc_before_offload = current_platform.memory_allocated()
         offload_megatron_no_grad_module(model_chunks=models, pin_memory=pin_memory, non_blocking=non_blocking)
         mca_model.optimizer.offload_states(include=included_state, pin_memory=pin_memory, non_blocking=non_blocking)
 
-        alloc_after_offload = torch.cuda.memory_allocated()
+        alloc_after_offload = current_platform.memory_allocated()
         print(f"alloc_after_offload < alloc_before_offload: {alloc_after_offload}, {alloc_before_offload}")
         # assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
 
@@ -420,7 +422,7 @@ def run_model_dist_optimizer(mca_model: TurboModelCreator, included_state, pin_m
 
         reload_megatron_no_grad_module(model_chunks=models, non_blocking=non_blocking)
         mca_model.optimizer.reload_states(include=included_state, non_blocking=non_blocking)
-        alloc_after_reload = torch.cuda.memory_allocated()
+        alloc_after_reload = current_platform.memory_allocated()
         print(f"alloc_after_offload < alloc_after_reload: {alloc_after_offload}, {alloc_after_reload}")
 
         # assert alloc_after_offload < alloc_after_reload, f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
@@ -475,38 +477,38 @@ def run_model_dist_optimizer(mca_model: TurboModelCreator, included_state, pin_m
             check_tensors(adam_exp_avg_sq_expected, adam_exp_avg_sq_restored)
 
         if included_state is None or MegatronOffloadStateType.model_params in included_state:
-            check_devices([p for model in models for p in model.parameters()], f"cuda:{torch.cuda.current_device()}")
+            check_devices([p for model in models for p in model.parameters()], f"{current_platform.device_type}:{current_platform.current_device()}")
             check_devices(
-                [buffer.param_data for buffer in mca_model.optimizer.buffers], f"cuda:{torch.cuda.current_device()}"
+                [buffer.param_data for buffer in mca_model.optimizer.buffers], f"{current_platform.device_type}:{current_platform.current_device()}"
             )
             check_devices(
                 [bucket.param_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [param for group in mca_model.optimizer.shard_float16_groups for param in group],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [param for group in mca_model.optimizer.shard_fp32_groups for param in group],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
 
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
             check_devices(
                 [p.main_grad for model in models for p in model.parameters() if p.requires_grad],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
-                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"cuda:{torch.cuda.current_device()}"
+                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"{current_platform.device_type}:{current_platform.current_device()}"
             )
             check_devices(
                 [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [param for group in mca_model.optimizer.shard_fp32_from_float16_groups for param in group],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
 
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
@@ -516,7 +518,7 @@ def run_model_dist_optimizer(mca_model: TurboModelCreator, included_state, pin_m
                     for group in mca_model.optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [
@@ -524,7 +526,7 @@ def run_model_dist_optimizer(mca_model: TurboModelCreator, included_state, pin_m
                     for group in mca_model.optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
 
 
@@ -572,11 +574,11 @@ def run_model_fp16_optimizer(mca_model: TurboModelCreator, included_state, pin_m
             for param in group["params"]
         ]
 
-        alloc_before_offload = torch.cuda.memory_allocated()
+        alloc_before_offload = current_platform.memory_allocated()
         offload_megatron_no_grad_module(model_chunks=models, pin_memory=pin_memory, non_blocking=non_blocking)
         mca_model.optimizer.offload_states(include=included_state, pin_memory=pin_memory, non_blocking=non_blocking)
 
-        alloc_after_offload = torch.cuda.memory_allocated()
+        alloc_after_offload = current_platform.memory_allocated()
         print(f"alloc_after_offload < alloc_before_offload: {alloc_after_offload}, {alloc_before_offload}")
         # assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
 
@@ -614,7 +616,7 @@ def run_model_fp16_optimizer(mca_model: TurboModelCreator, included_state, pin_m
 
         reload_megatron_no_grad_module(model_chunks=models, non_blocking=non_blocking)
         mca_model.optimizer.reload_states(include=included_state, non_blocking=non_blocking)
-        alloc_after_reload = torch.cuda.memory_allocated()
+        alloc_after_reload = current_platform.memory_allocated()
         print(f"alloc_after_offload < alloc_after_reload: {alloc_after_offload}, {alloc_after_reload}")
 
         # assert alloc_after_offload < alloc_after_reload, f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
@@ -659,31 +661,31 @@ def run_model_fp16_optimizer(mca_model: TurboModelCreator, included_state, pin_m
         if included_state is None or MegatronOffloadStateType.model_params in included_state:
             check_devices(
                 [p for model in models for p in model.parameters() if p.requires_grad],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [param for group in mca_model.optimizer.float16_groups for param in group],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [param for group in mca_model.optimizer.fp32_from_fp32_groups for param in group],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
             check_devices(
                 [p.main_grad for model in models for p in model.parameters() if p.requires_grad],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
-                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"cuda:{torch.cuda.current_device()}"
+                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"{current_platform.device_type}:{current_platform.current_device()}"
             )
             check_devices(
                 [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [param for group in mca_model.optimizer.fp32_from_float16_groups for param in group],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
             check_devices(
@@ -692,7 +694,7 @@ def run_model_fp16_optimizer(mca_model: TurboModelCreator, included_state, pin_m
                     for group in mca_model.optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [
@@ -700,7 +702,7 @@ def run_model_fp16_optimizer(mca_model: TurboModelCreator, included_state, pin_m
                     for group in mca_model.optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
 
 
@@ -744,11 +746,11 @@ def run_model_fp32_optimizer(mca_model: TurboModelCreator, included_state, pin_m
             for param in group["params"]
         ]
 
-        alloc_before_offload = torch.cuda.memory_allocated()
+        alloc_before_offload = current_platform.memory_allocated()
         offload_megatron_no_grad_module(model_chunks=models, pin_memory=pin_memory, non_blocking=non_blocking)
         mca_model.optimizer.offload_states(include=included_state, pin_memory=pin_memory, non_blocking=non_blocking)
 
-        alloc_after_offload = torch.cuda.memory_allocated()
+        alloc_after_offload = current_platform.memory_allocated()
         print(f"alloc_after_offload < alloc_before_offload: {alloc_after_offload}, {alloc_before_offload}")
         # assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
 
@@ -785,7 +787,7 @@ def run_model_fp32_optimizer(mca_model: TurboModelCreator, included_state, pin_m
 
         reload_megatron_no_grad_module(model_chunks=models, non_blocking=non_blocking)
         mca_model.optimizer.reload_states(include=included_state, non_blocking=non_blocking)
-        alloc_after_reload = torch.cuda.memory_allocated()
+        alloc_after_reload = current_platform.memory_allocated()
         print(f"alloc_after_offload < alloc_after_reload: {alloc_after_offload}, {alloc_after_reload}")
 
         # assert alloc_after_offload < alloc_after_reload, f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
@@ -826,23 +828,23 @@ def run_model_fp32_optimizer(mca_model: TurboModelCreator, included_state, pin_m
         if included_state is None or MegatronOffloadStateType.model_params in included_state:
             check_devices(
                 [p for model in models for p in model.parameters() if p.requires_grad],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [param for sub_group in mca_model.optimizer.param_groups for param in sub_group["params"]],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
             check_devices(
                 [p.main_grad for model in models for p in model.parameters() if p.requires_grad],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
-                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"cuda:{torch.cuda.current_device()}"
+                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"{current_platform.device_type}:{current_platform.current_device()}"
             )
             check_devices(
                 [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
             check_devices(
@@ -851,7 +853,7 @@ def run_model_fp32_optimizer(mca_model: TurboModelCreator, included_state, pin_m
                     for group in mca_model.optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
             check_devices(
                 [
@@ -859,7 +861,7 @@ def run_model_fp32_optimizer(mca_model: TurboModelCreator, included_state, pin_m
                     for group in mca_model.optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"cuda:{torch.cuda.current_device()}",
+                f"{current_platform.device_type}:{current_platform.current_device()}",
             )
 
 

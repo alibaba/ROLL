@@ -122,19 +122,19 @@ class VirtualModels:
         self, save_directory: str, save_safetensors: bool = True, max_shard_size: Union[int, str] = MAX_SHARD_SIZE
     ):
         os.makedirs(save_directory, exist_ok=True)
-        converter = ModelConverter(self.config)
+        converter = ModelConverter(self.config, to_hf=True)
         converter.save_model_as_hf_inflight(
             self.models, save_directory, save_safetensors=save_safetensors, max_shard_size=max_shard_size
         )
 
     def all_gather_weights_as_hf_inflight(self, models=None):
         models = models or self.models
-        converter = ModelConverter(self.config)
+        converter = ModelConverter(self.config, to_hf=True)
         yield from converter.all_gather_weights_as_hf_inflight(models)
 
     def all_gather_weights_as_hf_bucket(self, models=None, bucket_size: int = None):
         models = models or self.models
-        converter = ModelConverter(self.config)
+        converter = ModelConverter(self.config, to_hf=True)
         yield from converter.all_gather_weights_as_hf_bucket(models, bucket_size=bucket_size)
 
     def get_batch_on_this_cp_rank(self, *args, **kwargs):
@@ -184,13 +184,13 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                     f"and not mca_ckpt_exist: {mca_ckpt_exist} or not dist_config_match: {dist_config_match}"
                 )
             state_dict = {}
-            converter = ModelConverter(config, model_name_or_path=model_name_or_path)
+            converter = ModelConverter(config)
             for i in range(len(models)):
                 key = "model"
                 if len(models) > 1:
                     mpu.set_virtual_pipeline_model_parallel_rank(i)
                     key = f"{key}{i}"
-                state_dict[key] = converter.load_mca_state_dict_from_hf()
+                state_dict[key] = converter.load_mca_state_dict_from_hf(model_name_or_path, vp_stage=i)
         missing_keys, unexpected_keys = models.load_state_dict(state_dict, strict=False)
         if missing_keys:
             missing_keys = [key for key in missing_keys if not key.endswith("._extra_state")]
@@ -267,6 +267,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
             position_embedding_type=config.position_embedding_type,
             rotary_percent=config.rotary_percent,
             rotary_base=config.rotary_base,
+            rope_scaling=config.rotary_scaling,
             mtp_block_spec=self._get_mtp_block_spec(config),
             vp_stage=self.vp_stage,
         )

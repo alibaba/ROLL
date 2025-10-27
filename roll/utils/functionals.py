@@ -209,7 +209,7 @@ def entropy_from_logits(logits: torch.Tensor):
 
 
 def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str,
-             weights: Optional[torch.Tensor] = None):
+             weights: Optional[torch.Tensor] = None, loss_scale: Optional[float] = None):
     """
     ref: https://github.com/volcengine/verl/blob/78532923368aeb058f62201489546d013df47710/verl/trainer/ppo/core_algos.py#L370
     Aggregate the loss matrix into a scalar.
@@ -224,6 +224,7 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
                                       "seq-mean-token-sum-norm" /
             "seq-mean-token-sum" is the default behavior
         weights: `torch.Tensor`
+        loss_scale: `(float)`
     Returns:
         loss: `a scalar torch.Tensor`
             aggregated loss
@@ -257,7 +258,7 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
     else:
         raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 
-    return loss
+    return loss * loss_scale if loss_scale else loss
 
 
 def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int = None) -> torch.Tensor:
@@ -481,27 +482,14 @@ def reward_norm(response_level_rewards: torch.Tensor, n_sample=-1, running_ctrl=
     rewards = reshape_reward if norm_mean_type == "group" else response_level_rewards
     # 标准化奖励
     if norm_std_type is not None:
-        normalized_rewards = (rewards - reward_mean) / (reward_std + 1e-6)
-    else:
+        normalized_rewards = (rewards - reward_mean) / (reward_std + 1e-6) 
+    else: 
         normalized_rewards = (rewards - reward_mean)
-
+    
     # 如果是对 group mean 归一化，需要恢复原始形状
     if norm_mean_type == "group":
         normalized_rewards = normalized_rewards.reshape(*response_level_rewards.size())
     return normalized_rewards
-
-def group_reward_norm(data: "DataProto", n_sample=-1, div_std=True, div_std_global=False):
-    assert n_sample > 1, "n_sample must > 1"
-    response_level_rewards = data.batch["response_level_rewards"].clone().detach()
-    reshape_reward = response_level_rewards.reshape(*response_level_rewards.size()[:-1], -1, n_sample)
-    reshape_reward = reshape_reward - reshape_reward.mean(dim=-1, keepdim=True)
-    if div_std:
-        if not div_std_global:
-            reshape_reward = reshape_reward / (torch.std(reshape_reward, dim=-1, keepdim=True) + 1e-6)
-        else:
-            reshape_reward = reshape_reward / (torch.std(reshape_reward) + 1e-6)
-    data.batch["response_level_rewards"] = reshape_reward.reshape(*response_level_rewards.size())
-    return data
 
 
 def difficulty_mask(data: "DataProto", n_sample=-1, low_threshold=0.1, high_threshold=0.95):
@@ -560,7 +548,7 @@ def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_c
         pipeline_config.norm_mean_type, pipeline_config.norm_std_type = "group", "group"
 
     response_level_rewards = reward_norm(
-                    response_level_rewards,
+                    response_level_rewards, 
                     n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
                     running_ctrl=running_ctrl,
                     norm_mean_type=pipeline_config.norm_mean_type,
@@ -921,3 +909,17 @@ def aggregate_metrics(history_metrics: List[Dict], metrics_agg_mode: Dict[str, s
             aggregated_metrics[metric_name] = float(np.mean(values))
 
     return aggregated_metrics
+
+
+def group_reward_norm(data: "DataProto", n_sample=-1, div_std=True, div_std_global=False):
+    assert n_sample > 1, "n_sample must > 1"
+    response_level_rewards = data.batch["response_level_rewards"].clone().detach()
+    reshape_reward = response_level_rewards.reshape(*response_level_rewards.size()[:-1], -1, n_sample)
+    reshape_reward = reshape_reward - reshape_reward.mean(dim=-1, keepdim=True)
+    if div_std:
+        if not div_std_global:
+            reshape_reward = reshape_reward / (torch.std(reshape_reward, dim=-1, keepdim=True) + 1e-6)
+        else:
+            reshape_reward = reshape_reward / (torch.std(reshape_reward) + 1e-6)
+    data.batch["response_level_rewards"] = reshape_reward.reshape(*response_level_rewards.size())
+    return data

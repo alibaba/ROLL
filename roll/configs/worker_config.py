@@ -12,12 +12,12 @@ logger = get_logger()
 @dataclass
 class StrategyArguments:
     strategy_name: Literal[
-        "deepspeed_train", "hf_infer", "deepspeed_infer", "vllm", "sglang", "megatron_infer", "megatron_train", "diffusion_deepspeed_train",
+        "deepspeed_train", "hf_infer", "deepspeed_infer", "vllm", "sglang", "megatron_infer", "megatron_train", "diffusion_deepspeed_train"
     ] = field(
         default="deepspeed_train",
         metadata={
-            "help": "The name of the strategy. Options: 'deepspeed_train', 'hf_infer', 'deepspeed_infer', 'vllm', 'sglang', "
-            "'megatron_infer', 'megatron_train', 'diffusion_deepspeed_train'."
+            "help": "The name of the strategy. Options: 'deepspeed_train', 'diffusion_deepspeed_train', 'hf_infer', 'deepspeed_infer', 'vllm', 'sglang', "
+            "'megatron_infer', 'megatron_train'."
         },
     )
     strategy_config: Optional[Dict] = field(
@@ -109,6 +109,42 @@ class WorkerConfig:
         metadata={"help": "Remove tail padding token in a micro batch, don't pack sequences(different from verl). must set `variable_seq_lengths` for megatron."}
     )
 
+    use_dynamic_batching_in_train: bool = field(
+        default=False,
+        metadata={"help": "Dynamic batching is a feature designed to group sequences of similar lengths into batches, "
+                          "minimizing padding and improving computational and memory efficiency."}
+    )
+    max_tokens_per_microbatch_in_train: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Set the maximum number of tokens for each micro-batch during training. "
+                "This config must be set when using dynamic batching. "
+                "Recommended value: sequence_length × 2 × micro_batch_size."
+            )
+        }
+    )
+    sequence_length_round_in_train:int = field(
+        default=4,
+        metadata={"help": "The value to round up to when truncating the sequence length."
+                          "Note: This config must be set when using dynamic batching."}
+    )
+    use_dynamic_batching_in_infer: bool = field(
+        default=False,
+        metadata={"help": "Dynamic batching is a feature designed to group sequences of similar lengths into batches, "
+                          "minimizing padding and improving computational and memory efficiency."}
+    )
+    max_tokens_per_microbatch_in_infer:int = field(
+        default=None,
+        metadata={"help": "Set the maximum number of tokens for each micro-batch. "
+                          "Note: This config must be set when using dynamic batching."}
+    )
+    sequence_length_round_in_infer:int = field(
+        default=4,
+        metadata={"help": "The value to round up to when truncating the sequence length."
+                          "Note: This config must be set when using dynamic batching."}
+    )
+
     def __post_init__(self):
 
         if self.strategy_args is not None:
@@ -145,3 +181,17 @@ class WorkerConfig:
                 self.training_args.bf16 = True
             elif self.model_args.dtype == "fp16":
                 self.training_args.fp16 = True
+
+
+def is_colocated(actor_train: WorkerConfig, actor_infer: WorkerConfig):
+    train_devices = set(actor_train.device_mapping or [])
+    infer_devices = set(actor_infer.device_mapping or [])
+    if train_devices.issuperset(infer_devices):
+        return True
+    if train_devices.intersection(infer_devices):
+        # TODO: raise here
+        # raise ValueError(
+        #     f"train and infer share some devices, but train not cover infer. {train_devices=} {infer_devices=}"
+        # )
+        return False
+    return False

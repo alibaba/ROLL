@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 import datetime
 
+from roll.platforms import current_platform
 
 from sglang.srt.model_executor.model_runner import ModelRunner, UNBALANCED_MODEL_LOADING_TIMEOUT_S
 from sglang.srt.configs.device_config import DeviceConfig
@@ -28,7 +29,6 @@ logger = logging.getLogger(__name__)
 class ModelRunnerSA(ModelRunner):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.weights_refresh_dict = {}
 
     def load_model(self):
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)

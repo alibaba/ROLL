@@ -7,10 +7,14 @@ import tempfile
 import traceback
 from typing import Dict, Optional, Any
 
+import ray
 from filelock import FileLock
 from huggingface_hub import snapshot_download
 
+from roll.distributed.scheduler.storage import SharedStorage
+from roll.utils.constants import STORAGE_NAME, RAY_NAMESPACE
 from roll.utils.logging import get_logger
+from roll.utils.network_utils import get_node_ip
 from roll.utils.upload_utils import uploader_registry
 
 logger = get_logger()
@@ -31,12 +35,30 @@ def file_lock_context(lock_path: str):
     with FileLock(temp_lock_path):
         yield
 
+shared_storage = None
 
+def model_path_cache(func):
+    node_ip = get_node_ip()
+    def wrapper(model_name_or_path: str, local_dir: Optional[str] = None):
+        global shared_storage
+        if shared_storage is None:
+            shared_storage = SharedStorage.options(
+                name=STORAGE_NAME, get_if_exists=True, namespace=RAY_NAMESPACE
+            ).remote()
+        cached_path = ray.get(shared_storage.get.remote(key=f"{node_ip}:{model_name_or_path}"))
+        if cached_path is None or not os.path.exists(cached_path):
+            cached_path = func(model_name_or_path, local_dir)
+            ray.get(shared_storage.put.remote(key=f"{node_ip}:{model_name_or_path}", data=cached_path))
+        return cached_path
+    return wrapper
+
+
+@model_path_cache
 def download_model(model_name_or_path: str, local_dir: Optional[str] = None):
     if os.path.isdir(model_name_or_path):
         return model_name_or_path
 
-    model_download_type = os.getenv("MODEL_DOWNLOAD_TYPE", "HUGGINGFACE_HUB")
+    model_download_type = os.getenv("MODEL_DOWNLOAD_TYPE", "MODELSCOPE")
     if model_download_type not in model_download_registry:
         raise ValueError(f"Unknown model_download_type: {model_download_type},"
                          f" total registered model download type: {model_download_registry.keys()}")

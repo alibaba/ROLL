@@ -182,6 +182,11 @@ class DistributingParallelArguments:
             "improve stability especially when the number of experts is large. None means no changes for dtype.",
         },
     )
+    # mtp
+    mtp_num_layers: Optional[int] = field(
+        default=None,
+        metadata={"help": "The number of mtp layers."}
+    )
     # train options
     calculate_per_token_loss: bool = field(
         default=False,

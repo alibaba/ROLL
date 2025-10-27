@@ -73,6 +73,8 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
                 valid_image_embeds_start = image_mask[:i].sum().item()
                 valid_image_embeds_start += image_mask[i, :inputs_start].sum().item()
                 embeds_num = image_mask[i, inputs_start:inputs_end].sum().item()
+                if embeds_num == 0:
+                    continue
                 valid_image_embeds_end = valid_image_embeds_start + embeds_num
                 used_embeds_seqlen_start = 0  # embeds seqlens used in this range
                 new_embeds_seqlen_start = (
@@ -321,6 +323,8 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
         second_per_grid_ts: Optional[torch.Tensor] = None,  # for videos
         **kwargs,
     ) -> "torch.Tensor":
+        force_vit_image = kwargs.pop("force_vit_image", False)
+        force_vit_video = kwargs.pop("force_vit_video", False)
         if position_ids is None and input_ids is not None:
             position_ids, _ = self.get_rope_index(
                 input_ids, image_grid_thw, video_grid_thw, second_per_grid_ts, attention_mask
@@ -334,7 +338,7 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
             cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
             cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=["attention_mask"])
 
-        if not self.pre_process or (pixel_values is None and pixel_values_videos is None) or decoder_input is not None:
+        if not self.pre_process or decoder_input is not None:
             return super().forward(
                 decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
             )
@@ -351,6 +355,8 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
                 inputs_ranges,
                 self.config.image_token_id,
             )
+        elif force_vit_image:
+            inputs_embeds = self._handle_missing_visual(inputs_embeds)
         if pixel_values_videos is not None:
             inputs_embeds = self.construct_inputs_embeds(
                 input_ids,
@@ -360,6 +366,8 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
                 inputs_ranges,
                 self.config.video_token_id,
             )
+        elif force_vit_video:
+            inputs_embeds = self._handle_missing_visual(inputs_embeds)
         decoder_input = inputs_embeds
 
         return super().forward(

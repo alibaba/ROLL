@@ -1,10 +1,12 @@
 import os
+from collections import defaultdict
 from concurrent import futures
-from typing import List
+from typing import List, Any, Dict
 
-from codetiming import Timer
+import ray
 from transformers import set_seed
 
+from roll.distributed.executor.cluster import Cluster
 from roll.distributed.executor.model_update_group import ModelUpdateGroup
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.scheduler.resource_manager import ResourceManager
@@ -91,3 +93,15 @@ class BasePipeline:
 
         futures.wait(self.resume_futures)
         self.resume_futures.clear()
+
+    def download_models(self, *clusters: Cluster):
+        node2worker: Dict[str, Any] = {}
+        node2model_names: Dict[str, set[str]] = defaultdict(set)
+        for cluster in clusters:
+            for worker, node_ip in cluster.worker2nodes.items():
+                node2worker[node_ip] = worker
+                if cluster.worker_config.model_args.model_name_or_path:
+                    node2model_names[node_ip].add(cluster.worker_config.model_args.model_name_or_path)
+                if self.pipeline_config.resume_from_checkpoint:
+                    node2model_names[node_ip].add(self.pipeline_config.resume_from_checkpoint)
+        ray.get([node2worker[node_ip].download_models.remote(model_name_or_paths=model_names) for node_ip, model_names in node2model_names.items()])

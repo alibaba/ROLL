@@ -37,11 +37,11 @@ def modified_text(text: str) -> str:
 def remove_entrypoints(code: str, language: str = "python") -> str:
     """
     Remove entry points and example usage from code.
-
+    
     Args:
         code: Source code to process
         language: Programming language of the code
-
+        
     Returns:
         Processed code with entry points removed
     """
@@ -299,11 +299,11 @@ class CodeTester:
     def sandbox_result_judge(self, test_cases: List[Dict], sandbox_results: List[Dict]) -> Tuple[int, List[str]]:
         """
         Judge the results of sandbox tests.
-
+        
         Args:
             test_cases: List of test cases
             sandbox_results: List of sandbox results
-
+            
         Returns:
             Tuple containing the number of passed tests and a list of error types
         """
@@ -625,7 +625,7 @@ def run_text_tests(response: str, test_cases: List[Dict]) -> Tuple[bool, Dict]:
                 'error_code': -1 if 'SyntaxError' in str(e) else -3,
                 'error_message': 'Compilation Error' if 'SyntaxError' in str(e) else 'Runtime Error'
             }
-
+            
         if not passed:
             all_passed = False
             break
@@ -638,7 +638,7 @@ def run_io_tests(extracted_code: str, test_cases: List[Dict], func_name: str = N
     Run input/output test cases against the provided code.
     """
     from roll.utils.local_code.evaluator import codegen_check_correctness
-
+    
     if func_name == "None":
         func_name = ""
         
@@ -650,7 +650,7 @@ def run_io_tests(extracted_code: str, test_cases: List[Dict], func_name: str = N
     res, metadata = codegen_check_correctness(evaluation_sample, extracted_code, timeout=timeout, debug=True)
     
     all_passed = int(all(x == 1 for x in res))
-
+    
     return all_passed, metadata
 
 def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: str, 
@@ -685,13 +685,13 @@ def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: 
         info['format_think'] = 1
     if "```" in response:
         info['format_validation'] = 1
-
+    
     if response == "":
         info["error"] = "Empty Response"
         info["error_code"] = -1
         info["error_message"] = "Empty Response"
         return 0, info, ""
-
+    
     extracted_code = ""
     if "<|begin_of_solution|>" in response:
         response = response.split("<|begin_of_solution|>")[-1].strip()
@@ -706,7 +706,7 @@ def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: 
             info["error_code"] = -1
             info["error_message"] = "Extract Response Error"
             return 0, info, ""
-
+    
     try:
         correct = 0
         if case_type == "check_based":
@@ -722,7 +722,7 @@ def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: 
                 info["error_code"] = -4
                 info["error_message"] = "Environment Error"
                 return 0, info, "Environment Error"
-
+                
         elif case_type == "text":
             try:
                 all_passed, error_info = run_text_tests(response, test_cases)
@@ -735,7 +735,7 @@ def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: 
                 info["error_code"] = -4
                 info["error_message"] = "Environment Error"
                 return 0, info, "Environment Error"
-
+                
         elif case_type == "assert" or case_type == "pytest":
             try:
                 all_passed, error_info = run_assert_tests(extracted_code, test_cases, timeout=timeout)
@@ -748,10 +748,10 @@ def cal_local_test(global_step: int, prompt_id: str, prompt_txt: str, response: 
                 info["error_code"] = -4
                 info["error_message"] = "Environment Error"
                 return 0, info, "Environment Error"
-
+                
         else:
             try:
-                all_passed, metadata = run_io_tests(extracted_code, test_cases, func_name,
+                all_passed, metadata = run_io_tests(extracted_code, test_cases, func_name, 
                                      num_process_evaluate, timeout)
                 if metadata:
                     info.update(metadata)
@@ -854,7 +854,6 @@ class CodeSandboxRewardWorker(Worker):
         token_level_rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float16)
         response_level_rewards = torch.tensor(verify_answer, dtype=torch.float16)
         scores = torch.tensor(verify_answer, dtype=torch.float16)
-
         output = DataProto.from_dict(
             tensors={
                 "token_level_rewards": token_level_rewards,

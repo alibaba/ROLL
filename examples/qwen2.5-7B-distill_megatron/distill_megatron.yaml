@@ -10,7 +10,8 @@ output_dir: ./output
 
 checkpoint_config:
   type: file_system
-  output_dir: /data/oss_bucket_0/chuye/roll/distill/models/megatron_dp_pp
+  output_dir: /var/tmp/ckpt
+
 
 save_steps: 100
 logging_steps: 1
@@ -20,9 +21,12 @@ student_pretrain: Qwen/Qwen2.5-7B-Instruct
 teacher_pretrain: Qwen/Qwen2.5-14B-Instruct
 
 # distill config
+logits_topk: 64
 distill_loss_weight: 0.85
 kd_objective: forward_kl
 distill_on_prompt: False
+
+logits_transfer_backend: "nccl-only" # support "ipc+nccl", "nccl_only" and "ray"
 
 sequence_length: 1024
 max_grad_norm: 1.0
@@ -43,7 +47,6 @@ student:
     gradient_accumulation_steps: 1
     warmup_steps: 0
     num_train_epochs: 1
-    max_steps: 1000
 
   data_args:
     template: qwen2_5
@@ -53,8 +56,9 @@ student:
   strategy_args:
     strategy_name: megatron_train
     strategy_config:
-      tensor_model_parallel_size: 1
+      tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 2
+      context_parallel_size: 2
       use_distributed_optimizer: true
       recompute_granularity: full
   device_mapping: list(range(0,8))
@@ -72,8 +76,9 @@ teacher:
   strategy_args:
     strategy_name: megatron_infer
     strategy_config:
-      tensor_model_parallel_size: 1
+      tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 2
+      context_parallel_size: 2
       bf16: true
   device_mapping: list(range(0,8))
 

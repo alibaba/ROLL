@@ -93,6 +93,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_infer,
         )
+        download_clusters = [self.actor_infer]
         self.rewards: Dict[str, Any] = {
             key: Cluster(
                 name=f"reward-{key}",
@@ -102,6 +103,8 @@ class RLVRRolloutPipeline(RLVRPipeline):
             )
             for key, worker_config in self.pipeline_config.rewards.items()
         }
+        download_clusters.extend(self.rewards.values())
+        self.download_models(*download_clusters)
 
         val_pipeline_config = copy.deepcopy(self.pipeline_config)
         val_pipeline_config.is_use_additional_prompts = False

@@ -1,7 +1,6 @@
 import gc
 import time
 from collections import OrderedDict
-from typing import Optional
 
 import torch
 from vllm.device_allocator.cumem import CuMemAllocator

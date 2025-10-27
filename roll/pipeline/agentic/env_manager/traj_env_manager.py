@@ -53,8 +53,7 @@ class TrajEnvManager(BaseEnvManager):
         # EnvManager states
         self.rollout_cache: Optional[RolloutCache] = None
         self.group_seed = None
-        self.episode_id = 0
-        self.current_step = -1
+        self.episode_id = None
         self.running = False
         self.use_thread_lock = self.env_config.get("use_thread_lock", False) # 避免同时执行大量cpu操作, 可以通过env_config配置
         self.thread_lock = thread_lock if self.use_thread_lock else nullcontext()
@@ -95,7 +94,6 @@ class TrajEnvManager(BaseEnvManager):
         1. Each time run_rollout_loop is called,
            it will continuously play episodes until it receives a command that data collection is complete.
            The seed needs to be reset to ensure consistency across all groups.
-           episode_id is reset to 0.
 
         Seed update logic:
            group_seed = base_seed + group_id
@@ -103,22 +101,15 @@ class TrajEnvManager(BaseEnvManager):
 
         trajectory_id: f"{group_id}_{episode_id}_{episode_seed}"
         """
-        assert not self.running
         assert "seed" in data.meta_info
-        current_step = data.meta_info.get("current_step", None)
         self.running = True
-        is_sync_training: bool = current_step is not None
-        if is_sync_training:
-            self.current_step = current_step
-        assert self.current_step >= 0
-        self.episode_id = 0
         self.group_seed = data.meta_info['seed'] + self.env_config['group_seed']
         rollout_cache: RolloutCache = self.reset()
         start_step = self.current_step
 
         log_stats = {"generate_time": [], "step_time": [], "current_step": []}
 
-        while self.running:
+        while self.running and rollout_cache is not None:
 
             with Timer(name="generate", logger=None) as generate_timer:
                 lm_output: DataProto = self.make_decision(rollout_cache)
@@ -142,32 +133,34 @@ class TrajEnvManager(BaseEnvManager):
                 rollout.non_tensor_batch["traj_id"] = np.array([traj_id] * rollout.batch.batch_size[0], dtype=object)
                 ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout))
 
-                if not self.running or (is_sync_training and self.episode_id >= self.worker_config.max_traj_per_env):
-                    self.rollout_cache: Optional[RolloutCache] = None
-                    self.logger.debug(
-                        f"env_id: {self.env_config['env_id']} max_traj_per_env {self.worker_config.max_traj_per_env} reached, stopping rollout loop")
-                    break
-
                 rollout_cache = self.reset()
+                start_step = self.current_step
+
+        ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, None))
 
     def reset(self) -> RolloutCache:
         self.rollout_cache = RolloutCache(env_id=self.env_config['env_id'],
                                           group_id=self.env_config['group_id'],
                                           tag=self.env_config['tag'])
 
+        self.episode_id = ray.get(self.output_queue.get_episode_id.remote(self.env_config['group_id']))
+        if self.episode_id is None:
+            assert not self.running
+            return None
         seed = self.group_seed + self.episode_id
 
         with self.thread_lock, self.env_step_limiter:
             # `observation` describes the current game-state prompt;
             # `info["suffix"]` carries the current environment-specific state string.
             observation, info = self.env.reset(seed=seed)
+            if observation is None:
+                return None
         self.rollout_cache.history.append({
             "observation": observation,
             "actions_left": self.env_config.max_steps - self.rollout_cache.step,
             "messages": None,     # agent input messages
             **info,
         })
-        self.episode_id += 1
         return self.rollout_cache
 
     def step(self, llm_output: DataProto):
@@ -244,7 +237,8 @@ class TrajEnvManager(BaseEnvManager):
         user_content = ""
         if self.rollout_cache.step == 0:
             messages.append({"role": "system", "content": self.agent_system_template})
-            user_content =  f"{history.history[0]['env_instruction']}\n"
+            if "env_instruction" in history.history[0]:
+                user_content =  f"{history.history[0]['env_instruction']}\n"
         if len(self.rollout_cache.history) > 1 and self.rollout_cache.history[-2].get("use_tool", False):
             messages.append({"role": "tool", "content": content["observation"]})
         else:

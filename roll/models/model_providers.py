@@ -114,10 +114,13 @@ def freeze_model(model, model_args: "ModelArguments"):
             param.requires_grad_(False)
 
 
+# Inspired by: https://github.com/hiyouga/LLaMA-Factory/blob/main/src/llamafactory/model/adapter.py
 def setup_lora_training(config, model, model_args: "ModelArguments", is_trainable: Optional[bool] = False):
     model.enable_input_require_grads()
+
     if is_trainable:
         target_modules = model_args.lora_target
+
         lora_config = {
             "task_type": TaskType.CAUSAL_LM,
             "r": model_args.lora_rank,
@@ -126,6 +129,7 @@ def setup_lora_training(config, model, model_args: "ModelArguments", is_trainabl
             "lora_dropout": model_args.lora_dropout,
             "modules_to_save": model_args.additional_target,
         }
+
         model = get_peft_model(model, LoraConfig(**lora_config))
     return model
 
@@ -211,88 +215,9 @@ def patch_model(model, config, use_mcore):
 
     forward_patch = None
     # patch to force vit forward with mock image to avoid hang
-    if use_mcore:
+    if not use_mcore:
         if "qwen2_vl" == model_type or "qwen2_5_vl" == model_type:
-
-            def forward_patch(
-                self,
-                input_ids: "torch.Tensor",
-                position_ids: Optional["torch.Tensor"] = None,
-                attention_mask: Optional["torch.Tensor"] = None,
-                decoder_input: Optional["torch.Tensor"] = None,
-                labels: Optional["torch.Tensor"] = None,
-                pixel_values: Optional["torch.Tensor"] = None,
-                pixel_values_videos: Optional["torch.Tensor"] = None,
-                image_grid_thw: Optional["torch.LongTensor"] = None,
-                video_grid_thw: Optional["torch.LongTensor"] = None,
-                second_per_grid_ts: Optional[torch.Tensor] = None,  # for videos
-                **kwargs,
-            ):
-                force_vit_image = kwargs.pop("force_vit_image", False)
-                force_vit_video = kwargs.pop("force_vit_video", False)
-                if position_ids is None and input_ids is not None:
-                    position_ids, _ = self.get_rope_index(
-                        input_ids, image_grid_thw, video_grid_thw, second_per_grid_ts, attention_mask
-                    )
-                cp_batch = {
-                    "position_ids": position_ids,
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                }
-                if self.config.context_parallel_size > 1:
-                    cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
-                    cp_batch = (
-                        type(self)
-                        .mro()[1]
-                        .get_batch_on_this_cp_rank(self, cp_batch, dim3_keys=["attention_mask", "position_ids"])
-                    )
-                if (
-                    not self.pre_process
-                    or (pixel_values is None and pixel_values_videos is None)
-                    or decoder_input is not None
-                ):
-                    return (
-                        type(self)
-                        .mro()[1]
-                        .forward(self, decoder_input=decoder_input, labels=labels, **cp_batch, **kwargs)
-                    )
-                inputs_ranges = self.get_input_ranges(input_ids.shape[1])
-                inputs_embeds = self.embedding(input_ids=cp_batch["input_ids"], position_ids=cp_batch["position_ids"])
-                if pixel_values is not None:
-                    inputs_embeds = self.construct_inputs_embeds(
-                        input_ids,
-                        inputs_embeds,
-                        pixel_values,
-                        image_grid_thw,
-                        inputs_ranges,
-                        self.config.image_token_id,
-                    )
-                elif force_vit_image:
-                    # force vit forward with mock image to avoid hang
-                    inputs_embeds = self._handle_missing_visual(inputs_embeds)
-                if pixel_values_videos is not None:
-                    inputs_embeds = self.construct_inputs_embeds(
-                        input_ids,
-                        inputs_embeds,
-                        pixel_values_videos,
-                        video_grid_thw,
-                        inputs_ranges,
-                        self.config.video_token_id,
-                    )
-                elif force_vit_video:
-                    # force vit forward with mock image to avoid hang
-                    inputs_embeds = self._handle_missing_visual(inputs_embeds)
-                decoder_input = inputs_embeds
-                return (
-                    type(self).mro()[1].forward(self, decoder_input=decoder_input, labels=labels, **cp_batch, **kwargs)
-                )
-
-        if forward_patch is not None:
-            for model_chunk in model.get_models():
-                model_chunk.forward = types.MethodType(forward_patch, model_chunk)
-    else:
-        if "qwen2_vl" == model_type or "qwen2_5_vl" == model_type:
-            if is_peft_model := (getattr(model, "peft_config", None) is not None):
+            if is_peft_model := getattr(model, "peft_config", None) is not None:
                 ori_forward = type(model.get_base_model()).forward
             else:
                 ori_forward = type(model).forward

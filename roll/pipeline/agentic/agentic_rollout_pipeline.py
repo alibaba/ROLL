@@ -1,5 +1,6 @@
 import json
 import os.path
+from itertools import count
 from typing import Any
 
 import ray
@@ -11,7 +12,7 @@ from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.agentic.agentic_config import AgenticConfig
-from roll.pipeline.agentic.utils import dump_rollout_render
+from roll.pipeline.agentic.utils import dump_rollout_trajectories
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.functionals import (
     reduce_metrics,
@@ -30,8 +31,7 @@ class AgenticRolloutPipeline(BasePipeline):
         self.pipeline_config: AgenticConfig
 
         self.pipeline_config.set_max_steps(max_steps=self.pipeline_config.max_steps)
-
-        self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
+        self.use_policy_model = self.pipeline_config.train_env_manager.llm_proxy.proxy_type == "policy"
 
         self.actor_infer: Any = Cluster(
             name=self.pipeline_config.actor_infer.name,
@@ -39,8 +39,10 @@ class AgenticRolloutPipeline(BasePipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_infer,
         )
+        self.download_models(self.actor_infer)
+        self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
 
-        self.rollout_scheduler = RolloutScheduler.remote(
+        self.rollout_scheduler = ray.remote(RolloutScheduler).remote(
             config=self.pipeline_config,
             env_manager_config=self.pipeline_config.train_env_manager,
             resource_manager=self.resource_manager,
@@ -48,33 +50,25 @@ class AgenticRolloutPipeline(BasePipeline):
             mode="train",
         )
 
-        self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=True)
+        if self.use_policy_model:
+            self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=True)
 
     @torch.no_grad()
     def run(self):
 
-        for global_step in range(self.pipeline_config.max_steps):
+        for global_step in (count() if self.pipeline_config.max_steps == -1 else range(self.pipeline_config.max_steps)):
             logger.info(f"pipeline rollout global step {global_step} start...")
             metrics = {}
             batch: DataProto = DataProto()
             batch.meta_info = {"global_step": global_step}
 
-            ray.get(self.rollout_scheduler.suspend.remote(global_step))
-            ray.get(self.rollout_scheduler.resume.remote(global_step))
-
             with Timer(name="rollout", logger=None) as rollout_timer:
                 batch.meta_info["is_offload_states"] = True
+                self.actor_infer.start_server(data=batch)
                 batch = ray.get(self.rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
-                if self.pipeline_config.render_save_dir:
-                    self.executor.submit(
-                        dump_rollout_render,
-                        save_dir=self.pipeline_config.render_save_dir,
-                        step=global_step,
-                        frames=batch.non_tensor_batch["frames"],
-                        env_ids=batch.non_tensor_batch["env_ids"],
-                        tags=batch.non_tensor_batch["tags"],
-                        episode_scores=batch.non_tensor_batch["episode_scores"],
-                    )
+                if batch is None:
+                    break
+
             metrics["time/rollout"] = rollout_timer.last
             eval_metrics = reduce_metrics(batch.meta_info.get("metrics", {}))
             eval_score = batch.batch["scores"].sum(-1)
@@ -96,6 +90,8 @@ class AgenticRolloutPipeline(BasePipeline):
             metrics["system/samples"] = (global_step + 1) * batch.batch.shape[0]
 
             self.tracker.log(values=metrics, step=global_step)
+
+            dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, batch)
 
             if global_step % self.pipeline_config.logging_steps == 0:
                 if int(os.environ.get("RAY_PROFILING", "0")):
@@ -134,6 +130,5 @@ class AgenticRolloutPipeline(BasePipeline):
 
             logger.info(f"pipeline step {global_step} finished")
             global_step += 1
-            logger.info(f"epoch {global_step} finished")
-        ray.get(self.rollout_scheduler.stop.remote())
+        ray.get(self.rollout_scheduler.shutdown.remote())
         logger.info("pipeline complete!")

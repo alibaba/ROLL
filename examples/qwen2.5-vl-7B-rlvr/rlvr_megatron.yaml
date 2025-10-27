@@ -116,7 +116,7 @@ actor_infer:
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.9
+      gpu_memory_utilization: 0.8
       block_size: 16
   num_gpus_per_worker: 1
   device_mapping: list(range(0,32))

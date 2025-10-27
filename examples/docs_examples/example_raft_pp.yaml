@@ -41,7 +41,7 @@ resume_from_checkpoint: false
 #  no guarantee on training performance. For actual usage,
 #  please refer to configurations without the "example_" prefix.
 # RAFT++ core config
-adv_estimator: "reinforce"
+adv_estimator: "grpo"
 
 # normalize
 reward_norm: None

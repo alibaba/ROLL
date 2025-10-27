@@ -136,7 +136,6 @@ class Llm0100(LLM):
         self.collective_rpc(method="offload_states", args=(level,))
 
     def fetch_output(self):
-        output_list = []
         # simulating non blocking semantic when using v1 engine
         if envs.VLLM_USE_V1:
             try:
@@ -146,10 +145,7 @@ class Llm0100(LLM):
         else:
             request_outputs = self.llm_engine.step()
 
-        for request_output in request_outputs:
-            if request_output.finished:
-                output_list.append(request_output)
-        return output_list
+        return request_outputs
 
     def get_num_waiting(self):
         stats = self.llm_engine._get_stats(scheduler_outputs=None)

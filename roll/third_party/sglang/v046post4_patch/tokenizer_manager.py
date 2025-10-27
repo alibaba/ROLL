@@ -5,7 +5,7 @@ import fastapi
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.managers.tokenizer_manager import TokenizerManager, _Communicator
 
-from roll.third_party.sglang.v046post4_patch.io_struct import (
+from roll.third_party.sglang.io_struct import (
     SetupCollectiveGroupReqInput,
     BroadcastBucketReqInput,
     BroadcastParameterReqInput,

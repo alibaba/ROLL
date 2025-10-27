@@ -22,6 +22,8 @@ from roll.pipeline.distill.distill_config import DistillConfig
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 from roll.utils.constants import IGNORE_INDEX
+from roll.pipeline.distill.logits_transfer_group import LogitsTransferGroup
+
 
 logger = get_logger()
 
@@ -180,6 +182,7 @@ class DistillPipeline(BasePipeline):
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.student.model_args)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "right" # padding should be on right in distill
 
         dataset = preprocess_dataset(
             dataset,
@@ -191,6 +194,10 @@ class DistillPipeline(BasePipeline):
             tokenizer=self.tokenizer,
             padding="longest",
         )
+
+        self.pipeline_config.set_max_steps((self.pipeline_config.student.training_args.num_train_epochs * len(dataset)) // \
+                                      (self.pipeline_config.student.training_args.per_device_train_batch_size * \
+                                       self.pipeline_config.student.training_args.gradient_accumulation_steps))
 
         self.student: Any = Cluster(
             name=self.pipeline_config.student.name,
@@ -212,6 +219,9 @@ class DistillPipeline(BasePipeline):
         refs: List[ray.ObjectRef] = []
         refs.extend(self.teacher.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
+
+        self.logits_transfer_group = LogitsTransferGroup(self.teacher, self.student,
+                                                         backend=self.pipeline_config.logits_transfer_backend,)
 
         self.dataloader = get_dataloader(dataset,
                                          self.pipeline_config.student.training_args.per_device_train_batch_size *\
@@ -240,10 +250,17 @@ class DistillPipeline(BasePipeline):
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.meta_info = {"global_step": global_step, "is_offload_states": False, "is_offload_optimizer_states_in_train_step": False}
+                batch_offset = self.logits_transfer_group.apply_offset_by_dp(batch)
                 with Timer(name="step_train", logger=None) as step_train_timer:
                     with Timer(name="teacher_forward", logger=None) as teacher_timer:
-                        teacher_logits_handles = self.teacher.forward(batch, blocking=True)
-                    batch.meta_info['teacher_logits_handles'] = teacher_logits_handles
+                        teacher_forward_metrics_refs = self.teacher.forward(batch_offset, blocking=False)
+                        teacher_metric = DataProto.materialize_concat(data_refs=teacher_forward_metrics_refs).meta_info.pop("metrics", {})
+                    metrics_mgr.add_reduced_metrics(teacher_metric)
+
+                    with Timer(name="logits_transfer", logger=None) as logits_transfer_timer:
+                        logits_transfer_metrics = self.logits_transfer_group.logits_transfer()
+                    metrics_mgr.add_reduced_metrics(logits_transfer_metrics)
+
                     with Timer(name="student_train_step", logger=None) as student_timer:
                         student_train_metrics_refs = self.student.train_step(batch, blocking=False)
                         student_train_metrics = DataProto.materialize_concat(data_refs=student_train_metrics_refs)

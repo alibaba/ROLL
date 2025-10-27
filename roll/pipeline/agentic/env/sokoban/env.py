@@ -8,7 +8,7 @@ import numpy as np
 from roll.pipeline.agentic.env.parse_action_utils import default_parser_action_func
 from .utils import generate_room
 
-from roll.pipeline.agentic.utils import all_seed
+from roll.utils.random_utils import all_seed
 
 
 class SokobanEnv(Env, GymSokobanEnv):

@@ -1,13 +1,11 @@
-import json
 import inspect
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
-from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Sequence, Union, Optional, List
-import torch
-from transformers import DataCollatorForSeq2Seq, PreTrainedTokenizerBase, ProcessorMixin, BatchFeature
+from transformers import BatchFeature, PreTrainedTokenizerBase, ProcessorMixin
 from transformers.data.data_collator import pad_without_fast_tokenizer_warning
 from transformers.utils import PaddingStrategy
 
@@ -145,6 +143,9 @@ class DataCollatorWithPaddingForMM:
                 else None,
                 text=feature[self.prompt_key],
             )
+            for key in ["prompt"]:   # remove non-tensor feature, e.g. tbstars2_moe_vista has prompt in processor output
+                if key in model_inputs:
+                    model_inputs.pop(key)
             for key in filter(lambda k: k in model_inputs, self.padded_keys):
                 padded_features[key].append(model_inputs.pop(key)[0])
             # mm feature fileds can be different because of mixed data
@@ -168,7 +169,7 @@ class DataCollatorWithPaddingForMM:
                             else feature[self.image_key]
                         },
                     }
-                    if not self.image_flag_key or feature[self.image_flag_key]
+                    if (not self.image_flag_key or feature[self.image_flag_key]) and feature[self.image_key]
                     else {
                         "prompt_token_ids":  # different with input_ids
                         self.tokenizer.encode(feature[self.prompt_key], add_special_tokens=False),

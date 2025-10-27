@@ -133,7 +133,6 @@ class Llm084(LLM):
         self.collective_rpc(method="offload_states", args=(level,))
 
     def fetch_output(self):
-        output_list = []
         # simulating non blocking semantic when using v1 engine
         if envs.VLLM_USE_V1:
             try:
@@ -142,11 +141,7 @@ class Llm084(LLM):
                 request_outputs = []
         else:
             request_outputs = self.llm_engine.step()
-
-        for request_output in request_outputs:
-            if request_output.finished:
-                output_list.append(request_output)
-        return output_list
+        return request_outputs
 
     def get_num_waiting(self):
         stats = self.llm_engine._get_stats(scheduler_outputs=None)
@@ -163,7 +158,7 @@ class Llm084(LLM):
         assert len(prompt_token_ids) == len(request_ids)
         if multi_modal_data:
             assert len(multi_modal_data) == len(request_ids)
-        for i, (token_ids, request_id)in enumerate(zip(prompt_token_ids, request_ids)):
+        for i, (token_ids, request_id) in enumerate(zip(prompt_token_ids, request_ids)):
             if request_id is None:
                 request_id = next(self.request_counter)
             lora_request = lora_requests[i] if lora_requests is not None else None
@@ -183,10 +178,7 @@ class Llm084(LLM):
                     else preprocessed_inputs
                 )
             else:
-                processed_inputs = {
-                    "type": "token",
-                    "prompt_token_ids": token_ids
-                }
+                processed_inputs = {"type": "token", "prompt_token_ids": token_ids}
             self.llm_engine._add_processed_request(
                 request_id=request_id,
                 processed_inputs=processed_inputs,

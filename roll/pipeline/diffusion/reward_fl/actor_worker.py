@@ -40,19 +40,21 @@ class ActorWorker(BaseActorWorker):
             append_to_dict(metrics, pg_metrics)
 
         metrics["actor/loss"] = np.mean(metrics["actor/loss"])
+        metrics["actor/face_score"] = np.mean(metrics["actor/face_score"])
+        metrics["actor/kl_loss"] = np.mean(metrics["actor/kl_loss"])
         data.to("cpu")
 
         output = DataProto(meta_info={"metrics": metrics})
         return output
 
-    def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
+    def loss_func(self, data: DataProto, loss: torch.Tensor, face_score: torch.Tensor, kl_loss: torch.Tensor):
         """
             data: DataProto, from train_step
-            output_tensor: the tensor after vae decode
         """
-        loss = output_tensor
         metrics = {
             "actor/loss": loss.float().detach().cpu().item(),
+            "actor/face_score": face_score.float().detach().cpu().item(),
+            "actor/kl_loss": kl_loss.float().detach().cpu().item(),
         }
 
         return loss, metrics

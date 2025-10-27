@@ -26,16 +26,6 @@ checkpoint_config:
 # openlm_hub 模型下载
 model_download_type: OPENLM_HUB
 
-# ml_tracker的实验名，自行设置，不要和别人重复，否则没有权限写入报错
-track_with: ml_tracker
-tracker_kwargs:
- project: roll_pipeline_example # ml_tracker的实验名，
- notes: "scale aligner pipeline"
- tags: # mltracker job tags，后续方便管理实验
-   - pipeline
-   - roll
-   - qwen2.5
-
 num_gpus_per_node: 8
 
 max_steps: 500

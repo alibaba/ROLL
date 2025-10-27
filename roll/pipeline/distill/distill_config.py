@@ -37,6 +37,14 @@ class DistillConfig(BaseConfig):
     )
 
     # Distillation related
+    logits_topk: int = field(
+        default=64,
+        metadata={
+            "help": (
+                "Top-k of logits used to caculate distill loss"
+            )
+        }
+    )
     distill_loss_weight: float = field(
         default=0.5,
         metadata={
@@ -99,6 +107,12 @@ class DistillConfig(BaseConfig):
         metadata={"help": "Maximum grad norm"}
     )
 
+    logits_transfer_backend: Optional[str] = field(
+        default="ipc+nccl",
+        metadata={"help": "Backend used to transfer logits from teacher to student, available options are"
+                          " 'ipc+nccl', 'nccl-only', 'ray'"}
+    )
+
     def __post_init__(self):
         super().__post_init__()
 
@@ -123,3 +137,6 @@ class DistillConfig(BaseConfig):
 
     def to_dict(self):
         return dataclasses.asdict(self)
+
+    def set_max_steps(self, max_steps: int):
+        self.student.training_args.max_steps = max_steps

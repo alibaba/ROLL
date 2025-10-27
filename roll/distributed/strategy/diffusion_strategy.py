@@ -39,8 +39,8 @@ class DeepSpeedTrainStrategy(BaseDeepSpeedTrainStrategy):
             video = [torchvision.transforms.functional.to_pil_image(v) for v in video]
             data = {"prompt": prompt, "video": video}
 
-            output = self.model(data)
-            loss, loss_reduced = loss_func(data, output)
+            loss, face_score, kl_loss = self.model(data)
+            loss, loss_reduced = loss_func(data, loss, face_score, kl_loss)
             append_to_dict(metrics, loss_reduced)
             
             self.model.backward(loss)
@@ -74,6 +74,7 @@ class DeepSpeedTrainStrategy(BaseDeepSpeedTrainStrategy):
         
         # save DiffusionTrainingModule
         if dist.get_rank() == 0:
+            os.makedirs(local_state_path, exist_ok=True)
             torch.save(state_dict, os.path.join(local_state_path, "diffusion_module.pth"))
 
         metrics = {

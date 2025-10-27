@@ -26,7 +26,9 @@ class DeepSeekV3Template(Template):
             if rope_scaling.get("original_max_position_embeddings", None):
                 kw_args["max_position_embeddings"] = rope_scaling["original_max_position_embeddings"]
             if rope_scaling.get("type", None):
-                kw_args["rope_type"] = rope_scaling["type"]
+                rope_type = rope_scaling["type"]
+                kw_args["rope_type"] = rope_type
+                assert rope_type == "yarn", f"only support yarn rope scaling now. but got {rope_type}"
             if rope_scaling.get("factor", None):
                 kw_args["rotary_scaling_factor"] = rope_scaling["factor"]
             if rope_scaling.get("mscale_all_dim", None):
@@ -37,13 +39,9 @@ class DeepSeekV3Template(Template):
                 kw_args["beta_fast"] = rope_scaling["beta_fast"]
             if rope_scaling.get("beta_slow", None):
                 kw_args["beta_slow"] = rope_scaling["beta_slow"]
-
-        # fused backend only support dim <= 128
-        torch_dtype = getattr(hf_config, "torch_dtype", None)
-        if torch_dtype == torch.bfloat16 or torch_dtype == torch.float16:
-            from megatron.core.transformer.enums import AttnBackend
-
-            kw_args["attention_backend"] = AttnBackend.unfused
+        else:
+            kw_args["rope_type"] = "rope"
+            kw_args["rotary_scaling_factor"] = 1.0
 
         # compute moe_shared_expert_intermediate_size
         n_shared_experts = getattr(hf_config, "n_shared_experts", None)
@@ -74,51 +72,20 @@ class DeepSeekV3Template(Template):
             kw_args["first_k_dense_replace"] = mca_config.moe_layer_freq.count(0)
             kw_args["moe_layer_freq"] = 1
 
-        kw_args["rope_scaling"] = {
-            "original_max_position_embeddings": mca_config.max_position_embeddings,
-            "type": mca_config.rope_type,
-            "factor": mca_config.rotary_scaling_factor,
-            "mscale_all_dim": mca_config.mscale_all_dim,
-            "mscale": mca_config.mscale,
-            "beta_fast": mca_config.beta_fast,
-            "beta_slow": mca_config.beta_slow,
-        }
+        if mca_config.rope_type != "rope":
+            kw_args["rope_scaling"] = {
+                "original_max_position_embeddings": mca_config.max_position_embeddings,
+                "type": mca_config.rope_type,
+                "factor": mca_config.rotary_scaling_factor,
+                "mscale_all_dim": mca_config.mscale_all_dim,
+                "mscale": mca_config.mscale,
+                "beta_fast": mca_config.beta_fast,
+                "beta_slow": mca_config.beta_slow,
+            }
 
         res = super().convert_mca_to_hf_config(mca_config, **kw_args)
 
         return res
-
-    def _get_mtp_layer_index(self, layer_index):
-        if not mpu.is_pipeline_last_stage():
-            return None
-        if layer_index is None:
-            return None
-
-        total_pp_num_layers = self.mca_config.num_layers
-        if self.mca_config.account_for_embedding_in_pipeline_split:
-            total_pp_num_layers += 1
-        if self.mca_config.account_for_loss_in_pipeline_split:
-            total_pp_num_layers += 1
-        pp_size = mpu.get_pipeline_model_parallel_world_size()
-        assert (total_pp_num_layers % pp_size) == 0, (
-            "When using mtp, ensure the result layers num can be devideded by pp_size"
-        )
-
-        # account for no pipeline parallel
-        if pp_size == 1:
-            if layer_index < (self.mca_config.num_layers - 1):
-                return None
-            return layer_index - (self.mca_config.num_layers - 1)
-
-        num_layers_for_pp_rank = total_pp_num_layers // pp_size
-        num_layers_in_last_stage = num_layers_for_pp_rank
-        if self.mca_config.account_for_loss_in_pipeline_split:
-            num_layers_in_last_stage -= 1
-
-        if layer_index < (num_layers_in_last_stage - 1):
-            return None
-
-        return layer_index - (num_layers_in_last_stage - 1)
 
     def add_hf_weight(self, name, weight):
         name2weights = super().add_hf_weight(name, weight)
@@ -127,6 +94,8 @@ class DeepSeekV3Template(Template):
         res = {}
         for name, weight in name2weights.items():
             layer_index = get_mca_layer_index(name)
+            if layer_index is not None and layer_index >= self.mca_config.num_layers:
+                name = self.convert_mtp_name(name)
             if layer_index is not None and layer_index < self.mca_config.moe_layer_freq.count(0):
                 # dense layer use fused `TELayerNormColumnParallelLinear`, change the name
                 if "pre_mlp_layernorm" in name:
@@ -135,6 +104,7 @@ class DeepSeekV3Template(Template):
         return res
 
     def add_mca_weight(self, name, weight):
+        name = self.revert_mtp_name(name)
         layer_index = get_mca_layer_index(name)
         if layer_index is not None and layer_index < self.mca_config.moe_layer_freq.count(0):
             name = name.replace("mlp.linear_fc1.layer_norm_", "pre_mlp_layernorm.")
@@ -155,54 +125,42 @@ class DeepSeekV3Template(Template):
             res[name] = weight
         return res
 
-    def convert_mtp_weights(self, name2weights):
-        if name2weights is None:
+    def hf_name_to_mca_names(self, hf_name):
+        mca_names = super().hf_name_to_mca_names(hf_name)
+        if mca_names is None:
             return None
+        mtp_mca_names = [self.convert_mtp_name(mca_name) for mca_name in mca_names]
+        return mtp_mca_names
 
-        res = {}
-        for name, weight in name2weights.items():
-            mca_layer_index = get_mca_layer_index(name)
-            mtp_layer_index = self._get_mtp_layer_index(mca_layer_index)
-            if mtp_layer_index is not None:
-                has_transformer_layer = "self_attention" in name or "mlp" in name or "input_layernorm" in name
-                name = name.replace("decoder", "mtp")
-                pure_name = remove_weight_prefix(name, prefix="mtp.layers.")
-                name = (
-                    "mtp.layers."
-                    + str(mtp_layer_index)
-                    + (".transformer_layer" if has_transformer_layer else "")
-                    + pure_name
-                )
-            res[name] = weight
-        return res
+    def convert_mtp_name(self, name):
+        mca_layer_index = get_mca_layer_index(name)
+        if mca_layer_index is None or mca_layer_index < self.mca_config.num_layers:
+            return name
+        mtp_layer_index = mca_layer_index - self.mca_config.num_layers
+        has_transformer_layer = "self_attention" in name or "mlp" in name or "input_layernorm" in name
+        name = name.replace("decoder", "mtp")
+        pure_name = remove_weight_prefix(name, prefix="mtp.layers.")
+        name = (
+            "mtp.layers."
+            + str(mtp_layer_index)
+            + (".transformer_layer" if has_transformer_layer else "")
+            + pure_name
+        )
+        return name
 
-    def revert_mtp_weights(self, mca_state_dict):
-        res = {}
-        for name, weight in mca_state_dict.items():
-            if "mtp" in name:
-                has_transformer_layer = "self_attention" in name or "mlp" in name or "input_layernorm" in name
-                mtp_layer_index = get_layer_index(name, prefix="mtp.layers.")
-                pure_name = remove_weight_prefix(name, prefix="mtp.layers.")
-                # only consider padding mtp for now...
-                if self.mca_config.pipeline_model_parallel_size > 1:
-                    num_pp_layers = (
-                        self.mca_config.num_layers
-                        + self.mca_config.account_for_embedding_in_pipeline_split
-                        + self.mca_config.account_for_loss_in_pipeline_split
-                    )
-                    num_layers_in_last_stage = num_pp_layers // self.mca_config.pipeline_model_parallel_size
-                    if self.mca_config.account_for_loss_in_pipeline_split:
-                        num_layers_in_last_stage -= 1
-                    mca_layer_index = mtp_layer_index + (num_layers_in_last_stage - 1)
-                else:
-                    mca_layer_index = mtp_layer_index + (self.mca_config.num_layers - 1)
-                name = (
-                    "decoder.layers."
-                    + str(mca_layer_index)
-                    + (pure_name.replace(".transformer_layer", "") if has_transformer_layer else pure_name)
-                )
-            res[name] = weight
-        return res
+    def revert_mtp_name(self, name):
+        if "mtp" in name:
+            has_transformer_layer = "self_attention" in name or "mlp" in name or "input_layernorm" in name
+            mtp_layer_index = get_layer_index(name, prefix="mtp.layers.")
+            pure_name = remove_weight_prefix(name, prefix="mtp.layers.")
+            # only consider padding mtp for now...
+            mca_layer_index = mtp_layer_index + self.mca_config.num_layers
+            name = (
+                "decoder.layers."
+                + str(mca_layer_index)
+                + (pure_name.replace(".transformer_layer", "") if has_transformer_layer else pure_name)
+            )
+        return name
 
 
 register_config("deepseek_v3", MLAMcaModelConfig)

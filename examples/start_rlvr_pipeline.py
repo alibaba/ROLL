@@ -24,10 +24,9 @@ def main():
 
     print(OmegaConf.to_yaml(cfg, resolve=True))
 
-    ppo_config = from_dict(data_class=RLVRConfig, data=OmegaConf.to_container(cfg, resolve=True))
+    ppo_config: RLVRConfig = from_dict(data_class=RLVRConfig, data=OmegaConf.to_container(cfg, resolve=True))
 
     init()
-
     pipeline = RLVRPipeline(pipeline_config=ppo_config)
 
     pipeline.run()
