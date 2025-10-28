@@ -40,31 +40,44 @@ class timeout:
     def __exit__(self, type, value, traceback):
         signal.alarm(0)
         
-def _extract_after_last_end_think(response: str) -> str:
+def _extract_after_last_end_think(response: str, prompt: str, start_think: str='<think>', end_think: str='</think>') -> str:
     """
     提取字符串中最后一个 "</think>" 标签之后的所有文本。
 
-    校验逻辑：
-    - 如果字符串中包含开标签 "<think>"，直接返回空字符串。
-    - 如果字符串中包含超过一个的闭标签 "</think>"，也直接返回空字符串。
+    校验逻辑会根据 prompt 的结尾而变化：
+    - (1) 如果 prompt 的结尾（去掉换行符后）是以 "<think>" 结尾：
+        - response 中不允许包含开标签 "<think>"。
+        - response 中包含的闭标签 "</think>" 不能超过一个。
+        - 若不满足，则返回空字符串。
+    - (2) 否则（prompt 不以 "<think>" 结尾）：
+        - response 中包含的闭标签 "</think>" 不能超过一个。
+        - 如果 response 中包含开标签 "<think>"，它必须出现在字符串的开头。
+        - 若不满足，则返回空字符串。
 
-    如果校验通过，则执行原有逻辑：
+    如果校验通过，则执行提取逻辑：
     1. 优先按最后一个 '</think>' 分割。
     2. 如果找不到，则回退到按最后一个双换行符 '\n\n' 分割。
     3. 如果都找不到，则返回空字符串。
 
     Args:
         response (str): 输入的完整文本。
+        prompt (str): 用于生成 response 的提示文本。
 
     Returns:
         str: 提取出的文本块（已去除首尾空格），或空字符串。
     """
-    # 如果检测到 "<think>" 或超过一个 "</think>"，直接返回空字符串
-    if "<think>" in response or response.count('</think>') > 1:
-        return ""
-    
+    # 检查 prompt 是否以 <think> 结尾
+    is_prompt_ending_with_think = prompt.rstrip('\n').endswith(start_think)
+
+    if is_prompt_ending_with_think:
+        if start_think in response or response.count(end_think) > 1:
+            return ""
+    else:        
+        if response.count(end_think) > 1 or start_think in response and not response.startswith(start_think):
+            return ""
+
     # 1. 优先尝试按 '</think>' 分割
-    _before_think, sep_think, after_think = response.rpartition('</think>')
+    _before_think, sep_think, after_think = response.rpartition(end_think)
 
     if sep_think:
         # 如果找到了 '</think>'，则返回它后面的部分，并清理首尾空格
@@ -79,10 +92,10 @@ def _extract_after_last_end_think(response: str) -> str:
             # 3. 如果连 '\n\n' 都没找到，则返回空字符串
             return ""
 
-def _hf_verify_math_sample(response, answer, result):
+def _hf_verify_math_sample(response, answer, result, prompt):
     try:
         # 在解析之前，先对模型的原始输出进行预处理
-        cleaned_response = _extract_after_last_end_think(response)
+        cleaned_response = _extract_after_last_end_think(response, prompt)
         """
         --- `parse` 函数完整参数介绍与使用建议 ---
         `parse` 函数用于从文本中提取并解析数学答案，其主要参数如下：
@@ -133,13 +146,13 @@ def _hf_verify_math_sample(response, answer, result):
         result.append((False, "", ""))
 
 
-def hf_verify_math_sample(answer_a, answer_b, timeout_sec=5.0):
+def hf_verify_math_sample(answer_a, answer_b, prompt, timeout_sec=5.0):
     with multiprocessing.Manager() as manager:
         result = manager.list()
         
         p = multiprocessing.Process(
             target=_hf_verify_math_sample,
-            args=(answer_a, answer_b, result)
+            args=(answer_a, answer_b, result, prompt)
         )
         
         p.start()
@@ -219,13 +232,18 @@ class MathRuleRewardWorker(Worker):
         format_rewards = []
         
         response_text_list = self.tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=False)
-        for response, answer in zip(response_text_list, data.non_tensor_batch["ground_truth"]):
+        prompt_text_list = self.tokenizer.batch_decode(data.batch["prompts"], skip_special_tokens=False)
+        for response, answer, prompt in zip(response_text_list, data.non_tensor_batch["ground_truth"], prompt_text_list):
+            
+            prompt = prompt.replace("<|endoftext|>", "").replace("<pad>", "")
             response = response.replace("<|endoftext|>", "").replace("<pad>", "")
+            # self.logger.info(json.dumps({
+            #     "prompt": prompt}, ensure_ascii=False))
             
             try:
                 with timeout(5):
                     correct, extracted_ground_truth, extracted_response = hf_verify_math_sample(
-                        response, f"${answer}$"
+                        response, f"${answer}$", prompt
                     )
             
                 log_data = {
