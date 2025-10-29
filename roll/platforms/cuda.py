@@ -32,6 +32,7 @@ class CudaPlatform(Platform):
         env_vars = {
             # "RAY_DEBUG": "legacy"
             "RAY_get_check_signal_interval_milliseconds": "1",
+            "RAY_CGRAPH_get_timeout": '600',
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             "TORCHINDUCTOR_COMPILE_THREADS": "2",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
