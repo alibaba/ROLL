@@ -11,7 +11,7 @@ from vllm import envs
 from vllm.executor.msgspec_utils import encode_hook
 from vllm.executor.ray_distributed_executor import RayDistributedExecutor, RayWorkerMetaData
 from vllm.executor.ray_utils import RayWorkerWrapper
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.v1.outputs import SamplerOutput
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import make_async, get_ip, get_distributed_init_method, get_open_port
