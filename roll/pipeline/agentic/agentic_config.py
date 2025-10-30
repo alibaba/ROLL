@@ -103,7 +103,7 @@ class AgenticConfig(PPOConfig):
 
         # default worker_cls
         if self.actor_train.worker_cls is None:
-            self.actor_train.worker_cls = "roll.pipeline.base_worker.ActorWorker"
+            self.actor_train.worker_cls = "roll.pipeline.agentic.agentic_actor_worker.ActorWorker"
         if self.actor_infer.worker_cls is None:
             self.actor_infer.worker_cls = "roll.pipeline.base_worker.ActorWorker"
         if self.reference.worker_cls is None:
