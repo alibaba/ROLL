@@ -45,7 +45,7 @@ add_token_level_kl: false
 
 ### 核心参数说明
 
-- `adv_estimator`: 优势估计器类型，设置为 "reinforce"，这是RAFT++算法的核心配置
+- `adv_estimator`: 优势估计器类型，设置为 "grpo"，这是RAFT++算法的核心配置
 - `norm_mean_type`: 奖励归一化均值类型，可选值为 "batch", "group", "running", None，默认值为None
 - `norm_std_type`: 奖励归一化标准差类型，可选值为 "batch", "group", "running", None，默认值为None
 - `whiten_advantages`: 是否对优势值进行白化处理，默认值为 false

@@ -14,7 +14,7 @@ In ROLL, the Reward FL algorithm-specific configuration parameters are as follow
 
 ```yaml
 # reward fl
-learning_rate: 2.5e-6
+learning_rate: 2e-6
 lr_scheduler_type: constant
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 1
@@ -73,7 +73,22 @@ The following parameters related to Wan2_2 are as follows:
 - `Distilled Wan2.2 DiT safetensors`: [lightx2v/Wan2.2-Lightning](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main)
 - `Reward Model`: [deepinsight/insightface](https://github.com/deepinsight/insightface/releases/download/v0.7/antelopev2.zip) 
 
+## Preprocess checkpoints
+- Run `merge_model.py` to merge multiple files of `Official Wan2.2 pipeline` high noise model and low noise model into one file, respectively.
+- Run `merge_lora.py` to merge `Distilled Wan2.2 DiT safetensors` lora to the base model of `Official Wan2.2 pipeline` high noise model and low noise model, respectively.
+
+## Setup environments
+```
+pip install -r requirements_torch260_diffsynth.txt
+```
+
 ## Reference Example
 
 You can refer to the following configuration file to set up Reward FL training:
+
 - `./examples/docs_examples/example_reward_fl.yaml`
+
+Run `run_reward_fl_ds_pipeline.sh` to get start.
+
+## Reference
+[1]: Identity-Preserving Image-to-Video Generation via Reward-Guided Optimization. https://arxiv.org/abs/2510.14255

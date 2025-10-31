@@ -15,7 +15,7 @@
 
 ```yaml
 # reward fl
-learning_rate: 2.5e-6
+learning_rate: 2e-6
 lr_scheduler_type: constant
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 1
@@ -71,10 +71,22 @@ Wan2_2 相关参数如下：
 - `蒸馏 Wan2.2 模型参数`: [lightx2v/Wan2.2-Lightning](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main)
 - `奖励模型`: [deepinsight/insightface](https://github.com/deepinsight/insightface/tree/master/model_zoo) 
 
+## 权重预处理
+- 运行`merge_model.py`来分别合并`Official Wan2.2 pipeline` 高噪模型和低噪模型的多个文件为一个
+- 运行`merge_lora.py`来合并`Distilled Wan2.2 DiT safetensors`蒸馏加速lora分别到`Official Wan2.2 pipeline`高噪模型和低噪模型
+
+## 环境配置
+```
+pip install -r requirements_torch260_diffsynth.txt
+```
+
 ## 参考示例
 
 可以参考以下配置文件来设置 Reward FL 训练：
 
 - `./examples/docs_examples/example_reward_fl.yaml`
 
-这个示例展示了如何配置和运行 Reward FL 训练。
+运行`run_reward_fl_ds_pipeline.sh`快速开始
+
+## 参考文献
+[1]: Identity-Preserving Image-to-Video Generation via Reward-Guided Optimization. https://arxiv.org/abs/2510.14255

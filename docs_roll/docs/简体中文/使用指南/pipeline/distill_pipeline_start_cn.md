@@ -65,7 +65,6 @@
    * `output_dir`：模型检查点和输出文件保存路径
 
 2. **训练控制参数**
-   * `max_steps`：最大训练步数
    * `save_steps`：保存模型检查点的频率
    * `logging_steps`：记录训练指标的频率
    * `resume_from_checkpoint`：是否从检查点继续训练。若想继续训练，请设为其路径；否则设为 `False`。
@@ -82,7 +81,10 @@
    * `adaptive_kl_alpha`：当 `kd_objective` 为 `adaptive_kl` 时，混合前向和反向 KL 的加权因子。
    * `skew_lambda`：在 `skewed_forward_kl` 或 `skewed_reverse_kl` 目标中应用的偏斜系数。
 
-5. **工作进程配置**
+5. **Logits传输配置**
+    * `logits_transfer_backend`: logits传输过程中使用的backend，支持'ipc+nccl','nccl-only','ray'三种模式。其中'ipc+nccl'使用了CudaIPC，在同卡情况下利用共享显存直接传输logits。 在设备不支持ipc的场景下可以选择使用'nccl-only'或者'ray'模式。
+
+6. **工作进程配置**
    每个工作进程（`student`、`teacher`）配置包含：
 
    * **模型参数**（`model_args`）
@@ -90,6 +92,7 @@
      * `dtype`：计算精度（如 `bf16`、`fp16`）
      * ...
    * **训练参数**（`training_args`）
+     * `num_train_epochs`：训练epoch数
      * `learning_rate`：学习率
      * `per_device_train_batch_size`：每个设备的训练批次大小
      * `gradient_accumulation_steps`：梯度累积步数
@@ -180,8 +183,8 @@ bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
 * 特别注意这些配置段：
   * 数据配置：`student.data_args.file_name`
   * 模型配置：`student_pretrain` 和 `teacher_pretrain` 路径（DistillPipeline目前仅支持同类型学生与教师模型，例如学生与教师模型均为 Qwen。）
-  * 分布式策略：每个工作进程的 `strategy_args` 和 `device_mapping`（DistillPipeline目前仅支持学生与教师模型使用相同策略（如学生用 megatron_train，教师用 megatron_infer）且并行配置相同的场景，因为我们使用 CudaIPC 将教师 logits 传递给学生。）
-
+  * 分布式策略：每个工作进程的 `strategy_args` 和 `device_mapping`
+  
 ### 步骤 2：准备环境与依赖
 
 * 确保已安装所有必要依赖：

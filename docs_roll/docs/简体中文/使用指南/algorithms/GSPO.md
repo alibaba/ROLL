@@ -45,7 +45,7 @@ add_token_level_kl: false
 
 ### 核心参数说明
 
-- `adv_estimator`: 优势估计器类型，设置为 "reinforce"
+- `adv_estimator`: 优势估计器类型，设置为 "grpo"
 - `importance_sampling`: 重要性采样方式，设置为 "seq" 表示序列级采样
 - `rollout_batch_size`: 每个rollout_batch_size prompt的数量
 - `num_return_sequences_in_group`: 每个prompt生成的response数量（组大小），每个pipeline step训练的总样本数是(rollout_batch_size * num_return_sequences_in_group)
