@@ -62,7 +62,7 @@ def encode_function(data_i, processor, prompt_key, answer_key, image_key):
             image_out = load_images(image if isinstance(image, (list, tuple)) else [image], timeout=None)
         except Exception as e:
             image_out = [Image.new("RGB", (224, 224), (255, 255, 255))]
-            logger.error(f"Failed to get image: {image}")
+            logger.error(f"Failed to get image due to {e}")
         # since infer-image use pil image as input while train-engine use
         # processed data, process image here to make them use same image
         image_out = process_images(image_out, processor)
