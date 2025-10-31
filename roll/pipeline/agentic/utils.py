@@ -192,7 +192,7 @@ def get_agentic_response_level_mask(data: "DataProto", pipeline_config: AgenticC
 
     final_sample_mask = torch.ones(batch_size, device=response_mask.device)
 
-    if pipeline_config.max_len_mask:
+    if getattr(pipeline_config, "max_len_mask", False):
         # TODO 当前是混合多个的action/state，需要去判别，或者用别的方式过滤
         final_sample_mask = final_sample_mask
         mask_metrics["actor/max_len_mask_ratio"] = 1.0
