@@ -181,6 +181,33 @@ def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticC
 
     return batch
 
+@torch.no_grad()
+def get_agentic_response_level_mask(data: "DataProto", pipeline_config: AgenticConfig):
+    batch_size = data.batch["response_mask"].size(0)
+    mask_metrics = {}
+
+    # mask相关策略
+    data.batch["origin_response_mask"] = data.batch["response_mask"].clone()
+    response_mask = data.batch["response_mask"][:, 1:].clone()
+
+    final_sample_mask = torch.ones(batch_size, device=response_mask.device)
+
+    if pipeline_config.max_len_mask:
+        # TODO 当前是混合多个的action/state，需要去判别，或者用别的方式过滤
+        final_sample_mask = final_sample_mask
+        mask_metrics["actor/max_len_mask_ratio"] = 1.0
+    else:
+        mask_metrics["actor/max_len_mask_ratio"] = 1.0
+
+    expanded_sample_mask = final_sample_mask.unsqueeze(-1).expand_as(response_mask)
+    final_response_mask = response_mask * expanded_sample_mask
+    mask_metrics["actor/final_mask_ratio"] = final_sample_mask.mean().item()
+    mask_metrics["actor/samples_used"] = final_sample_mask.sum().item()
+    mask_metrics["actor/samples_total"] = float(batch_size)
+
+    data.batch["final_response_mask"] = final_response_mask
+    return data, mask_metrics
+
 
 print_only_once = False
 

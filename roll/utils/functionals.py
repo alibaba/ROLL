@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from tensordict import TensorDict
 
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
+from roll.configs.base_config import PPOConfig
 from roll.platforms import current_platform
 from roll.utils.kl_controller import AdaptiveKLController
 from roll.utils.logging import get_logger
@@ -504,7 +505,7 @@ def difficulty_mask(data: "DataProto", n_sample=-1, low_threshold=0.1, high_thre
 
 
 @torch.no_grad()
-def compute_token_reward(data: "DataProto", pipeline_config: RLVRConfig, kl_ctrl: AdaptiveKLController):
+def compute_token_reward(data: "DataProto", pipeline_config: PPOConfig, kl_ctrl: AdaptiveKLController):
     token_level_rewards = expand_to_token_level(data)
     beta = 0
     kld = compute_approx_kl(

@@ -17,7 +17,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.agentic.agentic_config import AgenticConfig, EnvManagerConfig
 from roll.pipeline.agentic.utils import (dump_rollout_render, compute_discounted_returns,
-                                         compute_response_level_rewards, dump_rollout_trajectories)
+                                         compute_response_level_rewards, dump_rollout_trajectories, get_agentic_response_level_mask)
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.functionals import (
@@ -28,6 +28,7 @@ from roll.utils.functionals import (
     RunningMoments,
     compute_clip_fraction,
     agg_loss,
+    compute_token_reward,
 )
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
@@ -206,30 +207,30 @@ class AgenticPipeline(BasePipeline):
 
                     metrics.update(reduce_metrics(old_log_probs.meta_info.pop("metrics", {})))
                 metrics["time/old_log_probs_values"] = cal_old_logpb_timer.last
+            
+                # TODO 当前这个还没用处
+                with Timer(name="cal_response_level_mask", logger=None) as timer:
+                    # TODO 补充完善的过滤要求，不同环境需要维持统一过滤标识
+                    batch, mask_metrics = get_agentic_response_level_mask(batch, self.pipeline_config)
+                    metrics.update(mask_metrics)
+                metrics["time/cal_response_level_mask"] = timer.last
 
-                with Timer(name="adv", logger=None) as timer:
+                with Timer(name="cal_response_norm_rewards", logger=None) as timer:
                     # Rewards need to be processed after grouping
                     # We can group by tag(env_type)/traj_group_id(group)/batch(rollout_batch)... to compute rewards / advantages
                     # The compute_response_level_rewards function injects a response_level_rewards key into batch.batch.
                     batch = compute_response_level_rewards(batch=batch, pipeline_config=self.pipeline_config)
                     metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
+                metrics["time/cal_norm_rewards"] = timer.last
 
-                    if self.pipeline_config.reward_clip:
-                        reward_clip_frac = compute_clip_fraction(
-                            values=batch.batch["response_level_rewards"],
-                            clip_max=self.pipeline_config.reward_clip,
-                            clip_min=-self.pipeline_config.reward_clip,
-                        )
-                        metrics["critic/reward_clip_frac"] = reward_clip_frac
-                        batch.batch["response_level_rewards"] = torch.clamp(
-                            batch.batch["response_level_rewards"],
-                            min=-self.pipeline_config.reward_clip,
-                            max=self.pipeline_config.reward_clip,
-                        )
-
+                with Timer(name="cal_token_reward", logger=None) as timer:
                     # Expand compute_response_level_rewards and add kl_penalty.
-                    batch, kl_metrics = apply_kl_penalty(data=batch, kl_ctrl=self.kl_ctrl, kl_penalty=self.pipeline_config.kl_penalty)
+                    # batch, kl_metrics = apply_kl_penalty(data=batch, kl_ctrl=self.kl_ctrl, kl_penalty=self.pipeline_config.kl_penalty)
+                    batch, token_level_metrics = compute_token_reward(batch, self.pipeline_config, self.kl_ctrl)
+                    metrics.update(token_level_metrics)
+                metrics["time/cal_token_reward"] = timer.last
 
+                with Timer(name="compute_advantage", logger=None) as timer:
                     # Is the advantage calculated globally across the batch, or within each group?
                     batch = compute_advantage(
                         data=batch,
@@ -241,8 +242,6 @@ class AgenticPipeline(BasePipeline):
                         whiten_rewards=self.pipeline_config.whiten_rewards,
                     )
                     metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
-
-                metrics.update(kl_metrics)
                 metrics["time/adv"] = timer.last
 
                 if self.pipeline_config.adv_estimator == "gae":
