@@ -17,7 +17,7 @@ checkpoint_config:
 
 # track_with: wandb
 # tracker_kwargs:
-#  api_key: 0f083c0ca57bbbccf243ef647f509e27f4ebf19b
+#  api_key: xxx
 #  project: roll_examples
 #  name: ${exp_name}
 #  notes: roll_examples
