@@ -198,7 +198,7 @@ If you use ROLL in your research or project, please consider citing us:
 -----
 
 ## 🤝 About [ROLL Team]
-ROLL is a project jointly developed by Taotian Future Life Lab and Aicheng Technology, with a strong emphasis on pioneering the future of Reinforcement Learning (RL). Our mission is to explore and shape innovative forms of future living powered by advanced RL technologies. If you are passionate about the future of RL and want to be part of its evolution, we warmly welcome you to join us! Learn more about the ROLL Team through our official channels below👇
+ROLL is a project jointly developed by Taotian Future Life Lab and Alibaba AI Engine Team, with a strong emphasis on pioneering the future of Reinforcement Learning (RL). Our mission is to explore and shape innovative forms of future living powered by advanced RL technologies. If you are passionate about the future of RL and want to be part of its evolution, we warmly welcome you to join us! Learn more about the ROLL Team through our official channels below👇
 
 <a href="./assets/roll_wechat.png" target="_blank">
   <img src="https://img.shields.io/badge/WeChat-green?logo=wechat" alt="WeChat QR">
