@@ -149,6 +149,23 @@ class RLVRConfig(PPOConfig):
     importance_sampling: Literal["token", "seq"] = (
         field(default="token", metadata={"help": "policy importance sampling"})
     )
+    use_rollout_importance_sampling_ratio: bool = field(default=False, metadata={"help": "apply train/infer ratio as token-level loss weight"})
+    rollout_importance_sampling_ratio_upper_bound: float = field(default=1.2)
+
+    train_infer_ratio_mask: bool = field(default=False, metadata={"help": "apply train/infer ratio as token-level response mask"})
+    train_infer_ratio_threshold_low: float = field(default=0.8)
+    train_infer_ratio_threshold_high: float = field(default=1.2)
+    train_infer_diff_mask: bool = field(default=False, metadata={"help": "apply train-infer diff as token-level response mask"})
+    train_infer_diff_threshold_low: float = field(default=-0.2)
+    train_infer_diff_threshold_high: float = field(default=0.2)
+
+    train_infer_ratio_seq_mask: bool = field(default=False, metadata={"help": "apply train/infer ratio as sequence-level response mask"})
+    train_infer_ratio_seq_threshold_low: float = field(default=0.8)
+    train_infer_ratio_seq_threshold_high: float = field(default=1.2)
+    train_infer_diff_seq_mask: bool = field(default=False, metadata={"help": "apply train-infer diff as sequence-level response mask"})
+    train_infer_diff_seq_threshold_low: float = field(default=-0.2)
+    train_infer_diff_seq_threshold_high: float = field(default=0.2)
+
     val_greedy: bool = field(default=False, metadata={"help": "Use greedy for validation"})
     val_n_sample: int = field(default=1, metadata={"help": "Number of samples for validation"})
     max_len_mask: bool = field(default=False)

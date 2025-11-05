@@ -55,14 +55,40 @@ class ActorWorker(BaseActorWorker):
             log_probs=log_probs, log_probs_base=old_log_probs, action_mask=response_mask, kl_penalty="kl"
         )
 
+        train_infer_ratio = (old_log_probs - infer_log_probs).exp()
+        train_infer_diff = old_log_probs.exp() - infer_log_probs.exp()
+        train_infer_ratio_seq = masked_mean(old_log_probs - infer_log_probs, response_mask, dim=-1).exp().unsqueeze(-1).expand_as(train_infer_ratio)
+        train_infer_diff_seq = masked_mean(old_log_probs.exp() - infer_log_probs.exp(), response_mask, dim=-1).unsqueeze(-1).expand_as(train_infer_diff)
+
+        train_infer_ratio_mask_mean = 1.0
+        train_infer_diff_mask_mean = 1.0
+        train_infer_ratio_seq_mask_mean = 1.0
+        train_infer_diff_seq_mask_mean = 1.0
+
+        if self.pipeline_config.train_infer_ratio_mask:
+            train_infer_ratio_mask = (train_infer_ratio <= self.pipeline_config.train_infer_ratio_threshold_high).float() * (train_infer_ratio >= self.pipeline_config.train_infer_ratio_threshold_low).float()
+            train_infer_ratio_mask_mean = masked_mean(train_infer_ratio_mask, final_response_mask, dim=-1).mean().detach().item()
+            final_response_mask = final_response_mask * train_infer_ratio_mask
+        if self.pipeline_config.train_infer_diff_mask:
+            train_infer_diff_mask = (train_infer_diff <= self.pipeline_config.train_infer_diff_threshold_high).float() * (train_infer_diff >= self.pipeline_config.train_infer_diff_threshold_low).float()
+            train_infer_diff_mask_mean = masked_mean(train_infer_diff_mask, final_response_mask, dim=-1).mean().detach().item()
+            final_response_mask = final_response_mask * train_infer_diff_mask
+
+        if self.pipeline_config.train_infer_ratio_seq_mask:
+            train_infer_ratio_seq_mask = (train_infer_ratio_seq <= self.pipeline_config.train_infer_ratio_seq_threshold_high).float() * (train_infer_ratio_seq >= self.pipeline_config.train_infer_ratio_seq_threshold_low).float()
+            train_infer_ratio_seq_mask_mean = masked_mean(train_infer_ratio_seq_mask, final_response_mask, dim=-1).mean().detach().item()
+            final_response_mask = final_response_mask * train_infer_ratio_seq_mask
+        if self.pipeline_config.train_infer_diff_seq_mask:
+            train_infer_diff_seq_mask = (train_infer_diff_seq <= self.pipeline_config.train_infer_diff_seq_threshold_high).float() * (train_infer_diff_seq >= self.pipeline_config.train_infer_diff_seq_threshold_low).float()
+            train_infer_diff_seq_mask_mean = masked_mean(train_infer_diff_seq_mask, final_response_mask, dim=-1).mean().detach().item()
+            final_response_mask = final_response_mask * train_infer_diff_seq_mask
+
         if self.pipeline_config.importance_sampling == "token":
             ratio = (log_probs - old_log_probs).exp()
-            train_infer_ratio = (log_probs - infer_log_probs).exp()
-            train_infer_diff = log_probs.exp() - infer_log_probs.exp()
         elif self.pipeline_config.importance_sampling == "seq":
             log_ratio = log_probs - old_log_probs
             masked_log_ratio = masked_mean(log_ratio, final_response_mask, dim=-1)
-            ratio = masked_log_ratio.exp().unsqueeze(-1).expand_as(log_ratio)
+            ratio = masked_log_ratio.exp().unsqueeze(-1).expand_as(log_ratio)        
 
         pg_clip_low = self.pipeline_config.pg_clip_low if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip
         pg_clip_high = self.pipeline_config.pg_clip_high if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip
@@ -70,9 +96,14 @@ class ActorWorker(BaseActorWorker):
         surr2 = ratio.clamp(1 - pg_clip_low, 1 + pg_clip_high) * advantages
 
         loss = -torch.min(surr1, surr2)
+
         if self.pipeline_config.dual_clip_loss:
             dual_clip_loss = -torch.max(-loss, (1 + self.pipeline_config.pg_clip * 2) * advantages)
             loss = torch.where(advantages < 0, dual_clip_loss, loss)
+
+        if self.pipeline_config.use_rollout_importance_sampling_ratio:
+            rollout_importance_sampling_clip = (train_infer_ratio > self.pipeline_config.rollout_importance_sampling_ratio_upper_bound).float()
+            loss = train_infer_ratio.clamp(0, self.pipeline_config.rollout_importance_sampling_ratio_upper_bound) * loss
 
         weighted_pg_loss = agg_loss(loss_mat=loss, loss_mask=final_response_mask,
                                     loss_agg_mode=self.pipeline_config.loss_agg_mode,
@@ -124,8 +155,12 @@ class ActorWorker(BaseActorWorker):
         train_infer_prob_metric = {
             "actor/train_infer_ratio_mean": masked_mean(train_infer_ratio, response_mask, dim=-1).mean().detach().item(),
             "actor/train_infer_diff_mean": masked_mean(train_infer_diff, response_mask, dim=-1).mean().detach().item(),
+            "actor/train_infer_ratio_mask_mean": train_infer_ratio_mask_mean,
+            "actor/train_infer_diff_mask_mean": train_infer_diff_mask_mean,
+            "actor/train_infer_ratio_seq_mask_mean": train_infer_ratio_seq_mask_mean,
+            "actor/train_infer_diff_seq_mask_mean": train_infer_diff_seq_mask_mean,
         }
-        
+
         loss_metric = {
             "actor/ppo_ratio_high_clipfrac": clipped_high.mean().detach().item(),
             "actor/ppo_ratio_low_clipfrac": clipped_low.mean().detach().item(),
@@ -136,6 +171,9 @@ class ActorWorker(BaseActorWorker):
             "actor/clipfrac": agg_loss(loss_mat=torch.lt(surr2, surr1).float(), loss_mask=response_mask,
                                 loss_agg_mode=self.pipeline_config.loss_agg_mode, loss_scale=loss_scale).detach().item(),
         } 
+
+        if self.pipeline_config.use_rollout_importance_sampling_ratio:
+            loss_metric["actor/rollout_importance_sampling_clip"] = rollout_importance_sampling_clip.mean().detach().item()
 
         pg_metrics = {
             "actor/pg_loss": original_pg_loss.detach().item(),
