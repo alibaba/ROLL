@@ -72,3 +72,5 @@ class GeneratingArguments:
     def __post_init__(self):
         if self.stop_strings is not None:
             self.stop_strings = list(self.stop_strings)
+        if self.num_beams > 1:
+            self.num_return_sequences = self.num_beams

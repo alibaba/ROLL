@@ -433,7 +433,7 @@ class RLVRPipeline(BasePipeline):
         actor_train_timer = _Timer(window_size=5)
 
         pre_step_total_time = 0
-        if self.pipeline_config.async_pipeline:
+        if self.pipeline_config.async_pipeline and self.pipeline_config.generate_opt_level == 1:
             for reward_cluster in self.rewards.values():
                 reward_cluster.load_states()
 
@@ -460,7 +460,7 @@ class RLVRPipeline(BasePipeline):
                 self.actor_train.offload_states(blocking=True)
 
                 with Timer(name="step_stop_server", logger=None) as step_stop_server_timer:
-                    if self.pipeline_config.async_pipeline and not first_step:
+                    if self.pipeline_config.async_pipeline and not first_step and self.pipeline_config.generate_opt_level == 1:
                         scheduler_refs = []
                         for scheduler in self.generate_schedulers.values():
                             scheduler_refs.append(scheduler.pause_sampling.remote(data=batch))
@@ -487,7 +487,9 @@ class RLVRPipeline(BasePipeline):
                     Timer(name="step_generate", logger=None) as step_generate_timer,
                 ):
                     domain_batches = {}
-                    self.actor_infer.start_server(data=DataProto(meta_info=batch.meta_info))
+                    if self.pipeline_config.generate_opt_level == 1:
+                        self.actor_infer.start_server(data=DataProto(meta_info=batch.meta_info))
+                        batch.meta_info["is_offload_states"] = False
                     if self.pipeline_config.async_pipeline:
                         if should_eval:
                             # 为Validation创建独立的DataProto
@@ -508,7 +510,6 @@ class RLVRPipeline(BasePipeline):
                         for reward_cluster in self.rewards.values():
                             reward_cluster.load_states()
 
-                    batch.meta_info["is_offload_states"] = False
                     scheduler_refs = {}
                     for domain, scheduler in self.generate_schedulers.items():
                         scheduler_refs[domain] = scheduler.get_batch.remote(
@@ -524,7 +525,7 @@ class RLVRPipeline(BasePipeline):
                     dump_rollout_to_specific_path(self.pipeline_config.rollout_dump_dir, global_step, generate_output, self.tokenizer)
                     generate_output.meta_info.pop("is_offload_states", None)
 
-                    if not self.pipeline_config.async_pipeline:
+                    if not self.pipeline_config.async_pipeline and self.pipeline_config.generate_opt_level == 1:
                         for reward_cluster in self.rewards.values():
                             reward_cluster.offload_states()
                         gen_metrics = self.actor_infer.stop_server()
@@ -536,7 +537,7 @@ class RLVRPipeline(BasePipeline):
                 batch = generate_output
                 batch.meta_info["global_step"] = global_step
 
-            
+
 
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                     if self.is_lora:
@@ -546,7 +547,7 @@ class RLVRPipeline(BasePipeline):
                     else:
                         if self.pipeline_config.reference.use_dynamic_batching_in_infer:
                             batch, dynamic_batching_metrics = dynamic_batching_shard(
-                                batch, 
+                                batch,
                                 self.reference.dp_size,
                                 self.pipeline_config.reference.max_tokens_per_microbatch_in_infer,
                                 self.pipeline_config.reference.sequence_length_round_in_infer,
@@ -567,7 +568,7 @@ class RLVRPipeline(BasePipeline):
                         values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
                     if self.pipeline_config.actor_train.use_dynamic_batching_in_infer:
                         batch, dynamic_batching_metrics = dynamic_batching_shard(
-                            batch, 
+                            batch,
                             self.actor_train.dp_size,
                             self.pipeline_config.actor_train.max_tokens_per_microbatch_in_infer,
                             self.pipeline_config.actor_train.sequence_length_round_in_infer,
@@ -689,7 +690,7 @@ class RLVRPipeline(BasePipeline):
                             # update actor
                             if self.pipeline_config.actor_train.use_dynamic_batching_in_train:
                                 batch, dynamic_batching_metrics = dynamic_batching_shard(
-                                    batch, 
+                                    batch,
                                     self.actor_train.dp_size,
                                     self.pipeline_config.actor_train.max_tokens_per_microbatch_in_train,
                                     self.pipeline_config.actor_train.sequence_length_round_in_train,
@@ -777,7 +778,7 @@ class RLVRPipeline(BasePipeline):
                 self.val_generate_scheduler.get_batch.remote(data=batch, batch_size=len(self.val_dataset)),
                 timeout=self.pipeline_config.rpc_timeout,
             )
-            if not self.pipeline_config.async_pipeline:
+            if not self.pipeline_config.async_pipeline and self.pipeline_config.generate_opt_level == 1:
                 self.actor_infer.stop_server()
                 for reward_cluster in self.rewards.values():
                     reward_cluster.offload_states()

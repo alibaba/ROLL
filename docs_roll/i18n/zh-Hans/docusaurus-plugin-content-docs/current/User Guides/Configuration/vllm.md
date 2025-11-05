@@ -74,6 +74,21 @@ actor_infer:
 
 这种设计允许不同组件根据其需求选择最适合的推理引擎。
 
+### beam_search 配置方式
+RLVRPipeline 支持vllm beam_search 的生成方式，配置方式如下：
+```yaml
+generate_opt_level: 0 # 退化为batch_generate生成方式，generate_opt_level=1是prompt粒度并行方式
+num_return_sequences_in_group: 8 
+actor_infer:
+  generating_args:
+    num_beams: ${num_return_sequences_in_group}
+    num_return_sequences: ${num_return_sequences_in_group}
+```
+注意：
+- generating_args.num_beams 和 generating_args.num_return_sequences 必须设置为相同的值。
+- validate中配置generating_args也是相同的方式。
+
+
 ## 性能优化建议
 
 1. **内存管理**：

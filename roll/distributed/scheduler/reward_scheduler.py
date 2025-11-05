@@ -12,7 +12,6 @@ from roll.utils.logging import get_logger
 logger = get_logger()
 
 
-@ray.remote
 class RewardScheduler:
     """
     reward 服务化和generate不同, request接口：

@@ -13,8 +13,9 @@ import torch.distributed as dist
 from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
 from vllm import RequestOutput, SamplingParams
+from vllm.beam_search import BeamSearchOutput
 from vllm.lora.request import LoRARequest
-from vllm.sampling_params import RequestOutputKind
+from vllm.sampling_params import RequestOutputKind, BeamSearchParams
 from vllm.utils import random_uuid
 
 from roll.distributed.executor.worker import Worker
@@ -124,6 +125,18 @@ class VllmStrategy(InferenceStrategy):
         pass
 
     def generate(self, batch: DataProto, generation_config) -> torch.Tensor:
+        # Check if beam search is requested
+        if self._should_use_beam_search(generation_config):
+            return self._generate_with_beam_search(batch, generation_config)
+        else:
+            return self._generate_standard(batch, generation_config)
+
+    def _should_use_beam_search(self, generation_config) -> bool:
+        """Check if beam search should be used based on generation_config."""
+        return generation_config.get("num_beams", 1) > 1 or generation_config.get("use_beam_search", False)
+
+    def _generate_standard(self, batch: DataProto, generation_config) -> torch.Tensor:
+        """Standard generate method for non-beam search cases."""
         sampling_params = create_sampling_params_for_vllm(gen_kwargs=generation_config)
 
         input_ids = batch.batch["input_ids"]  # (bs, prompt_length)
@@ -166,6 +179,63 @@ class VllmStrategy(InferenceStrategy):
         # (bs * num_return_sequences, input_len + max_response_len)
         output = concatenate_input_and_output(
             input_ids=input_ids, output_ids=output_ids, num_return_sequences=sampling_params.n
+        )
+
+        return output
+
+    def _generate_with_beam_search(self, batch: DataProto, generation_config) -> torch.Tensor:
+        """Generate using beam search method."""
+        # Create beam search parameters
+        beam_params = BeamSearchParams(
+            beam_width=generation_config.get("num_beams", 1),
+            max_tokens=generation_config.get("max_new_tokens", 50),
+            temperature=generation_config.get("temperature", 0.0),
+            ignore_eos=generation_config.get("ignore_eos", False),
+            length_penalty=generation_config.get("length_penalty", 1.0),
+            include_stop_str_in_output=generation_config.get("include_stop_str_in_output", False),
+        )
+
+        input_ids = batch.batch["input_ids"]  # (bs, prompt_length)
+        attention_mask = batch.batch["attention_mask"]  # left-padded attention_mask
+
+        # Prepare prompts for beam_search
+        if "multi_modal_data" in batch.non_tensor_batch:
+            # For multimodal data, we need to handle it differently
+            # This is a simplified approach - may need refinement based on actual multimodal format
+            prompts = batch.non_tensor_batch["multi_modal_data"]
+        else:
+            # Convert to token lists format expected by beam_search
+            token_lists = gather_unpadded_input_ids(
+                input_ids=input_ids, attention_mask=attention_mask
+            )
+            # Convert to TokensPrompt format expected by vLLM beam_search
+            prompts = [{"prompt_token_ids": token_ids} for token_ids in token_lists]
+
+        # Call beam_search method
+        beam_search_outputs = self.model.beam_search(
+            prompts=prompts,
+            params=beam_params,
+        )
+
+        generated_token_ids = []
+        token_ids = [prompt['prompt_token_ids'] for prompt in prompts]
+        for batch_idx, output in enumerate(beam_search_outputs):
+            # Each output contains beam_width sequences
+            for beam_idx, sequence in enumerate(output.sequences):
+                # Get prompt length for this input
+                prompt_length = len(token_ids[batch_idx])
+                # Extract only the generated tokens (exclude prompt)
+                generated_tokens = sequence.tokens[prompt_length:]
+                generated_token_ids.append(torch.tensor(generated_tokens, device=input_ids.device))
+
+        # Pad the sequences
+        output_ids = pad_sequence(generated_token_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
+
+        # Concatenate input and output
+        output = concatenate_input_and_output(
+            input_ids=input_ids,
+            output_ids=output_ids,
+            num_return_sequences=beam_params.beam_width
         )
 
         return output
@@ -383,20 +453,6 @@ def create_sampling_params_for_vllm(gen_kwargs):
         assert gen_kwargs["num_return_sequences"] == 1, (
             "fetch_output only supports num_return_sequences=1 or output_kind=FINAL"
         )
-
-    if gen_kwargs["num_beams"] > 1:
-        return SamplingParams(
-            max_tokens=gen_kwargs["max_new_tokens"],
-            stop_token_ids=gen_kwargs["eos_token_id"],
-            repetition_penalty=gen_kwargs["repetition_penalty"],
-            n=gen_kwargs["num_return_sequences"],
-            best_of=gen_kwargs["num_beams"],
-            use_beam_search=True,
-            stop=gen_kwargs["stop_strings"],
-            logprobs=gen_kwargs.get("logprobs", 0),
-            output_kind=output_kind,
-            include_stop_str_in_output=gen_kwargs.get("include_stop_str_in_output", True),
-        )
     return SamplingParams(
         max_tokens=gen_kwargs["max_new_tokens"],
         temperature=gen_kwargs["temperature"],
@@ -410,35 +466,3 @@ def create_sampling_params_for_vllm(gen_kwargs):
         output_kind=output_kind,
         include_stop_str_in_output=gen_kwargs.get("include_stop_str_in_output", True),
     )
-
-
-def compare_sampling_params(params1: SamplingParams, params2: SamplingParams) -> bool:
-    # 只比较采样参数的配置
-    param_attrs = [
-        "temperature",
-        "top_p",
-        "top_k",
-        "max_tokens",
-        "n",
-        "stop_token_ids",
-        "presence_penalty",
-        "frequency_penalty",
-        "repetition_penalty",
-        "min_p",
-        "best_of",
-        "stop",
-        "ignore_eos",
-        "use_beam_search",
-        "best_of",
-        "use_beam_search",
-    ]
-
-    # 比较每个采样参数
-    for attr in param_attrs:
-        if hasattr(params1, attr) and hasattr(params2, attr):
-            val1 = getattr(params1, attr)
-            val2 = getattr(params2, attr)
-            if val1 != val2:
-                print(f"采样参数 {attr} 不同: {val1} != {val2}")
-                return False
-    return True

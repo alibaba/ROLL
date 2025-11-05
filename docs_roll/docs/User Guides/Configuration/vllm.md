@@ -74,6 +74,20 @@ In the configuration example, we can see:
 
 This design allows different components to choose the most suitable inference engine according to their needs.
 
+### beam_search Configuration
+RLVRPipeline supports vllm beam_search generation method, configured as follows:
+```yaml
+generate_opt_level: 0 # Degrades to batch_generate generation method, generate_opt_level=1 is prompt-level parallel method
+num_return_sequences_in_group: 8 
+actor_infer:
+  generating_args:
+    num_beams: ${num_return_sequences_in_group}
+    num_return_sequences: ${num_return_sequences_in_group}
+```
+Note:
+- generating_args.num_beams and generating_args.num_return_sequences must be set to the same value.
+- The generating_args configuration in validate is also configured in the same way.
+
 ## Performance Optimization Recommendations
 
 1. **Memory Management**:

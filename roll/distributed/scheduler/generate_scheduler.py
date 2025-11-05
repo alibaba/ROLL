@@ -24,8 +24,9 @@ import json
 import os
 
 from roll.distributed.executor.cluster import Cluster
-from roll.distributed.scheduler.protocol import DataProto, collate_fn
-from roll.models.model_providers import default_tokenizer_provider
+from roll.distributed.scheduler.protocol import DataProto, collate_fn, pad_dataproto_to_divisor, unpad_dataproto
+from roll.distributed.scheduler.reward_scheduler import RewardScheduler
+from roll.models.model_providers import default_tokenizer_provider, default_processor_provider
 from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.functionals import (
     postprocess_generate,
@@ -365,6 +366,7 @@ class DynamicSamplingScheduler:
         self.exception_queue = queue.Queue()
         self.running = False
         self.dataset_epoch = 0
+        self.reward_scheduler = RewardScheduler()
 
         # Flow control measures. max_running_requests limits the maximum number of concurrent requests for each dp.
         # max_additional_running_prompts limits the number of prompts running simultaneously to avoid excessive consumption of prompts.
@@ -484,6 +486,54 @@ class DynamicSamplingScheduler:
             mininterval=int(self.batch_size * 0.1) + 1,
         )
 
+    def get_batch_opt_level_0(self, data: DataProto, batch_size: int) -> DataProto:
+        completed_data: List[DataProto] = []
+        query_use_count = 0
+
+        while len(completed_data) < batch_size:
+            data_item_list = [self.get_next_dataset_item() for _ in range(batch_size)]
+            collect_data = self.collect_fn(data_item_list)
+            request_data: DataProto = DataProto.from_single_dict(collect_data, meta_info=data.meta_info)
+            request_data.batch["prompt_id"] = torch.arange(request_data.batch.batch_size[0], device=request_data.batch.device)
+
+            gen_batch = request_data.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
+            gen_batch.meta_info = request_data.meta_info
+            num_return_sequences = self.generation_config["num_return_sequences"]
+            request_data = request_data.repeat(repeat_times=num_return_sequences)
+
+            # Pad gen_batch to be divisible by dp_size to avoid errors
+            gen_batch_padded, pad_size = pad_dataproto_to_divisor(gen_batch, self.actor_cluster.dp_size)
+            batch: DataProto = self.actor_cluster.generate(gen_batch_padded)
+            batch = unpad_dataproto(batch, pad_size * num_return_sequences)
+
+            batch.union(other=request_data)
+            batch.rename(old_keys="prompt_id", new_keys="origin_prompt_id")
+            batch_rewards = self.reward_scheduler.compute_rewards(data=batch, reward_clusters=self.reward_clusters, pipeline_config=self.pipeline_config)
+            metrics = batch.meta_info.pop("metrics", {})
+            metrics.update(batch_rewards.meta_info.pop("metrics", {}))
+
+            batch.union(other=batch_rewards)
+
+            batch.meta_info["metrics"] = metrics
+            batch_grouped: Dict[str, DataProto] = batch.group_by("origin_prompt_id")
+            for prompt_id, batch_item in batch_grouped.items():
+                if self.query_filter_fn([batch_item], self.pipeline_config):
+                    completed_data.append(batch_item)
+                else:
+                    self.query_filter_count += 1
+            query_use_count += batch_size
+
+        batch = DataProto.concat(completed_data[: self.batch_size])
+        batch.meta_info["metrics"] = {
+            f"scheduler/query_filter_count": self.query_filter_count,
+            f"scheduler/response_filter_count": self.response_filter_count,
+            f"scheduler/collect_query_count": self.batch_size,
+            f"scheduler/query_use_count": query_use_count,
+        }
+        self.reset_status()
+        return batch
+
+
     def get_batch(self, data: DataProto, batch_size: int) -> DataProto:
         """
         从dataset里，按给定策略sample batch
@@ -493,8 +543,12 @@ class DynamicSamplingScheduler:
         self.batch_size = batch_size
         self.reset_status()
         self.running = True
-        prompt_id_counter = itertools.count()
         self.generation_config = copy.deepcopy(data.meta_info["generation_config"])
+
+        if self.pipeline_config.generate_opt_level == 0:
+            return self.get_batch_opt_level_0(data, batch_size)
+
+        prompt_id_counter = itertools.count()
         num_return_sequences = self.generation_config["num_return_sequences"]
         while True:
             if (
@@ -538,11 +592,7 @@ class DynamicSamplingScheduler:
                     if int(os.environ.get("REPORT_LENGTH_AND_REWARDS", "0")):
                         self.prompt_id_2_hash_str[prompt_id] = base64.urlsafe_b64encode(prompt_digest).decode().rstrip('=') # prompt_id 对应 unique prompt
                     self.requests_buffers[req.meta_info["request_id"]] = req
-                    ray.get(
-                        self.actor_cluster.workers[dp_rank].add_request.remote(
-                            command=GenerateRequestType.ADD, data=req
-                        )
-                    )
+                    self.actor_cluster.workers[dp_rank].add_request.remote(command=GenerateRequestType.ADD, data=req)
                     req.meta_info.pop("response_callback_fn")
                     self.load_balance_coordinator[dp_rank] += 1
                     self.dp_fetch_count[dp_rank] += 1
@@ -605,6 +655,10 @@ class DynamicSamplingScheduler:
             # call reward
             # reward worker得能支持单条数据计算, dynamic sampling对需要batch计算reward的需要注意...
             # 多域的时候,llm as judge, 需要单独为reward worker分配gpu
+
+            # set rollout id
+            batch.non_tensor_batch["rollout_id"] = np.array([str(uuid.uuid4()) for _ in range(output_count)], dtype=object)
+
             rewards: DataProto = ray.get(reward_worker.compute_rewards.remote(batch))
             batch.union(rewards)
 
@@ -844,6 +898,9 @@ class RequestScheduler:
         pad_token_id = response_data.meta_info["pad_token_id"]
         output_token_ids = response_data.meta_info["output_token_ids"]
         output_tokens = [torch.tensor(token_ids) for token_ids in output_token_ids]
+
+        output_logprobs = response_data.meta_info.get("output_logprobs", None)
+
         output_tensor = pad_sequence(output_tokens, batch_first=True, padding_value=pad_token_id)
         output_tensor = concatenate_input_and_output(
             input_ids=data.batch["input_ids"], output_ids=output_tensor, num_return_sequences=len(output_tokens)
