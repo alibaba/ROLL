@@ -233,7 +233,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         if inputs is None:
             inputs = self.forward_preprocess(data)
 
-        face_embeddings = data['face_embeddings'].unsqueeze(0).to(device=self.pipe.device, dtype=self.pipe.torch_dtype)
+        face_embeddings = inputs['face_embeddings'].to(device=self.pipe.device, dtype=self.pipe.torch_dtype)
 
         # step1: forward latents + vae decode
         video_decoded, kl_loss = self.pipe.training_loss(**inputs)
