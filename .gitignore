@@ -1,4 +1,8 @@
+# Ignore all png files
 *.png
+
+# But allow png files in static/img directory
+!docs_roll/static/img/*.png
 *.pyc
 */checkpoint_dir
 */dataset

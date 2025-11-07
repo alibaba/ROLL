@@ -1,5 +1,5 @@
 import React from 'react';
-import { Avatar, Button, ConfigProvider, theme } from 'antd';
+import { Avatar, Button, ConfigProvider, theme, Image } from 'antd';
 import { SunOutlined, MoonOutlined, GlobalOutlined, ExportOutlined } from '@ant-design/icons';
 import clsx from 'clsx';
 import { useThemeConfig } from '@docusaurus/theme-common';
@@ -25,7 +25,7 @@ export default function Navbar() {
           {/* 左侧 Logo 和标题 */}
           <div className={clsx(styles.logoWrap, 'navbar__items')} onClick={() => history.push('/ROLL/')}>
             <div className={styles.logo}>
-              <Avatar size={40} src={useBaseUrl(logo?.src)}></Avatar>
+              <Image height={32} width={40} src={useBaseUrl(logo?.src)} alt="ROLL" preview={false} />
             </div>
             <div>
               <div className={styles.title}>

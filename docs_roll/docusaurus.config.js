@@ -9,7 +9,7 @@ const darkTheme = themes.dracula;
 const config = {
   title: 'ROLL',
   // tagline: 'Dinosaurs are cool',
-  favicon: 'img/logo.png',
+  favicon: 'https://img.alicdn.com/imgextra/i4/O1CN01bo6EZl2192CAIjFwE_!!6000000006941-2-tps-465-367.png',
 
   // Set the production url of your site here
   url: 'https://alibaba.github.io',
