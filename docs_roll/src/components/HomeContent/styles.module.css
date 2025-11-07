@@ -2,6 +2,9 @@
   .img {
     filter: var(--dark-image-reverse-filter);
   }
+  .whiteImg {
+    filter: var(--white-image-reverse-filter);
+  }
   .subTitle {
     font-size: 14px;
     line-height: 22px;
@@ -36,6 +39,10 @@
   }
   .btn, .github {
     border-radius: 20px;
+  }
+  .btn {
+    background-color: #fff;
+    color: rgba(0, 0, 0, 0.88);
   }
   .github {
     background-color: transparent;
