@@ -146,6 +146,8 @@ class AgenticConfig(PPOConfig):
         if self.val_batch_size < 0:
             self.val_env_manager.max_traj_per_env = sys.maxsize
         else:
+            assert self.val_batch_size % val_env_num == 0, f"val_batch_size {self.val_batch_size} must be divisible by val_env_num {val_env_num}, equal best"
+
             traj_per_env = (self.val_batch_size + val_env_num - 1) // val_env_num
             if self.val_env_manager.max_traj_per_env < 0:
                 self.val_env_manager.max_traj_per_env = traj_per_env
