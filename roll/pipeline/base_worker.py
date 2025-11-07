@@ -26,6 +26,7 @@ from roll.utils.functionals import (
     GenerateRequestType,
     agg_loss,
 )
+from roll.utils.offload_nccl import reload_process_groups
 from roll.utils.offload_states import OffloadStateType
 from roll.utils.dynamic_batching import make_mini_batch_iter_for_dynamic_batching
 from roll.platforms import current_platform
@@ -218,8 +219,7 @@ class ActorWorker(Worker):
     def compute_log_probs(self, data: DataProto):
         """
         return DataProto.from_dict(tensors={'log_probs': output})
-        """
-        data = self.strategy.get_data_input(data)
+        """     
         global_step = data.meta_info.get("global_step", 0)
         is_offload_states = data.meta_info.get("is_offload_states", True)
         metrics = {}
@@ -230,6 +230,7 @@ class ActorWorker(Worker):
             is_offload_states=is_offload_states,
             load_kwargs={"include": [OffloadStateType.model_params]},
         ):
+            data = self.strategy.get_data_input(data)
             data = data.to(current_platform.device_type)
             data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
             with torch.no_grad():
@@ -334,6 +335,8 @@ class ActorWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_checkpoint(self, global_step):
+        if self.worker_config.offload_nccl:
+            reload_process_groups()
         with Timer("do_checkpoint") as total_timer:
             ckpt_id = f"checkpoint-{global_step}"
 

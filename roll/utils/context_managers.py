@@ -14,6 +14,7 @@ from ray._private import profiling
 
 from roll.platforms import current_platform
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.offload_nccl import reload_process_groups, destroy_process_groups
 from roll.utils.logging import get_logger, is_roll_debug_mode
 
 
@@ -31,10 +32,11 @@ def log_gpu_memory_usage(head: str, logger: logging.Logger = None, rank: int = 0
         memory_allocated = current_platform.memory_allocated() / 1024**3
         memory_reserved = current_platform.memory_reserved() / 1024**3
         memory_reserved_max = current_platform.max_memory_reserved() / 1024**3
+        memory_device_used = current_platform.device_memory_used() / 1024**3
         rss = cpu_memory_info().rss / 1024**3
         message = (
             f"{head}, memory allocated (GB): {memory_allocated}, memory reserved (GB): {memory_reserved}, "
-            f"memory max reserved (GB): {memory_reserved_max}, rss (GB): {rss}"
+            f"memory max reserved (GB): {memory_reserved_max}, rss (GB): {rss} memory device used (GB): {memory_device_used}"
         )
         logger.info(msg=message)
 
@@ -78,6 +80,14 @@ def local_profiler():
             current_platform.memory._record_memory_history(enabled=None)
     else:
         yield
+
+
+@contextmanager
+def gpu_memory_offload_profiler(metrics, metric_infix, stage):
+    memory_start_offload = current_platform.device_memory_used() / 1024**3
+    yield
+    memory_end_offload = current_platform.device_memory_used() / 1024**3
+    metrics[f"memory/{metric_infix}/{stage}"] = abs(memory_end_offload - memory_start_offload)
 
 
 def get_load_exclude_kwargs(load_kwargs):
@@ -158,6 +168,10 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
             strategy.load_states(**load_kwargs)
             if load_kwargs.get("include", None) is not None:
                 strategy.offload_states(**get_load_exclude_kwargs(load_kwargs))
+            if strategy.offload_nccl:
+                with Timer(f"{metric_infix}_reload") as reload_pg_timer, gpu_memory_offload_profiler(metrics, metric_infix, "reload_nccl"):
+                    reload_process_groups()
+                metrics[f"time/{metric_infix}/reload_nccl"] = reload_pg_timer.last
             log_gpu_memory_usage(head=f"{metric_infix}_start_onload", logger=logger, rank=None)
 
             metrics.update(_get_gpu_memory_metrics(metric_infix, "start/onload"))
@@ -173,6 +187,10 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
             if is_offload_states:
                 current_platform.clear_cublas_workspaces()
                 strategy.offload_states()
+                if strategy.offload_nccl:
+                    with Timer(f"{metric_infix}_destroy") as destroy_pg_timer, gpu_memory_offload_profiler(metrics, metric_infix, "offload_nccl"):
+                        destroy_process_groups()
+                    metrics[f"time/{metric_infix}/offload_nccl"] = destroy_pg_timer.last
             log_gpu_memory_usage(head=f"{metric_infix}_end_offload", logger=logger, rank=None)
 
             metrics.update(_get_gpu_memory_metrics(metric_infix, "end/offload"))

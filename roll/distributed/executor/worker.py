@@ -17,6 +17,7 @@ from roll.utils.context_managers import state_offload_manger
 from roll.utils.logging import get_logger
 from roll.utils.network_utils import collect_free_port, get_node_ip
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.offload_nccl import monkey_patch_torch_dist
 from roll.platforms import current_platform
 
 
@@ -42,6 +43,8 @@ class RankInfo:
 class Worker:
 
     def __init__(self, worker_config: WorkerConfig):
+        if worker_config.offload_nccl:
+            monkey_patch_torch_dist()
         self.worker_config = worker_config
         self.pipeline_config = None
         self.worker_name = os.environ.get("WORKER_NAME", None)

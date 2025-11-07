@@ -27,6 +27,7 @@ class InferenceStrategy(ABC):
         self.worker_config = self.worker.worker_config
         self.thread_executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=5)
         self.model_update_comm_plan = {}
+        self.offload_nccl = self.worker_config.offload_nccl
 
     def initialize(self, *args, **kwargs):
         raise NotImplementedError

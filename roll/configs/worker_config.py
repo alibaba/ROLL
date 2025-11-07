@@ -144,6 +144,10 @@ class WorkerConfig:
         metadata={"help": "The value to round up to when truncating the sequence length."
                           "Note: This config must be set when using dynamic batching."}
     )
+    offload_nccl: bool = field(
+        default=False,
+        metadata={"help": "Whether offload nccl buffer to save gpu memory."}
+    )
 
     def __post_init__(self):
 
