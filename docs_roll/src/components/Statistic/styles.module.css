@@ -1,0 +1,20 @@
+.container {
+  display: flex;
+  align-items: center;
+  height: 260px;
+  flex-direction: column;
+  justify-content: center;
+  .count {
+    font-size: 44px;
+    font-weight: 600;
+    line-height: 54px;
+    color: var(--home-title-primary);
+    margin-bottom: 20px;
+  }
+  .content {
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 24px;
+    color: var(--home-title-primary);
+  }
+}

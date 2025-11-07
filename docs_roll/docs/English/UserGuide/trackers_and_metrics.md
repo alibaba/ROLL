@@ -155,7 +155,7 @@ The ROLL framework automatically records the following types of metrics:
 - time/adv: Duration of the advantages calculation phase.
 
 ### Execution Phases
-In the following time and memory metrics, {metric_infix} will be replaced with specific execution phase identifiers, such as:
+In the following time and memory metrics, `{metric_infix}` will be replaced with specific execution phase identifiers, such as:
 - train_step: Training phase
 - generate: Text generation/inference phase
 - model_update: Model parameter update/synchronization phase
@@ -165,37 +165,37 @@ In the following time and memory metrics, {metric_infix} will be replaced with s
 - compute_rewards: Reward computation phase
 
 #### Time Metrics
-- time/{metric_infix}/total: Total execution time for the entire operation (from entering state_offload_manager to exiting).
-- time/{metric_infix}/execute: Execution time for actual business logic (i.e., the yield part, such as model training, generation, etc.).
-- time/{metric_infix}/onload: Time to load model state (strategy.load_states()) to GPU or memory.
-- time/{metric_infix}/offload: Time to offload model state (strategy.offload_states()) from GPU or memory.
+- time/`{metric_infix}`/total: Total execution time for the entire operation (from entering state_offload_manager to exiting).
+- time/`{metric_infix}`/execute: Execution time for actual business logic (i.e., the yield part, such as model training, generation, etc.).
+- time/`{metric_infix}`/onload: Time to load model state (strategy.load_states()) to GPU or memory.
+- time/`{metric_infix}`/offload: Time to offload model state (strategy.offload_states()) from GPU or memory.
 
 #### GPU Memory Metrics
 - Memory snapshot at the beginning (after model state offloading)
-    - memory/{metric_infix}/**start/offload**/allocated/{device_id}: Currently allocated GPU memory on a specific device_id.
-    - memory/{metric_infix}/**start/offload**/reserved/{device_id}: Currently reserved GPU memory on a specific device_id.
-    - memory/{metric_infix}/**start/offload**/max_allocated/{device_id}: Peak allocated GPU memory from the start of this operation to the current moment on a specific device_id.
-    - memory/{metric_infix}/**start/offload**/max_reserved/{device_id}: Peak reserved GPU memory from the start of this operation to the current moment on a specific device_id.
+    - memory/`{metric_infix}`/**start/offload**/allocated/`{device_id}`: Currently allocated GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**start/offload**/reserved/`{device_id}`: Currently reserved GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**start/offload**/max_allocated/`{device_id}`: Peak allocated GPU memory from the start of this operation to the current moment on a specific device_id.
+    - memory/`{metric_infix}`/**start/offload**/max_reserved/`{device_id}`: Peak reserved GPU memory from the start of this operation to the current moment on a specific device_id.
 - Memory snapshot after loading model state (before executing business logic)
-    - memory/{metric_infix}/**start/onload**/allocated/{device_id}: Currently allocated GPU memory on a specific device_id.
-    - memory/{metric_infix}/**start/onload**/reserved/{device_id}: Currently reserved GPU memory on a specific device_id.
-    - memory/{metric_infix}/**start/onload**/max_allocated/{device_id}: Peak allocated GPU memory from the start of this operation to the current moment on a specific device_id.
-    - memory/{metric_infix}/**start/onload**/max_reserved/{device_id}: Peak reserved GPU memory from the start of this operation to the current moment on a specific device_id.
+    - memory/`{metric_infix}`/**start/onload**/allocated/`{device_id}`: Currently allocated GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**start/onload**/reserved/`{device_id}`: Currently reserved GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**start/onload**/max_allocated/`{device_id}`: Peak allocated GPU memory from the start of this operation to the current moment on a specific device_id.
+    - memory/`{metric_infix}`/**start/onload**/max_reserved/`{device_id}`: Peak reserved GPU memory from the start of this operation to the current moment on a specific device_id.
 - Memory snapshot after executing business logic (before offloading model state)
-    - memory/{metric_infix}/**end/onload**/allocated/{device_id}: Currently allocated GPU memory on a specific device_id.
-    - memory/{metric_infix}/**end/onload**/reserved/{device_id}: Currently reserved GPU memory on a specific device_id.
-    - memory/{metric_infix}/**end/onload**/max_allocated/{device_id}: Peak allocated GPU memory from the start of this operation to the current moment on a specific device_id.
-    - memory/{metric_infix}/**end/onload**/max_reserved/{device_id}: Peak reserved GPU memory from the start of this operation to the current moment on a specific device_id.
-    - memory/{metric_infix}/**end/onload**/max_allocated_frac/{device_id}: Fraction of peak allocated GPU memory relative to total GPU memory on a specific device_id.
-    - memory/{metric_infix}/**end/onload**/max_reserved_frac/{device_id}: Fraction of peak reserved GPU memory relative to total GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**end/onload**/allocated/`{device_id}`: Currently allocated GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**end/onload**/reserved/`{device_id}`: Currently reserved GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**end/onload**/max_allocated/`{device_id}`: Peak allocated GPU memory from the start of this operation to the current moment on a specific device_id.
+    - memory/`{metric_infix}`/**end/onload**/max_reserved/`{device_id}`: Peak reserved GPU memory from the start of this operation to the current moment on a specific device_id.
+    - memory/`{metric_infix}`/**end/onload**/max_allocated_frac/`{device_id}`: Fraction of peak allocated GPU memory relative to total GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**end/onload**/max_reserved_frac/`{device_id}`: Fraction of peak reserved GPU memory relative to total GPU memory on a specific device_id.
 - Memory snapshot after offloading model state (at operation end)
-    - memory/{metric_infix}/**end/offload**/allocated/{device_id}: Currently allocated GPU memory on a specific device_id.
-    - memory/{metric_infix}/**end/offload**/reserved/{device_id}: Currently reserved GPU memory on a specific device_id.
-    - memory/{metric_infix}/**end/offload**/max_allocated/{device_id}: Peak allocated GPU memory from the start of this operation to the current moment on a specific device_id.
-    - memory/{metric_infix}/**end/offload**/max_reserved/{device_id}: Peak reserved GPU memory from the start of this operation to the current moment on a specific device_id.
+    - memory/`{metric_infix}`/**end/offload**/allocated/`{device_id}`: Currently allocated GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**end/offload**/reserved/`{device_id}`: Currently reserved GPU memory on a specific device_id.
+    - memory/`{metric_infix}`/**end/offload**/max_allocated/`{device_id}`: Peak allocated GPU memory from the start of this operation to the current moment on a specific device_id.
+    - memory/`{metric_infix}`/**end/offload**/max_reserved/`{device_id}`: Peak reserved GPU memory from the start of this operation to the current moment on a specific device_id.
 
 #### CPU Memory Metrics
-- memory/cpu/{metric_infix}/start/rss: Actual physical memory (Resident Set Size) occupied by the process at the start of the operation.
-- memory/cpu/{metric_infix}/start/vms: Virtual memory (Virtual Memory Size) occupied by the process at the start of the operation.
-- memory/cpu/{metric_infix}/end/rss: Actual physical memory occupied by the process at the end of the operation.
-- memory/cpu/{metric_infix}/end/vms: Virtual memory occupied by the process at the end of the operation.
+- memory/cpu/`{metric_infix}`/start/rss: Actual physical memory (Resident Set Size) occupied by the process at the start of the operation.
+- memory/cpu/`{metric_infix}`/start/vms: Virtual memory (Virtual Memory Size) occupied by the process at the start of the operation.
+- memory/cpu/`{metric_infix}`/end/rss: Actual physical memory occupied by the process at the end of the operation.
+- memory/cpu/`{metric_infix}`/end/vms: Virtual memory occupied by the process at the end of the operation.

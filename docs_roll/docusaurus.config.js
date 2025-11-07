@@ -1,8 +1,9 @@
 // @ts-check
 // Note: type annotations allow type checking and IDEs autocompletion
 
-const lightCodeTheme = require('prism-react-renderer/themes/github');
-const darkCodeTheme = require('prism-react-renderer/themes/dracula');
+const { themes } = require('prism-react-renderer');
+const lightTheme = themes.github;
+const darkTheme = themes.dracula;
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
@@ -59,6 +60,21 @@ const config = {
     ],
   ],
 
+  themes: [
+    [
+      // @ts-ignore
+      require.resolve("@easyops-cn/docusaurus-search-local"),
+      /** @type {import("@easyops-cn/docusaurus-search-local").PluginOptions} */
+      // @ts-ignore
+      ({
+        hashed: true,
+        indexBlog: false,
+        // For Docs usingChinese, it is recomended to set:
+        language: ["en"],
+      }),
+    ],
+  ],
+
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
@@ -71,16 +87,23 @@ const config = {
           src: 'img/logo.png',
         },
         items: [
+          { to: '/ROLL', label: 'Home', position: 'right' },
+          { to: '/ROLL/#core', label: 'Core Algorithms', position: 'right' },
+          { to: '/ROLL/#research', label: 'Research Community', position: 'right' },
           {
             type: 'docSidebar',
             sidebarId: 'tutorialSidebar',
-            position: 'left',
-            label: '文档',
+            position: 'right',
+            label: 'API Docs',
           },
           {
             href: 'https://github.com/alibaba/ROLL',
             label: 'GitHub',
             position: 'right',
+          },
+          {
+            type: 'search',
+            position: 'right', // 确保位置在右侧
           },
         ],
       },
@@ -122,8 +145,11 @@ const config = {
         copyright: `Copyright © ${new Date().getFullYear()} Alibaba.`,
       },
       prism: {
-        theme: lightCodeTheme,
-        darkTheme: darkCodeTheme,
+        theme: lightTheme,
+        darkTheme: darkTheme,
+      },
+      colorMode: {
+        defaultMode: 'dark',
       },
     }),
 };

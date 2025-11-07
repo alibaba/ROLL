@@ -1,16 +1,14 @@
 import React, { useEffect } from 'react';
 import { Button } from 'antd';
 import clsx from 'clsx';
-import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
-import HomepageFeatures from '@site/src/components/HomepageFeatures';
-import {useHistory} from '@docusaurus/router';
 
 import styles from './index.module.css';
+import HomeContent from '../components/HomeContent';
 
 function HomepageHeader() {
-  const {siteConfig} = useDocusaurusContext();
+  const { siteConfig } = useDocusaurusContext();
   return (
     <header className={clsx('hero hero--primary', styles.heroBanner)}>
       <div className="container">
@@ -25,7 +23,7 @@ function HomepageHeader() {
               ROLL is an efficient and user-friendly RL library designed for Large Language Models (LLMs) utilizing Large Scale GPU resources. It significantly enhances LLM performance in key areas such as human preference alignment, complex reasoning, and multi-turn agentic interaction scenarios.
             </div>
             <div>
-              <Button style={{ height: '60px', fontSize: '20px', padding: '0 20px'}} size="large" type="primary" href="/ROLL/docs/简体中文/快速开始/multi_nodes_quick_start_cn">Get started</Button>
+              <Button style={{ height: '60px', fontSize: '20px', padding: '0 20px' }} size="large" type="primary" href="/ROLL/docs/简体中文/快速开始/multi_nodes_quick_start_cn">Get started</Button>
             </div>
           </div>
         </div>
@@ -35,20 +33,14 @@ function HomepageHeader() {
 }
 
 export default function Home() {
-  const {siteConfig} = useDocusaurusContext();
-
-  const history = useHistory();
-  useEffect(() => {
-    history.replace('/ROLL/docs/English/start');
-  }, [history]);
+  const { siteConfig } = useDocusaurusContext();
 
   return (
     <Layout
       title={`Hello from ${siteConfig.title}`}
       description="Description will go into a meta tag in <head />">
-      <HomepageHeader />
       <main>
-        <HomepageFeatures />
+        <HomeContent />
       </main>
     </Layout>
   );

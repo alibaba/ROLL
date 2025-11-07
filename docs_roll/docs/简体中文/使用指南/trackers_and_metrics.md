@@ -156,7 +156,7 @@ ROLL 框架会自动记录以下类型的指标：
 - time/adv: 优势（Advantages）计算阶段的耗时。
 
 ### 各执行阶段
-在下面的时间指标和内存指标中，{metric_infix} 会被替换为具体的执行阶段标识，例如：
+在下面的时间指标和内存指标中，`{metric_infix}` 会被替换为具体的执行阶段标识，例如：
 - train_step: 训练阶段
 - generate: 文本生成/推理阶段
 - model_update: 模型参数更新/同步阶段
@@ -166,37 +166,37 @@ ROLL 框架会自动记录以下类型的指标：
 - compute_rewards: 计算奖励阶段
 
 #### 时间指标
-- time/{metric_infix}/total: 整个操作的总执行时间（从进入 state_offload_manger 到退出）。
-- time/{metric_infix}/execute: 实际业务逻辑（即 yield 部分，如模型训练、生成等）的执行时间。
-- time/{metric_infix}/onload: 模型状态加载（strategy.load_states()）到 GPU 或内存中的时间。
-- time/{metric_infix}/offload: 模型状态从 GPU 或内存中卸载（strategy.offload_states()）的时间。
+- time/`{metric_infix}`/total: 整个操作的总执行时间（从进入 state_offload_manger 到退出）。
+- time/`{metric_infix}`/execute: 实际业务逻辑（即 yield 部分，如模型训练、生成等）的执行时间。
+- time/`{metric_infix}`/onload: 模型状态加载（strategy.load_states()）到 GPU 或内存中的时间。
+- time/`{metric_infix}`/offload: 模型状态从 GPU 或内存中卸载（strategy.offload_states()）的时间。
 
 #### GPU内存指标
 - 开始时（模型状态卸载后）的内存快照
-    - memory/{metric_infix}/**start/offload**/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
-    - memory/{metric_infix}/**start/offload**/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
-    - memory/{metric_infix}/**start/offload**/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
-    - memory/{metric_infix}/**start/offload**/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
+    - memory/`{metric_infix}`/**start/offload**/allocated/`{device_id}`: 某个 device_id 上当前已分配的 GPU 内存量。
+    - memory/`{metric_infix}`/**start/offload**/reserved/`{device_id}`: 某个 device_id 上当前已预留的 GPU 内存量。
+    - memory/`{metric_infix}`/**start/offload**/max_allocated/`{device_id}`: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
+    - memory/`{metric_infix}`/**start/offload**/max_reserved/`{device_id}`: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
 - 加载模型状态后（业务逻辑执行前）的内存快照
-    - memory/{metric_infix}/**start/onload**/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
-    - memory/{metric_infix}/**start/onload**/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
-    - memory/{metric_infix}/**start/onload**/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
-    - memory/{metric_infix}/**start/onload**/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
+    - memory/`{metric_infix}`/**start/onload**/allocated/`{device_id}`: 某个 device_id 上当前已分配的 GPU 内存量。
+    - memory/`{metric_infix}`/**start/onload**/reserved/`{device_id}`: 某个 device_id 上当前已预留的 GPU 内存量。
+    - memory/`{metric_infix}`/**start/onload**/max_allocated/`{device_id}`: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
+    - memory/`{metric_infix}`/**start/onload**/max_reserved/`{device_id}`: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
 - 业务逻辑执行后（模型状态卸载前）的内存快照
-    - memory/{metric_infix}/**end/onload**/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
-    - memory/{metric_infix}/**end/onload**/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
-    - memory/{metric_infix}/**end/onload**/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
-    - memory/{metric_infix}/**end/onload**/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
-    - memory/{metric_infix}/**end/onload**/max_allocated_frac/{device_id}: 某个 device_id 上已分配 GPU 内存峰值占总 GPU 内存的比例 (分数)。
-    - memory/{metric_infix}/**end/onload**/max_reserved_frac/{device_id}: 某个 device_id 上已预留 GPU 内存峰值占总 GPU 内存的比例 (分数)。
+    - memory/`{metric_infix}`/**end/onload**/allocated/`{device_id}`: 某个 device_id 上当前已分配的 GPU 内存量。
+    - memory/`{metric_infix}`/**end/onload**/reserved/`{device_id}`: 某个 device_id 上当前已预留的 GPU 内存量。
+    - memory/`{metric_infix}`/**end/onload**/max_allocated/`{device_id}`: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
+    - memory/`{metric_infix}`/**end/onload**/max_reserved/`{device_id}`: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
+    - memory/`{metric_infix}`/**end/onload**/max_allocated_frac/`{device_id}`: 某个 device_id 上已分配 GPU 内存峰值占总 GPU 内存的比例 (分数)。
+    - memory/`{metric_infix}`/**end/onload**/max_reserved_frac/`{device_id}`: 某个 device_id 上已预留 GPU 内存峰值占总 GPU 内存的比例 (分数)。
 - 卸载模型状态后（操作结束）的内存快照
-    - memory/{metric_infix}/**end/offload**/allocated/{device_id}: 某个 device_id 上当前已分配的 GPU 内存量。
-    - memory/{metric_infix}/**end/offload**/reserved/{device_id}: 某个 device_id 上当前已预留的 GPU 内存量。
-    - memory/{metric_infix}/**end/offload**/max_allocated/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
-    - memory/{metric_infix}/**end/offload**/max_reserved/{device_id}: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
+    - memory/`{metric_infix}`/**end/offload**/allocated/`{device_id}`: 某个 device_id 上当前已分配的 GPU 内存量。
+    - memory/`{metric_infix}`/**end/offload**/reserved/`{device_id}`: 某个 device_id 上当前已预留的 GPU 内存量。
+    - memory/`{metric_infix}`/**end/offload**/max_allocated/`{device_id}`: 某个 device_id 上从本次操作开始到当前时刻，已分配的 GPU 内存的峰值。
+    - memory/`{metric_infix}`/**end/offload**/max_reserved/`{device_id}`: 某个 device_id 上从本次操作开始到当前时刻，已预留的 GPU 内存的峰值。
 
 #### CPU内存指标
-- memory/cpu/{metric_infix}/start/rss: 进程在操作开始时占用的实际物理内存 (Resident Set Size)。
-- memory/cpu/{metric_infix}/start/vms: 进程在操作开始时占用的虚拟内存 (Virtual Memory Size)。
-- memory/cpu/{metric_infix}/end/rss: 进程在操作结束时占用的实际物理内存。
-- memory/cpu/{metric_infix}/end/vms: 进程在操作结束时占用的虚拟内存。
+- memory/cpu/`{metric_infix}`/start/rss: 进程在操作开始时占用的实际物理内存 (Resident Set Size)。
+- memory/cpu/`{metric_infix}`/start/vms: 进程在操作开始时占用的虚拟内存 (Virtual Memory Size)。
+- memory/cpu/`{metric_infix}`/end/rss: 进程在操作结束时占用的实际物理内存。
+- memory/cpu/`{metric_infix}`/end/vms: 进程在操作结束时占用的虚拟内存。
