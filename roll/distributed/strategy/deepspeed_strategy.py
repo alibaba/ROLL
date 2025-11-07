@@ -69,8 +69,10 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         global_rank = dist.get_rank()
 
         if (cp_size := self.worker_config.model_args.ulysses_size) > 1:
-            current_platform.apply_ulysses_patch()
-            set_upg_manager(ulysses_size=cp_size, rank=global_rank, world_size=world_size)
+            if current_platform.apply_ulysses_patch() is not None:
+                set_upg_manager(ulysses_size=cp_size, rank=global_rank, world_size=world_size)
+            else:
+                cp_size = 1
 
         self.worker.rank_info.dp_rank = global_rank // cp_size
         self.worker.rank_info.dp_size = world_size // cp_size

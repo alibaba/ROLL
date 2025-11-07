@@ -38,6 +38,7 @@ class UnknownPlatform(Platform):
             "RAY_get_check_signal_interval_milliseconds": "1",
             "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
             "TORCHINDUCTOR_COMPILE_THREADS": "2",
+            "RAY_CGRAPH_get_timeout": '600',
         }
         return env_vars
     
@@ -71,4 +72,4 @@ class UnknownPlatform(Platform):
     @classmethod
     def apply_ulysses_patch(cls) -> None:
         from roll.utils.context_parallel import apply_ulysses_patch
-        apply_ulysses_patch()
+        return apply_ulysses_patch()

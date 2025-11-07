@@ -31,6 +31,7 @@ class RocmPlatform(Platform):
     def get_custom_env_vars(cls) -> dict:
         env_vars = {
             "RAY_get_check_signal_interval_milliseconds": "1",
+            "RAY_CGRAPH_get_timeout": '600',
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             # These VLLM related enviroment variables are related to backend. maybe used afterwards.
             # "VLLM_USE_TRITON_FLASH_ATTN":"0",
@@ -105,4 +106,4 @@ class RocmPlatform(Platform):
     @classmethod
     def apply_ulysses_patch(cls) -> None:
         from roll.utils.context_parallel import apply_ulysses_patch
-        apply_ulysses_patch()
+        return apply_ulysses_patch()
