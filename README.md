@@ -40,6 +40,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 | 📣   Updates                                                                                                                                                                                                                                                                                                                            |
 |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **[11/08/2025]** 🎉 Our [ROCK: Reinforcement Open Construction Kit](https://github.com/alibaba/ROCK) released, Explore the new capabilities!.                                                                                                                                                                                           |
 | **[10/23/2025]** 🎉 Our Papers released, see [Asymmetric Proximal Policy Optimization: mini-critics boost LLM reasoning](https://arxiv.org/abs/2510.01656) and [Attention Illuminates LLM Reasoning: The Preplan-and-Anchor Rhythm Enables Fine-Grained Policy Optimization](https://arxiv.org/abs/2510.13554).                         |
 | **[10/14/2025]** 🎉 Our Paper released, see [Part II: ROLL Flash -- Accelerating RLVR and Agentic Training with Asynchrony](https://arxiv.org/abs/2510.11345).                                                                                                                                                                          |
 | **[09/28/2025]** 🎉 Ascend NPU support — see [usage guide](https://alibaba.github.io/ROLL/docs/English/UserGuide/ascend/ascend_usage).                                                                                                                                                                                                  |
@@ -197,8 +198,8 @@ If you use ROLL in your research or project, please consider citing us:
 
 -----
 
-## 🤝 About [ROLL Team]
-ROLL is a project jointly developed by Taotian Future Life Lab and Alibaba AI Engine Team, with a strong emphasis on pioneering the future of Reinforcement Learning (RL). Our mission is to explore and shape innovative forms of future living powered by advanced RL technologies. If you are passionate about the future of RL and want to be part of its evolution, we warmly welcome you to join us! Learn more about the ROLL Team through our official channels below👇
+## 🤝 About [ROCK & ROLL Team]
+ROLL is a project jointly developed by Taotian Future Living Lab and Alibaba AI Engine Team, with a strong emphasis on pioneering the future of Reinforcement Learning (RL). Our mission is to explore and shape innovative forms of future living powered by advanced RL technologies. If you are passionate about the future of RL and want to be part of its evolution, we warmly welcome you to join us!👇
 
 <a href="./assets/roll_wechat.png" target="_blank">
   <img src="https://img.shields.io/badge/WeChat-green?logo=wechat" alt="WeChat QR">
