@@ -197,10 +197,9 @@ class Llm0110(LLM):
         self.supported_tasks = supported_tasks
 
         # Load the Input/Output processor plugin if any
-        io_processor_plugin = self.llm_engine.model_config.io_processor_plugin
-        self.io_processor = get_io_processor(self.llm_engine.vllm_config,
-                                             io_processor_plugin)
-
+        self.model_config = self.llm_engine.model_config
+        self.processor = self.llm_engine.processor
+        self.io_processor = self.llm_engine.io_processor
 
     def load_states(self):
         self.collective_rpc(method="load_states")
