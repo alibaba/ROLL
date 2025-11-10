@@ -303,6 +303,16 @@ class Qwen2VLModel(McaGPTModel, ModuleUtilsMixin):
     ) -> "torch.Tensor":
         force_vit_image = kwargs.pop("force_vit_image", False)
         force_vit_video = kwargs.pop("force_vit_video", False)
+
+        if position_ids is not None:
+            expected_shape = (3, input_ids.shape[0], input_ids.shape[1])  # (3, batch, seq_len)
+            if position_ids.shape != expected_shape:
+                if position_ids.shape == (input_ids.shape[0], input_ids.shape[1]):
+                    position_ids, _ = self.get_rope_index(input_ids, image_grid_thw, video_grid_thw)
+                else:
+                    raise ValueError(f"Unexpected position_ids shape: {position_ids.shape}, "
+                                     f"expected: {expected_shape} or {(input_ids.shape[0], input_ids.shape[1])}")
+
         if position_ids is None and input_ids is not None:
             position_ids, _ = self.get_rope_index(input_ids, image_grid_thw, video_grid_thw)
 
