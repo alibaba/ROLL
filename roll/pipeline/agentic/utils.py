@@ -18,7 +18,12 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import AgenticConfig, RewardNormalizationConfig
 from roll.pipeline.rlvr.utils import DUMPING_FUNC
 from roll.utils.logging import get_logger
-from roll.utils.functionals import masked_whiten, compute_gae_advantage_return, compute_clip_fraction, compute_reinforce_return
+from roll.utils.functionals import (
+    masked_whiten,
+    compute_gae_advantage_return,
+    compute_clip_fraction,
+    compute_reinforce_return,
+)
 
 logger = get_logger()
 
@@ -50,29 +55,6 @@ def dump_rollout_render(save_dir, step, frames: List[List], env_ids: List, tags:
             logger.error(f"dump rollout render failed: {e}")
     logger.info(f"dump_rollout_render_cost: {timer.last}")
 
-@torch.no_grad()
-def get_score_normalize_fn(rn_cfg) -> Callable:
-    grouping, method = rn_cfg.grouping, rn_cfg.method
-    if method == "mean_std":
-        norm_func = lambda x: (
-            (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + 1e-6)
-            if x.numel() > 1 and x.std(dim=-1, keepdim=True).abs().max() > 1e-6
-            else torch.zeros_like(x)
-        )  # stable to bf16 than x.std()
-    elif method == "mean":
-        norm_func = lambda x: (x - x.mean(dim=-1, keepdim=True))
-    elif method == "asym_clip":
-        norm_func = lambda x: (
-            (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + 1e-6)
-            if x.numel() > 1 and x.std(dim=-1, keepdim=True).abs().max() > 1e-6
-            else torch.zeros_like(x)
-        ).clamp(min=-1, max=3)
-    elif method == "identity":
-        norm_func = lambda x: x
-    else:
-        raise ValueError(f"Invalid normalization method: {method}")
-
-    return norm_func
 
 @torch.no_grad()
 def compute_discounted_returns(batch: DataProto, adv_estimator, gamma=1.0) -> DataProto:
@@ -88,10 +70,10 @@ def compute_discounted_returns(batch: DataProto, adv_estimator, gamma=1.0) -> Da
         DataProto: Updated batch where each trajectory contains an extra tensor key
                    `"step_rewards"` holding the computed discounted returns.
     """
-    if adv_estimator in ["gigpo", "step_reinforce" ]:
+    if adv_estimator in ["gigpo", "step_reinforce"]:
         batch.batch["sample_order_placeholder"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
         batch_group_by_traj: Dict[str, DataProto] = batch.group_by(keys="traj_id")
-        for traj_id,  traj_batch in batch_group_by_traj.items():
+        for traj_id, traj_batch in batch_group_by_traj.items():
 
             indices: Tensor = torch.argsort(torch.from_numpy(traj_batch.non_tensor_batch["step"].astype(np.int64)))
             traj_batch.reorder(indices)
@@ -111,22 +93,64 @@ def compute_discounted_returns(batch: DataProto, adv_estimator, gamma=1.0) -> Da
     else:
         return batch
 
-def grouped_reward_norm(batch: "DataProto", reward_normalization: RewardNormalizationConfig) -> torch.Tensor:
+
+# TODO: 这里的功能性和rlvr比较接近，但因为后续agentic会有潜在的修改需求，所以就先拎出来
+@torch.no_grad()
+def agentic_reward_norm(batch: "DataProto", reward_normalization: RewardNormalizationConfig) -> torch.Tensor:
     batch.batch["sample_order_placeholder"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
     grouping = reward_normalization.grouping
+    norm_mean_type = reward_normalization.norm_mean_type
+    norm_std_type = reward_normalization.norm_std_type
+
+    all_scores = batch.batch["scores"].float()
+    batch_mean = None
+    batch_std = None
+    if norm_mean_type == "batch":
+        batch_mean = all_scores.mean()
+    if norm_std_type == "batch":
+        batch_std = all_scores.std()
+
+    batch_list = []
     batch_grouped: Dict[str, DataProto] = {"default": batch}
     if grouping != "batch":
         batch_grouped = batch.group_by(keys=grouping)
-    batch_list = []
     for group_name, group_batch in batch_grouped.items():
-        score_norm_fn = get_score_normalize_fn(rn_cfg=reward_normalization)
-        normalized_acc_scores = score_norm_fn(group_batch.batch["scores"])
-        group_batch.batch["grouped_rewards"] = normalized_acc_scores
+        scores = group_batch.batch["scores"]
+        original_dtype = scores.dtype
+        scores_float = scores.float()
+
+        if norm_mean_type == "batch":
+            reward_mean = batch_mean
+        elif norm_mean_type == "group":
+            reward_mean = scores_float.mean()
+        else:
+            reward_mean = 0.0
+
+        if norm_std_type == "batch":
+            reward_std = batch_std
+        elif norm_std_type == "group":
+            reward_std = scores_float.std()
+        else:
+            reward_std = None
+
+        if reward_std is not None:
+            # 处理单个元素或标准差为0的情况，避免除以0
+            if scores_float.numel() > 1 and reward_std.abs() > 1e-6:
+                normalized_scores = (scores_float - reward_mean) / (reward_std + 1e-6)
+            else:
+                normalized_scores = torch.zeros_like(scores_float)
+        else:
+            normalized_scores = scores_float - reward_mean
+
+        normalized_scores = normalized_scores.to(dtype=original_dtype)
+        group_batch.batch["grouped_rewards"] = normalized_scores
         batch_list.append(group_batch)
+
     batch = DataProto.concat(batch_list)
     batch.reorder(indices=torch.argsort(batch.batch["sample_order_placeholder"]))
     batch.pop("sample_order_placeholder")
     return batch.batch.pop("grouped_rewards")
+
 
 def build_state_group(batch: "DataProto") -> "DataProto":
     batch.batch["sample_order_placeholder"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
@@ -135,7 +159,9 @@ def build_state_group(batch: "DataProto") -> "DataProto":
     for traj_group_id, traj_group_batch in batch_group_by_traj_group.items():
         batch_group_by_state: Dict[str, DataProto] = traj_group_batch.group_by(keys="state_hash")
         for state, state_batch in batch_group_by_state.items():
-            state_batch.non_tensor_batch["state_group_id"] = np.array([state] * state_batch.batch.batch_size[0], dtype=object)
+            state_batch.non_tensor_batch["state_group_id"] = np.array(
+                [state] * state_batch.batch.batch_size[0], dtype=object
+            )
             merged.append(state_batch)
     state_batch_size = [len(m) for m in merged]
     merged = DataProto.concat(merged)
@@ -148,15 +174,19 @@ def build_state_group(batch: "DataProto") -> "DataProto":
     merged.meta_info["metrics"] = metrics
     return merged
 
+
 @torch.no_grad()
 def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticConfig) -> "DataProto":
+    reward_metrics = {}
     if pipeline_config.adv_estimator == "gigpo":
         # ref: https://github.com/langfengQ/verl-agent/blob/e03bd502667c45172e8c093cc506db8438ae8ab5/gigpo/core_gigpo.py#L109
         # step 1
         episode_scores = torch.from_numpy(batch.non_tensor_batch["episode_scores"].astype(np.float32))
         scores_to_group = DataProto.from_dict({"scores": episode_scores})
         scores_to_group.non_tensor_batch = batch.non_tensor_batch
-        episode_rewards: torch.Tensor = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
+        episode_rewards: torch.Tensor = agentic_reward_norm(
+            scores_to_group, reward_normalization=pipeline_config.reward_normalization
+        )
 
         # step 2
         batch = build_state_group(batch=batch)
@@ -164,23 +194,44 @@ def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticC
         # step 3
         scores_to_group = DataProto.from_dict({"scores": batch.batch["step_rewards"]})
         scores_to_group.non_tensor_batch = batch.non_tensor_batch
-        step_rewards: torch.Tensor = grouped_reward_norm(batch=scores_to_group,
-                                                         reward_normalization=RewardNormalizationConfig(grouping="state_group_id",
-                                                                                                        method=pipeline_config.reward_normalization.method))
+        step_rewards: torch.Tensor = agentic_reward_norm(
+            batch=scores_to_group,
+            reward_normalization=RewardNormalizationConfig(
+                grouping="state_group_id", method=pipeline_config.reward_normalization.method
+            ),
+        )
 
-        batch.batch["response_level_rewards"] = pipeline_config.episode_reward_weight * episode_rewards + pipeline_config.step_reward_weight * step_rewards
+        batch.batch["response_level_rewards"] = (
+            pipeline_config.episode_reward_weight * episode_rewards + pipeline_config.step_reward_weight * step_rewards
+        )
         batch.batch["episode_rewards_norm"] = episode_rewards
         batch.batch["step_rewards_norm"] = step_rewards
     elif pipeline_config.adv_estimator == "step_reinforce":
         scores_to_group = DataProto.from_dict({"scores": batch.batch["step_rewards"]})
         scores_to_group.non_tensor_batch = batch.non_tensor_batch
-        batch.batch["response_level_rewards"] = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
+        batch.batch["response_level_rewards"] = agentic_reward_norm(
+            scores_to_group, reward_normalization=pipeline_config.reward_normalization
+        )
     else:
         scores_to_group = DataProto.from_dict({"scores": batch.batch["scores"].clone().sum(dim=-1)})
         scores_to_group.non_tensor_batch = batch.non_tensor_batch
-        batch.batch["response_level_rewards"] = grouped_reward_norm(scores_to_group, reward_normalization=pipeline_config.reward_normalization)
+        batch.batch["response_level_rewards"] = agentic_reward_norm(
+            scores_to_group, reward_normalization=pipeline_config.reward_normalization
+        )
 
-    return batch
+    # 加上clip
+    if pipeline_config.reward_clip:
+        reward_metrics["critic/reward_clip_frac"] = compute_clip_fraction(
+            values=batch.batch["response_level_rewards"],
+            clip_min=-pipeline_config.reward_clip,
+            clip_max=pipeline_config.reward_clip,
+        )
+        batch.batch["response_level_rewards"] = torch.clamp(
+            batch.batch["response_level_rewards"], min=-pipeline_config.reward_clip, max=pipeline_config.reward_clip
+        )
+
+    return batch, reward_metrics
+
 
 @torch.no_grad()
 def get_agentic_response_level_mask(data: "DataProto", pipeline_config: AgenticConfig):
@@ -228,6 +279,7 @@ def dump_frames_as_gif(filename, frames, duration=0.2):
         print_only_once = True
         pass
 
+
 def dump_rollout_trajectories(path, global_step, data: DataProto):
     """
     Dumps rollout trajectories to persistent storage.
@@ -256,76 +308,13 @@ def dump_rollout_trajectories(path, global_step, data: DataProto):
     [data.non_tensor_batch.pop(item[0]) for item in columns_config if item[0] in data.non_tensor_batch]
 
     data_cnt = len(data)
-    write_data['global_step'] = [global_step] * data_cnt
-    columns_config.append(['global_step','bigint'])
+    write_data["global_step"] = [global_step] * data_cnt
+    columns_config.append(["global_step", "bigint"])
 
     for checker, func in DUMPING_FUNC:
         if checker(path):
             p = multiprocessing.Process(target=func, args=(path, write_data, columns_config), daemon=False)
             p.start()
-
-def compute_agentic_reinforce_return(token_level_rewards: torch.Tensor, gamma: torch.Tensor, lambd: torch.Tensor, mask: Optional[torch.Tensor] = None):
-    """
-    计算 REINFORCE 的 return，支持按 mask 分段 discount 衰减。
-    每段内所有位置获得相同的折扣累积值（从该段最后位置开始累积）。
-    
-    Args:
-        token_level_rewards: [batch_size, seq_len] token 级别的奖励
-        gamma: discount factor
-        lambd: lambda 参数（当前未使用，保留以兼容接口）
-        mask: [batch_size, seq_len] mask，1表示有效位置，0表示无效位置。如果为None，则对所有位置计算
-    
-    Returns:
-        advantages: [batch_size, seq_len] advantages
-        returns: [batch_size, seq_len] returns
-    """
-    with torch.no_grad():
-        batch_size, gen_len = token_level_rewards.shape
-        device = token_level_rewards.device
-        returns = torch.zeros_like(token_level_rewards, dtype=torch.float32)
-        
-        # 如果没有提供 mask，则对所有位置计算（向后兼容）
-        if mask is None:
-            mask = torch.ones_like(token_level_rewards)
-        
-        # 确保 gamma 是标量
-        gamma_val = gamma.item() if torch.is_tensor(gamma) else gamma
-        
-        # 对每个样本分别处理
-        for b in range(batch_size):
-            sample_mask = mask[b]  # [seq_len]
-            sample_rewards = token_level_rewards[b]  # [seq_len]
-            
-            # 找到所有连续的1的段
-            # 使用 diff 找到边界：1->0 和 0->1 的位置
-            diff = torch.diff(sample_mask.float(), prepend=torch.tensor([0.0], device=device))
-            
-            # 找到段的开始位置（0->1，diff==1）
-            segment_starts = torch.where(diff == 1)[0]
-            
-            # 找到段的结束位置（1->0，diff==-1）
-            segment_ends = torch.where(diff == -1)[0]
-            
-            # 如果最后一个位置是1，需要添加结束位置
-            if len(sample_mask) > 0 and sample_mask[-1] == 1:
-                segment_ends = torch.cat([segment_ends, torch.tensor([gen_len], device=device)])
-            
-            # 计算该段从最后位置开始的累积折扣奖励
-            cumulative_return = 0.0
-            # 对每段分别计算 discounted return
-            for start, end in zip(segment_starts.flip(-1), segment_ends.flip(-1)):
-                start_idx = start.item()
-                end_idx = end.item()
-                segment_len = end_idx - start_idx
-                
-                cumulative_return = sample_rewards[end_idx-1].item() + gamma_val * cumulative_return
-                
-                # 该段内所有位置都设置为这个累积值
-                returns[b, start_idx:end_idx] = cumulative_return
-        
-        advantages = returns
-    
-    return advantages, returns
 
 @torch.no_grad()
 def agentic_compute_advantage(
@@ -361,13 +350,9 @@ def agentic_compute_advantage(
             token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
         )
     elif adv_estimator in ["agentic_reinforce"]:
-        advantages, returns = compute_agentic_reinforce_return(
-            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd, mask=response_mask
-        )
+        raise NotImplementedError
     else:
         raise NotImplementedError
-    
-        data.batch["raw_advantages"] = advantages
     if whiten_advantages:
         # TODO whiten过程中是否要考虑response的长度？
         advantages = masked_whiten(values=advantages, mask=response_mask)

@@ -219,8 +219,9 @@ class AgenticPipeline(BasePipeline):
                     # Rewards need to be processed after grouping
                     # We can group by tag(env_type)/traj_group_id(group)/batch(rollout_batch)... to compute rewards / advantages
                     # The compute_response_level_rewards function injects a response_level_rewards key into batch.batch.
-                    batch = compute_response_level_rewards(batch=batch, pipeline_config=self.pipeline_config)
+                    batch, reward_metrics = compute_response_level_rewards(batch=batch, pipeline_config=self.pipeline_config)
                     metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
+                    metrics.update(reward_metrics)
                 metrics["time/cal_norm_rewards"] = timer.last
 
                 with Timer(name="cal_token_reward", logger=None) as timer:
