@@ -382,6 +382,9 @@ class PPOConfig(BaseConfig):
         field(default="seq-mean-token-mean", metadata={"help": "Loss aggregation mode"})
     )
     dual_clip_loss: bool = field(default=False, metadata={"help": "Use dual clip loss"})
+    enable_reference: bool = field(
+        default=False, metadata={"help": "Whether to enable reference cluster for computing ref_log_probs."}
+    )
 
     def __post_init__(self):
         super().__post_init__()
@@ -406,6 +409,8 @@ class PPOConfig(BaseConfig):
         self.actor_train.name = "actor_train"
         self.reference.name = "reference"
         self.critic.name = "critic"
+        if self.use_kl_loss or self.init_kl_coef > 0:
+            self.enable_reference = True
 
     def set_max_steps(self, max_steps: int):
         actor_backward_batch_size = (

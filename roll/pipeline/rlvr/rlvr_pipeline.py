@@ -216,7 +216,7 @@ class RLVRPipeline(BasePipeline):
         )
         download_clusters = [self.actor_train, self.actor_infer]
         # use unwrapped model as reference for lora training
-        if not self.is_lora:
+        if not self.is_lora and self.pipeline_config.enable_reference:
             self.reference: Any = Cluster(
                 name=self.pipeline_config.reference.name,
                 worker_cls=self.pipeline_config.reference.worker_cls,
@@ -310,7 +310,7 @@ class RLVRPipeline(BasePipeline):
         refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
 
-        if not self.is_lora:
+        if not self.is_lora and self.pipeline_config.enable_reference:
             refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True))
 
         refs = []
@@ -540,24 +540,25 @@ class RLVRPipeline(BasePipeline):
 
 
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
-                    if self.is_lora:
-                        batch.meta_info["disable_adapter"] = True
-                        batch.meta_info["is_offload_states"] = False
-                        ref_log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
-                    else:
-                        if self.pipeline_config.reference.use_dynamic_batching_in_infer:
-                            batch, dynamic_batching_metrics = dynamic_batching_shard(
-                                batch,
-                                self.reference.dp_size,
-                                self.pipeline_config.reference.max_tokens_per_microbatch_in_infer,
-                                self.pipeline_config.reference.sequence_length_round_in_infer,
-                                "reference/compute_log_probs",
-                            )
-                            metrics_mgr.add_metrics(dynamic_batching_metrics)
-                        ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
-                    metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
-                    ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
-                    batch = batch.union(ref_log_probs)
+                    if self.pipeline_config.enable_reference:
+                        if self.is_lora:
+                            batch.meta_info["disable_adapter"] = True
+                            batch.meta_info["is_offload_states"] = False
+                            ref_log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
+                        else:
+                            if self.pipeline_config.reference.use_dynamic_batching_in_infer:
+                                batch, dynamic_batching_metrics = dynamic_batching_shard(
+                                    batch,
+                                    self.reference.dp_size,
+                                    self.pipeline_config.reference.max_tokens_per_microbatch_in_infer,
+                                    self.pipeline_config.reference.sequence_length_round_in_infer,
+                                    "reference/compute_log_probs",
+                                )
+                                metrics_mgr.add_metrics(dynamic_batching_metrics)
+                            ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
+                        metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
+                        ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
+                        batch = batch.union(ref_log_probs)
                 metrics_mgr.add_metric("time/ref_log_probs_values", cal_ref_log_probs_timer.last)
 
                 with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
@@ -601,6 +602,10 @@ class RLVRPipeline(BasePipeline):
 
                     batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
                     metrics_mgr.add_reduced_metrics(old_log_probs.meta_info.pop("metrics", {}))
+                    
+                    # Mock ref_log_probs using old_log_probs if reference is disabled
+                    if not self.pipeline_config.enable_reference:
+                        batch.batch["ref_log_probs"] = batch.batch["old_log_probs"].clone()
                 metrics_mgr.add_metric("time/old_log_probs", cal_old_logpb_timer.last)
 
                 # 要按domain group by处理reward

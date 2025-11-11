@@ -222,7 +222,7 @@ class RLVRMathVLMPipeline(BasePipeline):
             worker_config=self.pipeline_config.actor_infer,
         )
         # use unwrapped model as reference for lora training
-        if not self.is_lora:
+        if not self.is_lora and self.pipeline_config.enable_reference:
             self.reference: Any = Cluster(
                 name=self.pipeline_config.reference.name,
                 worker_cls=self.pipeline_config.reference.worker_cls,
@@ -264,7 +264,7 @@ class RLVRMathVLMPipeline(BasePipeline):
         ray.get(refs)
 
         refs = []
-        if not self.is_lora:
+        if not self.is_lora and self.pipeline_config.enable_reference:
             refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=False))
         refs.extend(self.reward.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
@@ -360,25 +360,24 @@ class RLVRMathVLMPipeline(BasePipeline):
                         )
 
                     with Timer(name="cal_ref_log_probs_reward", logger=None) as cal_timer:
-                        if self.is_lora:
-                            batch.meta_info["disable_adapter"] = True
-                            batch.meta_info["is_offload_states"] = False
-                            ref_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(
-                                batch, blocking=False
-                            )
-                        else:
-                            ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(
-                                batch, blocking=False
-                            )
+                        if self.pipeline_config.enable_reference:
+                            if self.is_lora:
+                                batch.meta_info["disable_adapter"] = True
+                                batch.meta_info["is_offload_states"] = False
+                                ref_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(
+                                    batch, blocking=False
+                                )
+                            else:
+                                ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(
+                                    batch, blocking=False
+                                )
+                            ref_log_probs = DataProto.materialize_concat(data_refs=ref_log_probs_refs)
+                            metrics.update(reduce_metrics(ref_log_probs.meta_info.pop("metrics", {})))
+                            ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
+                            batch = batch.union(ref_log_probs)
                         rewards_refs: List[ray.ObjectRef] = self.reward.compute_rewards(batch, blocking=False)
-
-                        ref_log_probs = DataProto.materialize_concat(data_refs=ref_log_probs_refs)
                         rewards = DataProto.materialize_concat(data_refs=rewards_refs)
-
-                        metrics.update(reduce_metrics(ref_log_probs.meta_info.pop("metrics", {})))
                         metrics.update(reduce_metrics(rewards.meta_info.pop("metrics", {})))
-                        ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
-                        batch = batch.union(ref_log_probs)
                         batch = batch.union(rewards)
                     metrics["time/ref_log_probs_values_reward"] = cal_timer.last
 
@@ -399,6 +398,10 @@ class RLVRMathVLMPipeline(BasePipeline):
 
                         batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
                         metrics.update(reduce_metrics(old_log_probs.meta_info.pop("metrics", {})))
+                        
+                        # Mock ref_log_probs using old_log_probs if reference is disabled
+                        if not self.pipeline_config.enable_reference:
+                            batch.batch["ref_log_probs"] = batch.batch["old_log_probs"].clone()
 
                     metrics["time/old_log_probs"] = cal_old_logpb_timer.last
 
