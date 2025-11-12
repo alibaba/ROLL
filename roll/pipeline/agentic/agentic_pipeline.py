@@ -401,7 +401,10 @@ class AgenticPipeline(BasePipeline):
         """
         actor_train_train_bsz = self.pipeline_config.actor_train.training_args.per_device_train_batch_size * self.pipeline_config.actor_train.training_args.gradient_accumulation_steps * self.actor_train.dp_size
         actor_train_infer_bsz = self.pipeline_config.actor_train.infer_batch_size * self.actor_train.dp_size
-        ref_infer_bsz = self.pipeline_config.reference.infer_batch_size * self.reference.dp_size
+
+        ref_infer_bsz = 1
+        if hasattr(self, "reference"):
+            ref_infer_bsz = self.pipeline_config.reference.infer_batch_size * self.reference.dp_size
         critic_train_bsz = 1
         critic_infer_bsz = 1
         if self.pipeline_config.adv_estimator == "gae":
