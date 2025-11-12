@@ -1051,7 +1051,6 @@ class VideoVAE_(nn.Module):
         #         out = torch.cat([out, out_], 2) # may add tensor offload
 
         # 修改此处 decoder forward 中 cache 计算逻辑
-        # 按照 tbstar 中 VAE 的整时间轴的输入方式进行处理
         def create_custom_forward(module):
             def custom_forward(*inputs):
                 return module(*inputs)
