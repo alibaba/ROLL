@@ -24,6 +24,9 @@
   <a href="https://deepwiki.com/alibaba/ROLL" target="_blank">
     <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
   </a>
+  <a href="./assets/future_lab.png" target="_blank">
+    <img src="https://img.shields.io/twitter/follow/FutureLab2025?style=social" alt="X QR">
+  </a>
 </p>
 
 </div>
@@ -203,6 +206,9 @@ ROLL is a project jointly developed by Taotian Future Living Lab and Alibaba AI 
 
 <a href="./assets/roll_wechat.png" target="_blank">
   <img src="https://img.shields.io/badge/WeChat-green?logo=wechat" alt="WeChat QR">
+</a>
+<a href="./assets/future_lab.png" target="_blank">
+  <img src="https://img.shields.io/twitter/follow/FutureLab2025?style=social" alt="X QR">
 </a>
 
 -----
