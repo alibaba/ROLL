@@ -29,7 +29,7 @@ export default () => {
           An open-source reinforcement learning library by Alibaba, optimized for large-scale language models. Supporting distributed training, multi-task learning, and agent interaction for simpler and more efficient AI model training.
         </div>
         <div className={styles.buttons}>
-          <Button href="/ROLL/docs/English/start/" target='_blank' className={styles.btn}>{"Get Started >"}</Button>
+          <Button href="/ROLL/docs/UserGuide/start/" target='_blank' className={styles.btn}>{"Get Started >"}</Button>
           <Button className={styles.github} target='_blank' href="https://github.com/alibaba/ROLL" variant="outlined" icon={<GithubOutlined />}>{"Github >"}</Button>
           <Button className={styles.github} target='_blank' href="https://deepwiki.com/alibaba/ROLL" variant="outlined" icon={<Image width={14} src={useBaseUrl('/img/deepwiki.svg')} preview={false}></Image>}>{"DeepWiki >"}</Button>
         </div>

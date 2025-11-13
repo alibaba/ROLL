@@ -23,7 +23,7 @@ function HomepageHeader() {
               ROLL is an efficient and user-friendly RL library designed for Large Language Models (LLMs) utilizing Large Scale GPU resources. It significantly enhances LLM performance in key areas such as human preference alignment, complex reasoning, and multi-turn agentic interaction scenarios.
             </div>
             <div>
-              <Button style={{ height: '60px', fontSize: '20px', padding: '0 20px' }} size="large" type="primary" href="/ROLL/docs/简体中文/快速开始/multi_nodes_quick_start_cn">Get started</Button>
+              <Button style={{ height: '60px', fontSize: '20px', padding: '0 20px' }} size="large" type="primary" href="/ROLL/zh-Hans/docs/QuickStart/multi_nodes_quick_start_cn">Get started</Button>
             </div>
           </div>
         </div>

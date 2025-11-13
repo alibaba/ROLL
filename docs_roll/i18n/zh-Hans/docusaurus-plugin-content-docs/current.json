@@ -1,0 +1,42 @@
+{
+  "version.label": {
+    "message": "Next",
+    "description": "The label for version current"
+  },
+  "sidebar.tutorialSidebar.category.DesignImplementation": {
+    "message": "设计实现文档",
+    "description": "The label for category 'DesignImplementation' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.DevelopmentGuide": {
+    "message": "扩展开发手册",
+    "description": "The label for category 'DevelopmentGuide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.QuickStart": {
+    "message": "快速开始",
+    "description": "The label for category 'QuickStart' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.UserGuide": {
+    "message": "使用指南",
+    "description": "The label for category 'UserGuide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.agentic": {
+    "message": "agentic",
+    "description": "The label for category 'agentic' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.algorithms": {
+    "message": "algorithms",
+    "description": "The label for category 'algorithms' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.ascend": {
+    "message": "ascend",
+    "description": "The label for category 'ascend' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.backend": {
+    "message": "backend",
+    "description": "The label for category 'backend' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.pipeline": {
+    "message": "pipeline",
+    "description": "The label for category 'pipeline' in sidebar 'tutorialSidebar'"
+  }
+}

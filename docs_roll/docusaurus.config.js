@@ -30,7 +30,17 @@ const config = {
   // to replace "en" with "zh-Hans".
   i18n: {
     defaultLocale: 'en',
-    locales: ['en'],
+    locales: ['en', 'zh-Hans'],
+    localeConfigs: {
+      en: {
+        label: 'English',
+        direction: 'ltr',
+      },
+      'zh-CN': {
+        label: '简体中文',
+        direction: 'ltr',
+      },
+    },
   },
 
   presets: [
@@ -115,11 +125,11 @@ const config = {
             items: [
               {
                 label: 'ROLL单机实践手册',
-                to: '/docs/简体中文/快速开始/single_node_quick_start_cn',
+                to: '/docs/QuickStart/single_node_quick_start',
               },
               {
                 label: '配置指南',
-                to: '/docs/简体中文/快速开始/config_guide_cn',
+                to: '/docs/QuickStart/config_guide',
               },
             ],
           },
