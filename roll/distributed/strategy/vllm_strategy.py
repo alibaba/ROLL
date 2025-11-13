@@ -8,14 +8,14 @@ import time
 from collections import defaultdict, deque
 from concurrent import futures
 from typing import Dict, List, Optional, Union
+from packaging.version import Version
 
-import ray
 import torch
 import torch.distributed as dist
 from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
+import vllm
 from vllm import RequestOutput, SamplingParams
-from vllm.beam_search import BeamSearchOutput
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind, BeamSearchParams
 from vllm.utils import random_uuid
@@ -24,18 +24,10 @@ from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto, list_of_dict_to_dict_of_list
 from roll.distributed.strategy.strategy import InferenceStrategy
 from roll.third_party.vllm import LLM, AsyncLLM
-from roll.utils.collective import collective
 from roll.utils.functionals import GenerateRequestType, concatenate_input_and_output, reduce_metrics
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
 from roll.platforms import current_platform
-try:
-    from vllm.inputs import TokensPrompt
-    high_version_vllm=True
-except:
-    high_version_vllm=False
-    pass
-
 
 
 logger = get_logger()
@@ -166,11 +158,11 @@ class VllmStrategy(InferenceStrategy):
         if "multi_modal_data" in batch.non_tensor_batch:
             vllm_input_args["prompts"] = batch.non_tensor_batch["multi_modal_data"]
         else:
-            if high_version_vllm:
+            if Version(vllm.__version__) >= Version("0.11.0"):
+                from vllm.inputs import TokensPrompt
                 prompt_token_ids_list=gather_unpadded_input_ids(
                     input_ids=input_ids, attention_mask=attention_mask
                 )
-
                 vllm_input_args["prompts"] = [TokensPrompt(prompt_token_ids=prompt_token_ids)for prompt_token_ids in prompt_token_ids_list]
             else:
                 vllm_input_args["prompt_token_ids"] = gather_unpadded_input_ids(
