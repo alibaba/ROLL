@@ -31,7 +31,7 @@ class SchedulerSA(Scheduler):
     def __init__(self, *args, **kwargs):
         import sys
         from roll.third_party.sglang.v054_patch.tp_worker import TpModelWorkerSA
-        sys.modules['sglang.srt.managers.scheduler'].__dict__['TpModelWorker'] = TpModelWorkerSA
+        sys.modules['sglang.srt.managers.tp_worker'].__dict__['TpModelWorker'] = TpModelWorkerSA
         super().__init__(*args, **kwargs)
         func_map_patch = [(SetupCollectiveGroupReqInput, self.setup_collective_group),
                           (BroadcastBucketReqInput, self.broadcast_bucket),

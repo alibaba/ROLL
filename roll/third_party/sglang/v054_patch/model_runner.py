@@ -1,25 +1,31 @@
 import logging
-from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import datetime
+import socket
+import threading
 
 from roll.platforms import current_platform
 
 
 from sglang.srt.model_executor.model_runner import ModelRunner, UNBALANCED_MODEL_LOADING_TIMEOUT_S
 from sglang.srt.configs.device_config import DeviceConfig
-from sglang.srt.configs.load_config import LoadConfig
+from sglang.srt.configs.load_config import LoadConfig, LoadFormat
+
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.distributed import get_tp_group
-from sglang.srt.layers.quantization import monkey_patch_isinstance_for_vllm_base_layer
 from sglang.srt.distributed.parallel_state import monkey_patch_vllm_parallel_state
 from sglang.srt.model_loader import get_model
-from sglang.srt.offloader import get_offloader
+from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
+    trigger_init_weights_send_group_for_remote_instance_request,
+)
+from sglang.srt.debug_utils.tensor_dump_forward_hook import (
+    register_forward_hook_for_model,
+)
+from sglang.srt.utils.offloader import get_offloader
 
 from sglang.srt.utils import (
     get_available_gpu_memory,
-    monkey_patch_vllm_gguf_config,
     set_cuda_arch,
 )
 
@@ -40,43 +46,68 @@ class ModelRunnerSA(ModelRunner):
         # This can reduce thread conflicts and speed up weight loading.
         if self.device != "cpu":
             torch.set_num_threads(1)
-        if self.device == current_platform.device_type:
-            if current_platform.get_device_capability()[0] < 8:
+        if self.device == "cuda":
+            if torch.cuda.get_device_capability()[0] < 8:
                 logger.info(
                     "Compute capability below sm80. Use float16 due to lack of bfloat16 support."
                 )
                 self.server_args.dtype = "float16"
                 self.model_config.dtype = torch.float16
-                if current_platform.get_device_capability()[1] < 5:
+                if torch.cuda.get_device_capability()[1] < 5:
                     raise RuntimeError("SGLang only supports sm75 and above.")
 
         set_cuda_arch()
 
         # Prepare the model config
+        from sglang.srt.configs.modelopt_config import ModelOptConfig
+
+        modelopt_config = ModelOptConfig(
+            quant=self.server_args.modelopt_quant,
+            checkpoint_restore_path=self.server_args.modelopt_checkpoint_restore_path,
+            checkpoint_save_path=self.server_args.modelopt_checkpoint_save_path,
+            export_path=self.server_args.modelopt_export_path,
+            quantize_and_serve=self.server_args.quantize_and_serve,
+        )
+
         self.load_config = LoadConfig(
             load_format=self.server_args.load_format,
             download_dir=self.server_args.download_dir,
             model_loader_extra_config=self.server_args.model_loader_extra_config,
+            tp_rank=self.tp_rank,
+            remote_instance_weight_loader_seed_instance_ip=self.server_args.remote_instance_weight_loader_seed_instance_ip,
+            remote_instance_weight_loader_seed_instance_service_port=self.server_args.remote_instance_weight_loader_seed_instance_service_port,
+            remote_instance_weight_loader_send_weights_group_ports=self.server_args.remote_instance_weight_loader_send_weights_group_ports,
+            modelopt_config=modelopt_config,
         )
         if self.device == "cpu":
             self.model_config = adjust_config_with_unaligned_cpu_tp(
                 self.model_config, self.load_config, self.tp_size
             )
-        if self.server_args.load_format == "gguf":
-            monkey_patch_vllm_gguf_config()
+
+        if self.server_args.load_format == LoadFormat.REMOTE_INSTANCE:
+            if self.tp_rank == 0:
+                instance_ip = socket.gethostbyname(socket.gethostname())
+                t = threading.Thread(
+                    target=trigger_init_weights_send_group_for_remote_instance_request,
+                    args=(
+                        self.server_args.remote_instance_weight_loader_seed_instance_ip,
+                        self.server_args.remote_instance_weight_loader_seed_instance_service_port,
+                        self.server_args.remote_instance_weight_loader_send_weights_group_ports,
+                        instance_ip,
+                    ),
+                )
+                t.start()
 
         # Load the model
         # Remove monkey_patch when linear.py quant remove dependencies with vllm
         monkey_patch_vllm_parallel_state()
-        monkey_patch_isinstance_for_vllm_base_layer()
 
         self.model = get_model(
             model_config=self.model_config,
             load_config=self.load_config,
-            device_config=DeviceConfig(self.device),
+            device_config=DeviceConfig(self.device, self.gpu_id),
         )
         monkey_patch_vllm_parallel_state(reverse=True)
-        monkey_patch_isinstance_for_vllm_base_layer(reverse=True)
 
         get_offloader().post_init()
 
@@ -124,19 +155,34 @@ class ModelRunnerSA(ModelRunner):
             f"avail mem={after_avail_memory:.2f} GB, "
             f"mem usage={self.weight_load_mem_usage:.2f} GB."
         )
-
-        # Handle the case where some ranks do not finish loading.
-        try:
-            dist.monitored_barrier(
-                group=get_tp_group().cpu_group,
-                timeout=datetime.timedelta(seconds=UNBALANCED_MODEL_LOADING_TIMEOUT_S),
-                wait_all_ranks=True,
+        if self.server_args.debug_tensor_dump_output_folder is not None:
+            register_forward_hook_for_model(
+                self.model,
+                self.server_args.debug_tensor_dump_output_folder,
+                self.server_args.debug_tensor_dump_layers,
+                self.tp_size,
+                self.tp_rank,
+                self.pp_rank,
             )
-        except RuntimeError:
-            raise ValueError(
-                f"TP rank {self.tp_rank} could finish the model loading, but there are other ranks that didn't finish loading. It is likely due to unexpected failures (e.g., OOM) or a slow node."
-            ) from None
- 
+
+        if self.server_args.elastic_ep_backend == "mooncake":
+            # Mooncake does not support `monitored_barrier`
+            dist.barrier(group=get_tp_group().cpu_group)
+        else:
+            # Handle the case where some ranks do not finish loading.
+            try:
+                dist.monitored_barrier(
+                    group=get_tp_group().cpu_group,
+                    timeout=datetime.timedelta(
+                        seconds=UNBALANCED_MODEL_LOADING_TIMEOUT_S
+                    ),
+                    wait_all_ranks=True,
+                )
+            except RuntimeError:
+                raise ValueError(
+                    f"TP rank {self.tp_rank} could finish the model loading, but there are other ranks that didn't finish loading. It is likely due to unexpected failures (e.g., OOM) or a slow node."
+                ) from None
+
     def setup_collective_group(self, comm_plan, backend, rank_in_cluster):
         self.model_update_comm_plan = getattr(self, "model_update_comm_plan", {})
         rank, comm_plan_args = get_dist_info_from_comm_plan(comm_plan, rank_in_cluster=rank_in_cluster,
