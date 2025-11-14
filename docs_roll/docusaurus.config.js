@@ -94,7 +94,7 @@ const config = {
         title: 'ROLL',
         logo: {
           alt: 'ROLL Logo',
-          src: 'img/logo.png',
+          src: 'https://img.alicdn.com/imgextra/i3/O1CN016Mlxas1MHNA3NEbZ0_!!6000000001409-2-tps-465-367.png',
         },
         items: [
           { to: '/ROLL', label: 'Home', position: 'right' },
