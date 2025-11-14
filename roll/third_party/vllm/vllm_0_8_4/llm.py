@@ -206,7 +206,7 @@ class Llm084(LLM):
     def broadcast_parameter(self, *args, **kwargs):
         self.collective_rpc(method="broadcast_parameter", args=args, kwargs=kwargs)
 
-    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+    def update_parameter(self, parameter_name, weight, ranks_in_worker, is_lora):
         if envs.VLLM_USE_V1:
             weight_dict = {
                 "dtype": weight.dtype,
@@ -214,7 +214,7 @@ class Llm084(LLM):
             }
         else:
             weight_dict = weight
-        self.collective_rpc(method="update_parameter", args=(parameter_name, weight_dict, ranks_in_worker))
+        self.collective_rpc(method="update_parameter", args=(parameter_name, weight_dict, ranks_in_worker, is_lora))
 
     def update_parameter_in_bucket(self, meta_infos, buffer, ranks_in_worker):
         if envs.VLLM_USE_V1:

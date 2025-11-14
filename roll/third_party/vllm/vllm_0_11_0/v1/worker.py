@@ -22,10 +22,10 @@ class Worker0110(WorkerHelper, Worker):
         self.lora_params = OrderedDict()
         patch_vllm_lora_manager()
 
-    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+    def update_parameter(self, parameter_name, weight, ranks_in_worker, is_lora):
         weight_dict = weight
         weight = torch.tensor(weight_dict["weight"], dtype=weight_dict["dtype"]).cuda()
-        super().update_parameter(parameter_name, weight, ranks_in_worker)
+        super().update_parameter(parameter_name, weight, ranks_in_worker, is_lora)
 
     def broadcast_bucket(self, src_pp_rank, meta_infos, bucket_size):
         RecvBucketManager.dict_to_meta(meta_infos)
