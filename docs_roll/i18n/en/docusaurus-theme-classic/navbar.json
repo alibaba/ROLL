@@ -1,0 +1,30 @@
+{
+  "title": {
+    "message": "ROLL",
+    "description": "The title in the navbar"
+  },
+  "logo.alt": {
+    "message": "ROLL Logo",
+    "description": "The alt text of navbar logo"
+  },
+  "item.label.Home": {
+    "message": "Home",
+    "description": "Navbar item with label Home"
+  },
+  "item.label.Core Algorithms": {
+    "message": "Core Algorithms",
+    "description": "Navbar item with label Core Algorithms"
+  },
+  "item.label.Research Community": {
+    "message": "Research Community",
+    "description": "Navbar item with label Research Community"
+  },
+  "item.label.API Docs": {
+    "message": "API Docs",
+    "description": "Navbar item with label API Docs"
+  },
+  "item.label.GitHub": {
+    "message": "GitHub",
+    "description": "Navbar item with label GitHub"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "version.label": {
+    "message": "Next",
+    "description": "The label for version current"
+  },
+  "sidebar.tutorialSidebar.category.DesignImplementation": {
+    "message": "DesignImplementation",
+    "description": "The label for category 'DesignImplementation' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.DevelopmentGuide": {
+    "message": "DevelopmentGuide",
+    "description": "The label for category 'DevelopmentGuide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.QuickStart": {
+    "message": "QuickStart",
+    "description": "The label for category 'QuickStart' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.UserGuide": {
+    "message": "UserGuide",
+    "description": "The label for category 'UserGuide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.agentic": {
+    "message": "agentic",
+    "description": "The label for category 'agentic' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.algorithms": {
+    "message": "algorithms",
+    "description": "The label for category 'algorithms' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.ascend": {
+    "message": "ascend",
+    "description": "The label for category 'ascend' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.backend": {
+    "message": "backend",
+    "description": "The label for category 'backend' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.pipeline": {
+    "message": "pipeline",
+    "description": "The label for category 'pipeline' in sidebar 'tutorialSidebar'"
+  }
+}

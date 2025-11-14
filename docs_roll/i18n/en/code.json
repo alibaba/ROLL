@@ -1,46 +1,61 @@
 {
+  "like a Reinforcement Learning Algorithm Developer": {
+    "message": "like a Reinforcement Learning Algorithm Developer"
+  },
+  "Home": {
+    "message": "Home"
+  },
+  "Core Algorithms": {
+    "message": "Core Algorithms"
+  },
+  "Research Community": {
+    "message": "Research Community"
+  },
+  "API Docs": {
+    "message": "API Docs"
+  },
   "theme.ErrorPageContent.title": {
-    "message": "页面已崩溃。",
+    "message": "This page crashed.",
     "description": "The title of the fallback page when the page crashed"
   },
   "theme.BackToTopButton.buttonAriaLabel": {
-    "message": "回到顶部",
+    "message": "Scroll back to top",
     "description": "The ARIA label for the back to top button"
   },
   "theme.blog.archive.title": {
-    "message": "历史博文",
+    "message": "Archive",
     "description": "The page & hero title of the blog archive page"
   },
   "theme.blog.archive.description": {
-    "message": "历史博文",
+    "message": "Archive",
     "description": "The page & hero description of the blog archive page"
   },
   "theme.blog.paginator.navAriaLabel": {
-    "message": "博文列表分页导航",
+    "message": "Blog list page navigation",
     "description": "The ARIA label for the blog pagination"
   },
   "theme.blog.paginator.newerEntries": {
-    "message": "较新的博文",
+    "message": "Newer entries",
     "description": "The label used to navigate to the newer blog posts page (previous page)"
   },
   "theme.blog.paginator.olderEntries": {
-    "message": "较旧的博文",
+    "message": "Older entries",
     "description": "The label used to navigate to the older blog posts page (next page)"
   },
   "theme.blog.post.paginator.navAriaLabel": {
-    "message": "博文分页导航",
+    "message": "Blog post page navigation",
     "description": "The ARIA label for the blog posts pagination"
   },
   "theme.blog.post.paginator.newerPost": {
-    "message": "较新一篇",
+    "message": "Newer post",
     "description": "The blog post button label to navigate to the newer/previous post"
   },
   "theme.blog.post.paginator.olderPost": {
-    "message": "较旧一篇",
+    "message": "Older post",
     "description": "The blog post button label to navigate to the older/next post"
   },
   "theme.tags.tagsPageLink": {
-    "message": "查看所有标签",
+    "message": "View all tags",
     "description": "The label of the link targeting the tag list page"
   },
   "theme.colorToggle.ariaLabel.mode.system": {
@@ -48,134 +63,134 @@
     "description": "The name for the system color mode"
   },
   "theme.colorToggle.ariaLabel.mode.light": {
-    "message": "浅色模式",
+    "message": "light mode",
     "description": "The name for the light color mode"
   },
   "theme.colorToggle.ariaLabel.mode.dark": {
-    "message": "暗黑模式",
+    "message": "dark mode",
     "description": "The name for the dark color mode"
   },
   "theme.colorToggle.ariaLabel": {
-    "message": "切换浅色/暗黑模式（当前为{mode}）",
+    "message": "Switch between dark and light mode (currently {mode})",
     "description": "The ARIA label for the color mode toggle"
   },
   "theme.docs.breadcrumbs.navAriaLabel": {
-    "message": "页面路径",
+    "message": "Breadcrumbs",
     "description": "The ARIA label for the breadcrumbs"
   },
   "theme.docs.DocCard.categoryDescription.plurals": {
-    "message": "{count} 个项目",
+    "message": "1 item|{count} items",
     "description": "The default description for a category card in the generated index about how many items this category includes"
   },
   "theme.docs.paginator.navAriaLabel": {
-    "message": "文件选项卡",
+    "message": "Docs pages",
     "description": "The ARIA label for the docs pagination"
   },
   "theme.docs.paginator.previous": {
-    "message": "上一页",
+    "message": "Previous",
     "description": "The label used to navigate to the previous doc"
   },
   "theme.docs.paginator.next": {
-    "message": "下一页",
+    "message": "Next",
     "description": "The label used to navigate to the next doc"
   },
   "theme.docs.tagDocListPageTitle.nDocsTagged": {
-    "message": "{count} 篇文档带有标签",
+    "message": "One doc tagged|{count} docs tagged",
     "description": "Pluralized label for \"{count} docs tagged\". Use as much plural forms (separated by \"|\") as your language support (see https://www.unicode.org/cldr/cldr-aux/charts/34/supplemental/language_plural_rules.html)"
   },
   "theme.docs.tagDocListPageTitle": {
-    "message": "{nDocsTagged}「{tagName}」",
+    "message": "{nDocsTagged} with \"{tagName}\"",
     "description": "The title of the page for a docs tag"
   },
   "theme.docs.versionBadge.label": {
-    "message": "版本：{versionLabel}"
+    "message": "Version: {versionLabel}"
   },
   "theme.docs.versions.unreleasedVersionLabel": {
-    "message": "此为 {siteTitle} {versionLabel} 版尚未发行的文档。",
+    "message": "This is unreleased documentation for {siteTitle} {versionLabel} version.",
     "description": "The label used to tell the user that he's browsing an unreleased doc version"
   },
   "theme.docs.versions.unmaintainedVersionLabel": {
-    "message": "此为 {siteTitle} {versionLabel} 版的文档，现已不再积极维护。",
+    "message": "This is documentation for {siteTitle} {versionLabel}, which is no longer actively maintained.",
     "description": "The label used to tell the user that he's browsing an unmaintained doc version"
   },
   "theme.docs.versions.latestVersionSuggestionLabel": {
-    "message": "最新的文档请参阅 {latestVersionLink} ({versionLabel})。",
+    "message": "For up-to-date documentation, see the {latestVersionLink} ({versionLabel}).",
     "description": "The label used to tell the user to check the latest version"
   },
   "theme.docs.versions.latestVersionLinkLabel": {
-    "message": "最新版本",
+    "message": "latest version",
     "description": "The label used for the latest version suggestion link label"
   },
   "theme.common.editThisPage": {
-    "message": "编辑此页",
+    "message": "Edit this page",
     "description": "The link label to edit the current page"
   },
   "theme.common.headingLinkTitle": {
-    "message": "{heading}的直接链接",
+    "message": "Direct link to {heading}",
     "description": "Title for link to heading"
   },
   "theme.lastUpdated.atDate": {
-    "message": "于 {date} ",
+    "message": " on {date}",
     "description": "The words used to describe on which date a page has been last updated"
   },
   "theme.lastUpdated.byUser": {
-    "message": "由 {user} ",
+    "message": " by {user}",
     "description": "The words used to describe by who the page has been last updated"
   },
   "theme.lastUpdated.lastUpdatedAtBy": {
-    "message": "最后{byUser}{atDate}更新",
+    "message": "Last updated{atDate}{byUser}",
     "description": "The sentence used to display when a page has been last updated, and by who"
   },
   "theme.navbar.mobileVersionsDropdown.label": {
-    "message": "选择版本",
+    "message": "Versions",
     "description": "The label for the navbar versions dropdown on mobile view"
   },
   "theme.NotFound.title": {
-    "message": "找不到页面",
+    "message": "Page Not Found",
     "description": "The title of the 404 page"
   },
   "theme.tags.tagsListLabel": {
-    "message": "标签：",
+    "message": "Tags:",
     "description": "The label alongside a tag list"
   },
   "theme.admonition.caution": {
-    "message": "警告",
+    "message": "caution",
     "description": "The default label used for the Caution admonition (:::caution)"
   },
   "theme.admonition.danger": {
-    "message": "危险",
+    "message": "danger",
     "description": "The default label used for the Danger admonition (:::danger)"
   },
   "theme.admonition.info": {
-    "message": "信息",
+    "message": "info",
     "description": "The default label used for the Info admonition (:::info)"
   },
   "theme.admonition.note": {
-    "message": "备注",
+    "message": "note",
     "description": "The default label used for the Note admonition (:::note)"
   },
   "theme.admonition.tip": {
-    "message": "提示",
+    "message": "tip",
     "description": "The default label used for the Tip admonition (:::tip)"
   },
   "theme.admonition.warning": {
-    "message": "注意",
+    "message": "warning",
     "description": "The default label used for the Warning admonition (:::warning)"
   },
   "theme.AnnouncementBar.closeButtonAriaLabel": {
-    "message": "关闭",
+    "message": "Close",
     "description": "The ARIA label for close button of announcement bar"
   },
   "theme.blog.sidebar.navAriaLabel": {
-    "message": "最近博文导航",
+    "message": "Blog recent posts navigation",
     "description": "The ARIA label for recent posts in the blog sidebar"
   },
   "theme.DocSidebarItem.expandCategoryAriaLabel": {
-    "message": "展开侧边栏分类 '{label}'",
+    "message": "Expand sidebar category '{label}'",
     "description": "The ARIA label to expand the sidebar category"
   },
   "theme.DocSidebarItem.collapseCategoryAriaLabel": {
-    "message": "折叠侧边栏分类 '{label}'",
+    "message": "Collapse sidebar category '{label}'",
     "description": "The ARIA label to collapse the sidebar category"
   },
   "theme.IconExternalLink.ariaLabel": {
@@ -183,79 +198,79 @@
     "description": "The ARIA label for the external link icon"
   },
   "theme.NavBar.navAriaLabel": {
-    "message": "主导航",
+    "message": "Main",
     "description": "The ARIA label for the main navigation"
   },
   "theme.navbar.mobileLanguageDropdown.label": {
-    "message": "选择语言",
+    "message": "Languages",
     "description": "The label for the mobile language switcher dropdown"
   },
   "theme.NotFound.p1": {
-    "message": "我们找不到您要找的页面。",
+    "message": "We could not find what you were looking for.",
     "description": "The first paragraph of the 404 page"
   },
   "theme.NotFound.p2": {
-    "message": "请联系原始链接来源网站的所有者，并告知他们链接已损坏。",
+    "message": "Please contact the owner of the site that linked you to the original URL and let them know their link is broken.",
     "description": "The 2nd paragraph of the 404 page"
   },
   "theme.TOCCollapsible.toggleButtonLabel": {
-    "message": "本页总览",
+    "message": "On this page",
     "description": "The label used by the button on the collapsible TOC component"
   },
   "theme.blog.post.readMore": {
-    "message": "阅读更多",
+    "message": "Read more",
     "description": "The label used in blog post item excerpts to link to full blog posts"
   },
   "theme.blog.post.readMoreLabel": {
-    "message": "阅读 {title} 的全文",
+    "message": "Read more about {title}",
     "description": "The ARIA label for the link to full blog posts from excerpts"
   },
   "theme.blog.post.readingTime.plurals": {
-    "message": "阅读需 {readingTime} 分钟",
+    "message": "One min read|{readingTime} min read",
     "description": "Pluralized label for \"{readingTime} min read\". Use as much plural forms (separated by \"|\") as your language support (see https://www.unicode.org/cldr/cldr-aux/charts/34/supplemental/language_plural_rules.html)"
   },
   "theme.CodeBlock.copy": {
-    "message": "复制",
+    "message": "Copy",
     "description": "The copy button label on code blocks"
   },
   "theme.CodeBlock.copied": {
-    "message": "复制成功",
+    "message": "Copied",
     "description": "The copied button label on code blocks"
   },
   "theme.CodeBlock.copyButtonAriaLabel": {
-    "message": "复制代码到剪贴板",
+    "message": "Copy code to clipboard",
     "description": "The ARIA label for copy code blocks button"
   },
   "theme.CodeBlock.wordWrapToggle": {
-    "message": "切换自动换行",
+    "message": "Toggle word wrap",
     "description": "The title attribute for toggle word wrapping button of code block lines"
   },
   "theme.docs.breadcrumbs.home": {
-    "message": "主页面",
+    "message": "Home page",
     "description": "The ARIA label for the home page in the breadcrumbs"
   },
   "theme.docs.sidebar.collapseButtonTitle": {
-    "message": "收起侧边栏",
+    "message": "Collapse sidebar",
     "description": "The title attribute for collapse button of doc sidebar"
   },
   "theme.docs.sidebar.collapseButtonAriaLabel": {
-    "message": "收起侧边栏",
+    "message": "Collapse sidebar",
     "description": "The title attribute for collapse button of doc sidebar"
   },
   "theme.docs.sidebar.navAriaLabel": {
-    "message": "文档侧边栏",
+    "message": "Docs sidebar",
     "description": "The ARIA label for the sidebar navigation"
   },
   "theme.docs.sidebar.closeSidebarButtonAriaLabel": {
-    "message": "关闭导航栏",
+    "message": "Close navigation bar",
     "description": "The ARIA label for close button of mobile sidebar"
   },
   "theme.navbar.mobileSidebarSecondaryMenu.backButtonLabel": {
-    "message": "← 回到主菜单",
+    "message": "← Back to main menu",
     "description": "The label of the back button to return to main menu, inside the mobile navbar sidebar secondary menu (notably used to display the docs sidebar)"
   },
   "theme.docs.sidebar.toggleSidebarButtonAriaLabel": {
-    "message": "切换导航栏",
+    "message": "Toggle navigation bar",
     "description": "The ARIA label for hamburger menu button of mobile navigation"
   },
   "theme.navbar.mobileDropdown.collapseButton.expandAriaLabel": {
@@ -267,54 +282,54 @@
     "description": "The ARIA label of the button to collapse the mobile dropdown navbar item"
   },
   "theme.docs.sidebar.expandButtonTitle": {
-    "message": "展开侧边栏",
+    "message": "Expand sidebar",
     "description": "The ARIA label and title attribute for expand button of doc sidebar"
   },
   "theme.docs.sidebar.expandButtonAriaLabel": {
-    "message": "展开侧边栏",
+    "message": "Expand sidebar",
     "description": "The ARIA label and title attribute for expand button of doc sidebar"
   },
   "theme.SearchBar.noResultsText": {
-    "message": "没有找到任何文档"
+    "message": "No results"
   },
   "theme.SearchBar.seeAllOutsideContext": {
-    "message": "查看“{context}”以外的全部结果"
+    "message": "See all results outside \"{context}\""
   },
   "theme.SearchBar.searchInContext": {
-    "message": "查看“{context}”以内的全部结果"
+    "message": "See all results within \"{context}\""
   },
   "theme.SearchBar.seeAll": {
-    "message": "查看全部结果"
+    "message": "See all results"
   },
   "theme.SearchBar.label": {
-    "message": "搜索",
+    "message": "Search",
     "description": "The ARIA label and placeholder for search button"
   },
   "theme.SearchPage.existingResultsTitle": {
-    "message": "“{query}”的搜索结果",
+    "message": "Search results for \"{query}\"",
     "description": "The search page title for non-empty query"
   },
   "theme.SearchPage.emptyResultsTitle": {
-    "message": "搜索文档",
+    "message": "Search the documentation",
     "description": "The search page title for empty query"
   },
   "theme.SearchPage.searchContext.everywhere": {
-    "message": "所有"
+    "message": "Everywhere"
   },
   "theme.SearchPage.documentsFound.plurals": {
-    "message": "共找到 {count} 篇文档",
+    "message": "1 document found|{count} documents found",
     "description": "Pluralized label for \"{count} documents found\". Use as much plural forms (separated by \"|\") as your language support (see https://www.unicode.org/cldr/cldr-aux/charts/34/supplemental/language_plural_rules.html)"
   },
   "theme.SearchPage.noResultsText": {
-    "message": "没有找到任何文档",
+    "message": "No documents were found",
     "description": "The paragraph for empty search result"
   },
   "theme.blog.post.plurals": {
-    "message": "{count} 篇博文",
+    "message": "One post|{count} posts",
     "description": "Pluralized label for \"{count} posts\". Use as much plural forms (separated by \"|\") as your language support (see https://www.unicode.org/cldr/cldr-aux/charts/34/supplemental/language_plural_rules.html)"
   },
   "theme.blog.tagTitle": {
-    "message": "{nPosts} 含有标签「{tagName}」",
+    "message": "{nPosts} tagged with \"{tagName}\"",
     "description": "The title of the page for a blog tag"
   },
   "theme.blog.author.pageTitle": {
@@ -322,163 +337,148 @@
     "description": "The title of the page for a blog author"
   },
   "theme.blog.authorsList.pageTitle": {
-    "message": "作者",
+    "message": "Authors",
     "description": "The title of the authors page"
   },
   "theme.blog.authorsList.viewAll": {
-    "message": "查看所有作者",
+    "message": "View all authors",
     "description": "The label of the link targeting the blog authors page"
   },
   "theme.blog.author.noPosts": {
-    "message": "该作者尚未撰写任何文章。",
+    "message": "This author has not written any posts yet.",
     "description": "The text for authors with 0 blog post"
   },
   "theme.contentVisibility.unlistedBanner.title": {
-    "message": "未列出页",
+    "message": "Unlisted page",
     "description": "The unlisted content banner title"
   },
   "theme.contentVisibility.unlistedBanner.message": {
-    "message": "此页面未列出。搜索引擎不会对其索引，只有拥有直接链接的用户才能访问。",
+    "message": "This page is unlisted. Search engines will not index it, and only users having a direct link can access it.",
     "description": "The unlisted content banner message"
   },
   "theme.contentVisibility.draftBanner.title": {
-    "message": "草稿页",
+    "message": "Draft page",
     "description": "The draft content banner title"
   },
   "theme.contentVisibility.draftBanner.message": {
-    "message": "此页面是草稿，仅在开发环境中可见，不会包含在正式版本中。",
+    "message": "This page is a draft. It will only be visible in dev and be excluded from the production build.",
     "description": "The draft content banner message"
   },
   "theme.ErrorPageContent.tryAgain": {
-    "message": "重试",
+    "message": "Try again",
     "description": "The label of the button to try again rendering when the React error boundary captures an error"
   },
   "theme.common.skipToMainContent": {
-    "message": "跳到主要内容",
+    "message": "Skip to main content",
     "description": "The skip to content label used for accessibility, allowing to rapidly navigate to main content with keyboard tab/enter navigation"
   },
   "theme.tags.tagsPageTitle": {
-    "message": "标签",
+    "message": "Tags",
     "description": "The title of the tag list page"
   },
-  "like a Reinforcement Learning Algorithm Developer": {
-    "message": "像一名强化学习算法开发者一样"
-  },
-  "Home": {
-    "message": "首页"
-  },
-  "Core Algorithms": {
-    "message": "核心算法"
-  },
-  "Research Community": {
-    "message": "开源社区"
-  },
-  "API Docs": {
-    "message": "文档"
-  },
   "Open Source Framework · Powerful & Easy": {
-    "message": "开源框架 · 强大且易用"
+    "message": "Open Source Framework · Powerful & Easy"
   },
   "An open-source reinforcement learning library by Alibaba, optimized for large-scale language models. Supporting distributed training, multi-task learning, and agent interaction for simpler and more efficient AI model training.": {
-    "message": "阿里巴巴开源的强化学习库，专为大语言模型优化。支持分布式训练、多任务学习与智能体交互，让 AI 模型训练更简单、更高效。"
+    "message": "An open-source reinforcement learning library by Alibaba, optimized for large-scale language models. Supporting distributed training, multi-task learning, and agent interaction for simpler and more efficient AI model training."
   },
   "Framework Overview": {
-    "message": "框架概览"
+    "message": "Framework Overview"
   },
   "ROLL (Reinforcement Learning Optimization for Large-scale Learning) is an open-source reinforcement learning framework by Alibaba, designed for large-scale language models. Built on Ray distributed architecture, supporting mainstream algorithms like PPO and GRPO, providing complete solutions from research to production.": {
-    "message": "ROLL（面向大规模学习的强化学习优化框架，Reinforcement Learning Optimization for Large-scale Learning）是阿里巴巴开源的强化学习框架，专为大语言模型设计。基于 Ray 分布式架构构建，支持 PPO、GRPO 等主流算法，提供从研究到生产的完整解决方案。"
+    "message": "ROLL (Reinforcement Learning Optimization for Large-scale Learning) is an open-source reinforcement learning framework by Alibaba, designed for large-scale language models. Built on Ray distributed architecture, supporting mainstream algorithms like PPO and GRPO, providing complete solutions from research to production."
   },
   "Why": {
-    "message": "为什么"
+    "message": "Why"
   },
   "Choose ROLL": {
-    "message": "选择 ROLL"
+    "message": "Choose ROLL"
   },
   "Distributed Architecture": {
-    "message": "分布式框架"
+    "message": "Distributed Architecture"
   },
   "Ray-based distributed architecture supporting mainstream engines like vLLM, SGLang, Megatron-Core, seamlessly scaling from single machine to large GPU clusters": {
-    "message": "基于 Ray 的分布式架构，支持 vLLM、SGLang、Megatron-Core 等主流推理引擎，可无缝扩展，从单机环境平滑伸缩至大规模 GPU 集群。"
+    "message": "Ray-based distributed architecture supporting mainstream engines like vLLM, SGLang, Megatron-Core, seamlessly scaling from single machine to large GPU clusters"
   },
   "Multi-task Learning": {
-    "message": "多任务学习"
+    "message": "Multi-task Learning"
   },
   "Support for multi-task joint training including math reasoning, code generation, and dialogue, with dynamic sampling rate and data weight adjustment": {
-    "message": "支持数学推理、代码生成和对话等多任务联合训练，具备动态采样率与数据权重调整能力。"
+    "message": "Support for multi-task joint training including math reasoning, code generation, and dialogue, with dynamic sampling rate and data weight adjustment"
   },
   "Extremely Easy to Use": {
-    "message": "开箱即用"
+    "message": "Extremely Easy to Use"
   },
   "Gym-style clean API design with modular architecture for flexible extension, one-click switching between different backend engines and algorithm configurations": {
-    "message": "采用 Gym 风格的简洁 API 设计，结合模块化架构以支持灵活扩展，可一键切换不同后端引擎与算法配置。"
+    "message": "Gym-style clean API design with modular architecture for flexible extension, one-click switching between different backend engines and algorithm configurations"
   },
   "Core Advantages": {
-    "message": "核心优势"
+    "message": "Core Advantages"
   },
   "ROLL framework provides comprehensive reinforcement learning support, from model training to agent deployment, every aspect is carefully optimized to make AI training more efficient": {
-    "message": "ROLL 框架提供全面的强化学习支持，涵盖从模型训练到智能体部署的全流程，每个环节均经过精心优化，让 AI 训练更高效。"
+    "message": "ROLL framework provides comprehensive reinforcement learning support, from model training to agent deployment, every aspect is carefully optimized to make AI training more efficient"
   },
   "Born for Scale": {
-    "message": "为规模化而生"
+    "message": "Born for Scale"
   },
   "Built on a Ray-based distributed architecture, it supports large-scale cluster training at the thousand-GPU level. Its innovative Rollout scheduler and AutoDeviceMapping module dramatically improve GPU resource utilization .": {
-    "message": "基于 Ray 的分布式架构构建，支持千卡 GPU 级别的大规模集群训练。其创新的 Rollout 调度器与 AutoDeviceMapping 模块显著提升了 GPU 资源利用率。"
+    "message": "Built on a Ray-based distributed architecture, it supports large-scale cluster training at the thousand-GPU level. Its innovative Rollout scheduler and AutoDeviceMapping module dramatically improve GPU resource utilization ."
   },
   "Extreme Training Efficiency": {
-    "message": "极致训练效率"
+    "message": "Extreme Training Efficiency"
   },
   "Integrates cutting-edge technologies like Megatron-Core, SGLang, and vLLM to significantly accelerate the model training and inference sampling processes .": {
-    "message": "集成 Megatron-Core、SGLang 和 vLLM 等前沿技术，显著加速模型训练与推理采样过程。"
+    "message": "Integrates cutting-edge technologies like Megatron-Core, SGLang, and vLLM to significantly accelerate the model training and inference sampling processes ."
   },
   "Rich Algorithms & Scenarios": {
-    "message": "丰富的算法与场景支持"
+    "message": "Rich Algorithms & Scenarios"
   },
   "Comes with built-in mainstream RL algorithms like PPO and GRPO, and supports multi-task RL and agent interaction scenarios. Its effectiveness has been validated in numerous real-world business applications .": {
-    "message": "内置 PPO、GRPO 等主流强化学习算法，支持多任务强化学习与智能体交互场景，并已在众多实际业务应用中验证其有效性。"
+    "message": "Comes with built-in mainstream RL algorithms like PPO and GRPO, and supports multi-task RL and agent interaction scenarios. Its effectiveness has been validated in numerous real-world business applications ."
   },
   "Open Source and Accessible": {
-    "message": "开源易用"
+    "message": "Open Source and Accessible"
   },
   "ROLL is open-sourced on GitHub (https://github.com/alibaba/ROLL) under the Apache License 2.0, backed by an active community and comprehensive documentation .": {
-    "message": "ROLL 已在 GitHub（https://github.com/alibaba/ROLL）上开源，采用 Apache License 2.0 许可证，并由活跃的社区和完善的文档提供支持。"
+    "message": "ROLL is open-sourced on GitHub (https://github.com/alibaba/ROLL) under the Apache License 2.0, backed by an active community and comprehensive documentation ."
   },
   "Open Source Community": {
-    "message": "开源社区"
+    "message": "Open Source Community"
   },
   "Join our vibrant open source community, explore cutting-edge reinforcement learning technologies with global AI researchers, and jointly promote the future of LLM and RL": {
-    "message": "加入我们充满活力的开源社区，与全球 AI 研究者共同探索前沿强化学习技术，携手推动大语言模型与强化学习的未来发展。"
+    "message": "Join our vibrant open source community, explore cutting-edge reinforcement learning technologies with global AI researchers, and jointly promote the future of LLM and RL"
   },
   "How to Contribute": {
-    "message": "如何贡献"
+    "message": "How to Contribute"
   },
   "Contribute algorithm implementations and performance optimizations": {
-    "message": "贡献算法实现与性能优化"
+    "message": "Contribute algorithm implementations and performance optimizations"
   },
   "Share experimental results and best practices": {
-    "message": "分享实验结果与最佳实践"
+    "message": "Share experimental results and best practices"
   },
   "Improve tutorials and learning resources": {
-    "message": "完善教程与学习资源"
+    "message": "Improve tutorials and learning resources"
   },
   "Join Discussion": {
-    "message": "参与讨论"
+    "message": "Join Discussion"
   },
   "WeChat": {
-    "message": "微信群"
+    "message": "WeChat"
   },
   "Follow GitHub Repository": {
-    "message": "关注 GitHub 仓库"
+    "message": "Follow GitHub Repository"
   },
   "Get Started >": {
-    "message": "快速入门 >"
+    "message": "Get Started >"
   },
   "Github Stars": {
-    "message": "Github星标"
+    "message": "Github Stars"
   },
   "Contributors": {
-    "message": "贡献者"
+    "message": "Contributors"
   },
   "Commits": {
-    "message": "提交"
+    "message": "Commits"
   }
 }

@@ -1,0 +1,34 @@
+{
+  "link.title.Examples": {
+    "message": "Examples",
+    "description": "The title of the footer links column with title=Examples in the footer"
+  },
+  "link.title.Community": {
+    "message": "Community",
+    "description": "The title of the footer links column with title=Community in the footer"
+  },
+  "link.title.More": {
+    "message": "More",
+    "description": "The title of the footer links column with title=More in the footer"
+  },
+  "link.item.label.ROLL单机实践手册": {
+    "message": "Single Node Quick Start",
+    "description": "The label of footer link with label=ROLL单机实践手册 linking to /docs/QuickStart/single_node_quick_start"
+  },
+  "link.item.label.配置指南": {
+    "message": "Config Guide",
+    "description": "The label of footer link with label=配置指南 linking to /docs/QuickStart/config_guide"
+  },
+  "link.item.label.Stack Overflow": {
+    "message": "Stack Overflow",
+    "description": "The label of footer link with label=Stack Overflow linking to https://stackoverflow.com/questions/tagged/docusaurus"
+  },
+  "link.item.label.GitHub": {
+    "message": "GitHub",
+    "description": "The label of footer link with label=GitHub linking to https://github.com/alibaba/ROLL"
+  },
+  "copyright": {
+    "message": "Copyright © 2025 Alibaba.",
+    "description": "The footer copyright"
+  }
+}
