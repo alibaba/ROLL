@@ -138,7 +138,7 @@ dapo_17k_with_python_code:
 }
 ```
 
-![math dapo + python_tool](../../../static/img/math_python_tool.png)
+![math dapo + python_tool](https://img.alicdn.com/imgextra/i1/O1CN01NNucNY1WdwqE81Une_!!6000000002812-2-tps-2268-726.png)
 
 ### QA + SearchTool
 
@@ -146,7 +146,7 @@ dapo_17k_with_python_code:
 - HotpotQA: `examples/qwen3_agentic_gem/gem_math_hotpotqa.yaml`
 - HotpotQA + Search: `examples/qwen3_agentic_gem/gem_math_hotpotqa_search.yaml`
 
-![qa + search](../../../static/img/qa_search.png)
+![qa + search](https://img.alicdn.com/imgextra/i2/O1CN01rpk4P91iCGHwx2qv6_!!6000000004376-2-tps-2262-714.png)
 
 #### Search Engine Startup Method
 

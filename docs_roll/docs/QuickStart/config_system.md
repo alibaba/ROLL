@@ -58,7 +58,7 @@ To better understand ROLL's configuration system, the UML diagram of RLVRConfig 
 - In WorkerConfig, ModelArguments, TrainingArguments, GeneratingArguments, DataArguments, and backend StrategyArguments held by the role are defined as needed
 - WorkerConfig can be extended as needed to construct new application configurations
 
-![RLVRConfig Diagram](../../static/img/roll_config_diagram.png)
+![RLVRConfig Diagram](https://img.alicdn.com/imgextra/i2/O1CN012otRDy1m5AcR0Dcsx_!!6000000004902-2-tps-3034-1742.png)
 
 ## Mapping between YAML Configuration and PipelineConfig
 

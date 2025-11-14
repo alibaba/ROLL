@@ -398,7 +398,7 @@
     "message": "分布式框架"
   },
   "Ray-based distributed architecture supporting mainstream engines like vLLM, SGLang, Megatron-Core, seamlessly scaling from single machine to large GPU clusters": {
-    "message": "基于 Ray 的分布式架构，支持 vLLM、SGLang、Megatron-Core 等主流推理引擎，可无缝扩展，从单机环境平滑伸缩至大规模 GPU 集群。"
+    "message": "基于 Ray 的分布式架构，支持 vLLM、SGLang、Megatron-Core 等主流训练推理引擎，可无缝扩展，从单机环境平滑伸缩至大规模 GPU 集群。"
   },
   "Multi-task Learning": {
     "message": "多任务学习"
@@ -480,5 +480,8 @@
   },
   "Commits": {
     "message": "提交"
+  },
+  "Follow us on X": {
+    "message": "关注我们的 X 账号"
   }
 }

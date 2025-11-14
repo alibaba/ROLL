@@ -56,9 +56,9 @@ Notes:
 bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_nodes_demo.sh
 ```
 After the Ray cluster starts, you will see log examples like the following:
-![log_ray_multi_nodes](../../static/img/log_ray_multi_nodes.png)
+![log_ray_multi_nodes](https://img.alicdn.com/imgextra/i3/O1CN01sq2KKz1vBQZViSB0E_!!6000000006134-2-tps-2758-204.png)
 
-3. Configure environment variables on the worker node
+1. Configure environment variables on the worker node
 ```shell
 export MASTER_ADDR="ip of master node"
 export MASTER_PORT="port of master node" # Default: 6379
@@ -68,7 +68,7 @@ export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0
 ```
 
-4. Connect to the Ray cluster started by the master node on the worker node:
+1. Connect to the Ray cluster started by the master node on the worker node:
 ```shell
 ray start --address='ip of master node:port of master node' --num-gpus=2
 ```

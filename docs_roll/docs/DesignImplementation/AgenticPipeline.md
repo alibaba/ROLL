@@ -2,7 +2,7 @@
 
 ## Agentic Pipeline Architecture Diagram
 
-![Agentic Pipeline Architecture Diagram](../../static/img/AgenticPipeline.jpg)
+![Agentic Pipeline Architecture Diagram](https://img.alicdn.com/imgextra/i1/O1CN01WtFEA01siugMLjRsj_!!6000000005801-2-tps-4602-4230.png)
 
 ## AgenticPipeline
 

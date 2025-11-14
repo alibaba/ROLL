@@ -41,11 +41,11 @@ bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_single_node_demo.sh
 ```
 
 Example log screenshots during pipeline execution:
-![log_pipeline_start](../../static/img/log_pipeline_start.png)
+![log_pipeline_start](https://img.alicdn.com/imgextra/i2/O1CN015wRcUb1EkfZQEjpEI_!!6000000000390-2-tps-2868-650.png)
 
-![log_pipeline_in_training](../../static/img/log_pipeline_in_training.png)
+![log_pipeline_in_training](https://img.alicdn.com/imgextra/i2/O1CN01Iaiv7H1HYi4hu8Fat_!!6000000000770-2-tps-2876-904.png)
 
-![log_pipeline_complete](../../static/img/log_pipeline_complete.png)
+![log_pipeline_complete](https://img.alicdn.com/imgextra/i1/O1CN016YSeUs1F5jmtyFA5V_!!6000000000436-2-tps-1904-206.png)
 
 ## Reference: Single V100 GPU Memory Configuration Key Points
 ```yaml

@@ -58,7 +58,7 @@ ROLL 使用多个参数类来组织配置：
 - WorkerConfig中按需要定义该角色持有的ModelArguments、TrainingArguments、GeneratingArguments、DataArguments, 后端StrategyArguments
 - WorkerConfig可以按需扩展，构造新的应用配置
 
-![RLVRConfig Diagram](../../../../../static/img/roll_config_diagram.png)
+![RLVRConfig Diagram](https://img.alicdn.com/imgextra/i2/O1CN012otRDy1m5AcR0Dcsx_!!6000000004902-2-tps-3034-1742.png)
 
 ## YAML 配置与 PipelineConfig 的映射关系
 

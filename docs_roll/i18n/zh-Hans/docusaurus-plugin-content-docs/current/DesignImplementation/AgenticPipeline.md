@@ -2,7 +2,7 @@
 
 ## Agentic Pipeline 架构图
 
-![Agentic Pipeline 架构图](../../../../../static/img/AgenticPipeline.jpg)
+![Agentic Pipeline 架构图](https://img.alicdn.com/imgextra/i1/O1CN01WtFEA01siugMLjRsj_!!6000000005801-2-tps-4602-4230.png)
 
 ## AgenticPipeline
 

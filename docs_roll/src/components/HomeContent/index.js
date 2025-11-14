@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Button, Image, Divider, Col, Row, Collapse, Modal, ConfigProvider, theme } from 'antd';
-import { GithubOutlined, WechatOutlined } from '@ant-design/icons';
+import { GithubOutlined, WechatOutlined, XOutlined } from '@ant-design/icons';
 import clsx from 'clsx';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import { useColorMode } from '@docusaurus/theme-common';
@@ -49,16 +49,16 @@ export default () => {
             <Translate>{"Get Started >"}</Translate>
           </Button>
           <Button className={styles.github} target='_blank' href="https://github.com/alibaba/ROLL" variant="outlined" icon={<GithubOutlined />}>{"Github >"}</Button>
-          <Button className={styles.github} target='_blank' href="https://deepwiki.com/alibaba/ROLL" variant="outlined" icon={<Image width={14} src={useBaseUrl('/img/deepwiki.svg')} preview={false}></Image>}>{"DeepWiki >"}</Button>
+          <Button className={styles.github} target='_blank' href="https://deepwiki.com/alibaba/ROLL" variant="outlined" icon={<Image width={14} src="https://img.alicdn.com/imgextra/i3/O1CN01JUBft41wYcExwXCOK_!!6000000006320-55-tps-460-500.svg" preview={false}></Image>}>{"DeepWiki >"}</Button>
         </div>
 
         <div className={styles.mainImg}>
-          <Image className={styles.img} src={useBaseUrl('/img/home_main.png')} preview={false}></Image>
+          <Image className={styles.img} src="https://img.alicdn.com/imgextra/i2/O1CN01ZGW6zG1sXSmML15c3_!!6000000005776-2-tps-2160-1112.png" preview={false}></Image>
         </div>
 
         <div className={styles.overview}>
           <div className={styles.left}>
-            <Image className={styles.img} src={useBaseUrl('/img/icon1.svg')} preview={false}></Image>
+            <Image className={styles.img} src="https://img.alicdn.com/imgextra/i4/O1CN01t4tcSz1ZIN1sEzNnO_!!6000000003171-55-tps-54-54.svg" preview={false}></Image>
             <div>ROLL</div>
             <div>
               <Translate>Framework Overview</Translate>
@@ -94,7 +94,7 @@ export default () => {
         </div>
 
         <div className={styles.choose}>
-          <Image className={styles.img} src={useBaseUrl('/img/icon2.svg')} preview={false}></Image>
+          <Image className={styles.img} src="https://img.alicdn.com/imgextra/i3/O1CN01NwkUFs26qbxZhsz2J_!!6000000007713-55-tps-54-54.svg" preview={false}></Image>
           <div className={styles.wrap}>
             <div className={styles.left}>
               <div>
@@ -136,13 +136,13 @@ export default () => {
               </div>
             </div>
             <div className={styles.right}>
-              <Image className={styles.img} src={useBaseUrl('/img/choose.png')} preview={false}></Image>
+              <Image className={styles.img} src="https://img.alicdn.com/imgextra/i1/O1CN01ATICVH28DLERvLxi3_!!6000000007898-2-tps-1388-1228.png" preview={false}></Image>
             </div>
           </div>
         </div>
 
         <div className={styles.core} id="core">
-          <Image className={styles.img} src={useBaseUrl('/img/icon3.svg')} preview={false}></Image>
+          <Image className={styles.img} src="https://img.alicdn.com/imgextra/i4/O1CN012UiWaS1KzDqk2EhyO_!!6000000001234-55-tps-54-54.svg" preview={false}></Image>
           <div>
             <div className={styles.title}>
               <Translate>
@@ -219,7 +219,7 @@ export default () => {
         </div>
 
         <div className={styles.research} id="research">
-          <Image className={styles.img} src={useBaseUrl('/img/icon4.svg')} preview={false}></Image>
+          <Image className={styles.img} src="https://img.alicdn.com/imgextra/i1/O1CN016cZT1g1tk7L6GRZ7y_!!6000000005939-55-tps-54-54.svg" preview={false}></Image>
           <div>
             <div className={styles.title}>
               <Translate>
@@ -257,9 +257,14 @@ export default () => {
               </div>
               <div className={styles.buttons}>
                 <Button className={styles.btn} onClick={() => setOpen(true)} icon={<WechatOutlined />}><Translate>WeChat</Translate></Button>
-                <Button className={styles.github} href="https://github.com/alibaba/ROLL" variant="outlined" icon={<GithubOutlined />}>
+                <Button className={styles.github} target='_blank' href="https://github.com/alibaba/ROLL" variant="outlined" icon={<GithubOutlined />}>
                   <Translate>
                     Follow GitHub Repository
+                  </Translate>
+                </Button>
+                <Button target='_blank' href="https://x.com/FutureLab2025" icon={<XOutlined />} className={styles.github} variant='outlined'>
+                  <Translate>
+                    Follow us on X
                   </Translate>
                 </Button>
               </div>

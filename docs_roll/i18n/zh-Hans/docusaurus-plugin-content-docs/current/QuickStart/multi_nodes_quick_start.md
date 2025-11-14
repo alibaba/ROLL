@@ -56,9 +56,9 @@ export GLOO_SOCKET_IFNAME=eth0
 bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_multi_nodes_demo.sh
 ```
 ray集群启动后，会看到下面的log示例：
-![log_ray_multi_nodes](../../../../../static/img/log_ray_multi_nodes.png)
+![log_ray_multi_nodes](https://img.alicdn.com/imgextra/i3/O1CN01sq2KKz1vBQZViSB0E_!!6000000006134-2-tps-2758-204.png)
 
-3. 在工作节点配置环境变量
+1. 在工作节点配置环境变量
 ```shell
 export MASTER_ADDR="ip of master node"
 export MASTER_PORT="port of master node" # Default: 6379
@@ -68,7 +68,7 @@ export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0
 ```
 
-4. 在工作节点上连接主节点启动的ray集群：
+1. 在工作节点上连接主节点启动的ray集群：
 ```shell
 ray start --address='ip of master node:port of master node' --num-gpus=2
 ```
