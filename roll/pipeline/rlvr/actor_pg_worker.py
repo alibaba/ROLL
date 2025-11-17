@@ -33,12 +33,12 @@ class ActorPGWorker(ActorWorker):
         final_response_mask = data.batch.get("final_response_mask", response_mask)
 
         ref_log_probs = data.batch["ref_log_probs"]
-        old_log_probs = data.batch["old_log_probs"]
         advantages = data.batch["advantages"]
 
         log_probs = self.strategy.op_compute_log_probs(
             logits=output_tensor, input_ids=data.batch["input_ids"], attention_mask=data.batch["response_mask"]
         )
+        old_log_probs = self.get_old_log_probs_with_cache(data, log_probs)
 
         valid_samples = torch.any(final_response_mask > 0, dim=1).float()
         sample_weights = self.compute_sample_weights(data, response_mask)

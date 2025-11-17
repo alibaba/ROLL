@@ -183,7 +183,7 @@ class MetricsManager:
         response_mask = batch.batch["final_response_mask"].clone().bool()
         raw_advantages = batch.batch["raw_advantages"]
         returns = batch.batch["returns"]
-        agg_entropy = batch.meta_info.get("agg_entropy", 0.0)
+        agg_entropy = batch.meta_info.get("agg_entropy", torch.tensor(0))
 
         max_score = 1
         min_score = 0

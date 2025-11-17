@@ -1,10 +1,12 @@
 import copy
 import json
 import os
+import uuid
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import datasets
+import numpy as np
 import PIL.Image as Image
 import ray
 import torch
@@ -544,6 +546,7 @@ class RLVRVLMPipeline(BasePipeline):
                 # mark here to make megatron get_data_input broadcast with non_batch_tensor
                 batch.meta_info["_broadcast_non_tensor_batch"]= True
 
+                batch.non_tensor_batch['sample_uuid'] = np.array([str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object)
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                     if self.pipeline_config.enable_reference:
                         ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
@@ -556,23 +559,28 @@ class RLVRVLMPipeline(BasePipeline):
                     batch.meta_info["is_offload_states"] = False
                     if self.pipeline_config.adv_estimator == "gae":
                         values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
-                    old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
-                    old_log_probs = DataProto.materialize_concat(data_refs=old_log_probs_refs)
-                    agg_entropy = agg_loss(
-                        loss_mat=old_log_probs.batch["entropy"],
-                        loss_mask=batch.batch["response_mask"][:, 1:],
-                        loss_agg_mode="token-mean",
-                    )
-                    batch.meta_info["agg_entropy"] = agg_entropy
+
+                    if self.pipeline_config.enable_old_logprobs:
+                        old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
+                        old_log_probs = DataProto.materialize_concat(data_refs=old_log_probs_refs)
+                        agg_entropy = agg_loss(
+                            loss_mat=old_log_probs.batch["entropy"],
+                            loss_mask=batch.batch["response_mask"][:, 1:],
+                            loss_agg_mode="token-mean",
+                        )
+                        batch.meta_info["agg_entropy"] = agg_entropy
+
+                        batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
+                        metrics_mgr.add_reduced_metrics(old_log_probs.meta_info.pop("metrics", {}))
+                    else:
+                        # Use zeros when optimization is enabled
+                        batch.batch["old_log_probs"] = torch.zeros_like(batch.batch["attention_mask"][:, 1:])
 
                     if self.pipeline_config.adv_estimator == "gae":
                         values = DataProto.materialize_concat(data_refs=values_refs)
                         batch = batch.union(values)
                         metrics_mgr.add_reduced_metrics(values.meta_info.pop("metrics", {}))
 
-                    batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
-                    metrics_mgr.add_reduced_metrics(old_log_probs.meta_info.pop("metrics", {}))
-                    
                     # Mock ref_log_probs using old_log_probs if reference is disabled
                     if not self.pipeline_config.enable_reference:
                         batch.batch["ref_log_probs"] = batch.batch["old_log_probs"].clone()

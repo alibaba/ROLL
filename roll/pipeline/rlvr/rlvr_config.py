@@ -179,6 +179,7 @@ class RLVRConfig(PPOConfig):
     error_max_len_threshold: int = field(default=9999999999)
 
     def __post_init__(self):
+        self.actor_infer.generating_args.num_return_sequences = self.num_return_sequences_in_group
         super().__post_init__()
 
         # default worker_cls
@@ -192,8 +193,6 @@ class RLVRConfig(PPOConfig):
             self.critic.worker_cls = "roll.pipeline.base_worker.CriticWorker"
 
         logger.info(f"actor_train.worker_cls: {self.actor_train.worker_cls}")
-
-        self.actor_infer.generating_args.num_return_sequences = self.num_return_sequences_in_group
 
         self.domain_2_tag = None
         self.tag_2_domain = None

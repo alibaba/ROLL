@@ -174,6 +174,8 @@ class AgenticPipeline(BasePipeline):
                     with Timer(name="rollout", logger=None) as rollout_timer:
                         batch.meta_info["is_offload_states"] = True
                         batch = ray.get(self.train_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
+                        sample_uuids = [f"{traj_id}_{i}" for i, traj_id in enumerate(batch.non_tensor_batch['traj_id'])]
+                        batch.non_tensor_batch['sample_uuid'] = np.array(sample_uuids, dtype=object)
                         if "get_batch_return_start_time" in batch.meta_info:
                             metrics["time/get_batch_cost_train"] = time.time() - batch.meta_info.pop("get_batch_return_start_time")
                         actor_infer_metrics = self.actor_infer.get_metrics()
@@ -204,19 +206,29 @@ class AgenticPipeline(BasePipeline):
                     metrics["time/step_ref_log_probs_values_reward"] = cal_timer.last
 
                     with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
-                        # TODO: use engine log_probs as old_log_probs
                         batch.meta_info["is_offload_states"] = False
-                        old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
+                        if self.pipeline_config.enable_old_logprobs:
+                            old_log_probs: DataProto = self.actor_train.compute_log_probs(batch, blocking=True)
+                            batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
+                            avg_old_log_prob = masked_mean(batch.batch["old_log_probs"], batch.batch["response_mask"][:, 1:])
+                            metrics.update({"critic/old_log_prob/mean": avg_old_log_prob.item()})
+                            metrics.update(reduce_metrics(old_log_probs.meta_info.pop("metrics", {})))
+                            agg_entropy = agg_loss(
+                                loss_mat=old_log_probs.batch["entropy"],
+                                loss_mask=batch.batch["response_mask"][:, 1:],
+                                loss_agg_mode="token-mean",
+                            )
+                            metrics.update({"critic/entropy/mean": agg_entropy.item()})
+                        else:
+                            batch.batch["old_log_probs"] = torch.zeros_like(batch.batch["attention_mask"][:, 1:])
+
                         if self.pipeline_config.adv_estimator == "gae":
                             values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
-                        old_log_probs = DataProto.materialize_concat(data_refs=old_log_probs_refs)
+
                         if self.pipeline_config.adv_estimator == "gae":
                             values = DataProto.materialize_concat(data_refs=values_refs)
                             batch = batch.union(values)
                             metrics.update(reduce_metrics(values.meta_info.pop("metrics", {})))
-                        batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
-                        avg_old_log_prob = masked_mean(batch.batch["old_log_probs"], batch.batch["response_mask"][:, 1:])
-                        metrics.update({"critic/old_log_prob/mean": avg_old_log_prob.item()})
 
                         # Mock ref_log_probs using old_log_probs if reference cluster is disabled
                         if not self.pipeline_config.enable_reference:
@@ -224,14 +236,6 @@ class AgenticPipeline(BasePipeline):
                             avg_ref_log_prob = masked_mean(batch.batch["ref_log_probs"], batch.batch["response_mask"][:, 1:])
                             metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
 
-                        agg_entropy = agg_loss(
-                            loss_mat=old_log_probs.batch["entropy"],
-                            loss_mask=batch.batch["response_mask"][:, 1:],
-                            loss_agg_mode="token-mean",
-                        )
-                        metrics.update({"critic/entropy/mean": agg_entropy.item()})
-
-                        metrics.update(reduce_metrics(old_log_probs.meta_info.pop("metrics", {})))
                     metrics["time/step_old_log_probs_values"] = cal_old_logpb_timer.last
 
                     # TODO 当前这个还没用处

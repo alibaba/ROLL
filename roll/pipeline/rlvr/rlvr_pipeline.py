@@ -3,11 +3,13 @@ import json
 import math
 import os
 import time
+import uuid
 from datetime import datetime
 from functools import partial
 from typing import Any, Dict, List, Optional
 
 import datasets
+import numpy as np
 import ray
 import torch
 from codetiming import Timer
@@ -536,7 +538,7 @@ class RLVRPipeline(BasePipeline):
 
                 batch = generate_output
                 batch.meta_info["global_step"] = global_step
-
+                batch.non_tensor_batch['sample_uuid'] = np.array([str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object)
 
 
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
@@ -567,42 +569,47 @@ class RLVRPipeline(BasePipeline):
                     batch.meta_info["is_offload_states"] = False
                     if self.pipeline_config.adv_estimator == "gae":
                         values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
-                    if self.pipeline_config.actor_train.use_dynamic_batching_in_infer:
-                        batch, dynamic_batching_metrics = dynamic_batching_shard(
-                            batch,
-                            self.actor_train.dp_size,
-                            self.pipeline_config.actor_train.max_tokens_per_microbatch_in_infer,
-                            self.pipeline_config.actor_train.sequence_length_round_in_infer,
-                            "actor_train/compute_log_probs",
-                        )
-                        metrics_mgr.add_metrics(dynamic_batching_metrics)
-                    old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
-                    old_log_probs = DataProto.materialize_concat(data_refs=old_log_probs_refs)
 
-                    # Customize_logging metrics, Double check call twice
-                    if self.pipeline_config.save_logging_board_dir:
-                        old_log_probs_refs2: List[ray.ObjectRef] = self.actor_train.compute_log_probs(
-                            batch, blocking=False
-                        )
-                        old_log_probs2 = DataProto.materialize_concat(data_refs=old_log_probs_refs2)
-                        batch.batch["old_log_probs2"] = old_log_probs2.batch["log_probs"]
-                        batch.batch["old_log_probs2_entropy"] = old_log_probs2.batch["entropy"]
+                    if self.pipeline_config.enable_old_logprobs:
+                        if self.pipeline_config.actor_train.use_dynamic_batching_in_infer:
+                            batch, dynamic_batching_metrics = dynamic_batching_shard(
+                                batch,
+                                self.actor_train.dp_size,
+                                self.pipeline_config.actor_train.max_tokens_per_microbatch_in_infer,
+                                self.pipeline_config.actor_train.sequence_length_round_in_infer,
+                                "actor_train/compute_log_probs",
+                            )
+                            metrics_mgr.add_metrics(dynamic_batching_metrics)
+                        old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
+                        old_log_probs = DataProto.materialize_concat(data_refs=old_log_probs_refs)
 
-                    agg_entropy = agg_loss(
-                        loss_mat=old_log_probs.batch["entropy"],
-                        loss_mask=batch.batch["response_mask"][:, 1:],
-                        loss_agg_mode="token-mean",
-                    )
-                    batch.meta_info["agg_entropy"] = agg_entropy
+                        # Customize_logging metrics, Double check call twice
+                        if self.pipeline_config.save_logging_board_dir:
+                            old_log_probs_refs2: List[ray.ObjectRef] = self.actor_train.compute_log_probs(
+                                batch, blocking=False
+                            )
+                            old_log_probs2 = DataProto.materialize_concat(data_refs=old_log_probs_refs2)
+                            batch.batch["old_log_probs2"] = old_log_probs2.batch["log_probs"]
+                            batch.batch["old_log_probs2_entropy"] = old_log_probs2.batch["entropy"]
+
+                        agg_entropy = agg_loss(
+                            loss_mat=old_log_probs.batch["entropy"],
+                            loss_mask=batch.batch["response_mask"][:, 1:],
+                            loss_agg_mode="token-mean",
+                        )
+                        batch.meta_info["agg_entropy"] = agg_entropy
+
+                        batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
+                        metrics_mgr.add_reduced_metrics(old_log_probs.meta_info.pop("metrics", {}))
+                    else:
+                        # Use zeros when optimization is enabled
+                        batch.batch["old_log_probs"] = torch.zeros_like(batch.batch["attention_mask"][:, 1:])
 
                     if self.pipeline_config.adv_estimator == "gae":
                         values = DataProto.materialize_concat(data_refs=values_refs)
                         batch = batch.union(values)
                         metrics_mgr.add_reduced_metrics(values.meta_info.pop("metrics", {}))
 
-                    batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
-                    metrics_mgr.add_reduced_metrics(old_log_probs.meta_info.pop("metrics", {}))
-                    
                     # Mock ref_log_probs using old_log_probs if reference is disabled
                     if not self.pipeline_config.enable_reference:
                         batch.batch["ref_log_probs"] = batch.batch["old_log_probs"].clone()

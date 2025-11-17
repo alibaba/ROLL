@@ -16,15 +16,14 @@ class ActorWorker(BaseActorWorker):
         """
         response_mask = data.batch["response_mask"][:, 1:].long()
         ref_log_probs = data.batch["ref_log_probs"]
-        old_log_probs = data.batch["old_log_probs"]
-        infer_log_probs = data.batch.get("infer_logprobs", old_log_probs)
-        infer_log_probs = infer_log_probs if len(infer_log_probs) > 0 else old_log_probs
-
         advantages = data.batch["advantages"]
 
         log_probs = self.strategy.op_compute_log_probs(
             logits=output_tensor, input_ids=data.batch["input_ids"], attention_mask=data.batch["response_mask"]
         )
+        old_log_probs = self.get_old_log_probs_with_cache(data, log_probs)
+        infer_log_probs = data.batch.get("infer_logprobs", old_log_probs)
+        infer_log_probs = infer_log_probs if len(infer_log_probs) > 0 else old_log_probs
 
         if self.pipeline_config.ratio_type == "segment":
             raise NotImplemented(f"ratio_type: {self.pipeline_config.ratio_type} not implemented")

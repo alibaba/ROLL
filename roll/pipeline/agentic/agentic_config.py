@@ -180,6 +180,7 @@ class AgenticConfig(PPOConfig):
     ratio_type: Literal["token", "segment"] = field(default="token", metadata={"help": "Ratio type: token or segment"})
 
     def __post_init__(self):
+        self.actor_infer.generating_args.num_return_sequences = 1
         super().__post_init__()
 
         # default worker_cls
@@ -194,8 +195,6 @@ class AgenticConfig(PPOConfig):
 
         self.train_env_manager.name = "train_env"
         self.val_env_manager.name = "val_env"
-
-        self.actor_infer.generating_args.num_return_sequences = 1
 
         if self.render_save_dir:
             self.render_save_dir = os.path.join(
