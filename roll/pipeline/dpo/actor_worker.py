@@ -98,11 +98,6 @@ class ActorWorker(BaseActorWorker):
                 append_to_dict(metrics, pg_metrics)
 
             metrics["actor/lr"] = self.strategy.scheduler.get_last_lr()[0]
-            metrics["actor/loss"] = np.mean(metrics["actor/loss"])
-            metrics["actor/acc"] = np.mean(metrics["actor/acc"])
-            metrics["actor/chosen_reward"] = np.mean(metrics["actor/chosen_reward"])
-            metrics["actor/reject_reward"] = np.mean(metrics["actor/reject_reward"])
-            metrics["actor/grad_norm"] = np.mean(metrics.pop("actor_train/grad_norm"))
             data.to("cpu")
 
         output = DataProto(meta_info={"metrics": metrics})

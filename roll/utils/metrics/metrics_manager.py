@@ -23,8 +23,8 @@ class MetricsManager:
     def add_metrics(self, metrics_dict: Dict[str, Any]) -> None:
         self.metrics.update(metrics_dict)
 
-    def add_reduced_metrics(self, metrics_dict: Dict[str, Any], prefix: str = "") -> None:
-        reduced = reduce_metrics(metrics_dict)
+    def add_reduced_metrics(self, metrics_dict: Dict[str, Any], prefix: str = "", reduce_func=np.mean) -> None:
+        reduced = reduce_metrics(metrics_dict, reduce_func=reduce_func)
         if prefix:
             reduced = {f"{prefix}/{k}": v for k, v in reduced.items()}
         self.metrics.update(reduced)

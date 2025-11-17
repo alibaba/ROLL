@@ -20,6 +20,7 @@ from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.dpo.actor_worker import get_logps, loss_fn
 from roll.pipeline.dpo.dpo_config import DPOConfig
 from roll.utils.logging import get_logger
+from roll.utils.metrics.metrics_manager import MetricsManager
 
 logger = get_logger()
 
@@ -175,7 +176,7 @@ class DPOPipeline(BasePipeline):
     @torch.no_grad()
     def run(self):
         global_step = 0
-        metrics = {}
+        metrics_mgr = MetricsManager()
 
         for epoch in range(int(self.pipeline_config.actor_train.training_args.num_train_epochs)):
             logger.info(f"epoch {epoch} start...")
@@ -185,13 +186,13 @@ class DPOPipeline(BasePipeline):
                     continue
 
                 logger.info(f"pipeline step {global_step} start...")
-                metrics.clear()
+                metrics_mgr.clear_metrics()
 
                 if self.val_dataset and global_step % self.pipeline_config.eval_steps == 0:
                     with Timer(name="val_step", logger=None) as val_step_timer:
                         val_metrics = self.val()
-                        metrics.update(val_metrics)
-                    metrics["time/val_step"] = val_step_timer.last
+                        metrics_mgr.add_reduced_metrics(val_metrics)
+                    metrics_mgr.add_metric("time/val_step", val_step_timer.last)
 
                 with Timer(name="step_total", logger=None) as step_total_timer:
                     batch_dict: Dict
@@ -200,18 +201,21 @@ class DPOPipeline(BasePipeline):
 
                     with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                         ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
-                        metrics.update(ref_log_probs.meta_info.pop("metrics", {}))
+                        metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
                         ref_log_probs.rename(old_keys="log_probs", new_keys="reference_log_probs")
                         batch = batch.union(ref_log_probs)
-                    metrics["time/cal_ref_log_probs"] = cal_ref_log_probs_timer.last
+                    metrics_mgr.add_metric("time/cal_ref_log_probs", cal_ref_log_probs_timer.last)
 
                     with Timer(name="actor_train", logger=None) as actor_train_timer:
                         actor_train_refs = self.actor_train.train_step(batch, blocking=False)
                         actor_train_refs: DataProto = DataProto.materialize_concat(data_refs=actor_train_refs)
-                        metrics.update(actor_train_refs.meta_info.pop("metrics", {}))
-                    metrics["time/actor_train"] = actor_train_timer.last
-                metrics["time/step_total"] = step_total_timer.last
-                
+                        metrics_mgr.add_reduced_metrics(actor_train_refs.meta_info.pop("metrics", {}))
+                    metrics_mgr.add_metric("time/actor_train", actor_train_timer.last)
+                metrics_mgr.add_metric("time/step_total", step_total_timer.last)
+
+                metrics = metrics_mgr.get_metrics()
+                metrics = {k: float(v) for k, v in metrics.items()}
+
                 self.state.step = global_step
                 self.state.log_history.append(metrics)
                 self.tracker.log(values=metrics, step=global_step)
