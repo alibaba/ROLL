@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 from functools import partial
+from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import datasets
@@ -120,10 +121,18 @@ def encode_function(
         if image is None:
             image_flag[idx] = False
         try:
-            image_out = load_images(image if isinstance(image, (list, tuple)) else [image], timeout=None)
+            if isinstance(image, bytes): # bytes data
+                # TODO: support multiple images
+                image_out = Image.open(BytesIO(image))
+            else:
+                image_out = load_images(image if isinstance(image, (list, tuple)) else [image], timeout=None)
         except Exception as e:
-            image_out = [Image.new("RGB", (224, 224), (255, 255, 255))] * len(image)
-            logger.error(f"Failed to get image: {image}")
+            if isinstance(image, bytes):
+                image_out = [Image.new("RGB", (224, 224), (255, 255, 255))]
+                logger.error(f"Failed to get image with type: {type(image)}")
+            else:
+                image_out = [Image.new("RGB", (224, 224), (255, 255, 255))] * len(image)
+                logger.error(f"Failed to get image: {image}")
         # since infer-image use pil image as input while train-engine use
         # processed data, process image here to make them use same image
         # refer to the following for Spatial Understanding with Qwen2.5-VL
