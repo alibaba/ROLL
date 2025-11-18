@@ -1,0 +1,157 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen2.5-7B-async-rlvr-config"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+system_envs:
+  USE_MODELSCOPE: '1'
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/cpfs_0/rl_examples/lzc/models/${exp_name}
+
+track_with: ml_tracker
+
+num_gpus_per_node: 8
+
+max_steps: 1000
+save_steps: 100
+logging_steps: 1
+resume_from_checkpoint: false
+
+
+rollout_batch_size: 64  # prompt
+prompt_length: 2048
+response_length: 8192
+
+async_generation_ratio: 1
+is_num_return_sequences_expand: true
+num_return_sequences_in_group: 8
+ppo_epochs: 1
+adv_estimator: "reinforce"
+
+# clip
+value_clip: 0.5
+reward_clip: 10
+advantage_clip: 2.0
+dual_clip_loss: true
+
+# normalize
+norm_mean_type: ~
+norm_std_type: ~
+
+# data mask
+max_len_mask: true
+difficulty_mask: true
+difficulty_low_threshold: 0.1
+difficulty_high_threshold: 0.95
+error_max_len_clip: false
+
+# data weight
+difficulty_loss_weight: false
+length_loss_weight: false
+
+# reward
+add_token_level_kl: false
+
+# advantage
+whiten_advantages: true
+
+# dynamic sampling scheduler
+# use_additional_prompts: true
+# max_running_requests: 256
+# is_num_return_sequences_expand: false
+
+# pretrain: /data/cpfs_0/common/models/Qwen-2.5-7B-Instruct
+# reward_pretrain: /data/cpfs_0/common/models/Qwen-2.5-7B-Instruct
+
+pretrain: Qwen/Qwen2.5-7B
+reward_pretrain: Qwen/Qwen2.5-7B
+
+actor_train:
+  model_args:
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 64
+    warmup_steps: 1
+    num_train_epochs: 5
+  data_args:
+    template: qwen2_5
+    file_name:
+      - data/math_deepmath_deal.jsonl
+    domain_interleave_probs:
+      math_rule: 1.0
+    dataset_dir: data
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      sequence_parallel: true
+      use_distributed_optimizer: true
+      apply_rope_fusion: true
+      overlap_grad_reduce: true
+      bias_activation_fusion: true
+      bf16: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 2
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.6
+      block_size: 16
+      max_model_len: 8000
+  device_mapping: list(range(16,24))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      bf16: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 2
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen2_5
+    tag_included: [deepmath_103k, aime]
+    world_size: 8
+    infer_batch_size: 1

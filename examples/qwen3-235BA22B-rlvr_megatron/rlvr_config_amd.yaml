@@ -3,7 +3,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "qwen3-30BA3B-rlvr-config"
+exp_name: "qwen3-235BA22B-rlvr-config_amd"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
@@ -13,15 +13,6 @@ system_envs:
 checkpoint_config:
   type: file_system
   output_dir: ./rl_examples/models/${exp_name}
-
-#track_with: wandb
-#tracker_kwargs:
-#  api_key:
-#  project: roll_examples
-#  notes: roll_examples
-#  tags:
-#    - rlvr
-#    - baseline
 
 track_with: tensorboard
 tracker_kwargs:
@@ -76,21 +67,21 @@ whiten_advantages: true
 # max_running_requests: 256
 # is_num_return_sequences_expand: false
 
-pretrain: Qwen/Qwen3-30B-A3B-Base
-reward_pretrain: Qwen/Qwen3-30B-A3B-Base
+pretrain: Qwen/Qwen3-235B-A22B
+reward_pretrain: Qwen/Qwen3-235B-A22B
 
 validation:
   data_args:
-    template: qwen2_5
+    template: qwen3
     file_name:
       - data/math_benchmarks.jsonl
   generating_args:
-    max_new_tokens: ${response_length}
     top_p: 0.6
     top_k: 50
     num_beams: 1
     temperature: 0.6
     num_return_sequences: 1
+  eval_steps: 10
 
 actor_train:
   model_args:
@@ -101,21 +92,21 @@ actor_train:
     learning_rate: 1.0e-6
     weight_decay: 0
     per_device_train_batch_size: 1
-    gradient_accumulation_steps: 32
+    gradient_accumulation_steps: 64
     warmup_steps: 20
     num_train_epochs: 50
   data_args:
-    template: qwen2_5
+    template: qwen3
     file_name:
       - data/code_KodCode_data.jsonl
-      - data/llm_judge_Multi-subject-RLVR_deal_new.jsonl
+      # - data/llm_judge_Multi-subject-RLVR_deal_new.jsonl
       - data/math_deepmath_deal.jsonl
       - data/general_ifeval_train_deal.jsonl
       - data/general_CrossThink-QA_deal.jsonl
     domain_interleave_probs:
       math_rule: 0.4
       code_sandbox: 0.3
-      llm_judge: 0.1
+      # llm_judge: 0.1
       crossthinkqa: 0.1
       ifeval: 0.1
     dataset_dir: data
@@ -125,17 +116,22 @@ actor_train:
   strategy_args:
     strategy_name: megatron_train
     strategy_config:
-      tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 2
-      virtual_pipeline_model_parallel_size: 8
-      expert_model_parallel_size: 4
-      context_parallel_size: 4
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 8
+      virtual_pipeline_model_parallel_size: 6
+      expert_model_parallel_size: 8
+      context_parallel_size: 1
+      account_for_loss_in_pipeline_split: true
+      account_for_embedding_in_pipeline_split: true
       use_distributed_optimizer: true
       sequence_parallel: true
-      moe_token_dispatcher_type: "alltoall"
+      overlap_grad_reduce: true
+      bias_activation_fusion: true
+      apply_rope_fusion: true
       moe_grouped_gemm: true
       moe_layer_recompute: true
-  device_mapping: list(range(0,32))
+      moe_token_dispatcher_type: "alltoall"
+  device_mapping: list(range(0,256))
   infer_batch_size: 2
 
 actor_infer:
@@ -150,34 +146,40 @@ actor_infer:
     temperature: 0.99
     num_return_sequences: ${num_return_sequences_in_group}
   data_args:
-    template: qwen2_5
+    template: qwen3
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.5
+      gpu_memory_utilization: 0.6
       load_format: dummy
-      tensor_parallel_size: 2
-      sleep_level: 2  # 2 will destroy model parameter and kv_cache after generate to save cpu memory, 1 will destroy kv_cache only.
-  num_gpus_per_worker: 2
-  device_mapping: list(range(0,24)) # device share with llm reward
+      tensor_parallel_size: 8
+      enforce_eager: true
+  num_gpus_per_worker: 8
+  device_mapping: list(range(0,200)) # device share with llm reward
   infer_batch_size: 1
 
 reference:
   model_args:
-    disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~
   data_args:
-    template: qwen2_5
+    template: qwen3
   strategy_args:
     strategy_name: megatron_infer
     strategy_config:
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 4
-      moe_token_dispatcher_type: "alltoall"
+      pipeline_model_parallel_size: 8
+      virtual_pipeline_model_parallel_size: 6
+      expert_model_parallel_size: 8
+      account_for_loss_in_pipeline_split: true
+      account_for_embedding_in_pipeline_split: true
+      use_distributed_optimizer: true
+      sequence_parallel: true
+      bias_activation_fusion: true
+      apply_rope_fusion: true
       moe_grouped_gemm: true
-  device_mapping: list(range(0,32))
+      moe_token_dispatcher_type: "alltoall"
+  device_mapping: list(range(0,256))
   infer_batch_size: 2
 
 rewards:
@@ -188,7 +190,7 @@ rewards:
     model_args:
       model_name_or_path: ${reward_pretrain}
     data_args:
-      template: qwen2_5
+      template: qwen3
     tag_included: [crossthinkqa]
     world_size: 8
     infer_batch_size: 4
@@ -198,7 +200,7 @@ rewards:
     model_args:
       model_name_or_path: ${reward_pretrain}
     data_args:
-      template: qwen2_5
+      template: qwen3
     tag_included: [ifeval]
     world_size: 8
     infer_batch_size: 4
@@ -207,7 +209,7 @@ rewards:
     model_args:
       model_name_or_path: ${reward_pretrain}
     data_args:
-      template: qwen2_5
+      template: qwen3
     tag_included: [deepmath_103k, aime]
     world_size: 8
     infer_batch_size: 1
@@ -224,7 +226,7 @@ rewards:
     model_args:
       model_name_or_path: ${reward_pretrain}
     data_args:
-      template: qwen2_5
+      template: qwen3
     world_size: 8
     infer_batch_size: 1
 #    query_filter_config:
@@ -251,15 +253,15 @@ rewards:
       temperature: 0.8
       num_return_sequences: 1
     data_args:
-      template: qwen2_5
+      template: qwen3
     strategy_args:
       # strategy_name: hf_infer
       # strategy_config: null
       strategy_name: vllm
       strategy_config:
-        gpu_memory_utilization: 0.8
+        gpu_memory_utilization: 0.75
         block_size: 16
         max_model_len: 8000
         load_format: auto
-    device_mapping: list(range(24,32))
+    device_mapping: list(range(200,256))
     infer_batch_size: 4

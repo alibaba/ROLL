@@ -278,7 +278,7 @@ def patch_model(model, config, use_mcore):
                     use_cache,
                     output_attentions,
                     output_hidden_states,
-                    return_dict,
+                    # return_dict,
                     pixel_values,
                     pixel_values_videos,
                     image_grid_thw,

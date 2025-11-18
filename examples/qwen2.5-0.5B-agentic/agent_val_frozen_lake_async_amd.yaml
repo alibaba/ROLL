@@ -10,7 +10,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "agentic_pipeline"
+exp_name: "agentic_pipeline_async"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
@@ -31,8 +31,7 @@ system_envs:
 
 track_with: tensorboard
 tracker_kwargs:
-  log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_frozen_lake
-
+  log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_frozen_lake_async
 
 checkpoint_config:
   type: file_system
@@ -45,6 +44,8 @@ save_steps: 10000
 logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
+
+async_generation_ratio: 1
 
 rollout_batch_size: 1024
 val_batch_size: 1024
@@ -73,7 +74,7 @@ actor_train:
     learning_rate: 1.0e-6
     weight_decay: 0
     per_device_train_batch_size: 2
-    gradient_accumulation_steps: 64
+    gradient_accumulation_steps: 128
     warmup_steps: 10
     lr_scheduler_type: cosine
   data_args:
@@ -88,7 +89,7 @@ actor_train:
       expert_model_parallel_size: 1
       use_distributed_optimizer: true
       recompute_granularity: full
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(0,4))
   infer_batch_size: 2
 
 actor_infer:
@@ -110,7 +111,7 @@ actor_infer:
       gpu_memory_utilization: 0.6
       block_size: 16
       load_format: auto
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(4,8))
 
 reference:
   model_args:
@@ -123,7 +124,7 @@ reference:
   strategy_args:
     strategy_name: hf_infer
     strategy_config: ~
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(0,4))
   infer_batch_size: 2
 
 reward_normalization:
@@ -131,6 +132,7 @@ reward_normalization:
   method: mean_std # asym_clip / identity / mean_std
 
 train_env_manager:
+  format_penalty: -0.15 # sokoban env penalty_for_step=-0.1
   max_env_num_per_worker: 16
   num_env_groups: 128
   # under the same group, the env config and env seed are ensured to be equal
@@ -144,7 +146,6 @@ val_env_manager:
   group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
   tags: [SimpleSokoban, LargerSokoban, SokobanDifferentGridVocab, FrozenLake]
   num_groups_partition: [256, 256, 256, 256] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
-
 
 # Here, you can override variables defined in the imported envs. max_tokens_per_step: 128 in custom_env.SimpleSokoban, here replaced by 64
 max_tokens_per_step: 64
@@ -160,14 +161,3 @@ custom_envs:
     ${custom_env.FrozenLake}
   FrozenLakeThink:
     ${custom_env.FrozenLakeThink}
-  FrozenLakeLocallyDefineExamples:  # Can import from unified envs config or define dict locally
-    env_type: frozen_lake
-    max_steps: ${max_actions_per_traj}
-    max_tokens_per_step: ${max_tokens_per_step}
-    env_manager_cls: ${env_manager_cls}
-    use_thread_lock: true
-    env_config:
-      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
-      action_pattern: ${think_action_pattern}
-      max_steps: ${max_actions_per_traj}
-      is_slippery: false

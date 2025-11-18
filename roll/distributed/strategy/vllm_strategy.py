@@ -27,6 +27,13 @@ from roll.utils.functionals import GenerateRequestType, concatenate_input_and_ou
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
 from roll.platforms import current_platform
+try:
+    from vllm.inputs import TokensPrompt
+    high_version_vllm=True
+except:
+    high_version_vllm=False
+    pass
+
 
 
 logger = get_logger()
@@ -146,9 +153,16 @@ class VllmStrategy(InferenceStrategy):
         if "multi_modal_data" in batch.non_tensor_batch:
             vllm_input_args["prompts"] = batch.non_tensor_batch["multi_modal_data"]
         else:
-            vllm_input_args["prompt_token_ids"] = gather_unpadded_input_ids(
-                input_ids=input_ids, attention_mask=attention_mask
-            )
+            if high_version_vllm:
+                prompt_token_ids_list=gather_unpadded_input_ids(
+                    input_ids=input_ids, attention_mask=attention_mask
+                )
+
+                vllm_input_args["prompts"] = [TokensPrompt(prompt_token_ids=prompt_token_ids)for prompt_token_ids in prompt_token_ids_list]
+            else:
+                vllm_input_args["prompt_token_ids"] = gather_unpadded_input_ids(
+                    input_ids=input_ids, attention_mask=attention_mask
+                )
 
         lora_requests = None
         if self.is_lora:

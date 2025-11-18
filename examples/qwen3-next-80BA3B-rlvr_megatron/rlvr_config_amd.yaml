@@ -1,0 +1,196 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen3-next-80BA3B-rlvr-config"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+system_envs:
+  USE_MODELSCOPE: '1'
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./rl_examples/models/${exp_name}
+
+#track_with: wandb
+#tracker_kwargs:
+#  api_key:
+#  project: roll_examples
+#  notes: roll_examples
+#  tags:
+#    - rlvr
+#    - baseline
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ./roll_exp/rlvr/${exp_name}/
+
+num_gpus_per_node: 8
+
+max_steps: 500
+save_steps: 100
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+
+rollout_batch_size: 64  # prompt
+prompt_length: 2048
+response_length: 6144
+
+num_return_sequences_in_group: 8
+ppo_epochs: 1
+adv_estimator: "reinforce"
+
+# clip
+value_clip: 0.5
+reward_clip: 10
+advantage_clip: 2.0
+dual_clip_loss: true
+
+# normalize
+reward_norm: null
+reward_shift: false
+reward_scale: false
+
+# data mask
+max_len_mask: true
+difficulty_mask: true
+difficulty_low_threshold: 0.1
+difficulty_high_threshold: 0.95
+error_max_len_clip: false
+
+# data weight
+difficulty_loss_weight: false
+length_loss_weight: false
+
+# reward
+add_token_level_kl: false
+
+# advantage
+whiten_advantages: true
+
+# dynamic sampling scheduler
+# use_additional_prompts: true
+# max_running_requests: 256
+# is_num_return_sequences_expand: false
+
+pretrain: Qwen/Qwen3-Next-80B-A3B-Instruct
+reward_pretrain: Qwen/Qwen3-Next-80B-A3B-Instruct
+
+# validation:
+#   data_args:
+#     template: qwen2_5
+#     file_name:
+#       - data/aime24_25_deal.jsonl
+#   generating_args:
+#     top_p: 0.6
+#     top_k: 50
+#     num_beams: 1
+#     temperature: 0.6
+#     num_return_sequences: 1
+#   eval_steps: 10
+
+actor_train:
+  model_args:
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 32
+    warmup_steps: 1
+    num_train_epochs: 5
+  data_args:
+    template: native
+    file_name:
+      - data/math_deepmath_deal.jsonl
+    domain_interleave_probs:
+      math_rule: 1.0
+    dataset_dir: data
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      pipeline_model_parallel_size: 4
+      virtual_pipeline_model_parallel_size: 12
+      context_parallel_size: 1
+      use_distributed_optimizer: true
+      # account_for_loss_in_pipeline_split: true
+      moe_token_dispatcher_type: alltoall
+      recompute_granularity: selective
+      recompute_modules: "moe"
+      bias_activation_fusion: true
+      moe_grouped_gemm: true
+      moe_shared_expert_overlap: true
+      bf16: true
+      additional_configs:
+        moe_permute_fusion: true
+  device_mapping: list(range(0,64))
+  infer_batch_size: 1
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: native
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      tensor_parallel_size: 4
+      gpu_memory_utilization: 0.6
+      block_size: 16
+      max_model_len: 8192
+      enforce_eager: true
+  device_mapping: list(range(0,64))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: native
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      pipeline_model_parallel_size: 2
+      virtual_pipeline_model_parallel_size: 12
+      use_distributed_optimizer: true
+      moe_token_dispatcher_type: alltoall
+      bias_activation_fusion: true
+      moe_grouped_gemm: true
+      moe_shared_expert_overlap: true
+      additional_configs:
+        moe_permute_fusion: true
+  device_mapping: list(range(0,64))
+  infer_batch_size: 1
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: native
+    tag_included: [deepmath_103k, aime]
+    world_size: 8
+    infer_batch_size: 1

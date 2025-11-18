@@ -9,6 +9,7 @@ logging_dir: ./output/logs
 output_dir: ./output
 system_envs:
   USE_MODELSCOPE: '1'
+
 checkpoint_config:
   type: file_system
   output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
@@ -34,38 +35,25 @@ logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
 
-# --------------------------
-# grpo related
 
 rollout_batch_size: 64  # prompt
 prompt_length: 2048
 response_length: 4096
 
-adv_estimator: "grpo"
 num_return_sequences_in_group: 8
 ppo_epochs: 1
-use_kl_loss: true
-kl_loss_coef: 0.001
-loss_agg_mode: "seq-mean-token-sum"
+adv_estimator: "reinforce"
 
-
-# ppo related
-# advantage
-whiten_advantages: true
+# clip
+value_clip: 0.5
+reward_clip: 10
 advantage_clip: 2.0
 dual_clip_loss: true
-# clip
-reward_clip: 10
 
 # normalize
 norm_mean_type: ~
 norm_std_type: ~
 
-# reward
-add_token_level_kl: false
-
-# --------------------------
-# Additional optimization knobs
 # data mask
 max_len_mask: true
 difficulty_mask: true
@@ -77,12 +65,16 @@ error_max_len_clip: false
 difficulty_loss_weight: false
 length_loss_weight: false
 
+# reward
+add_token_level_kl: false
+
+# advantage
+whiten_advantages: true
+
 # dynamic sampling scheduler
 # use_additional_prompts: true
 # max_running_requests: 256
 # is_num_return_sequences_expand: false
-
-# --------------------------
 
 pretrain: Qwen/Qwen2.5-7B
 reward_pretrain: Qwen/Qwen2.5-7B
@@ -253,7 +245,11 @@ rewards:
     data_args:
       template: qwen2_5
     strategy_args:
-      strategy_name: hf_infer
-      strategy_config: null
+      strategy_name: vllm
+      strategy_config:
+        gpu_memory_utilization: 0.8
+        block_size: 16
+        max_model_len: 8000
+        load_format: auto
     device_mapping: list(range(12,16))
     infer_batch_size: 4
