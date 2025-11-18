@@ -345,6 +345,8 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
         video_grid_thw: Optional["torch.LongTensor"] = None,
         **kwargs,
     ) -> "torch.Tensor":
+        force_vit_image = kwargs.pop("force_vit_image", False)
+        force_vit_video = kwargs.pop("force_vit_video", False)
         if position_ids is None and input_ids is not None:
             position_ids, _ = get_rope_index(self.config, input_ids, image_grid_thw, video_grid_thw)
 
@@ -374,7 +376,9 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
                 inputs_ranges,
                 self.config.image_token_id,
             )
-        elif pixel_values_videos is not None:
+        elif force_vit_image:
+            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._handle_missing_visual(inputs_embeds)
+        if pixel_values_videos is not None:
             inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.construct_inputs_embeds(
                 input_ids,
                 inputs_embeds,
@@ -383,6 +387,8 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
                 inputs_ranges,
                 self.config.video_token_id,
             )
+        elif force_vit_video:
+            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._handle_missing_visual(inputs_embeds)
         return super().forward(
             decoder_input=inputs_embeds,
             labels=labels,
