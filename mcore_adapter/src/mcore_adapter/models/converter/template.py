@@ -310,6 +310,12 @@ class Template:
         return AutoMcaModelConfig.for_model(self.hf_model_type, **kw_args)
 
     def convert_hf_to_mca_config_kws(self, hf_config: "PretrainedConfig", **kw_args):
+        # TODO: support text_config
+        if hasattr(hf_config, "text_config"):
+            text_config = hf_config.text_config.to_dict()
+            for k, v in  text_config.items():
+                setattr(hf_config, k, v)
+
         for k, v in self.config_hf_to_mca.items():
             if hasattr(hf_config, k):
                 kw_args[v] = getattr(hf_config, k)

@@ -1,31 +1,159 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from megatron.core import mpu
+from megatron.core.inference.contexts import BaseInferenceContext
+from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.utils import deprecate_inference_params
+from torch import Tensor
 
-from ...platforms import current_platform
 from ..auto.modeling_auto import register_model
 from ..model_factory import McaGPTModel
 from ..model_utils import ModuleUtilsMixin
-from .config_qwen2_5_vl import Qwen2_5_VLConfig
+from .config_qwen3_vl import Qwen3VLConfig
+from .rope_utils import Qwen3VLMultimodalRotaryEmbedding, get_rope_index
+from .transformer_block import Qwen3VLTransformerBlock
 
 
-@register_model("qwen2_5_vl")
-class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
-    config_class = Qwen2_5_VLConfig
+class Qwen3VLGPTModel(McaGPTModel):
+    def __init__(
+        self,
+        config: Qwen3VLConfig,
+        rotary_percent: float = 1.0,
+        seq_len_interpolation_factor: Optional[float] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            config,
+            rotary_percent=rotary_percent,
+            seq_len_interpolation_factor=seq_len_interpolation_factor,
+            **kwargs,
+        )
 
-    def __init__(self, config: "Qwen2_5_VLConfig", **kwargs):
-        from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLVisionConfig
-        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+        # rebuild rope
+        self.rotary_pos_emb = Qwen3VLMultimodalRotaryEmbedding(
+            kv_channels=self.config.kv_channels,
+            rotary_percent=rotary_percent,
+            rotary_interleaved=self.config.rotary_interleaved,
+            seq_len_interpolation_factor=seq_len_interpolation_factor,
+            rotary_base=self.rotary_base,
+        )
+        self.mrope_section = self.config.mrope_section
+        assert self.mrope_section is not None, (
+            "mrope require mrope_section setting, but we got None from TransformerConfig"
+        )
+
+        # rebuild the transformer block
+        self.decoder = Qwen3VLTransformerBlock(
+            config=self.config,
+            spec=self.transformer_layer_spec,
+            pre_process=self.pre_process,
+            post_process=self.post_process,
+            vp_stage=self.vp_stage,
+        )
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        position_ids: Tensor,
+        attention_mask: Tensor,
+        decoder_input: Tensor = None,
+        labels: Tensor = None,
+        inference_context: BaseInferenceContext = None,
+        packed_seq_params: PackedSeqParams = None,
+        extra_block_kwargs: dict = None,
+        runtime_gather_output: Optional[bool] = None,
+        *,
+        inference_params: Optional[BaseInferenceContext] = None,
+        loss_mask: Optional[Tensor] = None,
+        # args for deepstack
+        visual_pos_masks: Optional[torch.Tensor] = None,
+        deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+    ) -> Tensor:
+        """Forward function of the GPT Model This function passes the input tensors
+        through the embedding layer, and then the decoeder and finally into the post
+        processing layer (optional).
+
+        It either returns the Loss values if labels are given  or the final hidden units
+
+        Args:
+            runtime_gather_output (bool): Gather output at runtime. Default None means
+                `parallel_output` arg in the constructor will be used.
+        """
+
+        inference_context = deprecate_inference_params(inference_context, inference_params)
+
+        (
+            decoder_input,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            sequence_len_offset,
+        ) = self._preprocess(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            decoder_input=decoder_input,
+            inference_context=inference_context,
+            packed_seq_params=packed_seq_params,
+        )
+
+        # Run decoder.
+        hidden_states = self.decoder(
+            hidden_states=decoder_input,
+            attention_mask=attention_mask,
+            inference_context=inference_context,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            packed_seq_params=packed_seq_params,
+            sequence_len_offset=sequence_len_offset,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+            **(extra_block_kwargs or {}),
+        )
+
+        return self._postprocess(
+            hidden_states=hidden_states,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            labels=labels,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            mtp_in_postprocess=self.mtp_process,
+            loss_mask=loss_mask,
+            decoder_input=decoder_input,
+            attention_mask=attention_mask,
+            inference_params=inference_params,
+            packed_seq_params=packed_seq_params,
+            sequence_len_offset=sequence_len_offset,
+            runtime_gather_output=runtime_gather_output,
+            extra_block_kwargs=extra_block_kwargs,
+            inference_context=inference_context,
+        )
+
+
+@register_model("qwen3_vl")
+class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
+    config_class = Qwen3VLConfig
+
+    def __init__(self, config: "Qwen3VLConfig", **kwargs):
+        from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionConfig
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
         super().__init__(config, **kwargs)
-        self.pre_process = kwargs.get("pre_process", mpu.is_pipeline_first_stage())
+
+        if mpu.get_pipeline_model_parallel_rank() == 0 and self.vp_stage == 0:
+            assert self.decoder.num_layers_per_pipeline_rank >= len(
+                config.vision_config.get("deepstack_visual_indexes", [8, 16, 24])
+            ), "Current pp and vp not support deepstack"
+
         if self.pre_process:
-            self.vision_model = Qwen2_5_VisionTransformerPretrainedModel._from_config(
-                Qwen2_5_VLVisionConfig(**config.vision_config),
+            self.vision_model = Qwen3VLVisionModel._from_config(
+                Qwen3VLVisionConfig(**config.vision_config),
                 attn_implementation="sdpa",
                 torch_dtype=self.config.params_dtype,
-            ).to(current_platform.current_device())
+            ).to(torch.cuda.current_device())
             for param in self.vision_model.parameters():
                 setattr(param, "sequence_parallel", config.sequence_parallel)
 
@@ -34,9 +162,13 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
             4, self.config.pixel_values_dim, device=inputs_embeds.device, dtype=inputs_embeds.dtype
         )
         mock_grid_thw = torch.LongTensor([[1, 2, 2]]).to(inputs_embeds.device)
-        image_embeddings = self.vision_model(mock_pixel_values, grid_thw=mock_grid_thw)
-        inputs_embeds = inputs_embeds + image_embeddings.mean() * 0
-        return inputs_embeds
+        image_embeds, deepstack_image_embeds = self.vision_model(mock_pixel_values, grid_thw=mock_grid_thw)
+        inputs_embeds = inputs_embeds + image_embeds.mean() * 0
+        return (
+            inputs_embeds,
+            torch.zeros((inputs_embeds.size(1), inputs_embeds.size(0)), device=inputs_embeds.device, dtype=torch.bool),
+            deepstack_image_embeds,
+        )
 
     def construct_inputs_embeds(
         self,
@@ -73,8 +205,6 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
                 valid_image_embeds_start = image_mask[:i].sum().item()
                 valid_image_embeds_start += image_mask[i, :inputs_start].sum().item()
                 embeds_num = image_mask[i, inputs_start:inputs_end].sum().item()
-                if embeds_num == 0:
-                    continue
                 valid_image_embeds_end = valid_image_embeds_start + embeds_num
                 used_embeds_seqlen_start = 0  # embeds seqlens used in this range
                 new_embeds_seqlen_start = (
@@ -116,9 +246,9 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
 
         required_pixel_values = torch.cat(required_pixel_values, dim=0)
         required_grid_thw = torch.stack(required_grid_thws, dim=0)
-        vision_model_dtype = self.vision_model.blocks[0].mlp.down_proj.weight.dtype
+        vision_model_dtype = self.vision_model.blocks[0].mlp.linear_fc1.weight.dtype
         required_pixel_values = required_pixel_values.type(vision_model_dtype)
-        image_embeds = self.vision_model(required_pixel_values, grid_thw=required_grid_thw)
+        image_embeds, deepstack_image_embeds = self.vision_model(required_pixel_values, grid_thw=required_grid_thw)
         image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
         image_mask = torch.cat(
@@ -142,133 +272,26 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
         image_mask = image_mask.unsqueeze(-1).expand_as(inputs_embeds)
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, needed_image_embeds)
         inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
-        return inputs_embeds
 
-    # copy from transformers, add time_tensor
-    # TODO: need test video input
-    def get_rope_index(
-        self,
-        input_ids: torch.LongTensor,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
-        second_per_grid_ts: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        spatial_merge_size = self.config.merge_size
-        image_token_id = self.config.image_token_id
-        video_token_id = self.config.video_token_id
-        vision_start_token_id = self.config.vision_start_token_id
-        mrope_position_deltas = []
-        if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
-            total_input_ids = input_ids
-            if attention_mask is None:
-                attention_mask = torch.ones_like(total_input_ids)
-            position_ids = torch.ones(
-                3,
-                input_ids.shape[0],
-                input_ids.shape[1],
-                dtype=input_ids.dtype,
-                device=input_ids.device,
+        # construct deepstack embedding
+        image_mask = image_mask[..., 0]
+        visual_pos_masks = image_mask
+        deepstack_visual_embeds = []
+        for deepstack_image_embed in deepstack_image_embeds:
+            needed_deepstack_image_embeds = torch.zeros(
+                [needed_image_embeds_num] + list(deepstack_image_embed.shape[1:]),
+                dtype=inputs_embeds.dtype,
+                device=inputs_embeds.device,
             )
-            image_index, video_index = 0, 0
-            attention_mask = attention_mask.to(total_input_ids.device)
-            for i, input_ids in enumerate(total_input_ids):
-                input_ids = input_ids[attention_mask[i] == 1]
-                image_nums, video_nums = 0, 0
-                vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
-                vision_tokens = input_ids[vision_start_indices + 1]
-                image_nums = (vision_tokens == image_token_id).sum()
-                video_nums = (vision_tokens == video_token_id).sum()
-                input_tokens = input_ids.tolist()
-                llm_pos_ids_list: list = []
-                st = 0
-                remain_images, remain_videos = image_nums, video_nums
-                for _ in range(image_nums + video_nums):
-                    if image_token_id in input_tokens and remain_images > 0:
-                        ed_image = input_tokens.index(image_token_id, st)
-                    else:
-                        ed_image = len(input_tokens) + 1
-                    if video_token_id in input_tokens and remain_videos > 0:
-                        ed_video = input_tokens.index(video_token_id, st)
-                    else:
-                        ed_video = len(input_tokens) + 1
-                    if ed_image < ed_video:
-                        t, h, w = (
-                            image_grid_thw[image_index][0],
-                            image_grid_thw[image_index][1],
-                            image_grid_thw[image_index][2],
-                        )
-                        second_per_grid_t = 0
-                        image_index += 1
-                        remain_images -= 1
-                        ed = ed_image
+            added_num = 0
+            for start, end in valid_image_embeds_nums:
+                embeds_num = end - start
+                needed_deepstack_image_embeds[added_num : added_num + embeds_num] = deepstack_image_embed[start:end]
+                added_num += embeds_num
+            assert added_num == needed_image_embeds_num
+            deepstack_visual_embeds.append(needed_deepstack_image_embeds)
 
-                    else:
-                        t, h, w = (
-                            video_grid_thw[video_index][0],
-                            video_grid_thw[video_index][1],
-                            video_grid_thw[video_index][2],
-                        )
-                        if second_per_grid_ts is not None:
-                            second_per_grid_t = second_per_grid_ts[video_index]
-                        else:
-                            second_per_grid_t = 1.0
-                        video_index += 1
-                        remain_videos -= 1
-                        ed = ed_video
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t.item(),
-                        h.item() // spatial_merge_size,
-                        w.item() // spatial_merge_size,
-                    )
-                    text_len = ed - st
-
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
-
-                    range_tensor = torch.arange(llm_grid_t).view(-1, 1)
-                    expanded_range = range_tensor.expand(-1, llm_grid_h * llm_grid_w)
-
-                    time_tensor = expanded_range * second_per_grid_t * self.config.tokens_per_second
-
-                    time_tensor_long = time_tensor.long()
-                    t_index = time_tensor_long.flatten()
-
-                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
-                    llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
-                    st = ed + llm_grid_t * llm_grid_h * llm_grid_w
-
-                if st < len(input_tokens):
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    text_len = len(input_tokens) - st
-                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
-
-                llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
-                mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
-            mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
-            return position_ids, mrope_position_deltas
-        else:
-            if attention_mask is not None:
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 1)
-                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1).to(attention_mask.device)
-                max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
-                mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
-            else:
-                position_ids = (
-                    torch.arange(input_ids.shape[1], device=input_ids.device)
-                    .view(1, 1, -1)
-                    .expand(3, input_ids.shape[0], -1)
-                )
-                mrope_position_deltas = torch.zeros(
-                    [input_ids.shape[0], 1],
-                    device=input_ids.device,
-                    dtype=input_ids.dtype,
-                )
-
-            return position_ids, mrope_position_deltas
+        return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
 
     def get_batch_on_this_cp_rank(self, batch, dim3_keys: List[str] = ["attention_mask"]):
         # VLM need to view all input_ids and media features
@@ -320,27 +343,10 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
         pixel_values_videos: Optional["torch.Tensor"] = None,
         image_grid_thw: Optional["torch.LongTensor"] = None,
         video_grid_thw: Optional["torch.LongTensor"] = None,
-        second_per_grid_ts: Optional[torch.Tensor] = None,  # for videos
         **kwargs,
     ) -> "torch.Tensor":
-        force_vit_image = kwargs.pop("force_vit_image", False)
-        force_vit_video = kwargs.pop("force_vit_video", False)       
-        
-        if position_ids is not None:
-            expected_shape = (3, input_ids.shape[0], input_ids.shape[1])  # (3, batch, seq_len)
-            if position_ids.shape != expected_shape:
-                if position_ids.shape == (input_ids.shape[0], input_ids.shape[1]):
-                    position_ids, _ = self.get_rope_index(
-                        input_ids, image_grid_thw, video_grid_thw, second_per_grid_ts, attention_mask
-                    )
-                else:
-                    raise ValueError(f"Unexpected position_ids shape: {position_ids.shape}, "
-                                     f"expected: {expected_shape} or {(input_ids.shape[0], input_ids.shape[1])}")
-
         if position_ids is None and input_ids is not None:
-            position_ids, _ = self.get_rope_index(
-                input_ids, image_grid_thw, video_grid_thw, second_per_grid_ts, attention_mask
-            )
+            position_ids, _ = get_rope_index(self.config, input_ids, image_grid_thw, video_grid_thw)
 
         cp_batch = {
             "input_ids": input_ids,
@@ -348,9 +354,9 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
         }
         if self.config.context_parallel_size > 1:
             cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
-            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=["attention_mask"])
+            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=["attention_mask", "position_ids"])
 
-        if not self.pre_process or decoder_input is not None:
+        if not self.pre_process or (pixel_values is None and pixel_values_videos is None) or decoder_input is not None:
             return super().forward(
                 decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
             )
@@ -359,7 +365,8 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
 
         inputs_embeds = self.embedding(input_ids=cp_batch["input_ids"], position_ids=None)
         if pixel_values is not None:
-            inputs_embeds = self.construct_inputs_embeds(
+            # get deepstack emb
+            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.construct_inputs_embeds(
                 input_ids,
                 inputs_embeds,
                 pixel_values,
@@ -367,10 +374,8 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
                 inputs_ranges,
                 self.config.image_token_id,
             )
-        elif force_vit_image:
-            inputs_embeds = self._handle_missing_visual(inputs_embeds)
-        if pixel_values_videos is not None:
-            inputs_embeds = self.construct_inputs_embeds(
+        elif pixel_values_videos is not None:
+            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.construct_inputs_embeds(
                 input_ids,
                 inputs_embeds,
                 pixel_values_videos,
@@ -378,10 +383,12 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
                 inputs_ranges,
                 self.config.video_token_id,
             )
-        elif force_vit_video:
-            inputs_embeds = self._handle_missing_visual(inputs_embeds)
-        decoder_input = inputs_embeds
-
         return super().forward(
-            decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
+            decoder_input=inputs_embeds,
+            labels=labels,
+            position_ids=position_ids,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+            **cp_batch,
+            **kwargs,
         )

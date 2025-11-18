@@ -10,6 +10,7 @@ from . import (
     qwen3,
     qwen3_moe,
     qwen3_next,
+    qwen3_vl,
 )
 from .auto import AutoConfig, AutoModel
 from .model_config import McaModelConfig
