@@ -75,7 +75,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [Installation](https://alibaba.github.io/ROLL/docs/Getting%20Started/Installation/)  
 [Config System Explanation](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/config_system)  
 [Debugging Guide](https://alibaba.github.io/ROLL/docs/Getting%20Started/Debugging%20Guide/debug_guide)  
-[Trackers and Metrics](https://alibaba.github.io/ROLL/docs/User%20Guides/Tracker%20and%20Metrics/trackers_and_metrics)  
+[Trackers and Metrics](https://alibaba.github.io/ROLL/docs/User%20Guides/Tracker%20&%20Metrics/trackers_and_metrics)  
 [Checkpoint Saving and Resuming Guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Advanced%20Features/checkpoint_and_resume)  
 [Converting MCoreAdapter Models to Hugging Face Format](https://alibaba.github.io/ROLL/docs/User%20Guides/Advanced%20Features/megatron_convert_2_hf)  
 [Quick Start: Single-Node Deployment Guide](https://alibaba.github.io/ROLL/docs/Getting%20Started/Quick%20Start/single_node_quick_start)  
