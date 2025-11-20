@@ -46,14 +46,14 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 | **[11/08/2025]** 🎉 Our [ROCK: Reinforcement Open Construction Kit](https://github.com/alibaba/ROCK) released, Explore the new capabilities!.                                                                                                                                                                                           |
 | **[10/23/2025]** 🎉 Our Papers released, see [Asymmetric Proximal Policy Optimization: mini-critics boost LLM reasoning](https://arxiv.org/abs/2510.01656) and [Attention Illuminates LLM Reasoning: The Preplan-and-Anchor Rhythm Enables Fine-Grained Policy Optimization](https://arxiv.org/abs/2510.13554).                         |
 | **[10/14/2025]** 🎉 Our Paper released, see [Part II: ROLL Flash -- Accelerating RLVR and Agentic Training with Asynchrony](https://arxiv.org/abs/2510.11345).                                                                                                                                                                          |
-| **[09/28/2025]** 🎉 Ascend NPU support — see [usage guide](https://alibaba.github.io/ROLL/docs/English/UserGuide/ascend/ascend_usage).                                                                                                                                                                                                  |
+| **[09/28/2025]** 🎉 Ascend NPU support — see [usage guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Hardware%20Support/ascend_usage).                                                                                                                                                                                                  |
 | **[09/25/2025]** 🎉 Our Paper released, see [RollPacker: Mitigating Long-Tail Rollouts for Fast, Synchronous RL Post-Training](https://arxiv.org/abs/2509.21009)                                                                                                                                                                        |
 | **[09/24/2025]** 🎉 Support [Wan2_2 Reward FL pipeline](examples/wan2.2-14B-reward_fl_ds/reward_fl_config.yaml). Explore the new capabilities!                                                                                                                                                                                          |
 | **[09/23/2025]** 🎉 ROLL aligns with GEM environment definition, providing agentic Tool Use training capabilities, [ToolUse docs](docs_roll/docs/English/UserGuide/agentic/Tool_Use.md).                                                                                                                                                |
 | **[09/16/2025]** 🎉 Qwen3-Next model training is supported, refer to [configuration](examples/qwen3-next-80BA3B-rlvr_megatron/rlvr_config.yaml).                                                                                                                                                                                        |
 | **[09/04/2025]** 🎉 ROLL supports vLLM dynamic FP8 rollout and remove_padding for acceleration.                                                                                                                                                                                                                                         |
 | **[08/28/2025]** 🎉 ROLL supports SFT pipeline, refer to [configuration](examples/qwen2.5-7B-sft_megatron/sft_config.yaml).                                                                                                                                                                                                             |
-| **[08/13/2025]** 🎉 ROLL supports AMD GPUs with out-of-box image docker and Dockerfile and specific yamls under `examples/` directory. Please refer to [Installation](https://alibaba.github.io/ROLL/docs/English/QuickStart/installation).                                                                                             |
+| **[08/13/2025]** 🎉 ROLL supports AMD GPUs with out-of-box image docker and Dockerfile and specific yamls under `examples/` directory. Please refer to [Installation](https://alibaba.github.io/ROLL/docs/Getting%20Started/Installation/).                                                                                             |
 | **[08/11/2025]** 🎉 Our Paper released, see [Part I: Tricks or Traps? A Deep Dive into RL for LLM Reasoning](https://arxiv.org/abs/2508.08221).                                                                                                                                                                                         |
 | **[08/10/2025]** 🎉 Agentic RL supports [stepwise learning](examples/qwen2.5-0.5B-agentic/agent_val_frozen_lake_gigpo.yaml), like [GiGPO](https://arxiv.org/abs/2505.10978); Distill supports [VLM](examples/qwen2.5-vl-7B-distill/distill_vl_megatron.yaml). Explore the new capabilities!                                             |
 | **[08/06/2025]** 🎉 ROLL PPT is now available, [Slides](assets/ROLL%20高效且用户友好的大模型RL训练框架.pdf).                                                                                                                                                                                                                                           |
@@ -72,52 +72,52 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [Documents](https://alibaba.github.io/ROLL/)
 
 ### Quick Start
-[Installation](https://alibaba.github.io/ROLL/docs/English/QuickStart/installation)  
-[Config System Explanation](https://alibaba.github.io/ROLL/docs/English/QuickStart/config_system)  
-[Debugging Guide](https://alibaba.github.io/ROLL/docs/English/QuickStart/debugging_guide_en)  
-[Trackers and Metrics](https://alibaba.github.io/ROLL/docs/English/UserGuide/trackers_and_metrics)  
-[Checkpoint Saving and Resuming Guide](https://alibaba.github.io/ROLL/docs/English/UserGuide/checkpoint_and_resume)  
-[Converting MCoreAdapter Models to Hugging Face Format](https://alibaba.github.io/ROLL/docs/English/UserGuide/megatron_convert_2_hf)  
-[Quick Start: Single-Node Deployment Guide](https://alibaba.github.io/ROLL/docs/English/QuickStart/single_node_quick_start)  
-[Quick Start: Multi-Node Deployment Guide](https://alibaba.github.io/ROLL/docs/English/QuickStart/multi_node_quick_start)  
-[Frequently Asked Questions](https://alibaba.github.io/ROLL/docs/English/QuickStart/qa_issues)
+[Installation](https://alibaba.github.io/ROLL/docs/Getting%20Started/Installation/)  
+[Config System Explanation](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/config_system)  
+[Debugging Guide](https://alibaba.github.io/ROLL/docs/Getting%20Started/Debugging%20Guide/debug_guide)  
+[Trackers and Metrics](https://alibaba.github.io/ROLL/docs/User%20Guides/Tracker%20and%20Metrics/trackers_and_metrics)  
+[Checkpoint Saving and Resuming Guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Advanced%20Features/checkpoint_and_resume)  
+[Converting MCoreAdapter Models to Hugging Face Format](https://alibaba.github.io/ROLL/docs/User%20Guides/Advanced%20Features/megatron_convert_2_hf)  
+[Quick Start: Single-Node Deployment Guide](https://alibaba.github.io/ROLL/docs/Getting%20Started/Quick%20Start/single_node_quick_start)  
+[Quick Start: Multi-Node Deployment Guide](https://alibaba.github.io/ROLL/docs/Getting%20Started/Quick%20Start/multi_nodes_quick_start)  
+[Frequently Asked Questions](https://alibaba.github.io/ROLL/docs/Getting%20Started/FAQ/qa_issues)
 
 ### UserGuide
 
 #### Pipeline Step by Step
-[RLVR Pipeline](https://alibaba.github.io/ROLL/docs/English/UserGuide/pipeline/rlvr_pipeline_start)  
-[Agentic Pipeline](https://alibaba.github.io/ROLL/docs/English/UserGuide/pipeline/agentic_pipeline_start)  
-[Agentic Comprehensive Guide](https://alibaba.github.io/ROLL/docs/English/UserGuide/pipeline/agent_pipeline_start)  
-[Distill Pipeline](https://alibaba.github.io/ROLL/docs/English/UserGuide/pipeline/distill_pipeline_start)
+[RLVR Pipeline](https://alibaba.github.io/ROLL/docs/User%20Guides/Pipeline/rlvr_pipeline_start)  
+[Agentic Pipeline](https://alibaba.github.io/ROLL/docs/User%20Guides/Pipeline/agentic_pipeline_start)  
+[Agentic Comprehensive Guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Pipeline/agent_pipeline_start)  
+[Distill Pipeline](https://alibaba.github.io/ROLL/docs/User%20Guides/Pipeline/distill_pipeline_start)
 
 #### Algorithms
-[Reinforce++](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/Reinforce_Plus_Plus)  
-[TOPR](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/TOPR)  
-[GiGPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/agentic_GiGPO)  
-[PPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/PPO)  
-[Lite PPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/LitePPO)  
-[GRPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/GRPO)  
-[GSPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/GSPO)  
-[RAFT++](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/RAFT_Plus_Plus)  
-[StarPO](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/agentic_StarPO)   
-[RewardFL](https://alibaba.github.io/ROLL/docs/English/UserGuide/algorithms/Reward_FL)
+[Reinforce++](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/Reinforce_Plus_Plus)  
+[TOPR](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/TOPR)  
+[GiGPO](https://alibaba.github.io/ROLL/docs/User%20Guides/Agentic/agentic_GiGPO)  
+[PPO](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/PPO)  
+[Lite PPO](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/LitePPO)  
+[GRPO](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/GRPO)  
+[GSPO](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/GSPO)  
+[RAFT++](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/RAFT_Plus_Plus)  
+[StarPO](https://alibaba.github.io/ROLL/docs/User%20Guides/Agentic/agentic_StarPO)   
+[RewardFL](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/Reward_FL)
 
 #### Backend
-[DeepSeed](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/deepspeed)  
-[Megatron](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/megatron)   
-[vLLM](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/vllm)  
-[SGLang](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/sglang)
+[DeepSeed](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/deepspeed)  
+[Megatron](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/megatron)   
+[vLLM](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/vllm)  
+[SGLang](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/sglang)
 
 #### Advanced Features
-[Asynchronous Parallel Rollout](https://alibaba.github.io/ROLL/docs/English/UserGuide/async_parallel_rollout)  
-[Asynchronous Training Feature](https://alibaba.github.io/ROLL/docs/English/UserGuide/async_training)  
+[Asynchronous Parallel Rollout](https://alibaba.github.io/ROLL/docs/User%20Guides/Advanced%20Features/async_parallel_rollout)  
+[Asynchronous Training Feature](https://alibaba.github.io/ROLL/docs/User%20Guides/Advanced%20Features/async_training)  
 
 #### Performance Optimization & Resource Management 
-[Resource Config](https://alibaba.github.io/ROLL/docs/English/UserGuide/device_mapping)   
-[GPU Time-Division Multiplexing Control](https://alibaba.github.io/ROLL/docs/English/UserGuide/offload_reload_control)  
+[Resource Config](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/device_mapping)   
+[GPU Time-Division Multiplexing Control](https://alibaba.github.io/ROLL/docs/User%20Guides/Advanced%20Features/offload_reload_control)  
 
 #### ROLL x Ascend
-[Ascend Usage Guide](https://alibaba.github.io/ROLL/docs/English/UserGuide/ascend/ascend_usage)
+[Ascend Usage Guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Hardware%20Support/ascend_usage)
 
 ---
 
@@ -138,7 +138,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
     *   Inference/Generation supports vLLM, SGLang.
     *   Training supports DeepSpeed (ZeRO), Megatron-LM 5D parallelism (mcore-adapter, dp/tp/pp/cp/ep), FSDP under implementation.
     *   Extreme offload/reload capabilities.
-    *   Supports [LoRA](https://alibaba.github.io/ROLL/docs/English/UserGuide/backend/lora) training.
+    *   Supports [LoRA](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/lora) training.
     *   Supports FP8 rollout (FP8 inference for LLM as judge, FP8 rollout with BF16 training under development).
 *   **AutoDeviceMapping:** Supports custom device mapping for different roles, flexibly managing colocated and disaggregated deployments.
 *   **Observability:** Integrated with SwanLab / WandB / TensorBoard, tracking of performance for each domain and reward type.

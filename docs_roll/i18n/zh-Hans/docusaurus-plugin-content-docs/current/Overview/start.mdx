@@ -1,0 +1,116 @@
+<div align="center">
+
+<img src="https://img.alicdn.com/imgextra/i2/O1CN01R6uYoU1VrrET7d1G6_!!6000000002707-0-tps-1292-407.jpg" width="40%" alt="ROLL Logo" />
+
+# ROLL: Reinforcement Learning Optimization for Large-Scale Learning
+
+<h4>🚀 An Efficient and User-Friendly Scaling Library for Reinforcement Learning with Large Language Models 🚀</h4>
+
+<p>
+  <a href="https://github.com/alibaba/ROLL/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" />
+  </a>
+  <a href="https://github.com/alibaba/ROLL/issues">
+    <img src="https://img.shields.io/github/issues/alibaba/ROLL" alt="GitHub issues" />
+  </a>
+  <a href="https://github.com/alibaba/ROLL/stargazers">
+    <img src="https://img.shields.io/github/stars/alibaba/ROLL?style=social" alt="Repo stars" />
+  </a>
+  <a href="https://arxiv.org/abs/2506.06122"><img src="https://img.shields.io/static/v1?label=arXiv&message=Paper&color=red" /></a>
+  <a href="https://img.alicdn.com/imgextra/i4/O1CN01MICK0T28fHMzy5P84_!!6000000007959-2-tps-756-850.png" target="_blank">
+    <img src="https://img.shields.io/badge/WeChat-green?logo=wechat" alt="WeChat QR" />
+  </a>
+</p>
+
+</div>
+
+ROLL is an efficient and user-friendly RL library designed for Large Language Models (LLMs) utilizing Large Scale GPU resources. It significantly enhances LLM performance in key areas such as human preference alignment, complex reasoning, and multi-turn agentic interaction scenarios.
+
+Leveraging a multi-role distributed architecture with Ray for flexible resource allocation and heterogeneous task scheduling, ROLL integrates cutting-edge technologies like Megatron-Core, SGLang and vLLM to accelerate model training and inference.
+
+**[08/11/2025]** 🎉 Our Paper released, see [Part I: Tricks or Traps? A Deep Dive into RL for LLM Reasoning](https://arxiv.org/abs/2508.08221). 
+**[06/09/2025]** 🎉 ROLL tech report is now available! Access the report [here](https://arxiv.org/abs/2506.06122).   
+
+---
+
+
+
+## 🚀 快速入门
+
+[文档](https://alibaba.github.io/ROLL/zh-Hans/)
+
+### 快速上手
+
+[安装指南](https://alibaba.github.io/ROLL/zh-Hans/docs/Getting%20Started/Installation/)  
+[快速上手：单机版部署指南](https://alibaba.github.io/ROLL/zh-Hans/docs/Getting%20Started/Quick%20Start/single_node_quick_start)  
+[快速上手：多节点部署指南](https://alibaba.github.io/ROLL/zh-Hans/docs/Getting%20Started/Quick%20Start/multi_nodes_quick_start)  
+[ROLL 调试指南](https://alibaba.github.io/ROLL/zh-Hans/docs/Getting%20Started/Debugging%20Guide/debug_guide)  
+[常见问题解答 (Q&A)](https://alibaba.github.io/ROLL/zh-Hans/docs/Getting%20Started/FAQ/qa_issues)
+
+### 使用指南
+
+#### 配置
+[ROLL 配置系统详解](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/config_system)  
+[ROLL 配置指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/config_guide)  
+[ROLL 资源配置](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/device_mapping)    
+[Off-Policy 算法配置指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/offpolicy_setting)  
+[vLLM 推理后端配置指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/vllm)  
+[SGLang 推理后端配置指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/sglang)  
+[Megatron 推理和训练后端配置指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/megatron)  
+[LoRA 微调配置指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/lora)  
+[FP8 量化配置指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/fp8_rollout)  
+[DeepSpeed 训练后端配置指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/deepspeed)  
+
+#### 流水线
+[VLM RLVR 流水线](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Pipeline/vl_rlvr_pipeline_start)  
+[RLVR 流水线](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Pipeline/rlvr_pipeline_start)  
+[DPO 流水线](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Pipeline/dpo_pipeline_start)  
+[Distill 流水线](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Pipeline/distill_pipeline_start)  
+[Agentic 流水线](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Pipeline/agentic_pipeline_start)  
+[Comprehensive Guide: Using the Agentic Part of ROLL](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Pipeline/agent_pipeline_start)
+
+#### 算法
+[TOPR (Tapered Off-Policy REINFORCE)](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Algorithms/TOPR)  
+[Reward Feedback Learning (Reward FL)](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Algorithms/Reward_FL)  
+[Reinforce++](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Algorithms/Reinforce_Plus_Plus)
+[RAFT++ (Reward rAnked Fine-Tuning)](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Algorithms/RAFT_Plus_Plus)  
+[Proximal Policy Optimization (PPO)](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Algorithms/PPO)  
+[Lite PPO](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Algorithms/LitePPO)
+[Group Sequence Policy Optimization (GSPO)](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Algorithms/GSPO)  
+[Group Relative Policy Optimization (GRPO)](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Algorithms/GRPO)  
+
+#### Agentic
+[Agentic 工程实践文档](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Agentic/agentic_engineer_practice)  
+[TrajWiseLearning——StarPO (State-Thinking-Actions-Reward Policy Optimization)](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Agentic/agentic_StarPO)  
+[StepWiseLearning——GiGPO (Group-in-Group Policy Optimization)](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Agentic/agentic_GiGPO)  
+[Tool Use 使用指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Agentic/Tool_Use)
+
+#### 高级特性
+[Agentic 异步并行 Rollout](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Advanced%20Features/async_parallel_rollout)  
+[ROLL 异步训练功能使用指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Advanced%20Features/async_training)  
+[检查点保存与恢复指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Advanced%20Features/checkpoint_and_resume)  
+[MCoreAdapter 模型转换为 Hugging Face 格式](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Advanced%20Features/megatron_convert_2_hf)  
+[GPU 时分复用控制指南](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Advanced%20Features/offload_reload_control) 
+
+#### Tracker 和 Metrics
+[tracker和metrics](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Tracker%20and%20Metrics/trackers_and_metrics)
+
+
+#### 硬件支持
+[ROLL x Ascend](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Hardware%20Support/ascend_usage)
+
+### 开发
+
+##### 架构
+[AgenticPipeline](https://alibaba.github.io/ROLL/zh-Hans/docs/Development/Architecture/AgenticPipeline)
+[RLVRPipeline](https://alibaba.github.io/ROLL/zh-Hans/docs/Development/Architecture/RLVRPipeline)
+
+#### 开发者指南
+[如何支持新模型](https://alibaba.github.io/ROLL/zh-Hans/docs/Development/Developer%20Guide/support_new_models)  
+[自定义Env](https://alibaba.github.io/ROLL/zh-Hans/docs/Development/Developer%20Guide/customer_env)  
+[Prompt生成指南](https://alibaba.github.io/ROLL/zh-Hans/docs/Development/Developer%20Guide/prompt_intro)
+
+---
+<div align="center">
+We welcome contributions from the community! 🤝
+</div>

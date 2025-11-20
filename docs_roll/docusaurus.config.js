@@ -5,6 +5,8 @@ const { themes } = require('prism-react-renderer');
 const lightTheme = themes.github;
 const darkTheme = themes.dracula;
 
+const sidebars = require('./sidebars.js');
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'ROLL',
@@ -22,8 +24,8 @@ const config = {
   organizationName: 'alibaba', // Usually your GitHub org/user name.
   projectName: 'ROLL', // Usually your repo name.
 
-  onBrokenLinks: 'warn',
-  onBrokenMarkdownLinks: 'warn',
+  onBrokenLinks: 'throw',
+  onBrokenMarkdownLinks: 'throw',
 
   // Even if you don't use internalization, you can use this field to set useful
   // metadata like html lang. For example, if your site is Chinese, you may want
@@ -41,6 +43,10 @@ const config = {
         direction: 'ltr',
       },
     },
+  },
+
+  customFields: {
+    fullSidebar: sidebars.tutorialSidebar,
   },
 
   presets: [
@@ -129,11 +135,11 @@ const config = {
             items: [
               {
                 label: 'ROLL单机实践手册',
-                to: '/docs/QuickStart/single_node_quick_start',
+                to: '/docs/Getting%20Started/Quick%20Start/single_node_quick_start',
               },
               {
                 label: '配置指南',
-                to: '/docs/QuickStart/config_guide',
+                to: '/docs/User%20Guides/Configuration/config_guide',
               },
             ],
           },

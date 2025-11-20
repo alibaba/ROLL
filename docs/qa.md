@@ -74,10 +74,10 @@ profiler_output_dir: /data/oss_bucket_0/yali/llm/profile/${exp_name}
 
 roll数据分配的时候，会将rollout_batch_size的样本，按dp size 分发到每个actor_train worker上，然后再按gradient_accumulation_steps计算每次梯度更新的样本。配置一除就是0; 
 
-详细配置逻辑可以参考手册：https://alibaba.github.io/ROLL/docs/English/QuickStart/config_guide#training-arguments-training_args
+详细配置逻辑可以参考手册：https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/config_guide#training-arguments-training_args
 
 
-0. **如果出现这种错误：AssertionError: batch_size 32 < chunks 64**
+1. **如果出现这种错误：AssertionError: batch_size 32 < chunks 64**
 
 batch_size 小于reference/actor_train 的DP size，导致dispatch时数据不够切分，可以调整rollout_batch_size解决
 

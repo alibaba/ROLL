@@ -3,40 +3,72 @@
     "message": "Next",
     "description": "The label for version current"
   },
-  "sidebar.tutorialSidebar.category.DesignImplementation": {
-    "message": "设计实现文档",
-    "description": "The label for category 'DesignImplementation' in sidebar 'tutorialSidebar'"
+  "sidebar.tutorialSidebar.category.Overview": {
+    "message": "概览",
+    "description": "The label for category 'Overview' in sidebar 'tutorialSidebar'"
   },
-  "sidebar.tutorialSidebar.category.DevelopmentGuide": {
-    "message": "扩展开发手册",
-    "description": "The label for category 'DevelopmentGuide' in sidebar 'tutorialSidebar'"
+  "sidebar.tutorialSidebar.category.Getting Started": {
+    "message": "快速入门",
+    "description": "The label for category 'Getting Started' in sidebar 'tutorialSidebar'"
   },
-  "sidebar.tutorialSidebar.category.QuickStart": {
+  "sidebar.tutorialSidebar.category.Installation": {
+    "message": "安装指南",
+    "description": "The label for category 'Installation' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Quick Start": {
     "message": "快速开始",
-    "description": "The label for category 'QuickStart' in sidebar 'tutorialSidebar'"
+    "description": "The label for category 'Quick Start' in sidebar 'tutorialSidebar'"
   },
-  "sidebar.tutorialSidebar.category.UserGuide": {
+  "sidebar.tutorialSidebar.category.Debugging Guide": {
+    "message": "调试",
+    "description": "The label for category 'Debugging Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.FAQ": {
+    "message": "答疑",
+    "description": "The label for category 'FAQ' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.User Guides": {
     "message": "使用指南",
-    "description": "The label for category 'UserGuide' in sidebar 'tutorialSidebar'"
+    "description": "The label for category 'User Guides' in sidebar 'tutorialSidebar'"
   },
-  "sidebar.tutorialSidebar.category.agentic": {
-    "message": "agentic",
-    "description": "The label for category 'agentic' in sidebar 'tutorialSidebar'"
+  "sidebar.tutorialSidebar.category.Advanced Features": {
+    "message": "高级特性",
+    "description": "The label for category 'Advanced Features' in sidebar 'tutorialSidebar'"
   },
-  "sidebar.tutorialSidebar.category.algorithms": {
-    "message": "algorithms",
-    "description": "The label for category 'algorithms' in sidebar 'tutorialSidebar'"
+  "sidebar.tutorialSidebar.category.Agentic": {
+    "message": "Agentic",
+    "description": "The label for category 'Agentic' in sidebar 'tutorialSidebar'"
   },
-  "sidebar.tutorialSidebar.category.ascend": {
-    "message": "ascend",
-    "description": "The label for category 'ascend' in sidebar 'tutorialSidebar'"
+  "sidebar.tutorialSidebar.category.Algorithms": {
+    "message": "算法",
+    "description": "The label for category 'Algorithms' in sidebar 'tutorialSidebar'"
   },
-  "sidebar.tutorialSidebar.category.backend": {
-    "message": "backend",
-    "description": "The label for category 'backend' in sidebar 'tutorialSidebar'"
+  "sidebar.tutorialSidebar.category.Configuration": {
+    "message": "配置",
+    "description": "The label for category 'Configuration' in sidebar 'tutorialSidebar'"
   },
-  "sidebar.tutorialSidebar.category.pipeline": {
-    "message": "pipeline",
-    "description": "The label for category 'pipeline' in sidebar 'tutorialSidebar'"
+  "sidebar.tutorialSidebar.category.Hardware Support": {
+    "message": "硬件支持",
+    "description": "The label for category 'Hardware Support' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Pipeline": {
+    "message": "流水线",
+    "description": "The label for category 'Pipeline' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Tracker & Metrics": {
+    "message": "Tracker 和 Metrics",
+    "description": "The label for category 'Tracker & Metrics' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Development": {
+    "message": "开发",
+    "description": "The label for category 'Development' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Architecture": {
+    "message": "架构",
+    "description": "The label for category 'Architecture' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Developer Guide": {
+    "message": "开发者指南",
+    "description": "The label for category 'Developer Guide' in sidebar 'tutorialSidebar'"
   }
 }

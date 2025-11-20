@@ -13,11 +13,11 @@
   },
   "link.item.label.ROLL单机实践手册": {
     "message": "ROLL单机实践手册",
-    "description": "The label of footer link with label=ROLL单机实践手册 linking to /docs/简体中文/快速开始/single_node_quick_start_cn"
+    "description": "The label of footer link with label=ROLL单机实践手册 linking to /docs/Getting%20Started/Quick%20Start/single_node_quick_start"
   },
   "link.item.label.配置指南": {
     "message": "配置指南",
-    "description": "The label of footer link with label=配置指南 linking to /docs/简体中文/快速开始/config_guide_cn"
+    "description": "The label of footer link with label=配置指南 linking to /docs/User%20Guides/Configuration/config_guide"
   },
   "link.item.label.Stack Overflow": {
     "message": "Stack Overflow",
