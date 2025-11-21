@@ -24,6 +24,8 @@ def create_strategy(worker: Worker) -> Union[InferenceStrategy, TrainStrategy]:
         from roll.distributed.strategy.megatron_strategy import MegatronInferStrategy as strategy_cls
     elif strategy_name == "megatron_train":
         from roll.distributed.strategy.megatron_strategy import MegatronTrainStrategy as strategy_cls
+    elif strategy_name == "mock_infer":
+        from roll.distributed.strategy.mock_strategy import MockInferStrategy as strategy_cls
     else:
         raise ValueError(f"Unknown strategy name: {strategy_name}")
 

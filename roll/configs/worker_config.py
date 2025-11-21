@@ -12,11 +12,11 @@ logger = get_logger()
 @dataclass
 class StrategyArguments:
     strategy_name: Literal[
-        "deepspeed_train", "hf_infer", "deepspeed_infer", "vllm", "sglang", "megatron_infer", "megatron_train", "diffusion_deepspeed_train"
+        "deepspeed_train", "hf_infer", "deepspeed_infer", "vllm", "sglang", "megatron_infer", "megatron_train", "mock_infer", "diffusion_deepspeed_train"
     ] = field(
         default="deepspeed_train",
         metadata={
-            "help": "The name of the strategy. Options: 'deepspeed_train', 'diffusion_deepspeed_train', 'hf_infer', 'deepspeed_infer', 'vllm', 'sglang', "
+            "help": "The name of the strategy. Options: 'deepspeed_train', 'diffusion_deepspeed_train', 'hf_infer', 'deepspeed_infer', 'mock_infer', 'vllm', 'sglang', "
             "'megatron_infer', 'megatron_train'."
         },
     )
