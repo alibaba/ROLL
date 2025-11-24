@@ -183,6 +183,7 @@ class DistillPipeline(BasePipeline):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "right" # padding should be on right in distill
+        pipeline_config.target_vocab_size = self.tokenizer.vocab_size
 
         dataset = preprocess_dataset(
             dataset,

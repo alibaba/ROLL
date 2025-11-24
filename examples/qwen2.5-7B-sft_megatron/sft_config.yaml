@@ -65,5 +65,6 @@ sft_train:
       pipeline_model_parallel_size: 2
       use_distributed_optimizer: true
       context_parallel_size: 2
+  use_sequence_packing: True
   device_mapping: list(range(0,8))
   infer_batch_size: 2

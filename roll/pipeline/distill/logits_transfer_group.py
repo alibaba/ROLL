@@ -41,7 +41,8 @@ class LogitsTransferGroup:
         self.tgt_cluster = tgt_cluster
         self.backend = backend
 
-        self.tensor_name_list_for_transfer = ['logits', 'topk_indices']
+        # get tensor list from src cluster
+        self.tensor_name_list_for_transfer = ray.get(src_cluster.workers[0].get_tensor_name_list_for_transfer.remote())
 
         self.broadcast_comm_pan = defaultdict(lambda: defaultdict(list))
         self.p2p_comm_plan = defaultdict(lambda: defaultdict(list))

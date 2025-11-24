@@ -252,5 +252,7 @@ class RLVRConfig(PPOConfig):
             else:
                 self.num_nodes = (max_gpu_num + self.num_gpus_per_node - 1) // self.num_gpus_per_node
 
+        self.validate_worker_config()
+
     def to_dict(self):
         return dataclasses.asdict(self)

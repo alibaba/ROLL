@@ -188,80 +188,125 @@ class InferenceStrategy(ABC):
             targets.view(-1),
             ignore_index=IGNORE_INDEX
         )
-        return loss
+        mask = (targets != IGNORE_INDEX)
+        valid_tokens = mask.sum()
+        return loss, valid_tokens
 
-    def op_compute_logits(self, logits: torch.Tensor, tp_gather: bool = False, cp_gather: bool = False, topk: int = 0):
+    def op_compute_topk_logits(self, logits: torch.Tensor, topk: int = 0):
         """
-            Post-process logits.
+        Compute top-k logits from the input logits tensor.
 
-            If topk == 0 (full-vocab mode), optionally gather across TP/CP ranks
-            using tp_gather and cp_gather flags.
-            If topk > 0, return top-K values and indices for each position.
+        Args:
+            logits (torch.Tensor): Input logits tensor of shape [batch_size, ..., vocab_size].
+            topk (int): Number of top elements to select. If 0, returns original logits.
 
-            Args:
-                logits: [B, local_seq_len, local_vocab_size] tensor.
-                tp_gather: Gather full vocab across tensor-parallel ranks (only if topk==0).
-                cp_gather: Gather full sequence across context-parallel ranks (only if topk==0).
-                topk: 0 for full vocab, >0 for top-K mode.
-
-            Returns:
-                (values, indices):
-                    - full-vocab: (logits, dummy indices)
-                    - top-K: (topk_values, topk_indices)"""
+        Returns:
+            tuple:
+                - If topk == 0: (original logits, empty tensor of shape [batch_size, 1])
+                - Otherwise: (top-k logits, top-k indices) from torch.topk
+        """
         if topk == 0:
             batch_size = logits.shape[0]
             return logits, torch.empty([batch_size, 1], device=logits.device)
         else:
             return torch.topk(logits, k=topk, dim=-1)
 
-    def op_compute_prepare_cp_local_iterator(self, tensor: torch.Tensor, feature_name: str, micro_batch_size: int):
+    def op_compute_topk_probs_and_indices(self, logits: torch.Tensor, topk: int = 0, target_vocab_size: int = None,
+                                          kd_temperature: int = 1, teacher_temperature: int = 1):
         """
-        Prepare a microbatch iterator for a tensor that may require Context Parallel (CP) slicing.
-
-        Notes:
-            - If the input `tensor` is None, this function returns None.
-            - The input tensor is assumed to have shape [global_batch, global_seq_len, ...],
-              with batch dimension first and sequence dimension second.
-            - When CP size > 1, the sequence dimension (dim=1) is sliced to the local CP rank
-              using `_get_feature_on_this_cp_rank`.
-            - After CP slicing (if any), the tensor is split along the batch dimension (dim=0)
-              into microbatches of size `micro_batch_size`.
+        Compute top-k probabilities, log probabilities, and indices from logits with temperature scaling.
 
         Args:
-            tensor (torch.Tensor or None): Full tensor before CP slicing. Can be None.
-            feature_name (str): Identifier passed to `_get_feature_on_this_cp_rank` for CP slicing.
-                                e.g., "teacher_logits" or "teacher_topk_indices".
-            micro_batch_size (int): Number of samples per microbatch; splitting is done along dim=0.
+            logits (torch.Tensor): Input logits tensor of shape [batch_size, seq_len, vocab_size].
+            topk (int): Number of top elements to select. If 0, uses all logits.
+            target_vocab_size (int, optional): Target vocabulary size to truncate logits. Defaults to None.
+            kd_temperature (int): Knowledge distillation temperature for scaling. Defaults to 1.
+            teacher_temperature (int): Teacher model temperature for scaling. Defaults to 1.
 
         Returns:
-            iterator or None: Iterator over microbatches with shape
-                              [micro_batch_size, local_seq_len, ...].
-                              Returns None if input `tensor` is None.
+            tuple: (topk_probs, topk_log_probs, topk_indices, topk_inf_mask)
+                - topk_probs (torch.Tensor): Softmax probabilities of top-k logits.
+                - topk_log_probs (torch.Tensor): Log softmax probabilities of top-k logits.
+                - topk_indices (torch.Tensor): Indices of top-k elements.
+                - topk_inf_mask (torch.Tensor): Boolean mask indicating infinite values in top-k logits.
         """
-        if tensor is None:
-            return None
+        if target_vocab_size is not None and logits.shape[-1] != target_vocab_size:
+            logits = logits[:, :, : min(logits.shape[-1], target_vocab_size)]
+        logits = logits / kd_temperature
+        logits = logits / teacher_temperature
+        topk_logits, topk_indices = self.op_compute_topk_logits(logits, topk)
+        topk_inf_mask = topk_logits.isinf()
+        topk_probs = F.softmax(topk_logits, dim=-1, dtype=torch.float32)
+        topk_log_probs = F.log_softmax(topk_logits, dim=-1)
+        return topk_probs, topk_log_probs, topk_indices, topk_inf_mask
 
-        # Microbatch split along batch dimension
-        return iter(tensor.split(micro_batch_size, dim=0))
-
-    def op_compute_various_divergence(self, loss_callable, logits, teacher_logits, teacher_topk_indices,
-                                      labels, attention_mask=None):
+    def op_compute_various_divergence(self, loss_callable, logits, teacher_topk_probs, teacher_topk_log_probs,
+                                      teacher_topk_indices,
+                                      teacher_topk_inf_mask, labels, attention_mask=None, reduction="mean"):
         """
-            Note:
-                `logits` here are both TP (Tensor Parallel) and CP (Context Parallel) sharded.
-                `logits` here are CP (Context Parallel) sharded.
-                - We gather across TP to get full-vocab logits for the local CP sequence slice.
-                `labels`, and `attention_mask` are provided as full tensors
-                (global sequence length). These are then sliced down to the local CP rank's
-                sequence shard before loss computation.
-            """
+        Compute divergence loss between student and teacher distributions with support for distributed training.
 
+        This function handles both Tensor Parallel (TP) and Context Parallel (CP) sharded logits, gathering
+        full vocabulary logits for the local sequence slice before computing the divergence loss.
+
+        Args:
+            loss_callable (callable): Loss function that computes divergence between student and teacher.
+            logits (torch.Tensor): Student model logits, potentially TP/CP sharded. Shape: [batch_size, seq_len, vocab_size].
+            teacher_topk_probs (torch.Tensor): Teacher's top-k probabilities.
+            teacher_topk_log_probs (torch.Tensor): Teacher's top-k log probabilities.
+            teacher_topk_indices (torch.Tensor): Indices of teacher's top-k elements.
+            teacher_topk_inf_mask (torch.Tensor): Mask for infinite values in teacher's top-k logits.
+            labels (torch.Tensor, optional): Ground truth labels with padding marked as IGNORE_INDEX. Defaults to None.
+            attention_mask (torch.Tensor, optional): Attention mask where 0 indicates padding. Used if labels is None.
+            reduction (str): Reduction method - "mean", "sum", or "none". Defaults to "mean".
+
+        Returns:
+            tuple: (loss, token_count)
+                - loss (torch.Tensor): Computed loss value based on reduction method.
+                    - "mean": averaged loss over valid tokens
+                    - "sum": summed loss over valid tokens
+                    - "none": per-token loss tensor
+                - token_count (torch.Tensor): Number of valid (non-padded) tokens.
+
+        Raises:
+            ValueError: If reduction method is not one of "mean", "sum", or "none".
+
+        Note:
+            - Input `logits` are both TP (Tensor Parallel) and CP (Context Parallel) sharded.
+            - The function gathers logits across TP to obtain full-vocab logits for the local CP sequence slice.
+            - `labels` and `attention_mask` are provided as full tensors with global sequence length,
+              then sliced to the local CP rank's sequence shard during loss computation.
+        """
+        # Gather full vocabulary logits using teacher's top-k indices
         full_logits = logits
         full_logits = self.op_compute_gather_by_teacher_indices(full_logits, teacher_topk_indices)
-        if teacher_logits.shape[-1] != full_logits.shape[-1]:
-            teacher_logits = teacher_logits[:, :, : min(full_logits.shape[-1], teacher_logits.shape[-1])]
-        loss = loss_callable(logits=full_logits, teacher_logits=teacher_logits, labels=labels, attention_mask=attention_mask)
-        return loss
+
+        # Compute per-token divergence loss
+        kld_per_token = loss_callable(logits=full_logits, teacher_probs=teacher_topk_probs,
+                                      teacher_log_probs=teacher_topk_log_probs,
+                                      teacher_inf_mask=teacher_topk_inf_mask)
+
+        # Create padding mask from labels or attention mask
+        if labels is not None:
+            pad_mask = labels.eq(IGNORE_INDEX)
+        else:
+            pad_mask = attention_mask.eq(0)
+        token_count = (~pad_mask).sum().float()
+
+        # Early return for 'none' reduction (per-token loss)
+        if reduction == 'none':
+            return kld_per_token, token_count
+
+        # Apply mask and compute aggregated loss
+        kld_masked = kld_per_token.masked_fill_(pad_mask, 0.0)
+        loss_sum = kld_masked.sum()
+
+        if reduction == "sum":
+            return loss_sum, token_count
+        elif reduction == "mean":
+            return loss_sum / token_count.clamp(min=1.0), token_count
+        else:
+            raise ValueError(f"Unsupported reduction: {reduction}. Use 'mean', 'sum', or 'none'.")
 
     # Both megatron and deepspeed can output language loss directly.
     # This op is mainly for computing context-parallel loss.

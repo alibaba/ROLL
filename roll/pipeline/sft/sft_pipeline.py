@@ -22,7 +22,6 @@ from roll.utils.metrics.metrics_manager import MetricsManager
 logger = get_logger()
 
 
-# TODO: support packing
 def preprocess_dataset(dataset, prompt_len, encode_func, num_proc):
     logger.info(f"Begin process dataset: {dataset}")
     dataset = dataset.map(

@@ -19,13 +19,14 @@ from megatron.core.distributed import DistributedDataParallelConfig, finalize_mo
 from megatron.core.models.common.embeddings import RotaryEmbedding
 from megatron.core.optimizer import MegatronOptimizer, OptimizerConfig
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region
+from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region, reduce_from_tensor_model_parallel_region
 from megatron.core.transformer.moe.moe_utils import (
     clear_aux_losses_tracker,
     get_moe_layer_wise_logging_tracker,
     reduce_aux_losses_tracker_across_ranks,
 )
 from megatron.core.tensor_parallel.cross_entropy import vocab_parallel_cross_entropy
+from megatron.core.packed_seq_params import PackedSeqParams
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
@@ -52,8 +53,8 @@ from roll.utils.functionals import append_to_dict
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
 from roll.utils.dynamic_batching import make_micro_batch_iter_for_dynamic_batching
-from roll.platforms import current_platform
 
+from roll.platforms import current_platform
 
 logger = get_logger()
 
@@ -74,6 +75,8 @@ class MegatronInferStrategy(InferenceStrategy):
         self.forward_backward_func = None
         self.seq_length = None
         self.use_remove_padding = self.worker_config.use_remove_padding
+        self.use_sequence_packing = self.worker_config.use_sequence_packing
+        self.max_packed_len = None
         # hard to impl with offload states
         assert not self.megatron_train_args.overlap_param_gather, "overlap_param_gather is not supported"
         if self.worker_config.use_remove_padding:
@@ -143,15 +146,19 @@ class MegatronInferStrategy(InferenceStrategy):
         self.model.eval()
         output_on_all_tp_cp_ranks = batch.meta_info.get("output_on_all_tp_cp_ranks", False)
         if self.worker_config.use_dynamic_batching_in_infer:
-            data_iterator = make_micro_batch_iter_for_dynamic_batching(batch)
+            micro_batches_list = list(make_micro_batch_iter_for_dynamic_batching(batch))
             num_microbatches = batch.meta_info["num_micro_batchs"]
             micro_batch_size = 1
         else:
             batch_size = batch.batch.batch_size[0]
             micro_batch_size = batch.meta_info["micro_batch_size"]
             num_microbatches = max(batch_size // micro_batch_size, 1)
-            micro_batches = batch.chunk(chunks=num_microbatches)
-            data_iterator = [iter(micro_batches) for _ in range(len(self.model))]
+            micro_batches_list = batch.chunk(chunks=num_microbatches)
+        if self.use_sequence_packing:
+            micro_batch_size = 1
+            self.max_packed_len = self._get_max_packed_len(micro_batches_list)
+
+        data_iterator = [iter(micro_batches_list) for _ in range(len(self.model))]
         with disable_gradients(models=self.model.get_models()):
             # List 是每个 micro-batch 构成的
             losses_reduced: List[Dict[str, torch.Tensor]] = self.forward_backward_func(
@@ -159,7 +166,7 @@ class MegatronInferStrategy(InferenceStrategy):
                 data_iterator=data_iterator,
                 model=self.model.get_models(),
                 num_microbatches=num_microbatches,
-                seq_length=self.seq_length,
+                seq_length=self.seq_length if not self.use_sequence_packing else self.max_packed_len,
                 micro_batch_size=micro_batch_size,
                 forward_only=True,
             )
@@ -192,20 +199,253 @@ class MegatronInferStrategy(InferenceStrategy):
 
         return padded_max_seqlen
 
+    def _get_pad_factor(self):
+        # caculate pad_factor in sequence packing
+        cp_size = mpu.get_context_parallel_world_size()
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+        pad_factor = cp_size * 2 * tp_size if cp_size > 1 else tp_size
+        pad_factor = math.lcm(16, pad_factor)
+        return pad_factor
+
+    def _get_max_packed_len(self, micro_batches_list):
+        max_packed_len = -1
+        for micro_batch in micro_batches_list:
+            input_ids = micro_batch.batch["input_ids"]
+            attention_mask = micro_batch.batch["attention_mask"]
+
+            batch_size = input_ids.shape[0]
+            seq_lens = attention_mask.sum(dim=-1)
+
+            pad_factor = self._get_pad_factor()
+
+            packed_len = 0
+            for b in range(batch_size):
+                seq_len = seq_lens[b].item() if torch.is_tensor(seq_lens[b]) else seq_lens[b]
+                if pad_factor > 1:
+                    padded_seq_len = ((seq_len + pad_factor - 1) // pad_factor) * pad_factor
+                else:
+                    padded_seq_len = seq_len
+                packed_len += padded_seq_len
+
+            max_packed_len = max(packed_len, max_packed_len)
+        return max_packed_len
+
+    def _pack_sequences(self, input_tensor, attention_mask, pad_packed_seq_to=None, pad_val=0):
+        """
+        Pack multiple sequences into a single continuous sequence by removing padding.
+
+        Implements sequence packing for efficient batch processing with variable-length sequences.
+        Removes per-sample padding and concatenates sequences while maintaining cumulative length info.
+
+        Reference: https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/models/megatron/common.py
+
+        Args:
+            input_tensor (torch.Tensor): Shape [batch_size, seq_len, ...], padded sequences.
+            attention_mask (torch.Tensor): Shape [batch_size, seq_len], 1=valid, 0=padding.
+            pad_packed_seq_to (int, optional): Target length for packed sequence. Defaults to None.
+            pad_val (int): Padding value. Defaults to 0.
+
+        Returns:
+            tuple: (packed_input_tensor, packed_seq_params, cu_seqlens, cu_seqlens_padded)
+                - packed_input_tensor: Shape [1, total_packed_length, ...], ready for current CP rank
+                - packed_seq_params: PackedSeqParams with cumulative lengths and max_seqlen
+                - cu_seqlens: Shape [batch_size + 1], cumulative lengths of original sequences
+                - cu_seqlens_padded: Shape [batch_size + 1], cumulative lengths after alignment
+
+        Note:
+            - Sequences padded to alignment boundaries if pad_factor > 1 or pad_packed_seq_to is set
+            - For CP training, sequences distributed across CP ranks
+            - attention_mask not needed after packing
+        """
+
+        batch_size = input_tensor.shape[0]
+        seq_lens = attention_mask.sum(dim=-1)
+        pad_factor = self._get_pad_factor()
+
+        # Remove padding from each sequence
+        # Note: attention_mask is not needed in sequence packing mode
+        input_tensor_unpadded = [input_tensor[b][:seq_lens[b]] for b in range(batch_size)]
+
+        # Build cumulative sequence lengths
+        cu_seqlens = [0]
+        cu_seqlens_padded = ([0] if pad_factor > 1 or pad_packed_seq_to is not None
+                             else None
+                             )
+
+        # Calculate cumulative lengths for both original and padded sequences
+        for b in range(batch_size):
+            seq_len = seq_lens[b].item() if torch.is_tensor(seq_lens[b]) else seq_lens[b]
+            cu_seqlens.append(cu_seqlens[-1] + seq_len)
+            if pad_factor > 1 or pad_packed_seq_to is not None:
+                # Pad sequence length to multiple of pad_factor
+                padded_seq_len = ((seq_len + pad_factor - 1) // pad_factor) * pad_factor
+                cu_seqlens_padded.append(cu_seqlens_padded[-1] + padded_seq_len)
+
+        # Convert to tensors
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=current_platform.device_type)
+        if pad_factor > 1 or pad_packed_seq_to is not None:
+            cu_seqlens_padded = torch.tensor(cu_seqlens_padded, dtype=torch.int32, device=current_platform.device_type)
+            if pad_packed_seq_to is not None:
+                cu_seqlens_padded[-1] = pad_packed_seq_to
+
+        # Calculate maximum sequence length
+        if pad_factor > 1 or pad_packed_seq_to is not None:
+            seq_lens_padded = cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
+            max_seqlen = seq_lens_padded.max().item()
+        else:
+            seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+            max_seqlen = seq_lens.max().item()
+
+        cp_size = mpu.get_context_parallel_world_size()
+
+        # Track running sequence length for padding
+        running_seq_len = 0
+        if pad_factor > 1:
+            all_input_tensor_padded = []
+            padded_tokens = []
+            for b in range(batch_size):
+                seq_len = seq_lens[b].item() if torch.is_tensor(seq_lens[b]) else seq_lens[b]
+                if b == batch_size - 1 and pad_packed_seq_to is not None:
+                    # Different from original implementation: calculate remaining length
+                    padded_seq_len = pad_packed_seq_to - running_seq_len
+                else:
+                    # Align to pad_factor boundary
+                    padded_seq_len = ((seq_len + pad_factor - 1) // pad_factor) * pad_factor
+
+                running_seq_len += padded_seq_len
+
+                seq_tokens = input_tensor_unpadded[b]
+
+                # Pad sequence if needed
+                if padded_seq_len > seq_len:
+                    seq_tokens = torch.nn.functional.pad(
+                        seq_tokens, (0, padded_seq_len - seq_len), value=pad_val
+                    )
+                all_input_tensor_padded.append(seq_tokens)
+
+                if cp_size > 1:
+                    # Handle Context Parallel distribution
+                    # Add batch dimension for processing
+                    seq_tokens_with_batch = seq_tokens.unsqueeze(0)  # [1, seq_len]
+                    seq_tokens_with_batch = self._get_feature_on_this_cp_rank(
+                        seq_tokens_with_batch, "seq_tokens"
+                    )
+                    seq_tokens = seq_tokens_with_batch.squeeze(0)  # Remove batch dimension
+
+                padded_tokens.append(seq_tokens)
+
+            # Concatenate all sequences
+            packed_input_tensor = torch.cat(padded_tokens, dim=0).unsqueeze(0)
+            all_input_tensor_padded = torch.cat(all_input_tensor_padded, dim=0).unsqueeze(0)
+
+        else:
+            # No padding factor: simply concatenate unpadded sequences
+            packed_input_tensor = torch.cat(input_tensor_unpadded, dim=0).unsqueeze(0)
+            all_input_tensor_padded = packed_input_tensor
+            if pad_packed_seq_to is not None:
+                # Pad to target length if specified
+                pad_len = pad_packed_seq_to - packed_input_tensor.shape[1]
+                if pad_len > 0:
+                    packed_input_tensor = torch.nn.functional.pad(
+                        packed_input_tensor, (0, pad_len), value=pad_val
+                    )
+                    all_input_tensor_padded = torch.nn.functional.pad(
+                        all_input_tensor_padded, (0, pad_len), value=pad_val
+                    )
+
+        if cu_seqlens_padded is None:
+            cu_seqlens_padded = cu_seqlens.clone()
+
+        # Create packed sequence parameters for attention computation
+        # Only use padded cumulative sequence lengths
+        packed_seq_params = PackedSeqParams(
+            cu_seqlens_q=cu_seqlens_padded,
+            cu_seqlens_kv=cu_seqlens_padded,
+            cu_seqlens_q_padded=cu_seqlens_padded,
+            cu_seqlens_kv_padded=cu_seqlens_padded,
+            # Individual sequence length
+            max_seqlen_q=int(max_seqlen),
+            max_seqlen_kv=int(max_seqlen),
+            qkv_format="thd",
+        )
+
+        return (
+            # Packed input tensor for current rank (especially CP rank) computation
+            # Contains all tokens from the batch with individual sample padding/alignment preserved
+            packed_input_tensor.contiguous(),
+
+            # Parameters required for sequence packing
+            packed_seq_params,
+
+            # Cumulative sequence lengths of original unpadded data
+            cu_seqlens,
+
+            # Cumulative sequence lengths after padding/alignment
+            cu_seqlens_padded,
+        )
+
+    def _get_tokens_on_this_cp_rank(
+            self,
+            input_ids: torch.Tensor,
+            cp_rank: int,
+            cp_size: int,
+            seq_dim: int = 1,
+    ) -> torch.Tensor:
+        """Get tokens on this context parallelism rank.
+
+        Assumes that input_ids are already padded to a multiple of cp_size * 2 or cp_size == 1.
+
+        Args:
+            input_ids: Input token IDs [seq_length, ]
+            cp_rank: Context parallelism rank
+            cp_size: Context parallelism size
+
+        Returns:
+            Tokens on this context parallelism rank [1, seq_length // cp_size]
+        """
+        if cp_size == 1:
+            return input_ids
+
+        # load balance for causal attention
+        shard_size = input_ids.shape[seq_dim] // (cp_size * 2)
+        shard_inds = (cp_rank, (cp_size * 2) - cp_rank - 1)
+
+        # Create slices for each dimension
+        slices = [slice(None)] * input_ids.dim()
+        ids_chunks = []
+
+        for ind in shard_inds:
+            slices[seq_dim] = slice(ind * shard_size, (ind + 1) * shard_size)
+            ids_chunks.append(input_ids[slices])
+
+        ids = torch.cat(ids_chunks, dim=seq_dim)
+        return ids
+
     def inner_forward_step(self, loss_func, data_iterator: Iterator[DataProto], model):
         data = next(data_iterator)
         input_ids = data.batch["input_ids"]
         attention_mask = data.batch["attention_mask"]
+        labels = data.batch["labels"] if "labels" in data.batch else None  # labels is only used for sft
+        packed_seq_params = None
+
         if self.use_remove_padding:
             unpad_seq_len = self._get_unpad_seqlen(attention_mask=attention_mask)
             input_ids = input_ids[:, :unpad_seq_len].contiguous()
             attention_mask = attention_mask[:, :unpad_seq_len].contiguous()
-
-        input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
-        attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
-        labels = data.batch["labels"] if "labels" in data.batch else None # labels is only used for sft
-        if labels is not None:
-            labels = self._get_feature_on_this_cp_rank(labels, "labels")
+        if self.use_sequence_packing:
+            input_ids, packed_seq_params, cu_seqlens, cu_seqlens_padded = self._pack_sequences(
+                input_ids, attention_mask, pad_packed_seq_to=self.max_packed_len
+            )
+            if labels is not None:
+                labels, _, _, _ = self._pack_sequences(labels, attention_mask, pad_packed_seq_to=self.max_packed_len,
+                                                       pad_val=IGNORE_INDEX)
+                data.meta_info['labels_packed'] = labels
+            attention_mask = None
+        else:
+            input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
+            attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
+            if labels is not None:
+                labels = self._get_feature_on_this_cp_rank(labels, "labels")
         position_ids = None
         # attention_mask: SelfAttention defalt to te DotProductAttention with
         # AttnMaskType.causal in which attention_mask would not be used, pass
@@ -237,8 +477,12 @@ class MegatronInferStrategy(InferenceStrategy):
             forward_args.update({"force_vit_image": True})
 
         output_tensor = model(
-            input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, labels=labels, **forward_args
+            input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, labels=labels,
+            packed_seq_params=packed_seq_params, **forward_args
         )
+
+        if self.use_sequence_packing:
+            loss_func.set_packing_params(cu_seqlens=cu_seqlens, cu_seqlens_padded=cu_seqlens_padded, logger=logger)
 
         return output_tensor, partial(loss_func, data)
 
@@ -296,148 +540,396 @@ class MegatronInferStrategy(InferenceStrategy):
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
         return entropy
 
-    def op_compute_language_loss_from_logits(self, logits: torch.Tensor, targets: torch.Tensor):
+    def op_compute_language_loss_from_logits(
+            self,
+            logits: torch.Tensor,
+            targets: torch.Tensor,
+            reduction: str = "mean"
+    ):
         """
-        Compute TP + CP aware GPT cross entropy loss.
+        Compute cross-entropy language modeling loss with TP and CP support.
+
+        Handles causal next-token prediction with proper sequence boundary alignment
+        in distributed training scenarios.
 
         Args:
-            logits: [batch_size, local_seq_len, vocab_size/TP]
-                    If CP is not enabled, local_seq_len = global_seq_len.
-            targets: [batch_size, global_seq_len]
-                    Global vocab ids for target tokens.
+            logits (torch.Tensor): Shape [batch_size, local_seq_len, vocab_size/tp_size].
+                                  TP-sharded (vocab) and CP-sharded (sequence).
+            targets (torch.Tensor): Shape [batch_size, global_seq_len].
+                                   Global vocab IDs, padding marked with IGNORE_INDEX.
+            reduction (str): "mean" or "sum". Default: "mean".
+
         Returns:
-            loss: scalar tensor, global average per-token loss
+            tuple: (loss, token_count)
+                - loss: Scalar tensor based on reduction method
+                - token_count: int64 tensor, number of valid tokens
+
+        Sequence Alignment:
+            - No CP: Simple shift, logits[:, :-1] predicts targets[:, 1:]
+            - With CP (2 chunks/rank): Handle chunk boundaries carefully
+                * Chunk 0: logits[:, :chunk_size-1] → targets[:, 1:chunk_size]
+                * Chunk 1: logits[:, chunk_size:-1] → targets[:, chunk_size+1:]
+
+        Note:
+            - vocab_parallel_cross_entropy handles TP all-reduce internally
+            - CP all-reduce performed explicitly for loss_sum and token_count
+            - Assumes 2 chunks per rank in CP mode for load balancing
         """
+        cp_size = mpu.get_context_parallel_world_size()
+
+        # Slice targets to current CP rank's sequence portion
         targets = self._get_feature_on_this_cp_rank(targets, "targets")
-        # shift
-        logits = logits[..., :-1, :].contiguous()
-        targets = targets[..., 1:].contiguous()
-        # TODO: support use remove padding
-        # [L_local, B, V/TP]: Megatron CE expects sequence-first layout
+
+        if cp_size == 1:
+            # Simple causal shift: logits[t] predicts targets[t+1]
+            logits = logits[:, :-1, :].contiguous()
+            targets = targets[:, 1:].contiguous()
+        else:
+            # CP mode: Handle chunk boundaries with load balancing
+            local_seq_len = logits.size(1)
+            chunk_size = local_seq_len // 2  # 2 chunks per rank
+
+            # Chunk 0: Remove last position (its target is in Chunk 1)
+            chunk_0_logits = logits[:, :chunk_size - 1, :]
+            chunk_0_targets = targets[:, 1:chunk_size]
+
+            # Chunk 1: Remove last position and skip first target (belongs to Chunk 0)
+            chunk_1_logits = logits[:, chunk_size:-1, :]
+            chunk_1_targets = targets[:, chunk_size + 1:]
+
+            # Merge chunks
+            logits = torch.cat([chunk_0_logits, chunk_1_logits], dim=1)
+            targets = torch.cat([chunk_0_targets, chunk_1_targets], dim=1)
+
+        # Transpose to sequence-first layout for Megatron CE
         logits_tp = logits.transpose(0, 1).contiguous()
         labels_tp = targets.transpose(0, 1).contiguous()
 
-        # (1) Compute per-token CE loss on the local TP shard
-        #     This function handles TP all-reduce internally to compute
-        #     the global denominator (sum exp logits) and target logits.
-        #     Output shape: [L_local, B]
+        # Compute per-token CE loss (handles TP all-reduce)
         loss_per_token = vocab_parallel_cross_entropy(
             logits_tp, labels_tp, label_smoothing=0.0
         )
 
-        # (2) Apply ignore_index mask (set loss to 0 for ignored positions)
+        # Apply ignore_index mask
         mask = (labels_tp != IGNORE_INDEX)
         loss_sum_local = (loss_per_token * mask).sum()
         token_count_local = mask.sum()
 
-        # (3) If Context Parallel is enabled, aggregate loss and token count
-        #     across the CP group to get global values
-        if mpu.get_context_parallel_world_size() > 1:
+        # All-reduce across CP ranks
+        if cp_size > 1:
             cp_group = mpu.get_context_parallel_group()
-            # Stack loss sum and token count to reduce in a single communication
-            stats_tensor = torch.stack([loss_sum_local, token_count_local], dim=0)
+            stats_tensor = torch.stack([
+                loss_sum_local.float(),
+                token_count_local.float()
+            ], dim=0)
             dist.all_reduce(stats_tensor, op=dist.ReduceOp.SUM, group=cp_group)
             loss_sum, token_count = stats_tensor[0], stats_tensor[1]
         else:
-            loss_sum, token_count = loss_sum_local, token_count_local
+            loss_sum = loss_sum_local.float()
+            token_count = token_count_local.float()
 
-        # (4) Compute global average per-token loss
-        loss = loss_sum / token_count
-        return loss
-
-    def op_compute_logits(self, logits: torch.Tensor, tp_gather: bool = False, cp_gather: bool = False, topk: int = 0):
-        """
-            Post-process logits.
-
-            If topk == 0 (full-vocab mode), optionally gather across TP/CP ranks
-            using tp_gather and cp_gather flags.
-            If topk > 0, return top-K values and indices for each position.
-
-            Args:
-                logits: [B, local_seq_len, local_vocab_size] tensor.
-                tp_gather: Gather full vocab across tensor-parallel ranks (only if topk==0).
-                cp_gather: Gather full sequence across context-parallel ranks (only if topk==0).
-                topk: 0 for full vocab, >0 for top-K mode.
-
-            Returns:
-                (values, indices):
-                    - full-vocab: (logits, dummy indices)
-                    - top-K: (topk_values, topk_indices)"""
-        # TODO: support use remove padding
-        # TP gather vocab
-        full_logits = logits
-        if tp_gather:
-            full_logits = gather_from_tensor_model_parallel_region(full_logits)
-        # CP gather seq
-        if mpu.get_context_parallel_world_size() > 1 and cp_gather:
-            full_logits = context_parallel_gather(full_logits, parallel_dim=1)
-        if topk == 0:
-            batch_size = full_logits.shape[0]
-            # return dummy topk indices for transfer
-            return full_logits, torch.empty([batch_size, 1], device=logits.device)
+        # Apply reduction
+        if reduction == "sum":
+            loss = loss_sum
+        elif reduction == "mean":
+            loss = loss_sum / torch.clamp(token_count, min=1.0)
         else:
-            return torch.topk(full_logits, k=topk, dim=-1)
+            raise ValueError(f"Unsupported reduction: {reduction}. Use 'mean' or 'sum'.")
 
-    def op_compute_prepare_cp_local_iterator(self, tensor: torch.Tensor, feature_name: str, micro_batch_size: int):
+        return loss, token_count.to(torch.int64)
+
+    def op_compute_topk_logits(
+            self,
+            logits: torch.Tensor,
+            topk: int = 0
+    ):
         """
-        Prepare a microbatch iterator for a tensor that may require Context Parallel (CP) slicing.
+        Compute top-k logits with memory-efficient two-stage approach for TP and CP training.
 
-        Notes:
-            - If the input `tensor` is None, this function returns None.
-            - The input tensor is assumed to have shape [global_batch, global_seq_len, ...],
-              with batch dimension first and sequence dimension second.
-            - When CP size > 1, the sequence dimension (dim=1) is sliced to the local CP rank
-              using `_get_feature_on_this_cp_rank`.
-            - After CP slicing (if any), the tensor is split along the batch dimension (dim=0)
-              into microbatches of size `micro_batch_size`.
+        Strategy:
+            - topk=0: Gather full vocab across TP ranks
+            - topk>0: Two-stage TopK (local → gather K values → global TopK → CP gather)
 
         Args:
-            tensor (torch.Tensor or None): Full tensor before CP slicing. Can be None.
-            feature_name (str): Identifier passed to `_get_feature_on_this_cp_rank` for CP slicing.
-                                e.g., "teacher_logits" or "teacher_topk_indices".
-            micro_batch_size (int): Number of samples per microbatch; splitting is done along dim=0.
+            logits (torch.Tensor): Shape [batch_size, local_seq_len, local_vocab_size].
+                                  TP-sharded along vocabulary.
+            topk (int): 0=full vocab, >0=top-k mode.
 
         Returns:
-            iterator or None: Iterator over microbatches with shape
-                              [micro_batch_size, local_seq_len, ...].
-                              Returns None if input `tensor` is None.
-        """
-        if tensor is None:
-            return None
+            tuple: (values, indices)
+                - topk=0: (logits [B, S, V], None)
+                - topk>0: (values [B, S, K], indices [B, S, K] in global vocab space)
 
-        # CP slicing on sequence dimension if enabled
-        if mpu.get_context_parallel_world_size() > 1:
-            local_tensor = self._get_feature_on_this_cp_rank(tensor, feature_name)
+        Note:
+            - Indices adjusted to global vocabulary space
+            - Intermediate tensors deleted early
+            - CP gathering after TP operations
+        """
+
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+        cp_size = mpu.get_context_parallel_world_size()
+
+        # ========== TopK Mode: Two-Stage Memory Optimization ==========
+        if topk > 0:
+            # Stage 1: Local TopK on each TP rank's vocabulary shard
+            # Memory reduction: [B, local_seq, local_vocab] -> [B, local_seq, K]
+            local_topk_values, local_topk_indices = torch.topk(
+                logits, k=topk, dim=-1, sorted=False
+            )
+
+            # Adjust indices to global vocabulary space
+            # Each TP rank owns a contiguous vocabulary range [vocab_start, vocab_end)
+            vocab_start_index = mpu.get_tensor_model_parallel_rank() * logits.shape[-1]
+            local_topk_indices = local_topk_indices + vocab_start_index
+
+            # Release original logits immediately to save memory
+            del logits
+
+            # Stage 2: Gather local TopK results across TP ranks
+            # Memory: [B, local_seq, K] -> [B, local_seq, K * tp_world_size]
+            # Only gather K values per rank instead of full vocabulary
+            gathered_values = local_topk_values
+            gathered_indices = local_topk_indices
+            if tp_size > 1:
+                gathered_values = gather_from_tensor_model_parallel_region(local_topk_values)
+                gathered_indices = gather_from_tensor_model_parallel_region(local_topk_indices)
+            del local_topk_values, local_topk_indices
+
+            # Stage 3: Global TopK on gathered candidates
+            # Select final top-k from K * tp_size candidates
+            # Memory: [B, local_seq, K * tp_world_size] -> [B, local_seq, K]
+            final_topk_values, topk_positions = torch.topk(
+                gathered_values, k=topk, dim=-1, sorted=True
+            )
+            # Use topk_positions to gather corresponding global indices
+            final_topk_indices = torch.gather(
+                gathered_indices, dim=-1, index=topk_positions
+            )
+            del gathered_values, gathered_indices, topk_positions
+
+            # Stage 4: CP gather for sequence parallel training
+            if cp_size > 1:
+                final_topk_values = context_parallel_gather(final_topk_values, parallel_dim=1)
+                final_topk_indices = context_parallel_gather(final_topk_indices, parallel_dim=1)
+
+            return final_topk_values, final_topk_indices
+
+        # ========== Full Vocabulary Mode: Traditional Gather Path ==========
+        result = logits
+        # Gather full vocabulary across TP ranks
+        if tp_size > 1:
+            result = gather_from_tensor_model_parallel_region(result)
+
+        # Gather across CP ranks for sequence parallelism
+        if cp_size > 1:
+            result = context_parallel_gather(result, parallel_dim=1)
+
+        # Return full vocabulary logits
+        if topk == 0:
+            return result, None
+
+        # Fallback: TopK mode without TP optimization (when TP is not used)
+        topk_values, topk_indices = torch.topk(result, k=topk, dim=-1)
+        del result
+
+        return topk_values, topk_indices
+
+    def op_compute_gather_by_teacher_indices(
+            self,
+            student_logits: torch.Tensor,
+            teacher_indices: torch.Tensor
+    ):
+        """
+        Gather student logits at teacher indices with TP support via sparse gather.
+
+        Strategy:
+            - No TP: Direct torch.gather
+            - TP mode: Sparse gather + all-reduce
+                1. Mask indices belonging to local vocab shard
+                2. Gather local values, zero out non-local
+                3. All-reduce sum across TP ranks
+
+        Args:
+            student_logits (torch.Tensor): Shape [batch_size, seq_len, local_vocab_size].
+                                           TP-sharded along vocabulary.
+            teacher_indices (torch.Tensor): Shape [batch_size, seq_len, k] or [batch_size, seq_len].
+                                           Global vocabulary indices (not sharded).
+
+        Returns:
+            torch.Tensor: Gathered logits matching teacher_indices shape.
+
+        Note:
+            - Returns original logits if teacher_indices is None
+            - Handles 2D/3D indices, restores original shape
+            - Vocab range per rank: [tp_rank * local_vocab_size, (tp_rank+1) * local_vocab_size)
+        """
+
+        # Early return if no teacher indices provided
+        if teacher_indices is None:
+            return student_logits
+
+        # Ensure indices are long type for indexing
+        if teacher_indices.dtype != torch.long:
+            teacher_indices = teacher_indices.long()
+
+        # Handle 2D input by adding dimension (will be removed before return)
+        squeeze_output = False
+        if teacher_indices.dim() == 2:
+            teacher_indices = teacher_indices.unsqueeze(-1)
+            squeeze_output = True
+
+        tp_world_size = mpu.get_tensor_model_parallel_world_size()
+
+        # Non-TP mode: Direct gather operation
+        if tp_world_size == 1:
+            gathered = torch.gather(student_logits, dim=-1, index=teacher_indices)
+            return gathered.squeeze(-1) if squeeze_output else gathered
+
+        # ========== TP-Sharded Sparse Gather ==========
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        local_vocab_size = student_logits.shape[-1]
+
+        # Calculate vocabulary range owned by current TP rank
+        vocab_start = tp_rank * local_vocab_size
+        vocab_end = vocab_start + local_vocab_size
+
+        # Create mask for indices that belong to local vocabulary shard
+        local_mask = (teacher_indices >= vocab_start) & (teacher_indices < vocab_end)
+
+        # Convert global indices to local vocabulary space
+        # Clamp to valid range to avoid index errors (non-local indices will be masked out)
+        local_indices = teacher_indices - vocab_start
+        local_indices = torch.clamp(local_indices, 0, local_vocab_size - 1)
+
+        # Gather values from local vocabulary shard
+        local_gathered = torch.gather(student_logits, dim=-1, index=local_indices)
+
+        # Mask out values that don't belong to local vocabulary
+        # Non-local positions are set to zero (will not contribute to final sum)
+        local_gathered = torch.where(local_mask, local_gathered, torch.zeros_like(local_gathered))
+
+        # All-reduce sum across TP ranks (fully differentiable)
+        # Forward: Sum contributions from all ranks (only one rank contributes non-zero per index)
+        # Backward: Each rank receives full gradient, but only masked portion affects local parameters
+        gathered = reduce_from_tensor_model_parallel_region(local_gathered)
+
+        # Restore original shape if input was 2D
+        return gathered.squeeze(-1) if squeeze_output else gathered
+
+    def op_compute_various_divergence(
+            self,
+            loss_callable, logits, teacher_topk_probs, teacher_topk_log_probs, teacher_topk_indices,
+            teacher_topk_inf_mask, labels, attention_mask=None, reduction="mean"
+    ):
+        """
+        Compute divergence losses (KL, JSD, RKL, etc.) with TP and CP support.
+
+        Strategy:
+            1. Slice teacher outputs to current CP rank's sequence
+            2. Gather student logits at teacher's top-k indices (TP-aware)
+            3. Compute per-token divergence loss
+            4. Gather loss across CP ranks
+            5. Apply padding mask and reduction
+
+        Args:
+            loss_callable (callable): Divergence function (KL/JSD/RKL).
+                                     Takes: logits, teacher_probs, teacher_log_probs, teacher_inf_mask.
+            logits (torch.Tensor): Shape [batch_size, local_seq_len, local_vocab_size].
+                                  TP and CP sharded.
+            teacher_topk_probs (torch.Tensor): Shape [batch_size, global_seq_len, topk].
+                                              Full tensor (not sharded).
+            teacher_topk_log_probs (torch.Tensor): Shape [batch_size, global_seq_len, topk].
+            teacher_topk_indices (torch.Tensor): Shape [batch_size, global_seq_len, topk].
+                                                Global vocabulary indices.
+            teacher_topk_inf_mask (torch.Tensor): Shape [batch_size, global_seq_len, topk].
+            labels (torch.Tensor): Shape [batch_size, global_seq_len].
+                                  Padding marked with IGNORE_INDEX.
+            attention_mask (torch.Tensor, optional): Shape [batch_size, global_seq_len].
+                                                    0=padding. Used if labels is None.
+            reduction (str): "mean", "sum", or "none".
+
+        Returns:
+            tuple: (loss, token_count)
+                - loss: Scalar (mean/sum) or tensor [B, S] (none)
+                - token_count: Scalar, number of valid tokens
+
+        Note:
+            - Teacher outputs sliced to CP rank's sequence
+            - Student logits TP-sharded, handled by sparse gather
+            - Token count from full sequence for correct normalization
+        """
+
+        # Preserve full tensors for final mask computation
+        labels_full = labels
+        attention_mask_full = attention_mask
+
+        # (1) Slice teacher outputs to current CP rank's sequence portion
+        # Each CP rank processes a contiguous chunk of the sequence
+        if teacher_topk_probs is not None:
+            teacher_topk_probs = self._get_feature_on_this_cp_rank(teacher_topk_probs, "teacher_topk_probs")
+        if teacher_topk_indices is not None:
+            teacher_topk_indices = self._get_feature_on_this_cp_rank(teacher_topk_indices, "teacher_topk_indices")
+        if teacher_topk_log_probs is not None:
+            teacher_topk_log_probs = self._get_feature_on_this_cp_rank(teacher_topk_log_probs,"teacher_topk_log_probs")
+        if teacher_topk_inf_mask is not None:
+            teacher_topk_inf_mask = self._get_feature_on_this_cp_rank(teacher_topk_inf_mask, "teacher_topk_inf_mask")
+
+        # (2) Gather student logits at teacher's top-k indices
+        # Handles TP-sharded logits with sparse gather operation
+        # Input: [batch_size, local_seq_len, local_vocab_size] (TP-sharded)
+        # Output: [batch_size, local_seq_len, topk] (aligned with teacher indices)
+        full_logits = self.op_compute_gather_by_teacher_indices(logits, teacher_topk_indices)
+
+        # (3) Compute per-token divergence loss
+        # loss_callable computes divergence (e.g., KL, JSD) between student and teacher distributions
+        # Returns: [batch_size, local_seq_len] per-token loss
+        kld_per_token = loss_callable(
+            logits=full_logits,
+            teacher_probs=teacher_topk_probs,
+            teacher_log_probs=teacher_topk_log_probs,
+            teacher_inf_mask=teacher_topk_inf_mask,
+        )
+
+        # (4) Gather per-token loss across CP ranks to restore full sequence
+        # Input: [batch_size, local_seq_len] (CP-sharded sequence)
+        # Output: [batch_size, global_seq_len] (full sequence)
+        cp_size = mpu.get_context_parallel_world_size()
+        if cp_size > 1:
+            kld_per_token = context_parallel_gather(kld_per_token, parallel_dim=1)
+
+        # (5) Compute total number of valid (non-padded) tokens
+        # Uses full labels/attention_mask to count across entire batch
+        if labels_full is not None:
+            # Padding positions marked with IGNORE_INDEX in labels
+            pad_mask = labels_full.eq(IGNORE_INDEX)
         else:
-            local_tensor = tensor
+            # Alternatively use attention_mask where 0 indicates padding
+            pad_mask = attention_mask_full.eq(0)
+        token_count = (~pad_mask).sum().float()
 
-        # Microbatch split along batch dimension
-        return iter(local_tensor.split(micro_batch_size, dim=0))
+        # (6) Early return for 'none' reduction (per-token loss)
+        if reduction == 'none':
+            return kld_per_token, token_count
 
-    def op_compute_various_divergence(self, loss_callable, logits, teacher_logits, teacher_topk_indices,
-                                      labels, attention_mask=None):
-        """
-            Note:
-                `logits` here are both TP (Tensor Parallel) and CP (Context Parallel) sharded.
-                `logits` here are CP (Context Parallel) sharded.
-                - We gather across TP to get full-vocab logits for the local CP sequence slice.
-                `labels`, and `attention_mask` are provided as full tensors
-                (global sequence length). These are then sliced down to the local CP rank's
-                sequence shard before loss computation.
-            """
-        # TODO: support TP and remove padding
-        full_logits = gather_from_tensor_model_parallel_region(logits)
-        full_logits = self.op_compute_gather_by_teacher_indices(full_logits, teacher_topk_indices)
-        if teacher_logits.shape[-1] != full_logits.shape[-1]:
-            teacher_logits = teacher_logits[:, :, : min(full_logits.shape[-1], teacher_logits.shape[-1])]
-        labels = self._get_feature_on_this_cp_rank(labels, "labels")
-        if attention_mask is not None:
-            attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
-        loss = loss_callable(logits=full_logits, teacher_logits=teacher_logits, labels=labels, attention_mask=attention_mask)
-        return loss
+        # (7) Apply padding mask and compute aggregated loss
+        # Mask out padding positions by setting their loss to 0
+        kld_masked = kld_per_token.masked_fill_(pad_mask, 0.0)
+        loss_sum = kld_masked.sum()
+
+        # (8) Return loss based on reduction method
+        if reduction == "sum":
+            # Return sum of loss over all valid tokens
+            return loss_sum, token_count
+        elif reduction == "mean":
+            # Return average loss per valid token
+            # Clamp token_count to avoid division by zero
+            return loss_sum / token_count.clamp(min=1.0), token_count
+        else:
+            raise ValueError(f"Unsupported reduction: {reduction}. Use 'mean', 'sum', or 'none'.")
 
     def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor):
-        labels = self._get_feature_on_this_cp_rank(labels, "labels")
+        if not self.use_sequence_packing:
+            labels = self._get_feature_on_this_cp_rank(labels, "labels")
 
         loss_mask = (labels != IGNORE_INDEX).float()
         loss_mask = loss_mask.view(-1).float()
@@ -585,7 +1077,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
 
         if self.worker_config.use_dynamic_batching_in_train:
-            data_iterator = make_micro_batch_iter_for_dynamic_batching(batch)
+            micro_batches_list = list(make_micro_batch_iter_for_dynamic_batching(batch))
             num_microbatches = batch.meta_info["num_micro_batchs"]
             mini_batch_size = 1
         else:
@@ -594,16 +1086,20 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             assert (
                 num_microbatches == self.megatron_train_args.gradient_accumulation_steps
             ), f"num_microbatches={num_microbatches} gradient_accumulation_steps={self.megatron_train_args.gradient_accumulation_steps}"
-            data_iterator = [
-                batch.make_iterator(mini_batch_size=mini_batch_size, epochs=1) for _ in range(len(self.model))
-            ]
+            micro_batches_list = batch.chunk(chunks=num_microbatches)
+        if self.use_sequence_packing:
+            mini_batch_size = 1
+            self.max_packed_len = self._get_max_packed_len(micro_batches_list)
+            logger.info(f"max_packed_len: {self.max_packed_len}")
+
+        data_iterator = [iter(micro_batches_list) for _ in range(len(self.model))]
 
         metrics_tensors: List[Dict[str, "torch.Tensor"]] = self.forward_backward_func(
             forward_step_func=partial(self.inner_forward_step, loss_func),
             data_iterator=data_iterator,
             model=self.model.get_models(),
             num_microbatches=num_microbatches,
-            seq_length=self.seq_length,
+            seq_length=self.seq_length if not self.use_sequence_packing else self.max_packed_len,
             micro_batch_size=mini_batch_size,
             forward_only=False,
         )

@@ -97,11 +97,6 @@ class DistillConfig(BaseConfig):
         metadata={"help": "Whether to distill on the prompt or not."},
     )
 
-    max_length: Optional[int] = field(
-        default=4096,
-        metadata={"help": "Max length for DataCollator."}
-    )
-
     max_grad_norm: Optional[float] = field(
         default=0,
         metadata={"help": "Maximum grad norm"}
@@ -134,6 +129,10 @@ class DistillConfig(BaseConfig):
 
         self.teacher.name = "teacher"
         self.student.name = "student"
+
+        self.target_vocab_size = None
+
+        self.validate_worker_config()
 
     def to_dict(self):
         return dataclasses.asdict(self)

@@ -149,6 +149,13 @@ class WorkerConfig:
         metadata={"help": "Whether offload nccl buffer to save gpu memory."}
     )
 
+    # sequence packing
+    use_sequence_packing: bool = field(
+        default=False,
+        metadata={"help": "Concatenates multiple sequences into a single “packed” sequence, eliminating most padding. "
+                          "Only supported in the megatron strategy"}
+    )
+
     def __post_init__(self):
 
         if self.strategy_args is not None:
@@ -185,7 +192,6 @@ class WorkerConfig:
                 self.training_args.bf16 = True
             elif self.model_args.dtype == "fp16":
                 self.training_args.fp16 = True
-
 
 def is_colocated(actor_train: WorkerConfig, actor_infer: WorkerConfig):
     train_devices = set(actor_train.device_mapping or [])

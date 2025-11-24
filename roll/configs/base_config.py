@@ -289,6 +289,19 @@ class BaseConfig:
                 if hasattr(attribute, "training_args"):
                     setattr(attribute.training_args, "max_steps", max_steps)
 
+    def validate_worker_config(self):
+        # check if current worker supports sequence packing
+        allowed_names = {
+            'student', 'teacher', 'sft_train',
+        }
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name)
+            if isinstance(attr, WorkerConfig) and attr.use_sequence_packing:
+                if attr.name not in allowed_names:
+                    raise ValueError(
+                        f"Worker '{attr.name}' (from field '{attr_name}') don't support use sequence packing now"
+                    )
+
 @dataclass
 class PPOConfig(BaseConfig):
     # role related

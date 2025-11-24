@@ -236,6 +236,8 @@ class AgenticConfig(PPOConfig):
         logger.info(f"val_env_manager.max_traj_per_env: {self.val_env_manager.max_traj_per_env}")
         assert self.val_env_manager.max_traj_per_env >= traj_per_env, f"max_traj_per_env must be >= {traj_per_env}"
 
+        self.validate_worker_config()
+
     def make_env_configs(self, env_manager_config: EnvManagerConfig):
         # construct env configs
         env_configs = defaultdict(defaultdict)

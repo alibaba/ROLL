@@ -75,6 +75,8 @@ class DPOConfig(BaseConfig):
         self.actor_train.name = "actor_train"
         self.reference.name = "reference"
 
+        self.validate_worker_config()
+
     def set_max_steps(self, max_steps: int):
         self.max_steps = max_steps
         self.actor_train.training_args.max_steps = max_steps
