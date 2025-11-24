@@ -404,13 +404,16 @@ class ActorWorker(Worker):
             response_callback_fn: callable
         generation_config, 按request设置
         """
-        if command == GenerateRequestType.ALIVE_CHECK:
+        def alive_check():
             if self.thread_server is not None:
                 if not self.thread_server.is_alive():
                     raise Exception("thread server has stopped unexpectedly. check stderr for more info.")
+        if command == GenerateRequestType.ALIVE_CHECK:
+            alive_check()
             output = DataProto(meta_info={"request_counts": len(self.response_call_back_fns)})
             return output
         elif command == GenerateRequestType.ADD:
+            alive_check()
             assert "response_callback_fn" in data.meta_info, "response_callback_fn is not in data.meta_info"
             is_num_return_sequences_expand = data.meta_info.get("is_num_return_sequences_expand", False)
             if "generation_config" not in data.meta_info:
