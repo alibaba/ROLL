@@ -45,7 +45,7 @@ export default () => {
           </Translate>
         </div>
         <div className={styles.buttons}>
-          <Button href={`${targetPath}docs/Overview/start`} target='_blank' className={styles.btn}>
+          <Button href={`${targetPath}docs/Overview`} target='_blank' className={styles.btn}>
             <Translate>{"Get Started >"}</Translate>
           </Button>
           <Button className={styles.github} target='_blank' href="https://github.com/alibaba/ROLL" variant="outlined" icon={<GithubOutlined />}>{"Github >"}</Button>
