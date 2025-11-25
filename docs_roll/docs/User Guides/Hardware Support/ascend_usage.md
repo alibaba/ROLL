@@ -1,10 +1,10 @@
 # ROLL x Ascend
 
-Last updated: 11/28/2025.
+Last updated: 11/25/2025.
 
 We have added support for Huawei Ascend devices in ROLL.
 
-## Hardware Support
+## Hardware Support 
 
 Atlas 900 A2 PODc
 
