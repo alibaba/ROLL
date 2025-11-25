@@ -3,8 +3,9 @@ import time
 from collections import OrderedDict
 
 import torch
-from vllm.v1.worker.gpu_worker import Worker
+# from vllm.v1.worker.gpu_worker import Worker
 
+from roll.platforms import current_platform
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
 from roll.third_party.vllm.worker_helper import WorkerHelper
 from roll.utils.logging import get_logger
@@ -12,6 +13,8 @@ from roll.utils.send_recv_utils import RecvBucketManager
 
 
 logger = get_logger()
+
+Worker = current_platform.get_vllm_worker_class()
 
 
 class Worker0110(WorkerHelper, Worker):

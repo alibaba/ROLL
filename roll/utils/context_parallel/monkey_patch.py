@@ -5,7 +5,7 @@ from roll.utils.logging import get_logger
 from roll.utils.packages import is_transformers_version_greater_than
 
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 old_flash_attention_forward = ALL_ATTENTION_FUNCTIONS["flash_attention_2"]

@@ -1,6 +1,6 @@
 # ROLL x Ascend
 
-Last updated: 09/28/2025.
+Last updated: 11/28/2025.
 
 We have added support for Huawei Ascend devices in ROLL.
 
@@ -14,15 +14,15 @@ Atlas 900 A2 PODc
 
 | Software | Version |
 | -------- | ------- |
-| Python   | 3.10    |
-| CANN     | 8.1.RC1 |
+| Python   | 3.11    |
+| CANN     | 8.3.RC1 |
 
 ### Create Conda Environment
 
 Use the following commands to create a new conda environment in Miniconda:
 
 ```
-conda create --name roll python=3.10
+conda create --name roll python=3.11
 conda activate roll
 ```
 
@@ -31,11 +31,11 @@ conda activate roll
 To use torch and torch_npu in ROLL, install them using the commands below:
 
 ```
-# Install CPU version of torch
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+# Use CPU only torch
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cpu
 
-# Install torch_npu
-pip install torch_npu==2.5.1
+# Install torch_npu 2.7.1
+pip install torch_npu==2.7.1
 ```
 
 ### Install vllm & vllm-ascend
@@ -44,37 +44,28 @@ To use vllm in ROLL, compile and install vllm and vllm-ascend as follows:
 
 ```
 # vllm
-git clone -b v0.8.4 --depth 1 https://github.com/vllm-project/vllm.git
+git clone -b v0.11.0 --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
+pip install -r requirements/build.txt
 
 VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
+
 # vllm-ascend
-git clone -b v0.8.4rc2 --depth 1 https://github.com/vllm-project/vllm-ascend.git
+git clone -b v0.11.0rc1 --depth 1 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 
-export COMPILE_CUSTOM_KERNELS=1
 pip install -e .
 cd ..
 ```
 
-If you encounter an error like this during the vllm-ascend installation:
-
+Or you could install `vllm` and `vllm-ascend` from pre-built wheel:
 ```
-RuntimeError: CMake configuration failed: Command '['/pathto/miniconda3/envs/roll/bin/python3.10', '-m', 'pybind11', '--cmake']' returned non-zero exit status 2.
-```
+# Install vllm-project/vllm. The newest supported version is v0.11.0.
+pip install vllm==0.11.0
 
-Try modifying lines 151–158 in `setup.py` under the vllm-ascend directory as follows, then recompile:
-
-```
-try:
-    # if pybind11 is installed via pip
-    pybind11_cmake_path = (subprocess.check_output(
-        [python_executable, "-m", "pybind11",
-        "--cmakedir"]).decode().strip())
-except subprocess.CalledProcessError as e:
-    # else specify pybind11 path installed from source code on CI container
-    raise RuntimeError(f"CMake configuration failed: {e}")
+# Install vllm-project/vllm-ascend from pypi.
+pip install vllm-ascend==0.11.0rc1
 ```
 
 ### Install ROLL
@@ -83,7 +74,7 @@ except subprocess.CalledProcessError as e:
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL
 pip install -r requirements_common.txt
-pip install deepspeed==0.16.0
+pip install deepspeed==0.16.4
 cd ..
 ```
 
@@ -91,16 +82,16 @@ cd ..
 
 | Software                    | Description   |
 | --------------------------- | ------------- |
-| transformers                | v4.52.4       |
+| transformers                | >= v4.57.1    |
 | flash_attn                  | not supported |
 | transformer-engine[pytorch] | not supported |
 
-1. `transformers` v4.52.4 supports enabling `--flash_attention_2`.
-2. `flash_attn` acceleration is not supported.
+1. `transformers` v4.57.1 supports enabling `--flash_attention_2`.
+2. `flash_attn` acceleration is not supported currently.
 3. `transformer-engine[pytorch]` is currently not supported.
 
 ```
-pip install transformers==4.52.4
+pip install transformers==4.57.1
 ```
 
 ## Quick Start: Single-Node Deployment
@@ -118,7 +109,6 @@ bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_single_node_demo.sh
 
 ```
 # Make sure you are in the root directory of the ROLL project
-# export PYTHONPATH=$(pwd):$PYTHONPATH
 
 python examples/start_agentic_pipeline.py \
         --config_path qwen2.5-0.5B-agentic \
