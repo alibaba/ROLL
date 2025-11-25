@@ -3,7 +3,6 @@ import time
 from collections import OrderedDict
 
 import torch
-# from vllm.v1.worker.gpu_worker import Worker
 
 from roll.platforms import current_platform
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
