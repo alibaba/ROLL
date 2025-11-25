@@ -72,9 +72,6 @@ class TokenizerManagerSA(TokenizerManager):
         request: Optional[fastapi.Request] = None,
     ) -> Tuple[bool, str]:
         self.auto_create_handle_loop()
-        assert (
-            self.server_args.dp_size == 1
-        ), "dp_size must be 1 for init parameter update group"
         result = (await self.setup_collective_group_communicator(obj))[0]
         return result.success, result.message
 
@@ -84,9 +81,6 @@ class TokenizerManagerSA(TokenizerManager):
         request: Optional[fastapi.Request] = None,
     ) -> Tuple[bool, str]:
         self.auto_create_handle_loop()
-        assert (
-            self.server_args.dp_size == 1
-        ), "dp_size must be 1 for init parameter update group"
         result = (await self.broadcast_bucket_communicator(obj))[0]
         return result.success, result.message
 
@@ -96,9 +90,6 @@ class TokenizerManagerSA(TokenizerManager):
         request: Optional[fastapi.Request] = None,
     ) -> Tuple[bool, str]:
         self.auto_create_handle_loop()
-        assert (
-            self.server_args.dp_size == 1
-        ), "dp_size must be 1 for init parameter update group"
         result = (await self.broadcast_parameter_communicator(obj))[0]
         return result.success, result.message
 
@@ -108,9 +99,6 @@ class TokenizerManagerSA(TokenizerManager):
         request: Optional[fastapi.Request] = None,
     ) -> Tuple[bool, str]:
         self.auto_create_handle_loop()
-        assert (
-            self.server_args.dp_size == 1
-        ), "dp_size must be 1 for init parameter update group"
         result = (await self.update_parameter_communicator(obj))[0]
         return result.success, result.message
 
@@ -120,8 +108,5 @@ class TokenizerManagerSA(TokenizerManager):
         request: Optional[fastapi.Request] = None,
     ) -> Tuple[bool, str]:
         self.auto_create_handle_loop()
-        assert (
-            self.server_args.dp_size == 1
-        ), "dp_size must be 1 for init parameter update group"
         result = (await self.update_parameter_in_bucket_communicator(obj))[0]
         return result.success, result.message

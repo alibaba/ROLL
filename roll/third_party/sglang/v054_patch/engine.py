@@ -103,11 +103,13 @@ class _roll_launch_subprocesses(object):
     def __call__(self, *args, **kwargs):
         import sys
         from roll.third_party.sglang.v054_patch.tokenizer_manager import TokenizerManagerSA
-        from roll.third_party.sglang.v054_patch.scheduler import run_scheduler_process
+        from roll.third_party.sglang.v054_patch.scheduler import run_scheduler_process, run_data_parallel_controller_process
         
         sys.modules['sglang.srt.entrypoints.engine'].__dict__['TokenizerManager'] = TokenizerManagerSA
         sys.modules['sglang.srt.entrypoints.engine'].__dict__['run_scheduler_process'] = run_scheduler_process
+        sys.modules['sglang.srt.entrypoints.engine'].__dict__['run_data_parallel_controller_process'] = run_data_parallel_controller_process
         return self._launch_subprocesses(*args, **kwargs)
+
 
 
 engine_module._launch_subprocesses = _roll_launch_subprocesses(engine_module._launch_subprocesses)

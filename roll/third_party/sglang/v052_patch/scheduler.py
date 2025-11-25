@@ -97,3 +97,12 @@ def run_scheduler_process(*args, **kwargs):
     from sglang.srt.managers.scheduler import run_scheduler_process
     return run_scheduler_process(*args, **kwargs)
 
+
+def run_data_parallel_controller_process(*args, **kwargs):
+    import sys
+    sys.modules['sglang.srt.managers.data_parallel_controller'].__dict__['run_scheduler_process'] = run_scheduler_process
+    from sglang.srt.managers.data_parallel_controller import (
+        run_data_parallel_controller_process,
+    )
+    return run_data_parallel_controller_process(*args, **kwargs)
+
