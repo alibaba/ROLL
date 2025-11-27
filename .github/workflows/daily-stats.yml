@@ -15,10 +15,10 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout master branch
+      - name: Checkout main branch
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: main
     
       - name: Fetch current stats.json from gh-pages
         run: |
