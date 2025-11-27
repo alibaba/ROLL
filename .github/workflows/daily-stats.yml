@@ -1,0 +1,61 @@
+name: Daily Repo Stats to gh-pages
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # UTC 2:00 = Beijing 10:00
+  workflow_dispatch:
+
+jobs:
+  update-stats:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs_roll
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout master branch
+        uses: actions/checkout@v4
+        with:
+          ref: master
+    
+      - name: Fetch current stats.json from gh-pages
+        run: |
+          mkdir -p ./public-data
+          curl -s -o ./public-data/stats.json \
+            https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/stats.json || echo "{}" > ./public-data/stats.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm install octokit
+
+      - name: Run stats script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          STATS_FILE: ./public-data/stats.json
+        run: node scripts/update-stats.js
+
+      - name: show stats.json content
+        run: cat ./public-data/stats.json
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs_roll/public-data
+          destination_dir: .  
+          keep_files: true 
