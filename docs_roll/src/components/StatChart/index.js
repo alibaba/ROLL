@@ -67,49 +67,41 @@ export default ({ allStat }) => {
               {
                 name: 'Fork数',
                 type: 'line',
-                stack: 'Total',
                 data: chartData.map(item => item.forks || 0)
               },
               {
                 name: 'Star数',
                 type: 'line',
-                stack: 'Total',
                 data: chartData.map(item => item.stars || 0)
               },
               {
                 name: 'Contributors',
                 type: 'line',
-                stack: 'Total',
                 data: chartData.map(item => item.contributors || 0)
               },
               {
                 name: 'issues总数',
                 type: 'line',
-                stack: 'Total',
                 data: chartData.map(item => item.issues?.total || 0)
               },
               {
                 name: 'issues open数',
                 type: 'line',
-                stack: 'Total',
                 data: chartData.map(item => item.issues?.open || 0)
               },
               {
                 name: 'issue 解决率',
                 type: 'line',
-                stack: 'Total',
                 data: chartData.map(item => item.issues?.fixRate || 0)
               },
               {
                 name: 'PR总数',
                 type: 'line',
-                stack: 'Total',
                 data: chartData.map(item => item.prs?.total || 0)
               },
               {
                 name: 'PR open数',
                 type: 'line',
-                stack: 'Total',
                 data: chartData.map(item => item.prs?.open || 0)
               },
             ],
