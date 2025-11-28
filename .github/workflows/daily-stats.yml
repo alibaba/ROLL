@@ -2,7 +2,7 @@ name: Daily Repo Stats to gh-pages
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
