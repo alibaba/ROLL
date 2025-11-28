@@ -50,6 +50,7 @@ class LLMJudgeRewardWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):
         super().initialize(pipeline_config)
+        self.actor_tokenizer = default_tokenizer_provider(pipeline_config.actor_train.model_args)
         if self.judge_model_type == "api":
             self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
             print(f"{self.worker_name} initialized with API model")
@@ -220,8 +221,8 @@ class LLMJudgeRewardWorker(Worker):
             return self._compute_rewards_impl(data, metrics)
 
     def _compute_rewards_impl(self, data: DataProto, metrics: Dict):
-        prompts_text_list = self.tokenizer.batch_decode(data.batch["prompts"], skip_special_tokens=True)
-        response_text_list = self.tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=True)
+        prompts_text_list = self.actor_tokenizer.batch_decode(data.batch["prompts"], skip_special_tokens=True)
+        response_text_list = self.actor_tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=True)
 
         scores = []
         for prompt_id, prompt_txt, response, reference in zip(
