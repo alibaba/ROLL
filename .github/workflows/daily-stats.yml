@@ -2,7 +2,7 @@ name: Daily Repo Stats to gh-pages
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # UTC 2:00 = Beijing 10:00
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
