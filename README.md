@@ -80,6 +80,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [Converting MCoreAdapter Models to Hugging Face Format](https://alibaba.github.io/ROLL/docs/User%20Guides/Advanced%20Features/megatron_convert_2_hf)  
 [Quick Start: Single-Node Deployment Guide](https://alibaba.github.io/ROLL/docs/Getting%20Started/Quick%20Start/single_node_quick_start)  
 [Quick Start: Multi-Node Deployment Guide](https://alibaba.github.io/ROLL/docs/Getting%20Started/Quick%20Start/multi_nodes_quick_start)  
+[Quick Start: Using Alibaba Cloud Function Compute DevPod for Rapid Development](https://alibaba.github.io/ROLL/docs/Getting%20Started/Quick%20Start/aliyun_serverless_devpod_quick_start)
 [Frequently Asked Questions](https://alibaba.github.io/ROLL/docs/Getting%20Started/FAQ/qa_issues)
 
 ### UserGuide
