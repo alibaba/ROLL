@@ -225,6 +225,11 @@ class TrajEnvManager(BaseEnvManager):
         response_ids = lm_output.batch['responses'][0]
         response_ids = response_ids.tolist()
         content = self.rollout_cache.history[-1]
+
+        if "infer_logprobs" in lm_output.batch:
+            infer_logprobs = lm_output.batch['infer_logprobs'][0][-len(response_ids):]
+            content["infer_logprobs"] = infer_logprobs.tolist()
+
         content["response_ids"] = response_ids
         content["messages"].append({"role": "assistant", "content": self.tokenizer.decode(response_ids, skip_special_tokens=True)})
         lm_output.meta_info["stop_reason"] = GenerateStopReason.FINISH
@@ -293,11 +298,14 @@ class TrajEnvManager(BaseEnvManager):
         token_ids = []
         prompt_masks = []
         response_masks = []
+        infer_logprobs = []
         for items in self.rollout_cache.history:
             token_ids.extend(items["prompt_ids"])
             token_ids.extend(items["response_ids"])
             prompt_masks.extend([1] * len(items["prompt_ids"]) + [0] * len(items["response_ids"]))
             response_masks.extend([0] * len(items["prompt_ids"]) + [1] * len(items["response_ids"]))
+            if "infer_logprobs" in items:
+                infer_logprobs.extend([0] * len(items["prompt_ids"]) + items["infer_logprobs"])
 
         input_ids =torch.tensor(token_ids, dtype=torch.long).unsqueeze(0)
         attention_mask = torch.tensor([1] * len(token_ids), dtype=torch.long).unsqueeze(0)
@@ -337,6 +345,11 @@ class TrajEnvManager(BaseEnvManager):
             "prompt_mask": prompt_mask,
             "scores": score_tensor,
         })
+        if len(infer_logprobs):
+            infer_logprobs = torch.tensor(infer_logprobs, dtype=torch.float).unsqueeze(0)
+            infer_logprobs = pad_to_length(infer_logprobs, length=self.pipeline_config.sequence_length, pad_value=0)
+            lm_input.batch["infer_logprobs"] = infer_logprobs[:, 1:]
+
         lm_input.non_tensor_batch.update({
             "env_ids": np.array([self.rollout_cache.env_id], dtype=object),
             "group_ids": np.array([self.rollout_cache.group_id], dtype=object),

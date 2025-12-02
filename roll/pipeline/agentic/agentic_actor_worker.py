@@ -16,6 +16,9 @@ class ActorWorker(BaseActorWorker):
         response_mask = data.batch["response_mask"][:, 1:].long()
         ref_log_probs = data.batch["ref_log_probs"]
         old_log_probs = data.batch["old_log_probs"]
+        infer_log_probs = data.batch.get("infer_logprobs", old_log_probs)
+        infer_log_probs = infer_log_probs if len(infer_log_probs) > 0 else old_log_probs
+
         advantages = data.batch["advantages"]
 
         log_probs = self.strategy.op_compute_log_probs(
@@ -23,6 +26,8 @@ class ActorWorker(BaseActorWorker):
         )
 
         ratio = (log_probs - old_log_probs).exp()
+        train_infer_ratio = (log_probs - infer_log_probs).exp()
+        train_infer_diff = log_probs.exp() - infer_log_probs.exp()
 
         pg_clip_low = self.pipeline_config.pg_clip_low if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip
         pg_clip_high = self.pipeline_config.pg_clip_high if self.pipeline_config.use_pg_clip_range else self.pipeline_config.pg_clip  
@@ -62,6 +67,11 @@ class ActorWorker(BaseActorWorker):
             )
             total_loss = total_loss - entropy_loss * self.pipeline_config.entropy_loss_coef
 
+        train_infer_prob_metric = {
+            "actor/train_infer_ratio_mean": masked_mean(train_infer_ratio, response_mask, dim=-1).mean().detach().item(),
+            "actor/train_infer_diff_mean": masked_mean(train_infer_diff, response_mask, dim=-1).mean().detach().item(),
+        }
+
         pg_metrics = {
             "actor/ppo_ratio_high_clipfrac": clipped_high.mean().detach().item(),
             "actor/ppo_ratio_low_clipfrac": clipped_low.mean().detach().item(),
@@ -78,6 +88,7 @@ class ActorWorker(BaseActorWorker):
                                        loss_agg_mode=self.pipeline_config.loss_agg_mode).detach().item(),
             "actor/policykl": agg_loss(loss_mat=policykl, loss_mask=response_mask,
                                        loss_agg_mode=self.pipeline_config.loss_agg_mode).detach().item(),
+            **train_infer_prob_metric
         }
         
         return total_loss, pg_metrics

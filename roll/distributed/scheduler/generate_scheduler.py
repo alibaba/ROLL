@@ -918,6 +918,7 @@ class RequestScheduler:
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
             pad_to_seq_len=data.meta_info.get("pad_to_seq_len", True),
+            output_logprobs=output_logprobs,
         )
         request_repeat = data.repeat(repeat_times=len(output_tokens))
         output.non_tensor_batch = request_repeat.non_tensor_batch

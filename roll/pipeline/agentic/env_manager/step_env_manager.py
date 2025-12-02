@@ -79,6 +79,9 @@ class StepEnvManager(TrajEnvManager):
             input_ids =torch.tensor(token_ids, dtype=torch.long).unsqueeze(0)
             attention_mask = torch.tensor([1] * len(token_ids), dtype=torch.long).unsqueeze(0)
             response_mask = torch.tensor(response_masks, dtype=torch.bool).unsqueeze(0)
+            infer_logprobs = []
+            if "infer_logprobs" in history:
+                infer_logprobs = [0] * len(history["prompt_ids"]) + history["infer_logprobs"]
 
             first_response_idx = response_masks.index(1)
             prompt_masks = [1] * first_response_idx + [0] * (len(token_ids) - first_response_idx)
@@ -93,8 +96,7 @@ class StepEnvManager(TrajEnvManager):
             response_mask = pad_to_length(response_mask, length=self.pipeline_config.sequence_length, pad_value=0)
             prompt_mask = pad_to_length(prompt_mask, length=self.pipeline_config.sequence_length, pad_value=0)
             score_tensor = pad_to_length(score_tensor, length=self.pipeline_config.sequence_length, pad_value=0)
-
-            samples.append(DataProto(
+            lm_input = DataProto(
                 batch=TensorDict(
                     {
                         "input_ids": input_ids,
@@ -114,8 +116,13 @@ class StepEnvManager(TrajEnvManager):
                     "state_hash": np.array([history['state_hash']], dtype=object),
                     "step": np.array([step], dtype=object),
                 }
-            ))
+            )
+            if len(infer_logprobs):
+                infer_logprobs = torch.tensor(infer_logprobs, dtype=torch.float).unsqueeze(0)
+                infer_logprobs = pad_to_length(infer_logprobs, length=self.pipeline_config.sequence_length, pad_value=0)
+                lm_input.batch["infer_logprobs"] = infer_logprobs[:, 1:]
 
+            samples.append(lm_input)
         batch: DataProto = DataProto.concat(samples)
 
         response_length = batch.batch["response_mask"].float().sum(-1).mean().item()
