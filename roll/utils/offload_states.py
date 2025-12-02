@@ -4,7 +4,6 @@ from typing import List, Tuple, Union
 import torch
 from torch import Tensor
 from transformers import PreTrainedModel
-from trl import AutoModelForCausalLMWithValueHead
 from roll.platforms import current_platform
 
 

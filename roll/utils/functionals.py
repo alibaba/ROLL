@@ -350,8 +350,55 @@ def response_level_masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift
 
 
 def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
+    """
+    Reduce metrics with enhanced aggregation support based on metric name suffixes.
+    
+    Supported suffixes:
+    - _mean: arithmetic mean (default)
+    - _max: maximum value
+    - _min: minimum value  
+    - _p50: 50th percentile (median)
+    - _p99: 99th percentile
+    - _std: standard deviation
+    - _sum: sum of all values
+    
+    Args:
+        metrics: Dictionary of metric names to lists/tensors of values
+        reduce_func: Default reduction function (used for metrics without suffix)
+    
+    Returns:
+        Dictionary with reduced metric values
+    """
+    import numpy as np
+    
+    def _parse_suffix(metric_name):
+        """Parse aggregation method from metric name suffix."""
+        if metric_name.endswith('_mean'):
+            return np.mean
+        elif metric_name.endswith('_max'):
+            return np.max
+        elif metric_name.endswith('_min'):
+            return np.min
+        elif metric_name.endswith('_p50'):
+            return lambda x: np.percentile(x, 50)
+        elif metric_name.endswith('_p99'):
+            return lambda x: np.percentile(x, 99)
+        elif metric_name.endswith('_std'):
+            return np.std
+        elif metric_name.endswith('_sum'):
+            return np.sum
+        else:
+            return reduce_func
+    
     for key, val in metrics.items():
-        metrics[key] = reduce_func(val)
+        if isinstance(val, (list, tuple, np.ndarray)) and len(val) > 0:
+            # Use suffix-based aggregation if available
+            aggregation_func = _parse_suffix(key)
+            metrics[key] = float(aggregation_func(val))
+        else:
+            # Fallback to default reduction function
+            metrics[key] = reduce_func(val)
+    
     return metrics
 
 

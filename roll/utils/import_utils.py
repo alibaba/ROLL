@@ -1,6 +1,7 @@
 import importlib
 from importlib.util import find_spec
 from typing import Any, Optional
+import traceback
 
 from roll.utils.logging import get_logger
 
@@ -20,6 +21,7 @@ def can_import_class(class_path: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to import class {class_path}: {e}")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return False
 
 

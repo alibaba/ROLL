@@ -3,7 +3,9 @@ import copy
 import gc
 import os
 import queue
+import threading
 import time
+from collections import defaultdict, deque
 from concurrent import futures
 from typing import Dict, List, Optional, Union
 
@@ -19,11 +21,11 @@ from vllm.sampling_params import RequestOutputKind, BeamSearchParams
 from vllm.utils import random_uuid
 
 from roll.distributed.executor.worker import Worker
-from roll.distributed.scheduler.protocol import DataProto
+from roll.distributed.scheduler.protocol import DataProto, list_of_dict_to_dict_of_list
 from roll.distributed.strategy.strategy import InferenceStrategy
 from roll.third_party.vllm import LLM, AsyncLLM
 from roll.utils.collective import collective
-from roll.utils.functionals import GenerateRequestType, concatenate_input_and_output
+from roll.utils.functionals import GenerateRequestType, concatenate_input_and_output, reduce_metrics
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
 from roll.platforms import current_platform
@@ -51,6 +53,11 @@ class VllmStrategy(InferenceStrategy):
 
         self.request_metas = {}
         self.running = False
+        
+        # Metrics snapshot infrastructure
+        self._metrics_snapshots = deque(maxlen=3600)
+        self._metrics_snapshot_interval = 1.0  # Snapshot every 1 second
+        self._metrics_thread = None
 
     def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
@@ -124,6 +131,12 @@ class VllmStrategy(InferenceStrategy):
         self.worker.rank_info.dp_size = self.worker.world_size
 
         self.is_model_in_gpu = True
+
+        self._metrics_thread = threading.Thread(
+            target=self._collect_metrics_snapshot,
+            name="metrics-collection"
+        )
+        self._metrics_thread.start()
 
     def op_compute_log_probs(self, logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         """
@@ -443,6 +456,41 @@ class VllmStrategy(InferenceStrategy):
     def add_lora(self, peft_config):
         self.model.add_lora(peft_config)
 
+    def _collect_metrics_snapshot(self):
+        """Collect metrics snapshots periodically in a background thread."""
+        while True:
+            raw_metrics = self.model.get_metrics()
+            snapshot = {
+                'vllm/kv_cache_usage_perc_max': [],
+                'vllm/num_requests_waiting_max': [],
+                'vllm/num_preemptions_max': []
+            }
+            for metric in raw_metrics:
+                if metric.name == "vllm:kv_cache_usage_perc":
+                    snapshot['vllm/kv_cache_usage_perc_max'].append(metric.value)
+                elif metric.name == "vllm:num_requests_waiting":
+                    snapshot['vllm/num_requests_waiting_max'].append(metric.value)
+                elif metric.name == "vllm:num_preemptions":
+                    snapshot['vllm/num_preemptions_max'].append(metric.value)
+            self._metrics_snapshots.append(snapshot)
+
+            time.sleep(self._metrics_snapshot_interval)
+
+    def get_metrics(self, metric_names: Optional[List[str]] = None) -> Dict[str, float]:
+        """
+        Get aggregated metrics for the time interval since last call.
+
+        Args:
+            metric_names: Optional list of specific metric names to filter
+
+        Returns:
+            Dictionary of metric names to aggregated values
+        """
+        if not self._metrics_snapshots:
+            return {}
+        metrics_snapshots = list_of_dict_to_dict_of_list(self._metrics_snapshots)
+        self._metrics_snapshots.clear()
+        return reduce_metrics(metrics_snapshots)
 
 def gather_unpadded_input_ids(input_ids: torch.Tensor, attention_mask: torch.Tensor):
     gathered_input_ids = [ids[mask.bool()].tolist() for ids, mask in zip(input_ids, attention_mask)]

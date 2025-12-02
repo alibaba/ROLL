@@ -1,5 +1,6 @@
 import asyncio
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -282,6 +283,9 @@ class GroupQueueManager:
                 self.pending_gets.update(pending)
 
             await wait_a_episode()
+        get_batch_return_start_time = time.time()
+        for d in ret:
+            d.meta_info["get_batch_return_start_time"] = get_batch_return_start_time
         return ret
 
 class RolloutScheduler:
@@ -385,8 +389,14 @@ class RolloutScheduler:
             return None
 
         metrics = {}
-        [append_to_dict(metrics, meta_info.meta_info["metrics"]) for meta_info in data_batch]
+        get_batch_return_start_time = None
+        for d_item in data_batch:
+            get_batch_return_start_time = d_item.meta_info.pop("get_batch_return_start_time", None)
+            append_to_dict(metrics, d_item.meta_info["metrics"])
+        if get_batch_return_start_time is not None:
+            metrics["time/get_batch_cost_gqm"] = time.time() - get_batch_return_start_time
         metrics.update(await self.env_output_queue.collect_metrics.remote())
         batch = DataProto.concat(data_batch)
         batch.meta_info["metrics"] = metrics
+        batch.meta_info["get_batch_return_start_time"] = time.time()
         return batch

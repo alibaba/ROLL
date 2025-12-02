@@ -1,5 +1,6 @@
 import json
 import os.path
+import time
 from itertools import count
 from typing import Any
 
@@ -70,7 +71,12 @@ class AgenticRolloutPipeline(BasePipeline):
                 if batch is None:
                     break
 
-            metrics["time/rollout"] = rollout_timer.last
+                if "get_batch_return_start_time" in batch.meta_info:
+                    metrics["time/get_batch_cost_train"] = time.time() - batch.meta_info.pop("get_batch_return_start_time")
+                actor_infer_metrics: DataProto = self.actor_infer.get_metrics()
+                metrics.update(reduce_metrics(actor_infer_metrics.meta_info.pop("metrics", {})))
+
+            metrics["time/step_rollout"] = rollout_timer.last
             eval_metrics = reduce_metrics(batch.meta_info.get("metrics", {}))
             eval_score = batch.batch["scores"].sum(-1)
             eval_metrics["score/mean"] = torch.mean(eval_score).detach().item()

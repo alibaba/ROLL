@@ -1,6 +1,6 @@
 from abc import ABC
 from concurrent import futures
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -49,6 +49,18 @@ class InferenceStrategy(ABC):
 
     def generate(self, *args, **kwargs):
         raise NotImplementedError
+
+    def get_metrics(self, metric_names: Optional[List[str]] = None) -> Dict[str, float]:
+        """
+        Get performance metrics from the strategy.
+        
+        Args:
+            metric_names: Optional list of specific metric names to filter
+            
+        Returns:
+            Dictionary of metric names to aggregated values
+        """
+        return {}
 
     def start_server(self, *args, **kwargs):
         raise NotImplementedError

@@ -1,11 +1,14 @@
 import asyncio
 import copy
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional
 
 from codetiming import Timer
 from transformers import PreTrainedTokenizer, ProcessorMixin
+
+from roll.utils.context_managers import local_profiler
 
 from roll.pipeline.agentic.env_manager.base_env_manager import BaseEnvManager
 from roll.distributed.executor.worker import Worker
@@ -36,6 +39,7 @@ class EnvironmentWorker(Worker):
         self.env_configs: Dict[int, Dict] = worker_config.env_configs[self.rank]
         self.thread_lock = threading.Lock()
         self.output_queue = None
+        self.mode = "train"
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
     async def initialize(self,
@@ -47,6 +51,7 @@ class EnvironmentWorker(Worker):
         super().initialize(pipeline_config)
 
         self.output_queue = output_queue
+        self.mode = mode
         model_name_or_path = download_model(self.worker_config.model_args.model_name_or_path)
         self.tokenizer = default_tokenizer_provider(self.worker_config.model_args, model_name_or_path)
         self.processor = default_processor_provider(self.worker_config.model_args, model_name_or_path)
@@ -88,14 +93,29 @@ class EnvironmentWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
     async def run_rollout_loop(self, seed):
+        # Set environment variables for profiler context
+        os.environ["roll_EXEC_FUNC_NAME"] = "run_rollout_loop"
+        os.environ["WORKER_NAME"] = f"EnvironmentWorker_{self.rank}"
+        
         loop = asyncio.get_event_loop()
         pool = ThreadPoolExecutor(max_workers=len(self.env_managers))
-        await asyncio.gather(
-            *[
-                loop.run_in_executor(pool, env_manager.run_rollout_loop, DataProto(meta_info={"seed": seed}))
-                for env_manager in self.env_managers.values()
-            ]
-        )
+        
+        def run_with_profiler(env_manager, data_proto):
+            with local_profiler():
+                return env_manager.run_rollout_loop(data_proto)
+        
+        def run_without_profiler(env_manager, data_proto):
+            return env_manager.run_rollout_loop(data_proto)
+        
+        tasks = []
+        for env_id, env_manager in self.env_managers.items():
+            # Only profile the first env_manager (env_id=0) on rank=0
+            run_func = run_without_profiler
+            if self.rank == 0 and env_id == 0:
+                run_func = run_with_profiler
+            tasks.append(loop.run_in_executor(pool, run_func, env_manager, DataProto(meta_info={"seed": seed})))
+        
+        await asyncio.gather(*tasks)
         pool.shutdown()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
