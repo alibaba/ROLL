@@ -61,8 +61,10 @@ class GlobalDataset:
     async def filter(self, filter_name: str, function: Optional[Callable] = None, **kwargs):
         if filter_name in self.filter_names:
             return
+        logger.info(f"---- before filter-- {filter_name}, dataset_name: {self.dataset_name} len: {len(self.dataset)}")
         self.dataset = self.dataset.filter(function, **kwargs)
         self.filter_names.add(filter_name)
+        logger.info(f"---- after filter-- {filter_name}, dataset_name: {self.dataset_name} len: {len(self.dataset)}")
 
 
 @ray.remote
