@@ -97,6 +97,7 @@ class AgenticConfig(PPOConfig):
     episode_reward_weight: float = field(default=1.0, metadata={"help": "Episode reward weight, used in GiGPO."})
     step_reward_weight: float = field(default=1.0, metadata={"help": "Step reward weight, used in GiGPO."})
     step_reward_gamma: float = field(default=0.95, metadata={"help": "Gamma parameter for step reward calculation"})
+    ratio_type: Literal["token", "segment"] = field(default="token", metadata={"help": "Ratio type: token or segment"})
 
     def __post_init__(self):
         super().__post_init__()

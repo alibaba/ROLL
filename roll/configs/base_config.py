@@ -355,7 +355,7 @@ class PPOConfig(BaseConfig):
     whiten_rewards: bool = field(default=False, metadata={"help": "Whiten the rewards before compute advantages."})
     whiten_advantages: bool = field(default=False, metadata={"help": "Whiten the advantage."})
     advantage_clip: float = field(default=None, metadata={"help": "advantage_clip value"})
-    adv_estimator: Literal["gae", "reinforce", "grpo", "gigpo", "step_reinforce"] = field(
+    adv_estimator: Literal["gae", "reinforce", "grpo", "gigpo", "step_reinforce", "agentic_reinforce"] = field(
         default="gae", metadata={"help": "advantage estimator: gae (GAE)."}
     )
     norm_mean_type: Literal["batch", "group", "running", None] = field(

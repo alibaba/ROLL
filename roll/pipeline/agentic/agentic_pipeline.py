@@ -17,7 +17,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.agentic.agentic_config import AgenticConfig, EnvManagerConfig
 from roll.pipeline.agentic.utils import (dump_rollout_render, compute_discounted_returns,
-                                         compute_response_level_rewards, dump_rollout_trajectories, get_agentic_response_level_mask)
+                                         compute_response_level_rewards, dump_rollout_trajectories, get_agentic_response_level_mask, agentic_compute_advantage)
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.functionals import (
@@ -232,7 +232,7 @@ class AgenticPipeline(BasePipeline):
 
                 with Timer(name="compute_advantage", logger=None) as timer:
                     # Is the advantage calculated globally across the batch, or within each group?
-                    batch = compute_advantage(
+                    batch = agentic_compute_advantage(
                         data=batch,
                         gamma=self.pipeline_config.gamma,
                         lambd=self.pipeline_config.lambd,

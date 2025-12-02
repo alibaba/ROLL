@@ -18,6 +18,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import AgenticConfig, RewardNormalizationConfig
 from roll.pipeline.rlvr.utils import DUMPING_FUNC
 from roll.utils.logging import get_logger
+from roll.utils.functionals import masked_whiten, compute_gae_advantage_return, compute_clip_fraction, compute_reinforce_return
 
 logger = get_logger()
 
@@ -263,3 +264,120 @@ def dump_rollout_trajectories(path, global_step, data: DataProto):
             p = multiprocessing.Process(target=func, args=(path, write_data, columns_config), daemon=False)
             p.start()
 
+def compute_agentic_reinforce_return(token_level_rewards: torch.Tensor, gamma: torch.Tensor, lambd: torch.Tensor, mask: Optional[torch.Tensor] = None):
+    """
+    计算 REINFORCE 的 return，支持按 mask 分段 discount 衰减。
+    每段内所有位置获得相同的折扣累积值（从该段最后位置开始累积）。
+    
+    Args:
+        token_level_rewards: [batch_size, seq_len] token 级别的奖励
+        gamma: discount factor
+        lambd: lambda 参数（当前未使用，保留以兼容接口）
+        mask: [batch_size, seq_len] mask，1表示有效位置，0表示无效位置。如果为None，则对所有位置计算
+    
+    Returns:
+        advantages: [batch_size, seq_len] advantages
+        returns: [batch_size, seq_len] returns
+    """
+    with torch.no_grad():
+        batch_size, gen_len = token_level_rewards.shape
+        device = token_level_rewards.device
+        returns = torch.zeros_like(token_level_rewards, dtype=torch.float32)
+        
+        # 如果没有提供 mask，则对所有位置计算（向后兼容）
+        if mask is None:
+            mask = torch.ones_like(token_level_rewards)
+        
+        # 确保 gamma 是标量
+        gamma_val = gamma.item() if torch.is_tensor(gamma) else gamma
+        
+        # 对每个样本分别处理
+        for b in range(batch_size):
+            sample_mask = mask[b]  # [seq_len]
+            sample_rewards = token_level_rewards[b]  # [seq_len]
+            
+            # 找到所有连续的1的段
+            # 使用 diff 找到边界：1->0 和 0->1 的位置
+            diff = torch.diff(sample_mask.float(), prepend=torch.tensor([0.0], device=device))
+            
+            # 找到段的开始位置（0->1，diff==1）
+            segment_starts = torch.where(diff == 1)[0]
+            
+            # 找到段的结束位置（1->0，diff==-1）
+            segment_ends = torch.where(diff == -1)[0]
+            
+            # 如果最后一个位置是1，需要添加结束位置
+            if len(sample_mask) > 0 and sample_mask[-1] == 1:
+                segment_ends = torch.cat([segment_ends, torch.tensor([gen_len], device=device)])
+            
+            # 计算该段从最后位置开始的累积折扣奖励
+            cumulative_return = 0.0
+            # 对每段分别计算 discounted return
+            for start, end in zip(segment_starts.flip(-1), segment_ends.flip(-1)):
+                start_idx = start.item()
+                end_idx = end.item()
+                segment_len = end_idx - start_idx
+                
+                cumulative_return = sample_rewards[end_idx-1].item() + gamma_val * cumulative_return
+                
+                # 该段内所有位置都设置为这个累积值
+                returns[b, start_idx:end_idx] = cumulative_return
+        
+        advantages = returns
+    
+    return advantages, returns
+
+@torch.no_grad()
+def agentic_compute_advantage(
+    data: "DataProto",
+    gamma,
+    lambd,
+    adv_estimator,
+    advantage_clip=None,
+    whiten_advantages=False,
+    whiten_rewards=False,
+    response_mask=None,
+):
+    if response_mask is None:
+        response_mask = data.batch["response_mask"][:, 1:]
+    if response_mask.sum() == 0:
+        whiten_rewards = False
+        whiten_advantages = False
+        logger.info("Warning: domain final_response_mask.sum() == 0! All masked_whiten will be skipped.")
+
+    token_level_rewards = data.batch["token_level_rewards"].float()
+    if whiten_rewards:
+        token_level_rewards = masked_whiten(values=token_level_rewards, mask=response_mask)
+    token_level_rewards = token_level_rewards * response_mask
+    data.batch["token_level_rewards"] = token_level_rewards
+    if adv_estimator == "gae":
+        values = data.batch["values"].float()
+        data.batch["values"] = values * response_mask
+        advantages, returns = compute_gae_advantage_return(
+            token_level_rewards=token_level_rewards, values=values, gamma=gamma, lambd=lambd
+        )
+    elif adv_estimator in ["reinforce", "grpo", "gigpo", "step_reinforce"]:
+        advantages, returns = compute_reinforce_return(
+            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
+        )
+    elif adv_estimator in ["agentic_reinforce"]:
+        advantages, returns = compute_agentic_reinforce_return(
+            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd, mask=response_mask
+        )
+    else:
+        raise NotImplementedError
+    
+        data.batch["raw_advantages"] = advantages
+    if whiten_advantages:
+        # TODO whiten过程中是否要考虑response的长度？
+        advantages = masked_whiten(values=advantages, mask=response_mask)
+    advantages = advantages * response_mask
+
+    if advantage_clip is not None:
+        adv_clip_frac = compute_clip_fraction(values=advantages, clip_min=-advantage_clip, clip_max=advantage_clip)
+        data.meta_info["metrics"] = {"critic/advantage_clip_frac": adv_clip_frac}
+        advantages = torch.clamp(advantages, min=-advantage_clip, max=advantage_clip)
+
+    data.batch["advantages"] = advantages
+    data.batch["returns"] = returns
+    return data

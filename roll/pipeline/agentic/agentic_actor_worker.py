@@ -4,6 +4,7 @@ import torch
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.base_worker import ActorWorker as BaseActorWorker
 from roll.utils.functionals import masked_mean, agg_loss, compute_approx_kl
+from roll.pipeline.agentic.utils import compute_segment_masked_mean
 
 
 class ActorWorker(BaseActorWorker):
@@ -25,7 +26,11 @@ class ActorWorker(BaseActorWorker):
             logits=output_tensor, input_ids=data.batch["input_ids"], attention_mask=data.batch["response_mask"]
         )
 
-        ratio = (log_probs - old_log_probs).exp()
+        if self.pipeline_config.ratio_type == "segment":
+            raise NotImplemented(f"ratio_type: {self.pipeline_config.ratio_type} not implemented")
+        else:
+            ratio = (log_probs - old_log_probs).exp()
+        
         train_infer_ratio = (log_probs - infer_log_probs).exp()
         train_infer_diff = log_probs.exp() - infer_log_probs.exp()
 
