@@ -398,8 +398,8 @@ class PPOConfig(BaseConfig):
     enable_reference: bool = field(
         default=False, metadata={"help": "Whether to enable reference cluster for computing ref_log_probs."}
     )
-    enable_old_logprobs: bool = field(default=False, metadata={"help": "Enable old_logprobs computation optimization for disable caching"})
-    force_disable_old_logprobs: bool = field(default=False, metadata={"help": "Force disable old_logprobs computation optimization for disable caching, priority is higher than enable_old_logprobs"})
+    enable_old_logprobs_recompute: bool = field(default=False, metadata={"help": "Enable old_logprobs computation optimization for disable caching"})
+    force_disable_old_logprobs_recompute: bool = field(default=False, metadata={"help": "Force disable old_logprobs computation optimization for disable caching, priority is higher than enable_old_logprobs_recompute"})
 
     def __post_init__(self):
         super().__post_init__()
@@ -427,10 +427,12 @@ class PPOConfig(BaseConfig):
         if self.use_kl_loss or self.init_kl_coef > 0:
             logger.warning(f"use_kl_loss or init_kl_coef > 0, enable_reference = True")
             self.enable_reference = True
-        if self.force_disable_old_logprobs:
-            self.enable_old_logprobs = False
+        if self.force_disable_old_logprobs_recompute:
+            self.enable_old_logprobs_recompute = False
         else:
             self.set_old_logprobs_status()
+
+        logger.info(f"enable_old_logprobs_recompute: {self.enable_old_logprobs_recompute}\tenable_reference: {self.enable_reference}")
 
     def set_max_steps(self, max_steps: int):
         actor_backward_batch_size = (
@@ -487,11 +489,11 @@ class PPOConfig(BaseConfig):
         if backward_steps_per_rank > 1:
             # Multiple backward steps means model parameters change during training
             # Cannot reuse cached logprobs across backward passes
-            self.enable_old_logprobs = True
+            self.enable_old_logprobs_recompute = True
 
         if self.init_kl_coef > 0:
-            logger.warning(f"init_kl_coef > 0, enable_old_logprobs = True")
-            self.enable_old_logprobs = True
+            logger.warning(f"init_kl_coef > 0, enable_old_logprobs_recompute = True")
+            self.enable_old_logprobs_recompute = True
 
     @property
     def async_pipeline(self) -> bool:

@@ -538,6 +538,7 @@ class RLVRPipeline(BasePipeline):
 
                 batch = generate_output
                 batch.meta_info["global_step"] = global_step
+                batch.meta_info["_broadcast_non_tensor_batch"] = True
                 batch.non_tensor_batch['sample_uuid'] = np.array([str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object)
 
 
@@ -570,7 +571,7 @@ class RLVRPipeline(BasePipeline):
                     if self.pipeline_config.adv_estimator == "gae":
                         values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
 
-                    if self.pipeline_config.enable_old_logprobs:
+                    if self.pipeline_config.enable_old_logprobs_recompute:
                         if self.pipeline_config.actor_train.use_dynamic_batching_in_infer:
                             batch, dynamic_batching_metrics = dynamic_batching_shard(
                                 batch,

@@ -390,7 +390,7 @@ class RLVRMathVLMPipeline(BasePipeline):
                         if self.pipeline_config.adv_estimator == "gae":
                             values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
 
-                        if self.pipeline_config.enable_old_logprobs:
+                        if self.pipeline_config.enable_old_logprobs_recompute:
                             old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(
                                 batch, blocking=False
                             )

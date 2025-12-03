@@ -207,7 +207,7 @@ class AgenticPipeline(BasePipeline):
 
                     with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
                         batch.meta_info["is_offload_states"] = False
-                        if self.pipeline_config.enable_old_logprobs:
+                        if self.pipeline_config.enable_old_logprobs_recompute:
                             old_log_probs: DataProto = self.actor_train.compute_log_probs(batch, blocking=True)
                             batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
                             avg_old_log_prob = masked_mean(batch.batch["old_log_probs"], batch.batch["response_mask"][:, 1:])
