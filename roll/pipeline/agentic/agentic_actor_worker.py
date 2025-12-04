@@ -4,7 +4,6 @@ import torch
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.base_worker import ActorWorker as BaseActorWorker
 from roll.utils.functionals import masked_mean, agg_loss, compute_approx_kl
-from roll.pipeline.agentic.utils import compute_segment_masked_mean
 
 
 class ActorWorker(BaseActorWorker):
