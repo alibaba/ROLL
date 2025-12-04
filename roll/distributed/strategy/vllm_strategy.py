@@ -450,23 +450,26 @@ class VllmStrategy(InferenceStrategy):
 
     def _collect_metrics_snapshot(self):
         """Collect metrics snapshots periodically in a background thread."""
-        while True:
-            raw_metrics = self.model.get_metrics()
-            snapshot = {
-                'vllm/kv_cache_usage_perc_max': [],
-                'vllm/num_requests_waiting_max': [],
-                'vllm/num_preemptions_max': []
-            }
-            for metric in raw_metrics:
-                if metric.name == "vllm:kv_cache_usage_perc":
-                    snapshot['vllm/kv_cache_usage_perc_max'].append(metric.value)
-                elif metric.name == "vllm:num_requests_waiting":
-                    snapshot['vllm/num_requests_waiting_max'].append(metric.value)
-                elif metric.name == "vllm:num_preemptions":
-                    snapshot['vllm/num_preemptions_max'].append(metric.value)
-            self._metrics_snapshots.append(snapshot)
+        try:
+            while True:
+                raw_metrics = self.model.get_metrics()
+                snapshot = {
+                    'vllm/kv_cache_usage_perc_max': [],
+                    'vllm/num_requests_waiting_max': [],
+                    'vllm/num_preemptions_max': []
+                }
+                for metric in raw_metrics:
+                    if metric.name == "vllm:kv_cache_usage_perc":
+                        snapshot['vllm/kv_cache_usage_perc_max'].append(metric.value)
+                    elif metric.name == "vllm:num_requests_waiting":
+                        snapshot['vllm/num_requests_waiting_max'].append(metric.value)
+                    elif metric.name == "vllm:num_preemptions":
+                        snapshot['vllm/num_preemptions_max'].append(metric.value)
+                self._metrics_snapshots.append(snapshot)
 
-            time.sleep(self._metrics_snapshot_interval)
+                time.sleep(self._metrics_snapshot_interval)
+        except Exception as e:
+            logger.warning(f"Failed to get metrics: {e}")
 
     def get_metrics(self, metric_names: Optional[List[str]] = None) -> Dict[str, float]:
         """
