@@ -65,6 +65,7 @@ class CudaPlatform(Platform):
         env_vars = {
             "PYTORCH_CUDA_ALLOC_CONF": "",
             "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
+            "VLLM_ALLREDUCE_USE_SYMM_MEM": "0", # vllm 0.11.0 bug: https://github.com/vllm-project/vllm/issues/24694
             "CUDA_VISIBLE_DEVICES": f"{gpu_rank}",
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
         }
