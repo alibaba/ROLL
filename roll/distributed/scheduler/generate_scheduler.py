@@ -386,6 +386,7 @@ class DynamicSamplingScheduler:
         self.collect_fn_kwargs = None
         self.collect_fn = None
         self.tokenizer = None
+        self.processor = None
         self.response_filter_fn = None
         self.query_filter_fn = None
         self.response_callback_fn = None
@@ -413,6 +414,7 @@ class DynamicSamplingScheduler:
         response_callback_fn=None,
         state: Dict[str, Any] = None,
         is_val: bool = False,
+        is_vlm: bool = False,
     ):
         """
         GenerateScheduler可以由多个实例，不再局限于单例
@@ -439,6 +441,9 @@ class DynamicSamplingScheduler:
         self.collect_fn_cls = collect_fn_cls
         self.collect_fn_kwargs = collect_fn_kwargs
         self.tokenizer = default_tokenizer_provider(model_args=self.actor_cluster.worker_config.model_args)
+        self.processor = default_processor_provider(model_args=self.actor_cluster.worker_config.model_args)
+        if is_vlm:
+            collect_fn_kwargs["processor"] = self.processor
         self.collect_fn = self.collect_fn_cls(tokenizer=self.tokenizer, **self.collect_fn_kwargs)
 
         if self.is_use_additional_prompts:

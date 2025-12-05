@@ -367,7 +367,6 @@ class RLVRVLMPipeline(BasePipeline):
                     collect_fn_kwargs=dict(
                         # tokenizer passed by DynamicSamplingScheduler.set_scheduler
                         # tokenizer=self.tokenizer,
-                        processor=self.processor,
                         extra_unpadded_keys=["domain", "reward_model"],
                         extra_data_provider=get_extra_data_provider(
                             self.pipeline_config.actor_train.model_args.model_name_or_path, processor=self.processor
@@ -383,6 +382,7 @@ class RLVRVLMPipeline(BasePipeline):
                     query_filter_fn=query_filter_fn,
                     response_callback_fn=generate_scheduler.report_response.remote,
                     state=self.state.kv.get(f"scheduler_state_{domain}", None),
+                    is_vlm=True,
                 )
             )
             self.generate_schedulers[domain] = generate_scheduler
@@ -411,7 +411,6 @@ class RLVRVLMPipeline(BasePipeline):
                     collect_fn_kwargs=dict(
                         # tokenizer passed by DynamicSamplingScheduler.set_scheduler
                         # tokenizer=self.tokenizer,
-                        processor=self.processor,
                         # val metrics are grouped by tag rather than domain
                         extra_unpadded_keys=["domain", "reward_model", "tag"],
                         extra_data_provider=get_extra_data_provider(
@@ -427,6 +426,7 @@ class RLVRVLMPipeline(BasePipeline):
                     response_filter_fn=lambda data_item, config: True,
                     query_filter_fn=lambda data_list, config: True,
                     response_callback_fn=self.val_generate_scheduler.report_response.remote,
+                    is_vlm=True,
                 )
             )
 

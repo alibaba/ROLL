@@ -143,7 +143,7 @@ class DataCollatorWithPaddingForMM:
                 else None,
                 text=feature[self.prompt_key],
             )
-            for key in ["prompt"]:   # remove non-tensor feature, e.g. tbstars2_moe_vista has prompt in processor output
+            for key in ["prompt", "position_ids", "rope_deltas"]:   # remove unnecessary feature
                 if key in model_inputs:
                     model_inputs.pop(key)
             for key in filter(lambda k: k in model_inputs, self.padded_keys):
