@@ -42,7 +42,11 @@ def prepare_automap_files(model_path: str):
             python_files.append(file_name)
     with file_lock_context(model_path):
         for file_name in python_files:
-            get_cached_module_file(model_path, file_name)
+            try:
+                get_cached_module_file(model_path, file_name)
+            except Exception:
+                # if it's a needed file, will raise an exception when calling from_pretrained
+                pass
 
 
 def default_tokenizer_provider(model_args: "ModelArguments", model_name_or_path: str=None):
