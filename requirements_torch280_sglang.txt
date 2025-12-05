@@ -6,3 +6,6 @@ torchaudio==2.8.0.*
 
 deepspeed==0.16.4
 sglang[srt,torch-memory-saver]==0.5.2
+
+# for GDN , eg: Qwen3Next
+flash-linear-attention

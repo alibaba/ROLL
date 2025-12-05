@@ -1,9 +1,5 @@
 import copy
 import json
-import math
-import os
-import time
-from datetime import datetime
 from functools import partial
 from typing import Any, Dict, List, Optional
 
@@ -12,13 +8,9 @@ import ray
 import torch
 from codetiming import Timer
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from ray.util.timer import _Timer
 
-from roll.configs import GeneratingArguments
-from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
 from roll.distributed.executor.cluster import Cluster
-from roll.distributed.scheduler.async_generate_scheduler import AsyncDynamicSamplingScheduler
 from roll.distributed.scheduler.generate_scheduler import DynamicSamplingScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
@@ -26,17 +18,6 @@ from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.rlvr_pipeline import RLVRPipeline, get_encode_function, preprocess_dataset, \
     update_dataset_domain
-from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
-from roll.utils.functionals import (
-    RunningMoments,
-    agg_loss,
-    compute_advantage,
-    compute_token_reward,
-    get_sample_level_mask,
-    reduce_metrics,
-    reward_postprocess,
-)
-from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 
@@ -69,13 +50,13 @@ class RLVRRolloutPipeline(RLVRPipeline):
 
         # 加上format，然后转ids的func
         template_name = self.pipeline_config.global_template
-        encode_function = get_encode_function(template_name, self.tokenizer)
+        encode_function = get_encode_function(template_name, self.tokenizer, self.pipeline_config.actor_train.data_args)
 
         self.val_dataset = preprocess_dataset(
             self.val_dataset,
             self.pipeline_config.prompt_length,
             encode_function,
-            num_proc=1,
+            data_args=self.pipeline_config.actor_train.data_args,
         )
         self.val_dataset = self.val_dataset.map(
             partial(update_dataset_domain, self.pipeline_config.tag_2_domain),

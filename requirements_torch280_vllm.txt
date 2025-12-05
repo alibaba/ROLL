@@ -11,3 +11,7 @@ flash-attn
 
 #todo upgrade docker image
 vllm==0.10.2
+
+
+# for GDN , eg: Qwen3Next
+flash-linear-attention

@@ -10,7 +10,6 @@ from typing import List, Optional
 
 import torch
 import torch.distributed as dist
-from sglang.srt.hf_transformers_utils import get_tokenizer
 from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
 
@@ -23,6 +22,11 @@ from roll.utils.functionals import GenerateRequestType, concatenate_input_and_ou
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
 from roll.platforms import current_platform
+
+try:
+    from sglang.srt.hf_transformers_utils import get_tokenizer
+except:
+    from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 
 logger = get_logger()
