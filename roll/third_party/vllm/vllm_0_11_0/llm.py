@@ -7,9 +7,18 @@ import cloudpickle
 import torch
 from pydantic import ValidationError
 from vllm import LLM, EngineArgs, SamplingParams, envs
-from vllm.config import (CompilationConfig, StructuredOutputsConfig, 
-                         ModelDType, TokenizerMode,
-                         is_init_field)
+from vllm.config import (
+    CompilationConfig,
+    StructuredOutputsConfig,
+    is_init_field,
+)
+
+try:
+    # 0.11.1rc2.dev0+gc3a722fcb.d20251021 has import diff
+    from vllm.config.model import ModelDType, TokenizerMode
+except ImportError:
+    from vllm.config import ModelDType, TokenizerMode
+
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
                                    PoolerConfig, RunnerOption)
