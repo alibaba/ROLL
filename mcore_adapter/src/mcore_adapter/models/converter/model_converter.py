@@ -60,9 +60,12 @@ class ModelConverter:
         self.verbose = verbose
         self.template = get_template(mca_config.hf_model_type)
         self.template.set_mca_config_for_ops(self.mca_config)
-        tensor_model_parallel_rank = tensor_model_parallel_rank or mpu.get_tensor_model_parallel_rank()
-        pipeline_model_parallel_rank = pipeline_model_parallel_rank or mpu.get_pipeline_model_parallel_rank()
-        expert_model_parallel_rank = expert_model_parallel_rank or mpu.get_expert_model_parallel_rank()
+        if tensor_model_parallel_rank is None:
+            tensor_model_parallel_rank = mpu.get_tensor_model_parallel_rank()
+        if pipeline_model_parallel_rank is None:
+            pipeline_model_parallel_rank = mpu.get_pipeline_model_parallel_rank()
+        if expert_model_parallel_rank is None:
+            expert_model_parallel_rank = mpu.get_expert_model_parallel_rank()
         self.dist_converter = DistConverter(
             self.mca_config,
             tensor_model_parallel_rank=tensor_model_parallel_rank,
@@ -152,13 +155,30 @@ class ModelConverter:
             for mca_name, weight in sorted(mca_state_dict.items()):
                 yield vp_stage, mca_name, weight
 
-    def convert_to_hf(self, mca_state_dict: Dict[str, list["Tensor"]], vp_stage: Optional[int] = None) -> Dict[str, "Tensor"]:
+    def convert_to_hf(
+        self,
+        mca_state_dict: Dict[str, list["Tensor"]],
+        vp_stage: Optional[int] = None,
+        layer_index_preprocessed: bool = False,
+    ) -> Dict[str, "Tensor"]:
+        """
+        Convert Mca state dict to HuggingFace format.
+
+        Args:
+            mca_state_dict: Dictionary of mca weight names to tensor lists
+            vp_stage: Virtual pipeline stage
+            layer_index_preprocessed: If True, the weight names' layer indices have already been 
+                preprocessed for pipeline parallelism by the caller. If False (default), 
+                DistConverter will handle the layer index conversion between global and local indices.
+        """
         if vp_stage is None:
             vp_stage = mpu.get_virtual_pipeline_model_parallel_rank()
 
         hf_state_dict = {}
         for mca_name, weights in mca_state_dict.items():
-            merged_named_weights = self.dist_converter.dist_convert(mca_name, weights, vp_stage=vp_stage)
+            merged_named_weights = self.dist_converter.dist_convert(
+                mca_name, weights, vp_stage=vp_stage, layer_index_preprocessed=layer_index_preprocessed
+            )
             if merged_named_weights is None:
                 continue
             converted = {}

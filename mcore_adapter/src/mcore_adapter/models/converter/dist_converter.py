@@ -347,12 +347,12 @@ class DistConverter:
             return weights[0]
         return torch.cat(weights, dim=0)
 
-    def handle_column_parallel(self, name: str, weights: Union["Tensor", List["Tensor"]], vp_stage: int) -> Dict[str, "Tensor"]:
+    def handle_column_parallel(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
         if self.revert:
             weight = self._revert_column_parallel(weights)
         else:
             weight = self._convert_column_parallel(weights)
-        name = self.name_relocate(name, vp_stage=vp_stage)
+        name = self._name_relocate(name)
         return {name: weight}
 
     def _convert_row_parallel(self, weight: "Tensor"):
@@ -366,12 +366,12 @@ class DistConverter:
             return weights[0]
         return torch.cat(weights, dim=1)
 
-    def handle_row_parallel(self, name: str, weights: Union["Tensor", List["Tensor"]], vp_stage: int) -> Dict[str, "Tensor"]:
+    def handle_row_parallel(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
         if self.revert:
             weight = self._revert_row_parallel(weights)
         else:
             weight = self._convert_row_parallel(weights)
-        name = self.name_relocate(name, vp_stage=vp_stage)
+        name = self._name_relocate(name)
         return {name: weight}
 
     def _convert_swiglu(self, weight: "Tensor"):
@@ -390,12 +390,12 @@ class DistConverter:
         weight_v = self._revert_column_parallel(weights_v)
         return StackedTensors([weight_w, weight_v], dim=0)
 
-    def handle_swiglu(self, name: str, weights: Union["Tensor", List["Tensor"]], vp_stage: int) -> Dict[str, "Tensor"]:
+    def handle_swiglu(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
         if self.revert:
             weight = self._revert_swiglu(weights)
         else:
             weight = self._convert_swiglu(weights)
-        name = self.name_relocate(name, vp_stage=vp_stage)
+        name = self._name_relocate(name)
         return {name: weight}
 
     def get_pure_name(self, name: str):
@@ -412,7 +412,7 @@ class DistConverter:
                 pure_name = self.config.local_to_te_key_map[pure_name]
         return pure_name
 
-    def name_relocate(self, name: str, vp_stage: int, moe_index: Optional[int] = None):
+    def _name_relocate(self, name: str, moe_index: Optional[int] = None):
         pure_name = self.get_pure_name(name)
         if self.mca_config.transformer_impl == "local":
             if self.revert:  # when revert to hf, convert to te name
@@ -423,10 +423,7 @@ class DistConverter:
         moe_index = get_mca_moe_index(name) if moe_index is None else moe_index
         if layer_index is None:
             return pure_name
-        if self.revert:
-            layer_index = self.get_global_layer_index(layer_index, vp_stage=vp_stage)
-        else:
-            layer_index = self.get_local_layer_index(layer_index)
+
         if moe_index is not None:
             if self.revert:
                 if self.mca_config.moe_grouped_gemm:
@@ -479,7 +476,7 @@ class DistConverter:
             global_layer_index -= 1
         return global_layer_index
 
-    def handle_duplicated(self, name: str, weights: Union["Tensor", List["Tensor"]], vp_stage: int) -> Dict[str, "Tensor"]:
+    def handle_duplicated(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
         if self.revert:
             weight = weights[0]
             if not self.efficient_mode:
@@ -494,7 +491,7 @@ class DistConverter:
                     break
         else:
             weight = weights
-        name = self.name_relocate(name, vp_stage=vp_stage)
+        name = self._name_relocate(name)
         return {name: weight}
 
     def handle_grouped_duplicated(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
@@ -512,33 +509,33 @@ class DistConverter:
         else:
             raise NotImplementedError()
         moe_index = int(extract_suffix_number(name))
-        return {self.name_relocate(name, moe_index=moe_index): weight}
+        return {self._name_relocate(name, moe_index=moe_index): weight}
 
-    def _convert_te_grouped_column(self, name: str, weights: "Tensor", vp_stage: int):
+    def _convert_te_grouped_column(self, name: str, weights: "Tensor"):
         if self.swiglu:
             weights = self._convert_swiglu(weights)
         else:
             weights = self._convert_column_parallel(weights)
         # weights = weights.transpose(0, 1)
         moe_index = get_mca_moe_index(name) % self.num_layers_for_expert
-        relocated_name = self.name_relocate(name, vp_stage=vp_stage) + str(moe_index)
+        relocated_name = self._name_relocate(name) + str(moe_index)
         return {relocated_name: weights}
 
-    def _revert_te_grouped_column(self, name: str, weights: List["Tensor"], vp_stage: int):
+    def _revert_te_grouped_column(self, name: str, weights: List["Tensor"]):
         if self.swiglu:
             weight = self._revert_swiglu(weights)
         else:
             weight = self._revert_column_parallel(weights)
         moe_index = int(extract_suffix_number(name))
-        return {self.name_relocate(name, moe_index=moe_index, vp_stage=vp_stage): weight}
+        return {self._name_relocate(name, moe_index=moe_index): weight}
 
-    def _convert_grouped_column(self, name: str, weights: "Tensor", vp_stage: int):
+    def _convert_grouped_column(self, name: str, weights: "Tensor"):
         if self.swiglu:
             weights = self._convert_swiglu(weights)
         else:
             weights = self._convert_column_parallel(weights)
         weights = weights.transpose(0, 1)
-        relocated_name = self.name_relocate(name, vp_stage=vp_stage)
+        relocated_name = self._name_relocate(name)
         moe_index = get_mca_moe_index(name) % self.num_layers_for_expert
         if relocated_name not in self.weights_waiting_for_convert:
             self.weights_waiting_for_convert[relocated_name] = {}
@@ -568,35 +565,35 @@ class DistConverter:
 
         ungrouped_weights = [_revert_column(weights) for weights in ungrouped_weights]
         return {
-            self.name_relocate(name, moe_index=moe_index, vp_stage=vp_stage): weight
+            self._name_relocate(name, moe_index=moe_index): weight
             for moe_index, weight in enumerate(ungrouped_weights)
         }
 
-    def handle_grouped_column(self, name: str, weights: Union["Tensor", List["Tensor"]], vp_stage: int) -> Dict[str, "Tensor"]:
+    def handle_grouped_column(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
         if self.revert:
             if self.use_te_grouped_moe:
-                return self._revert_te_grouped_column(name, weights, vp_stage=vp_stage)
-            return self._revert_grouped_column(name, weights, vp_stage=vp_stage)
+                return self._revert_te_grouped_column(name, weights)
+            return self._revert_grouped_column(name, weights)
         else:
             if self.use_te_grouped_moe:
-                return self._convert_te_grouped_column(name, weights, vp_stage=vp_stage)
-            return self._convert_grouped_column(name, weights, vp_stage=vp_stage)
+                return self._convert_te_grouped_column(name, weights)
+            return self._convert_grouped_column(name, weights)
 
-    def _convert_te_grouped_row(self, name: str, weights: "Tensor", vp_stage: int):
+    def _convert_te_grouped_row(self, name: str, weights: "Tensor"):
         weights = self._convert_row_parallel(weights)
         moe_index = get_mca_moe_index(name) % self.num_layers_for_expert
-        relocated_name = self.name_relocate(name, vp_stage=vp_stage) + str(moe_index)
+        relocated_name = self._name_relocate(name) + str(moe_index)
         return {relocated_name: weights}
 
-    def _revert_te_grouped_row(self, name: str, weights: List["Tensor"], vp_stage: int):
+    def _revert_te_grouped_row(self, name: str, weights: List["Tensor"]):
         weights = self._revert_row_parallel(weights)
         moe_index = int(extract_suffix_number(name))
-        return {self.name_relocate(name, moe_index=moe_index, vp_stage=vp_stage): weights}
+        return {self._name_relocate(name, moe_index=moe_index): weights}
 
-    def _convert_grouped_row(self, name: str, weights: "Tensor", vp_stage: int):
+    def _convert_grouped_row(self, name: str, weights: "Tensor"):
         weights = self._convert_row_parallel(weights)
         weights = weights.transpose(0, 1)
-        relocated_name = self.name_relocate(name, vp_stage=vp_stage)
+        relocated_name = self._name_relocate(name)
         moe_index = get_mca_moe_index(name) % self.num_layers_for_expert
         if relocated_name not in self.weights_waiting_for_convert:
             self.weights_waiting_for_convert[relocated_name] = {}
@@ -607,7 +604,7 @@ class DistConverter:
         weights = [weight[1] for weight in weights]
         return {relocated_name: torch.stack(weights, dim=0).view(-1, self.mca_config.hidden_size)}
 
-    def _revert_grouped_row(self, name, weights: List["Tensor"], vp_stage: int):
+    def _revert_grouped_row(self, name, weights: List["Tensor"]):
         def _revert_grouped(weight: "Tensor"):
             weight = weight.view(self.num_layers_for_expert, -1, self.mca_config.hidden_size)
             expert_weights = torch.unbind(weight, dim=0)
@@ -619,19 +616,19 @@ class DistConverter:
         ungrouped_weights = [[weights[i] for weights in ungrouped_weights] for i in range(self.num_layers_for_expert)]
         ungrouped_weights = [self._revert_row_parallel(weights) for weights in ungrouped_weights]
         return {
-            self.name_relocate(name, moe_index=moe_index, vp_stage=vp_stage): weight
+            self._name_relocate(name, moe_index=moe_index): weight
             for moe_index, weight in enumerate(ungrouped_weights)
         }
 
-    def handle_grouped_row(self, name: str, weights: Union["Tensor", List["Tensor"]], vp_stage: int) -> Dict[str, "Tensor"]:
+    def handle_grouped_row(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
         if self.revert:
             if self.use_te_grouped_moe:
-                return self._revert_te_grouped_row(name, weights, vp_stage=vp_stage)
-            return self._revert_grouped_row(name, weights, vp_stage=vp_stage)
+                return self._revert_te_grouped_row(name, weights)
+            return self._revert_grouped_row(name, weights)
         else:
             if self.use_te_grouped_moe:
-                return self._convert_te_grouped_row(name, weights, vp_stage=vp_stage)
-            return self._convert_grouped_row(name, weights, vp_stage=vp_stage)
+                return self._convert_te_grouped_row(name, weights)
+            return self._convert_grouped_row(name, weights)
 
     def name_match(self, pure_name: str, patterns: list[str] | dict[str, Any]):
         if pure_name in patterns:
@@ -672,7 +669,43 @@ class DistConverter:
         else:
             return [local_to_global(i) for i in local_moe_index]
 
-    def dist_convert(self, name: str, weights: Union["Tensor", List["Tensor"]], vp_stage: Optional[int] = None) -> Dict[str, "Tensor"]:
+    def preprocess_layer_index(self, name: str, vp_stage: int) -> str:
+        """
+        Preprocess layer index for pipeline parallelism.
+        Converts between global and local layer indices before calling name_relocate.
+        """
+        layer_index = get_mca_layer_index(name)
+        if layer_index is None:
+            return name
+        moe_index = get_mca_moe_index(name)
+
+        if self.revert:
+            layer_index = self.get_global_layer_index(layer_index, vp_stage=vp_stage)
+        else:
+            layer_index = self.get_local_layer_index(layer_index)
+
+        if name.startswith("mtp.layers."):
+            return add_mca_mtp_layer_prefix(remove_mca_weight_prefix(name), layer_index, moe_index)
+        return add_mca_layer_prefix(remove_mca_weight_prefix(name), layer_index, moe_index)
+
+    def dist_convert(
+        self,
+        name: str,
+        weights: Union["Tensor", List["Tensor"]],
+        vp_stage: Optional[int] = None,
+        layer_index_preprocessed: bool = False,
+    ) -> Dict[str, "Tensor"]:
+        """
+        Convert weights for distributed parallelism.
+
+        Args:
+            name: Weight name
+            weights: Weight tensor(s)
+            vp_stage: Virtual pipeline stage
+            layer_index_preprocessed: If True, the name's layer index has already been preprocessed 
+                for pipeline parallelism by the caller. If False (default), DistConverter will 
+                handle the layer index conversion between global and local indices.
+        """
         if vp_stage is None:
             vp_stage = self.virtual_pipeline_model_parallel_rank
         if (
@@ -687,23 +720,27 @@ class DistConverter:
 
         if not self.is_on_this_rank(name, vp_stage=vp_stage):
             return None
+
+        if not layer_index_preprocessed:
+            name = self.preprocess_layer_index(name, vp_stage)
+
         pure_name = self.get_pure_name(name)
         if pure_name.endswith(".bias"):
             pure_name = pure_name.replace(".bias", ".weight")
         if self.mca_config.moe_grouped_gemm and self.name_match(pure_name, self.config.grouped_duplicated_weights):
             return self.handle_grouped_duplicated(name, weights)
         if self.mca_config.moe_grouped_gemm and self.name_match(pure_name, self.config.grouped_column_weights):
-            return self.handle_grouped_column(name, weights, vp_stage=vp_stage)
+            return self.handle_grouped_column(name, weights)
         if self.mca_config.moe_grouped_gemm and self.name_match(pure_name, self.config.grouped_row_weights):
-            return self.handle_grouped_row(name, weights, vp_stage=vp_stage)
+            return self.handle_grouped_row(name, weights)
         if self.swiglu and self.name_match(pure_name, self.config.swiglu_weights):
-            return self.handle_swiglu(name, weights, vp_stage=vp_stage)
+            return self.handle_swiglu(name, weights)
         if self.name_match(pure_name, self.config.duplicated_weights):
-            return self.handle_duplicated(name, weights, vp_stage=vp_stage)
+            return self.handle_duplicated(name, weights)
         if self.name_match(pure_name, self.config.column_parallel_weights):
-            return self.handle_column_parallel(name, weights, vp_stage=vp_stage)
+            return self.handle_column_parallel(name, weights)
         if self.name_match(pure_name, self.config.row_parallel_weights):
-            return self.handle_row_parallel(name, weights, vp_stage=vp_stage)
+            return self.handle_row_parallel(name, weights)
         raise ValueError(f"name: {name}, pure_name: {pure_name}, config {self.config} swiglu: {self.swiglu}")
 
     def is_tensor_parallel_dup_weight(self, name: str) -> bool:

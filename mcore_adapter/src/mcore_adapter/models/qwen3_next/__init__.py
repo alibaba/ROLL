@@ -36,12 +36,6 @@ class DropConverOp(ConverOp):
 @dataclass
 class NextQKVConverOp(QKVConverOp):
     """query weight used for calculating query_states and gate"""
-
-    def __post_init__(self):
-        super().__post_init__()
-        assert len(self.hf_names) == 3, f"QKVConverOp only support three hf_names {self.hf_names}"
-        assert len(self.mca_names) == 1, f"QKVConverOp only support one mca_name {self.mca_names}"
-
     def _hf_to_mca(self, weights):
         q_weight, k_weight, v_weight = weights
         nh = self.mca_config.num_attention_heads

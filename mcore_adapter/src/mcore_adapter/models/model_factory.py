@@ -213,20 +213,7 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
 
     def save_pretrained(self, save_directory: str, state_dict=None):
         os.makedirs(save_directory, exist_ok=True)
-        if state_dict is None:
-            new_state_dict = {}
-            state_dict_model = self.state_dict_for_save_checkpoint()
-            for n, p in self.named_parameters():
-                if not p.requires_grad:
-                    continue
-                if n in state_dict_model:
-                    new_state_dict[n] = state_dict_model[n]
-                key = n.replace('.weight', '._extra_state')
-                if key.endswith('._extra_state0'):
-                    key = key.replace('._extra_state0', '._extra_state')
-                if key in state_dict_model:
-                    new_state_dict[key] = state_dict_model[key]
-            state_dict = {"model": new_state_dict}
+        state_dict = state_dict if state_dict is not None else {"model": self.state_dict_for_save_checkpoint()}
         save_config_and_state_dict(save_directory, self.config, state_dict)
 
     def get_batch_on_this_cp_rank(self, batch: Dict[str, "torch.Tensor"], dim3_keys: List[str] = ["attention_mask"]):

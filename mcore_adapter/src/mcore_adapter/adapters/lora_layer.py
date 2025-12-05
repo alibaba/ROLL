@@ -31,6 +31,8 @@ from peft.tuners.lora.layer import LoraLayer
 from peft.tuners.tuners_utils import BaseTunerLayer, check_adapters_to_merge
 from peft.utils import transpose
 
+from ..platforms import current_platform
+
 
 class LoraParallelLinear(MegatronModule, LoraLayer):
     def __init__(
@@ -271,7 +273,7 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
         base_layer = self.get_base_layer()
         origin_device = base_layer.weight0.device if self.is_grouped else base_layer.weight.device
         if origin_device.type == "cpu":
-            self.to(device=torch.cuda.current_device())
+            self.to(device=current_platform.current_device())
 
         for active_adapter in adapter_names:
             if active_adapter in self.lora_A.keys():
