@@ -130,6 +130,21 @@ class RenameConverOp(ConverOp):
 
 
 @dataclass
+class CopyConverOp(ConverOp):
+    def __post_init__(self):
+        super().__post_init__()
+        assert (len(self.hf_names) == 1) != (len(self.mca_names) == 1), (
+            f"CopyConverOp only supports one name as target {self.hf_names} {self.mca_names}"
+        )
+
+    def _hf_to_mca(self, weights):
+        return weights * len(self.mca_names)
+
+    def _mca_to_hf(self, weights):
+        return weights * len(self.hf_names)
+
+
+@dataclass
 class ConcatConverOp(ConverOp):
     dim: int = 0
 
@@ -173,13 +188,18 @@ class StackConverOp(ConverOp):
         return StackedTensors(tensors=weights, dim=self.dim)
 
 
+@dataclass
 class QKVConverOp(ConverOp):
+    hidden_size: Optional[int] = None
+
     def __post_init__(self):
         super().__post_init__()
         assert len(self.hf_names) == 3, f"QKVConverOp only support three hf_names {self.hf_names}"
         assert len(self.mca_names) == 1, f"QKVConverOp only support one mca_name {self.mca_names}"
 
     def _hf_to_mca(self, weights):
+        if self.hidden_size is None:
+            self.hidden_size = self.mca_config.hidden_size
         q_weight, k_weight, v_weight = weights
         nh = self.mca_config.num_attention_heads
         ng = self.mca_config.num_query_groups
@@ -192,22 +212,25 @@ class QKVConverOp(ConverOp):
                 v_weight.reshape((ng, dim, -1)),
             ],
             dim=1,
-        ).reshape((-1, self.mca_config.hidden_size))
+        ).reshape((-1, self.hidden_size))
         return mca_qkv_weight
 
     def _mca_to_hf(self, weights):
+        if self.hidden_size is None:
+            self.hidden_size = self.mca_config.hidden_size
         qkv_weight = weights[0]
         ng = self.mca_config.num_query_groups
         nh = self.mca_config.num_attention_heads
         dim = self.mca_config.kv_channels
         qkv_weight = qkv_weight.reshape((ng, dim * (nh // ng + 2), -1))
         qkv_weights = torch.split(qkv_weight, [dim * nh // ng, dim, dim], dim=1)
-        q_weight = qkv_weights[0].reshape((-1, self.mca_config.hidden_size))
-        k_weight = qkv_weights[1].reshape((-1, self.mca_config.hidden_size))
-        v_weight = qkv_weights[2].reshape((-1, self.mca_config.hidden_size))
+        q_weight = qkv_weights[0].reshape((-1, self.hidden_size))
+        k_weight = qkv_weights[1].reshape((-1, self.hidden_size))
+        v_weight = qkv_weights[2].reshape((-1, self.hidden_size))
         return [q_weight, k_weight, v_weight]
 
 
+@dataclass
 class QKVBiasConverOp(ConverOp):
     def __post_init__(self):
         super().__post_init__()
@@ -348,7 +371,10 @@ class Template:
             self.prefix_name_to_weight[weight_prefix] = {}
         self.prefix_name_to_weight[weight_prefix][original_name] = weight
         prefix_weights = self.prefix_name_to_weight[weight_prefix]
-        op = self.get_conver_op(original_name, self.mca_name_to_converter)
+        if ".lora_A." in original_name or ".lora_B." in original_name:
+            op = self.get_lora_conver_op(original_name, self.mca_name_to_converter)
+        else:
+            op = self.get_conver_op(original_name, self.mca_name_to_converter)
         name_to_weight = {
             name: prefix_weights.pop(name)
             for name in list(prefix_weights.keys())
@@ -370,6 +396,31 @@ class Template:
             if re.match(re_pattern, name):
                 return pattern_to_conver_ops[pattern]
         raise ValueError(f"can not find conver op for {name} in {pattern_to_conver_ops}")
+
+    def get_lora_conver_op(self, name, pattern_to_conver_ops: Dict[str, ConverOp]):
+        lora_name = name[name.find(".lora"):]
+        name = name[:name.find(".lora")] + ".weight"
+        op = self.get_conver_op(name, pattern_to_conver_ops)
+        if isinstance(op, RenameConverOp):
+            op_class = RenameConverOp
+            kwargs = {}
+        elif "lora_A" in lora_name:
+            op_class = CopyConverOp
+            kwargs = {}
+        elif isinstance(op, StackConverOp):
+            op_class = StackConverOp
+            kwargs = {"dim": op.dim}
+        elif isinstance(op, QKVConverOp):
+            op_class = QKVConverOp
+            kwargs = {"hidden_size": op.mca_config.lora_rank}
+        else:
+            raise ValueError(f"can not find lora conver op for {name} in {pattern_to_conver_ops}")
+        return op_class(
+            hf_names=[hf_name.replace(".weight", lora_name) for hf_name in op.hf_names],
+            mca_names=[mca_name.replace(".weight", lora_name) for mca_name in op.mca_names],
+            mca_config=op.mca_config,
+            **kwargs,
+        )
 
     def hf_name_to_mca_names(self, hf_name) -> Optional[List[str]]:
         weight_prefix = get_weight_prefix(hf_name, self.hf_layer_prefix, moe_prefix=self.hf_moe_prefix)

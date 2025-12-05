@@ -15,12 +15,16 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 from megatron.core.transformer.module import MegatronModule
 
 from ..checkpointing import load_state_dict_from_checkpoint, save_config_and_state_dict
-from ..utils import get_logger
+from ..platforms import current_platform
+from ..utils import get_logger, is_peft_available
 from .converter.convert_utils import MAX_SHARD_SIZE
 from .converter.model_converter import ModelConverter
 from .model_config import McaModelConfig
 from .model_utils import ModuleUtilsMixin, RMSNorm, exists_hf_config, exists_mca_config, get_thd_data_on_this_cp_rank
-from ..platforms import current_platform
+
+
+if is_peft_available():
+    from peft import PeftModel
 
 
 if TYPE_CHECKING:
@@ -43,6 +47,10 @@ class VirtualModels:
 
     def save_pretrained(self, save_directory: str):
         if len(self.models) == 1:
+            if is_peft_available() and isinstance(self.models[0], PeftModel):
+                for _, peft_config in self.models[0].peft_config.items():
+                    peft_config.save_pretrained(save_directory)
+                return self.models[0].base_model.model.save_pretrained(save_directory)
             return self.models[0].save_pretrained(save_directory)
         state_dict = {f"model{i}": model.state_dict_for_save_checkpoint() for i, model in enumerate(self.models)}
         return self.models[0].save_pretrained(save_directory, state_dict=state_dict)
@@ -51,6 +59,8 @@ class VirtualModels:
         if len(self.models) == 1:
             if "model" in state_dict:
                 state_dict = state_dict["model"]
+            if is_peft_available() and isinstance(self.models[0], PeftModel):
+                return self.models[0].base_model.model.load_state_dict(state_dict, strict=False)
             return self.models[0].load_state_dict(state_dict, strict=strict)
         all_missing_keys, all_unexpected_keys = [], []
         for i, model in enumerate(self.models):
@@ -203,7 +213,20 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
 
     def save_pretrained(self, save_directory: str, state_dict=None):
         os.makedirs(save_directory, exist_ok=True)
-        state_dict = state_dict if state_dict is not None else {"model": self.state_dict_for_save_checkpoint()}
+        if state_dict is None:
+            new_state_dict = {}
+            state_dict_model = self.state_dict_for_save_checkpoint()
+            for n, p in self.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if n in state_dict_model:
+                    new_state_dict[n] = state_dict_model[n]
+                key = n.replace('.weight', '._extra_state')
+                if key.endswith('._extra_state0'):
+                    key = key.replace('._extra_state0', '._extra_state')
+                if key in state_dict_model:
+                    new_state_dict[key] = state_dict_model[key]
+            state_dict = {"model": new_state_dict}
         save_config_and_state_dict(save_directory, self.config, state_dict)
 
     def get_batch_on_this_cp_rank(self, batch: Dict[str, "torch.Tensor"], dim3_keys: List[str] = ["attention_mask"]):
@@ -243,6 +266,18 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                     batch[key] = val
 
         return batch
+
+    def enable_input_require_grads(self):
+        """
+        Enables the gradients for the input embeddings. This is useful for fine-tuning adapter weights while keeping
+        the model weights fixed.
+        """
+
+        def make_inputs_require_grads(module, input, output):
+            output.requires_grad_(True)
+
+        if hasattr(self, "embedding"):
+            self._require_grads_hook = self.embedding.register_forward_hook(make_inputs_require_grads)
 
 
 class McaGPTModel(GPTModel, PretrainedModel):

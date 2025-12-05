@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import enum
 import hashlib
@@ -14,7 +15,7 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import PipelinePar
 from transformers import AutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from ..constants import MCA_CONFIG_NAME, HUGGINGFACE_AUTOMAP_CACHE
+from ..constants import HUGGINGFACE_AUTOMAP_CACHE, MCA_CONFIG_NAME
 from ..initialize import initialize_megatron
 from ..training_args import DistributingParallelArguments, TrainingArguments
 from ..utils import get_logger
@@ -47,7 +48,18 @@ class PretrainedConfig:
         self.__post_init__()
 
     def to_dict(self):
-        return dataclasses.asdict(self)
+        output = {}
+        for k, v in self.__dict__.items():
+            if callable(v):
+                output[k] = None
+            elif isinstance(v, list) and callable(v[0]):
+                output[k] = None
+            elif isinstance(v, PipelineParallelLayerLayout):
+                output[k] = str(v)
+            else:
+                output[k] = copy.deepcopy(v)
+
+        return output
 
     def to_json_string(self):
         save_dict = {}

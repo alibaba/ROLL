@@ -16,9 +16,11 @@ from llamafactory.train.callbacks import SaveProcessorCallback
 from llamafactory.train.dpo import run_dpo
 from llamafactory.train.pt import run_pt
 from llamafactory.train.sft import run_sft
+from peft import LoraConfig, get_peft_model
 from transformers import DataCollatorForSeq2Seq, HfArgumentParser
 from transformers.trainer_callback import TrainerCallback
 
+from mcore_adapter.adapters import apply_megatron_lora, find_all_linear_modules, set_linear_is_expert
 from mcore_adapter.models import AutoConfig, AutoModel
 from mcore_adapter.trainer import DPOTrainer, McaTrainer
 from mcore_adapter.trainer.dpo_config import DPOConfig
@@ -110,6 +112,28 @@ def data_collator_wrapper(data_collator):
     return wrapper
 
 
+def setup_lora_training(model, finetuning_args):
+    model.enable_input_require_grads()
+    target_modules = find_all_linear_modules(model)
+
+    peft_kwargs = {
+        "r": finetuning_args.lora_rank,
+        "target_modules": target_modules,
+        "lora_alpha": finetuning_args.lora_alpha,
+        "lora_dropout": finetuning_args.lora_dropout,
+    }
+
+    lora_config = LoraConfig(
+        **peft_kwargs,
+    )
+    model = get_peft_model(model, lora_config)
+
+    for param in filter(lambda p: p.requires_grad, model.parameters()):
+        param.data = param.data.to(torch.float32)
+
+    return model
+
+
 def pt_mca_train(
     training_args: Seq2SeqTrainingArguments,
     model_args: ModelArguments,
@@ -120,6 +144,10 @@ def pt_mca_train(
     tokenizer = tokenizer_module["tokenizer"]
     template = get_template_and_fix_tokenizer(tokenizer, data_args)
     model = AutoModel.from_pretrained(model_args.model_name_or_path, training_args)
+    if finetuning_args.finetuning_type == "lora":
+        apply_megatron_lora()
+        set_linear_is_expert(model[0])
+        model.models[0] = setup_lora_training(model[0], finetuning_args)
     data_args.cutoff_len += 1
     dataset_module = get_dataset(template, model_args, data_args, training_args, stage="pt", **tokenizer_module)
     data_args.cutoff_len -= 1
@@ -165,6 +193,10 @@ def sft_mca_train(
     data_args.cutoff_len += 1
     dataset_module = get_dataset(template, model_args, data_args, training_args, stage="sft", **tokenizer_module)
     data_args.cutoff_len -= 1
+    if finetuning_args.finetuning_type == "lora":
+        apply_megatron_lora()
+        set_linear_is_expert(model[0])
+        model.models[0] = setup_lora_training(model[0], finetuning_args)
     if model.config.hf_model_type in ["qwen2_vl"] and finetuning_args.freeze_vision_tower:
         for name, p in model.named_parameters():
             if any(name.startswith(k) for k in ["vision_model.blocks", "vision_model.patch_embed"]):

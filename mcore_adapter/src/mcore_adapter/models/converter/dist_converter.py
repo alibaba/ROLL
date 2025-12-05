@@ -1,8 +1,9 @@
 import fnmatch
 import os
+import warnings
 from dataclasses import dataclass, field
 from itertools import product
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
 from megatron.core.transformer.pipeline_parallel_layer_layout import LayerType, PipelineParallelLayerLayout
@@ -50,6 +51,7 @@ class DistParallelConfig:
     swiglu_weights: List[str] = field(default_factory=list)
 
     # ungrouped TE name to grouped
+    grouped_duplicated_map: Dict[str, str]  = field(default_factory=dict)
     grouped_column_map: Dict[str, str] = field(default_factory=dict)
     grouped_row_map: Dict[str, str] = field(default_factory=dict)
 
@@ -57,9 +59,10 @@ class DistParallelConfig:
 
     def __post_init__(self):
         self.local_to_te_key_map = {v: k for k, v in self.te_to_local_key_map.items()}
+        self.grouped_duplicated_weights = list(self.grouped_duplicated_map.keys()) + list(self.grouped_duplicated_map.values())
         self.grouped_column_weights = list(self.grouped_column_map.keys()) + list(self.grouped_column_map.values())
         self.grouped_row_weights = list(self.grouped_row_map.keys()) + list(self.grouped_row_map.values())
-        self.grouped_map = {**self.grouped_column_map, **self.grouped_row_map}
+        self.grouped_map = {**self.grouped_duplicated_map, **self.grouped_column_map, **self.grouped_row_map}
         self.grouped_reverse_map = {v: k for k, v in self.grouped_map.items()}
 
     def merge_configs(self, other: "DistParallelConfig") -> "DistParallelConfig":
@@ -76,10 +79,34 @@ class DistParallelConfig:
             column_parallel_weights=self.column_parallel_weights + other.column_parallel_weights,
             row_parallel_weights=self.row_parallel_weights + other.row_parallel_weights,
             swiglu_weights=self.swiglu_weights + other.swiglu_weights,
+            grouped_duplicated_map={**self.grouped_duplicated_map, **other.grouped_duplicated_map},
             grouped_column_map={**self.grouped_column_map, **other.grouped_column_map},
             grouped_row_map={**self.grouped_row_map, **other.grouped_row_map},
             te_to_local_key_map={**self.te_to_local_key_map, **other.te_to_local_key_map},
         )
+
+
+lora_config = DistParallelConfig(
+    duplicated_weights=[
+        ".self_attention.linear_proj.lora_B.*.weight",
+        ".self_attention.linear_qkv.lora_A.*.weight",
+        ".mlp.linear_fc1.lora_A.*.weight",
+        ".linear_fc1.lora_A.*.weight",
+        ".mlp.linear_fc2.lora_B.*.weight",
+        ".linear_fc2.lora_B.*.weight",
+    ],
+    column_parallel_weights=[
+        ".self_attention.linear_qkv.lora_B.*.weight",
+        ".mlp.linear_fc1.lora_B.*.weight",
+        ".linear_fc1.lora_B.*.weight",
+    ],
+    row_parallel_weights=[
+        ".self_attention.linear_proj.lora_A.*.weight",
+        ".mlp.linear_fc2.lora_A.*.weight",
+        ".linear_fc2.lora_A.*.weight",
+    ],
+    swiglu_weights=[".mlp.linear_fc1.lora_B.*.weight", ".linear_fc1.lora_B.*.weight"],
+)
 
 
 default_dist_config = DistParallelConfig(
@@ -109,13 +136,23 @@ default_dist_config = DistParallelConfig(
         ".self_attention.linear_qkv.layer_norm_weight": ".input_layernorm.weight",
         ".mlp.linear_fc1.layer_norm_weight": ".pre_mlp_layernorm.weight",
     },
+).merge_configs(lora_config)
+
+
+lora_te_moe_config = DistParallelConfig(
+    grouped_duplicated_map={
+        ".linear_fc1.lora_A.*.weight": ".mlp.experts.linear_fc1.lora_A.*.weight",
+        ".linear_fc2.lora_B.*.weight": ".mlp.experts.linear_fc2.lora_B.*.weight",
+    },
+    grouped_column_map={".linear_fc1.lora_B.*.weight": ".mlp.experts.linear_fc1.lora_B.*.weight"},
+    grouped_row_map={".linear_fc2.lora_A.*.weight": ".mlp.experts.linear_fc2.lora_A.*.weight"},
 )
 
 
 te_moe_config = DistParallelConfig(
     grouped_column_map={".linear_fc1.weight": ".mlp.experts.linear_fc1.weight"},
     grouped_row_map={".linear_fc2.weight": ".mlp.experts.linear_fc2.weight"},
-)
+).merge_configs(lora_te_moe_config)
 
 
 mtp_config = DistParallelConfig(
@@ -366,7 +403,9 @@ class DistConverter:
         pure_name = remove_mca_weight_prefix(name)
         if self.use_te_grouped_moe:
             suffix_num = extract_suffix_number(pure_name)
-            if suffix_num is not None and pure_name[: -len(suffix_num)] in self.config.grouped_reverse_map:
+            if suffix_num is not None and self.name_match(
+                pure_name[: -len(suffix_num)], self.config.grouped_reverse_map
+            ):
                 pure_name = pure_name[: -len(suffix_num)]
         if self.mca_config.transformer_impl == "local":
             if self.revert and pure_name in self.config.local_to_te_key_map:
@@ -391,7 +430,7 @@ class DistConverter:
         if moe_index is not None:
             if self.revert:
                 if self.mca_config.moe_grouped_gemm:
-                    pure_name = self.config.grouped_reverse_map[pure_name]
+                    pure_name = self.get_matched_name(pure_name, self.config.grouped_reverse_map)
                 moe_index = self.num_layers_for_expert * self.expert_model_parallel_rank + moe_index
             else:
                 if self.mca_config.moe_grouped_gemm:
@@ -457,6 +496,23 @@ class DistConverter:
             weight = weights
         name = self.name_relocate(name, vp_stage=vp_stage)
         return {name: weight}
+
+    def handle_grouped_duplicated(self, name: str, weights: Union["Tensor", List["Tensor"]]) -> Dict[str, "Tensor"]:
+        if self.revert:
+            weight = weights[0]
+            for w in weights[1:]:
+                if w.equal(weight):
+                    continue
+                message = f"{name} weights are not equal diff sum: {torch.sum(torch.abs(w - weight))}"
+                if ASSERT_SP_CONSISTENCY:
+                    raise ValueError(message)
+                else:
+                    logger.warning(message)
+                break
+        else:
+            raise NotImplementedError()
+        moe_index = int(extract_suffix_number(name))
+        return {self.name_relocate(name, moe_index=moe_index): weight}
 
     def _convert_te_grouped_column(self, name: str, weights: "Tensor", vp_stage: int):
         if self.swiglu:
@@ -577,7 +633,7 @@ class DistConverter:
                 return self._convert_te_grouped_row(name, weights, vp_stage=vp_stage)
             return self._convert_grouped_row(name, weights, vp_stage=vp_stage)
 
-    def name_match(self, pure_name: str, patterns: List[str]):
+    def name_match(self, pure_name: str, patterns: list[str] | dict[str, Any]):
         if pure_name in patterns:
             return True
         for pattern in patterns:
@@ -585,14 +641,24 @@ class DistConverter:
                 return True
         return False
 
+    def get_matched_name(self, name: str, weight_map: dict[str, Any]) -> Optional[str]:
+        if name in weight_map:
+            return weight_map[name]
+        for key in weight_map:
+            if fnmatch.fnmatch(name, key):
+                name_pattern = weight_map[key]
+                return name_pattern[:name_pattern.find(".lora")] + name[name.find(".lora"):]
+
     def get_local_moe_index(self, name: str) -> Optional[Union[int, List[int]]]:
         pure_name = remove_mca_weight_prefix(name)
         if self.use_te_grouped_moe:
             suffix_num = extract_suffix_number(pure_name)
-            if suffix_num is not None and pure_name[: -len(suffix_num)] in self.config.grouped_reverse_map:
+            if suffix_num is not None and self.name_match(
+                pure_name[: -len(suffix_num)], self.config.grouped_reverse_map
+            ):
                 return int(suffix_num)
         if self.mca_config.moe_grouped_gemm:
-            if pure_name in self.config.grouped_reverse_map:
+            if self.name_match(pure_name, self.config.grouped_reverse_map):
                 return list(range(self.num_layers_for_expert))
         return get_mca_moe_index(name)
 
@@ -624,6 +690,8 @@ class DistConverter:
         pure_name = self.get_pure_name(name)
         if pure_name.endswith(".bias"):
             pure_name = pure_name.replace(".bias", ".weight")
+        if self.mca_config.moe_grouped_gemm and self.name_match(pure_name, self.config.grouped_duplicated_weights):
+            return self.handle_grouped_duplicated(name, weights)
         if self.mca_config.moe_grouped_gemm and self.name_match(pure_name, self.config.grouped_column_weights):
             return self.handle_grouped_column(name, weights, vp_stage=vp_stage)
         if self.mca_config.moe_grouped_gemm and self.name_match(pure_name, self.config.grouped_row_weights):
@@ -650,6 +718,7 @@ class DistConverter:
 
     @staticmethod
     def dist_converter_iter(mca_config: "McaModelConfig", **kwargs):
+        warnings.warn("dist_converter_iter is deprecated", DeprecationWarning)
         for tp_rank, pp_rank, ep_rank in product(
             range(mca_config.tensor_model_parallel_size),
             range(mca_config.pipeline_model_parallel_size),

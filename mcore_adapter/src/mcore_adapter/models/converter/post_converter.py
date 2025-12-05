@@ -20,12 +20,14 @@ from transformers.models.auto.auto_factory import _get_model_class
 
 from ...checkpointing import get_checkpoint_name, save_config_and_state_dict
 from ...training_args import DistributingParallelArguments
-from ...utils import get_logger
+from ...utils import get_logger, is_peft_available
 from ..auto.config_auto import AutoConfig
-from .dist_converter import DistConverter
 from .model_converter import ModelConverter
 from .template import get_template
 
+
+if is_peft_available():
+    from peft import LoraConfig, PeftConfig, get_peft_model
 
 if TYPE_CHECKING:
     from ...training_args import DistributingParallelArguments
@@ -68,13 +70,27 @@ def _add_mca_state_dicts_to_hf(
 
 
 def convert_checkpoint_to_hf(
-    model_name_or_path: str, save_directory: str, torch_dtype: Optional["torch.dtype"] = None, verbose: bool = True
+    model_name_or_path: str,
+    save_directory: str,
+    adapter_name_or_path: Optional[str] = None,
+    torch_dtype: Optional["torch.dtype"] = None,
+    verbose: bool = True,
 ):
-    mca_config = AutoConfig.from_pretrained(model_name_or_path)
+    if is_lora := adapter_name_or_path is not None:
+        if not is_peft_available():
+            raise ImportError("PEFT is not installed. Please install it with `pip install peft`")
+        ckpt_path = adapter_name_or_path
+        peft_config = PeftConfig.from_pretrained(adapter_name_or_path)
+    else:
+        ckpt_path = model_name_or_path
+    mca_config = AutoConfig.from_pretrained(ckpt_path)
     if mca_config is None:
         raise ValueError("No mca config found in checkpoint")
     if mca_config.hf_model_type is None:
         raise ValueError("No hf model type found in mca config")
+    if is_lora:
+        setattr(mca_config, "lora_rank", peft_config.r)
+
     template: "Template" = get_template(mca_config.hf_model_type)
     hf_config = template.convert_mca_to_hf_config(mca_config)
     template.set_mca_config_for_ops(mca_config)
@@ -93,7 +109,7 @@ def convert_checkpoint_to_hf(
         # TODO: use loader and support low_mem
         for tp_rank in range(mca_config.tensor_model_parallel_size):
             ckpt_name = get_checkpoint_name(
-                model_name_or_path,
+                ckpt_path,
                 tensor_rank=tp_rank,
                 pipeline_rank=pp_rank,
                 pipeline_parallel=mca_config.pipeline_model_parallel_size > 1,
@@ -134,18 +150,43 @@ def convert_checkpoint_to_hf(
     else:
         model_class = _get_model_class(hf_config, model_class._model_mapping)
 
-    model = model_class.from_pretrained(
-        None,
-        config=hf_config,
-        state_dict=hf_state_dict,
-        torch_dtype=torch_dtype if torch_dtype is not None else mca_config.params_dtype,
-        trust_remote_code=True,
-    )
+    if is_lora:
+        hf_config.save_pretrained(save_directory)
+        target_modules = set()
+        for name, _ in hf_state_dict.items():
+            if ".lora_A." in name or ".lora_B." in name:
+                # TODO: support VLM lora
+                target_modules.add(name[:name.find(".lora")].split(".")[-1])
+        target_modules = list(target_modules)
+        model = model_class.from_pretrained(
+            model_name_or_path,
+            config=hf_config,
+            torch_dtype=torch_dtype if torch_dtype is not None else mca_config.params_dtype,
+            trust_remote_code=True,
+        )
+        lora_config = LoraConfig(
+            r=peft_config.r,
+            target_modules=target_modules,
+            lora_alpha=peft_config.lora_alpha,
+            lora_dropout=peft_config.lora_dropout,
+            use_rslora=peft_config.use_rslora,
+            modules_to_save=peft_config.modules_to_save,
+        )
+        model = get_peft_model(model, lora_config)
+        model.base_model.model.load_state_dict(hf_state_dict, strict=False)
+    else:
+        model = model_class.from_pretrained(
+            None,
+            config=hf_config,
+            state_dict=hf_state_dict,
+            torch_dtype=torch_dtype if torch_dtype is not None else mca_config.params_dtype,
+            trust_remote_code=True,
+        )
     model.save_pretrained(save_directory)
     mca_config.save_hf_auto_map_files(save_directory)
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
     try:
-        processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(ckpt_path, trust_remote_code=True)
     except Exception as e:
         logger.info(f"Processor was not found: {e}.")
         processor = tokenizer

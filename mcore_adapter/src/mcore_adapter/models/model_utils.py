@@ -8,8 +8,9 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.enums import AttnBackend
 
 from ..constants import MCA_CONFIG_NAME
-from ..utils import get_logger
 from ..platforms import current_platform
+from ..utils import get_logger
+
 
 if TYPE_CHECKING:
     from megatron.core.transformer import TransformerConfig
