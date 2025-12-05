@@ -4,7 +4,7 @@ patch = None
 if sgl.__version__ == '0.4.6.post4':
     from roll.third_party.sglang import v046post4_patch
     patch = v046post4_patch
-elif sgl.__version__ == '0.4.6.post1':
+elif sgl.__version__ == '0.4.6.post1' or  sgl.__version__ == '0.4.6.post5':
     from roll.third_party.sglang import v046post4_patch
     patch = v046post4_patch
 elif sgl.__version__ == '0.4.10.post2':
