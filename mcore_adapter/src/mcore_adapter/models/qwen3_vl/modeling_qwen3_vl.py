@@ -356,7 +356,7 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
         }
         if self.config.context_parallel_size > 1:
             cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
-            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=["attention_mask", "position_ids"])
+            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=[])
 
         if not self.pre_process or (pixel_values is None and pixel_values_videos is None) or decoder_input is not None:
             return super().forward(
