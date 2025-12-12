@@ -433,6 +433,11 @@ class RLVRPipeline(BasePipeline):
         actor_infer_timer = _Timer(window_size=5)
         actor_infer_response_timer = _Timer(window_size=5)
         actor_train_timer = _Timer(window_size=5)
+        
+        metrics_mgr.timers["tps"] = tps_timer
+        metrics_mgr.timers["actor_infer"] = actor_infer_timer
+        metrics_mgr.timers["actor_infer_response"] = actor_infer_response_timer
+        metrics_mgr.timers["actor_train"] = actor_train_timer
 
         pre_step_total_time = 0
         if self.pipeline_config.async_pipeline and self.pipeline_config.generate_opt_level == 1:

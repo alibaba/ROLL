@@ -484,6 +484,11 @@ class RLVRVLMPipeline(BasePipeline):
         actor_infer_response_timer = _Timer(window_size=5)
         actor_train_timer = _Timer(window_size=5)
 
+        metrics_mgr.timers["tps"] = tps_timer
+        metrics_mgr.timers["actor_infer"] = actor_infer_timer
+        metrics_mgr.timers["actor_infer_response"] = actor_infer_response_timer
+        metrics_mgr.timers["actor_train"] = actor_train_timer
+
         for global_step in range(self.pipeline_config.max_steps):
             if global_step <= self.state.step:
                 global_step += 1
