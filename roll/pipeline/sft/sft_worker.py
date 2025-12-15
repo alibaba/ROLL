@@ -46,7 +46,13 @@ class SFTWorker(Worker):
         data = data.to(current_platform.device_type)
         data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
         data = self.strategy.get_data_input(data)
-        metrics = self.strategy.forward_step(batch=data, forward_func=self.loss_func)
+        
+        loss_func = self.loss_func
+        if self.worker_config.use_sequence_packing:
+            from roll.utils.sequence_packing import SequencePackingSFTLossWrapper
+            loss_func = SequencePackingSFTLossWrapper(self.strategy, loss_func)
+
+        metrics = self.strategy.forward_step(batch=data, forward_func=loss_func)
         output = DataProto(meta_info={"metrics": metrics}).to("cpu")
         return output
 
