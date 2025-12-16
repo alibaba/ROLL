@@ -167,6 +167,26 @@ class StudentWorker(Worker):
         }
         return loss, student_metrics
 
+    @register(Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
+    def val_step(self, data: DataProto):
+        data = data.to(current_platform.device_type)
+        data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
+        data = self.strategy.get_data_input(data)
+        if "labels" in data.batch.keys():
+            # rename key: labels -> labels_for_loss
+            data.batch.rename_key_("labels", "labels_for_loss")
+        metrics = self.strategy.forward_step(batch=data, forward_func=self.loss_func_for_eval)
+        output = DataProto(meta_info={"metrics": metrics}).to("cpu")
+        return output
+    
+    def loss_func_for_eval(self, data: DataProto, output_tensor: torch.Tensor):
+        labels = data.batch['labels_for_loss']
+        gpt_loss, _ = self.strategy.op_compute_language_loss_from_logits(output_tensor, labels)
+        student_metrics = {
+            "student/val_loss": gpt_loss.detach().item(),
+        }
+        return gpt_loss, student_metrics
+    
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_checkpoint(self, global_step):
         with Timer("do_checkpoint") as total_timer:

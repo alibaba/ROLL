@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 import datasets
 import ray
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from codetiming import Timer
@@ -177,6 +178,14 @@ class DistillPipeline(BasePipeline):
             raise ValueError("No dataset paths provided")
         print(f'load_dataset_paths: {chr(10)} {chr(10).join(dataset_paths)}')
         dataset = datasets.load_dataset('json', data_files=dataset_paths)['train']
+        
+        val_dataset = None
+        if self.pipeline_config.validation and self.pipeline_config.validation.data_args:
+            val_dataset_paths = self.pipeline_config.validation.data_args.file_name
+            if not val_dataset_paths:
+                raise ValueError("No val dataset paths provided")
+            print(f'load_dataset_paths: {chr(10)} {chr(10).join(val_dataset_paths)}')
+            val_dataset = datasets.load_dataset("json", data_files=val_dataset_paths)["train"]
 
         # Currently, only models where the student and teacher are of the same type are supported.
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.student.model_args)
@@ -231,6 +240,24 @@ class DistillPipeline(BasePipeline):
                                          data_collator,
                                          num_proc=self.pipeline_config.student.training_args.dataloader_num_workers)
 
+        if val_dataset:
+            val_dataset = preprocess_dataset(
+                val_dataset,
+                self.tokenizer,
+                pipeline_config
+            )
+            
+            self.val_dataloader = DataLoader(
+                dataset=val_dataset,
+                batch_size=self.pipeline_config.student.infer_batch_size *\
+                            self.pipeline_config.student.training_args.gradient_accumulation_steps *\
+                            self.student.get_rank_info(0).dp_size,
+                shuffle=False,
+                drop_last=True,
+                num_workers=self.pipeline_config.student.training_args.dataloader_num_workers,
+                collate_fn=data_collator
+            )
+        
         self.set_checkpoint_clusters(self.student)
 
     @torch.no_grad()
@@ -248,6 +275,12 @@ class DistillPipeline(BasePipeline):
                 logger.info(f"pipeline step {global_step} start...")
 
                 metrics_mgr.clear_metrics()
+                
+                if self.val_dataloader and global_step % self.pipeline_config.eval_steps == 0:
+                    with Timer(name="val") as val_timer:
+                        val_metrics = self.val()
+                        metrics_mgr.add_reduced_metrics(val_metrics)
+                    metrics_mgr.add_metric("time/val", val_timer.last)
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.meta_info = {"global_step": global_step, "is_offload_states": False, "is_offload_optimizer_states_in_train_step": False}
@@ -293,3 +326,15 @@ class DistillPipeline(BasePipeline):
                 logger.info(f"pipeline step {global_step} finished")
                 global_step += 1
         logger.info("pipeline complete!")
+    
+    @torch.no_grad()
+    def val(self):
+        val_loss_list = []
+        for batch_dict in self.val_dataloader:
+            batch: DataProto = DataProto.from_single_dict(batch_dict)
+            batch.meta_info = {"is_offload_optimizer_states_in_train_step": False}
+            val_metrics_refs = self.student.val_step(batch, blocking=False)
+            val_metrics = DataProto.materialize_concat(data_refs=val_metrics_refs)
+            val_metrics = val_metrics.meta_info.pop("metrics", {})
+            val_loss_list.append(val_metrics[f"student/val_loss"])
+        return {"student/val_loss": np.concatenate(val_loss_list)}

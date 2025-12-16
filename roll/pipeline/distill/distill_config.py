@@ -26,6 +26,10 @@ class DistillConfig(BaseConfig):
         default_factory=WorkerConfig,
         metadata={"help": "Configuration for the teacher's role."}
     )
+    validation: WorkerConfig = field(
+        default=None,
+        metadata={"help": "Configuration for the validation."}
+    )
 
     # data related
     question_key: str = field(

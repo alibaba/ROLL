@@ -16,6 +16,7 @@ checkpoint_config:
 save_steps: 100
 logging_steps: 1
 resume_from_checkpoint: false
+eval_steps: 50
 
 student_pretrain: Qwen/Qwen2.5-7B-Instruct
 teacher_pretrain: Qwen/Qwen2.5-14B-Instruct
@@ -33,6 +34,12 @@ max_grad_norm: 1.0
 
 question_key: question_zh
 answer_key: answer_zh
+
+validation:
+  data_args:
+    file_name: 
+      - data/GSM8K_zh.json
+    template: qwen2_5
 
 student:
   model_args:
@@ -64,6 +71,7 @@ student:
       recompute_granularity: full
   use_sequence_packing: True
   device_mapping: list(range(0,8))
+  infer_batch_size: 2
 
 teacher:
   model_args:
