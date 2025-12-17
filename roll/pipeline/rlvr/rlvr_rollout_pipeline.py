@@ -49,9 +49,12 @@ class RLVRRolloutPipeline(RLVRPipeline):
         self.val_dataset = datasets.load_dataset("json", data_files=val_dataset_paths)["train"]
 
         # 加上format，然后转ids的func
-        template_name = self.pipeline_config.global_template
-        encode_function = get_encode_function(template_name, self.tokenizer, self.pipeline_config.actor_train.data_args)
-
+        template_name = (
+            self.pipeline_config.global_template
+            if self.pipeline_config.global_template
+            else self.pipeline_config.actor_train.data_args.template
+        )
+        encode_function = get_encode_function(template_name, self.pipeline_config.actor_train.data_args, self.tokenizer)
         self.val_dataset = preprocess_dataset(
             self.val_dataset,
             self.pipeline_config.prompt_length,
