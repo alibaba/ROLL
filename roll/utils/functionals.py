@@ -307,13 +307,26 @@ def get_eos_mask(response_id: torch.Tensor, eos_token: int = 2, dtype=torch.int6
     return eos_mask
 
 
-def get_pad_mask(response_id: torch.Tensor, pad_token: int = 0, dtype=torch.int64):
+def get_pad_mask(response_id: torch.Tensor, pad_token: int = 0, eos_token: int = 1, dtype=torch.int64):
     """
     e.g. pad token=0
     response_id: [1, 2, 2, 42, 3, 5, 1, 0, 0]
     pad_mask:     [1, 1, 1, 1,  1, 1, 1, 0, 0]
+    
+    If eos_token == pad_token, the first pad token (which is the eos token) should be kept.
+    e.g. pad_token=0, eos_token=0
+    response_id: [1, 2, 2, 42, 3, 5, 0, 0, 0]
+    pad_mask:     [1, 1, 1, 1,  1, 1, 1, 0, 0]  (first pad token/eos token is kept)
     """
     pad_mask = response_id.not_equal(pad_token).to(dtype)
+    
+    # eos_token == pad_token, 需要保留第一个pad token否则会误将eos token mask掉
+    if eos_token == pad_token:
+        pad_positions = response_id.eq(pad_token).to(dtype)
+        cumsum_pad = torch.cumsum(pad_positions, dim=-1)
+        first_pad_token = (cumsum_pad == 1).to(dtype)
+        pad_mask = pad_mask | first_pad_token
+    
     assert (
         not (pad_mask[:, 0] == 0).logical_and(pad_mask.sum(-1) != 0).any()
     ), f"response_id is not valid: {response_id}, pad_token is {pad_token}"
@@ -812,7 +825,7 @@ def postprocess_generate(
     attention_mask = (
         attention_mask.unsqueeze(1).repeat(1, num_return_sequences, 1).view(output_batch_size, prompt_length)
     )
-    response_mask = get_pad_mask(response_id=response, pad_token=pad_token_id, dtype=attention_mask.dtype)
+    response_mask = get_pad_mask(response_id=response, pad_token=pad_token_id, eos_token=eos_token_id, dtype=attention_mask.dtype)
     attention_mask = torch.cat((attention_mask, response_mask), dim=-1)
 
     position_ids = prompts.batch["position_ids"]
