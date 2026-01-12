@@ -66,6 +66,14 @@ async function main() {
   const totalPRs = prsAll.length;
   const openPRs = prsOpen.length;
 
+  // 5. Commits (all)
+  const commits = await octokit.paginate(octokit.rest.repos.listCommits, {
+    owner,
+    repo: repoName,
+    per_page: 100,
+  });
+  const commitCount = commits.length;
+
   // Pure issues = total issues - PRs
   const pureTotalIssues = totalIssues - totalPRs;
   const pureOpenIssues = openIssues - openPRs;
@@ -87,6 +95,7 @@ async function main() {
     stars,
     forks,
     contributors: contributorCount,
+    commits: commitCount,
     issues: {
       total: pureTotalIssues,
       open: pureOpenIssues,

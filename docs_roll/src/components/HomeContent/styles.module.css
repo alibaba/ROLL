@@ -57,6 +57,18 @@
     }
   }
 
+  /* Fade in animation styles */
+  .fadeIn {
+    opacity: 0;
+    transform: translateY(30px);
+    transition: opacity 0.8s ease-out, transform 0.8s ease-out;
+  }
+
+  .fadeIn.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
   .overview {
     margin-top: 40px;
     display: flex;
@@ -216,6 +228,24 @@
           flex-direction: column;
         }
       }
+    }
+  }
+  .stats {
+    text-align: center;
+    margin-top: 110px;
+    padding-bottom: 80px;
+    .count {
+      color: var(--home-title-primary);
+      font-size: 44px;
+      font-weight: 600;
+      line-height: 54px;
+      margin-bottom: 20px;
+    }
+    .label {
+      color: var(--home-title-primary);
+      font-size: 16px;
+      font-weight: 500;
+      line-height: 24px;
     }
   }
 }

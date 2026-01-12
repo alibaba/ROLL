@@ -1,22 +1,70 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button, Image, Divider, Col, Row, Collapse, Modal, ConfigProvider, theme } from 'antd';
 import { GithubOutlined, WechatOutlined, XOutlined } from '@ant-design/icons';
 import clsx from 'clsx';
-import useBaseUrl from '@docusaurus/useBaseUrl';
 import { useColorMode } from '@docusaurus/theme-common';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
-import Translate, { translate } from '@docusaurus/Translate';
-import Statistic from '../Statistic';
+import Translate from '@docusaurus/Translate';
+import dayjs from 'dayjs';
+import CountUp from 'react-countup';
 
 import styles from './styles.module.css';
 
+// Intersection Observer Hook
+const useIntersectionObserver = (options = {}) => {
+  const [isVisible, setIsVisible] = useState(false);
+  const elementRef = useRef(null);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setIsVisible(true);
+        observer.disconnect();
+      }
+    }, {
+      threshold: 0.2,
+      rootMargin: '0px',
+      ...options
+    });
+
+    const currentElement = elementRef.current;
+    if (currentElement) {
+      observer.observe(currentElement);
+    }
+
+    return () => {
+      if (currentElement) {
+        observer.unobserve(currentElement);
+      }
+    };
+  }, [options]);
+
+  return [elementRef, isVisible];
+};
+
 export default () => {
   const [open, setOpen] = useState(false);
+  const [todayStat, setTodayStat] = useState({});
+  const today = dayjs().format('YYYY-MM-DD');
   const { colorMode } = useColorMode();
   const { i18n } = useDocusaurusContext();
   const { currentLocale } = i18n;
   const isChinese = currentLocale !== 'en';
   const targetPath = isChinese ? '/ROLL/zh-Hans/' : '/ROLL/'
+
+  // Intersection Observer refs
+  const [mainImgRef, mainImgVisible] = useIntersectionObserver();
+  const [overviewRef, overviewVisible] = useIntersectionObserver();
+  const [statsRef, statsVisible] = useIntersectionObserver();
+  const [chooseRef, chooseVisible] = useIntersectionObserver();
+  const [coreRef, coreVisible] = useIntersectionObserver();
+  const [researchRef, researchVisible] = useIntersectionObserver();
+
+  useEffect(() => {
+    fetch('/ROLL/stats.json').then(res => res.json()).then(data => {
+      setTodayStat(data[today]);
+    })
+  }, []);
 
   return <ConfigProvider theme={{ algorithm: colorMode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm }}>
     <div className={clsx('container', styles.container)} id="home">
@@ -52,11 +100,11 @@ export default () => {
           <Button className={styles.github} target='_blank' href="https://deepwiki.com/alibaba/ROLL" variant="outlined" icon={<Image width={14} src="https://img.alicdn.com/imgextra/i3/O1CN01JUBft41wYcExwXCOK_!!6000000006320-55-tps-460-500.svg" preview={false}></Image>}>{"DeepWiki >"}</Button>
         </div>
 
-        <div className={styles.mainImg}>
+        <div ref={mainImgRef} className={clsx(styles.mainImg, styles.fadeIn, mainImgVisible && styles.visible)}>
           <Image className={styles.img} src="https://img.alicdn.com/imgextra/i2/O1CN01ZGW6zG1sXSmML15c3_!!6000000005776-2-tps-2160-1112.png" preview={false}></Image>
         </div>
 
-        <div className={styles.overview}>
+        <div ref={overviewRef} className={clsx(styles.overview, styles.fadeIn, overviewVisible && styles.visible)}>
           <div className={styles.left}>
             <Image className={styles.img} src="https://img.alicdn.com/imgextra/i4/O1CN01t4tcSz1ZIN1sEzNnO_!!6000000003171-55-tps-54-54.svg" preview={false}></Image>
             <div>ROLL</div>
@@ -73,27 +121,42 @@ export default () => {
 
         <Divider style={{ borderColor: 'var(--home-divider-color)' }}></Divider>
 
-        <div>
+        <div ref={statsRef} className={styles.stats}>
           <Row gutter={16}>
             <Col span={8}>
-              <Statistic count="1.9k" content={translate({
-                message: 'Github Stars',
-              })} />
+              <div className={styles.count}>
+                {statsVisible && <CountUp end={todayStat?.stars || 2620} />}
+              </div>
+              <div className={styles.label}>
+                <Translate>
+                  Github Stars
+                </Translate>
+              </div>
             </Col>
             <Col span={8}>
-              <Statistic count="30+" content={translate({
-                message: 'Contributors',
-              })} />
+              <div className={styles.count}>
+                {statsVisible && <CountUp end={todayStat?.contributors || 37} />}
+              </div>
+              <div className={styles.label}>
+                <Translate>
+                  Contributors
+                </Translate>
+              </div>
             </Col>
             <Col span={8}>
-              <Statistic count="200+" content={translate({
-                message: 'Commits',
-              })} />
+              <div className={styles.count}>
+                {statsVisible && <CountUp end={todayStat?.commits || 371} />}
+              </div>
+              <div className={styles.label}>
+                <Translate>
+                  Commits
+                </Translate>
+              </div>
             </Col>
           </Row>
         </div>
 
-        <div className={styles.choose}>
+        <div ref={chooseRef} className={clsx(styles.choose, styles.fadeIn, chooseVisible && styles.visible)}>
           <Image className={styles.img} src="https://img.alicdn.com/imgextra/i3/O1CN01NwkUFs26qbxZhsz2J_!!6000000007713-55-tps-54-54.svg" preview={false}></Image>
           <div className={styles.wrap}>
             <div className={styles.left}>
@@ -141,7 +204,7 @@ export default () => {
           </div>
         </div>
 
-        <div className={styles.core} id="core">
+        <div ref={coreRef} className={clsx(styles.core, styles.fadeIn, coreVisible && styles.visible)} id="core">
           <Image className={styles.img} src="https://img.alicdn.com/imgextra/i4/O1CN012UiWaS1KzDqk2EhyO_!!6000000001234-55-tps-54-54.svg" preview={false}></Image>
           <div>
             <div className={styles.title}>
@@ -218,7 +281,7 @@ export default () => {
           </div>
         </div>
 
-        <div className={styles.research} id="research">
+        <div ref={researchRef} className={clsx(styles.research, styles.fadeIn, researchVisible && styles.visible)} id="research">
           <Image className={styles.img} src="https://img.alicdn.com/imgextra/i1/O1CN016cZT1g1tk7L6GRZ7y_!!6000000005939-55-tps-54-54.svg" preview={false}></Image>
           <div>
             <div className={styles.title}>
