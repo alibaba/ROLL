@@ -1,5 +1,6 @@
 from . import (
     deepseek_v3,
+    glm4_moe,
     llama,
     mistral,
     mixtral,
