@@ -22,5 +22,11 @@ RUN pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.al
     "megatron-core>=0.13.0,<0.14.0" "deepspeed==0.16.4"
 
 RUN pip uninstall -y flash-attn && \
-    pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    pip install \
+    --no-build-isolation \
+    --trusted-host mirrors.aliyun.com \
+    --index-url https://mirrors.aliyun.com/pypi/simple/ \
     "flash-attn==2.7.4.post1" "flash-linear-attention"
+
+RUN pip install vllm==0.11.0 \
+    --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/
