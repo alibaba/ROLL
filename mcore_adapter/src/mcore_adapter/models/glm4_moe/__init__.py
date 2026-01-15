@@ -18,7 +18,6 @@ from ..converter.template import (
 from ..model_config import McaModelConfig
 from ..model_factory import McaGPTModel
 
-
 class Glm4MoeTemplate(Template):
     def convert_hf_to_mca_config_kws(self, hf_config, **kw_args):
         partial_rotary_factor = getattr(hf_config, "partial_rotary_factor", None)
@@ -140,8 +139,8 @@ register_template(
         "position_embedding_type": "rope",
         "normalization": "RMSNorm",
         "add_bias_linear": False,
-        # "hidden_dropout": 0.0,
-        "rotary_percent": 1.0,
+        "hidden_dropout": 0.0,
+        "rotary_percent": 0.5,
         "moe_router_load_balancing_type": "seq_aux_loss",
         "moe_router_pre_softmax": False,
         "qk_layernorm": False,
