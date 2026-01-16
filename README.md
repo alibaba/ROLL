@@ -165,6 +165,7 @@ We are continuously working to expand ROLL's capabilities:
 ---
 
 ## 🏆 Notable work based on ROLL
+- [SocioReasoner](https://github.com/AMAP-ML/SocioReasoner): A vision-language method for urban socio-semantic segmentation that employs a render-and-refine mechanism optimized by RL to identify abstract social entities using satellite and map data.
 - [STAgent](https://arxiv.org/abs/2512.24957): An agentic LLM specialized for spatio-temporal understanding and complex tasks like constrained POI discovery and itinerary planning, featuring hierarchical data curation with 1:10,000 filter ratio and cascaded training (seed SFT + difficulty-aware SFT + RL), achieving strong performance on TravelBench while preserving general capabilities.
 - [IPRO](https://arxiv.org/abs/2510.14255): A novel video diffusion framework using reinforcement learning to enhance identity preservation in human-centric I2V generation, optimizing diffusion models with face identity scorer and KL-divergence regularization.
 - [TaoSR-SHE](https://arxiv.org/abs/2510.07972): Stepwise Hybrid Examination Reinforcement Learning Framework for Taobao Search Relevance, with SRPO (hybrid reward model + offline verifier), diversified data filtering, and multi-stage curriculum learning.
