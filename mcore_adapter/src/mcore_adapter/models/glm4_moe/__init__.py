@@ -114,6 +114,10 @@ register_template(
     hf_layer_prefix="model.layers.",
     hf_moe_prefix=".mlp.experts.",
     template_class=Glm4MoeTemplate,
+    hf_invalid_keys=[
+        ".embed_tokens.weight", # skip layers.x.embed_tokens
+        ".shared_head.head.weight",
+    ],
     config_hf_to_mca={
         "max_position_embeddings": "max_sequence_length",
         "hidden_size": "hidden_size",
@@ -176,6 +180,10 @@ register_template(
             hf_names=[".self_attn.q_proj.bias", ".self_attn.k_proj.bias", ".self_attn.v_proj.bias"],
             mca_names=".self_attention.linear_qkv.bias",
         ),
+        RenameConverOp(hf_names=".enorm.weight", mca_names=".enorm.weight"),
+        RenameConverOp(hf_names=".hnorm.weight", mca_names=".hnorm.weight"),
+        RenameConverOp(hf_names=".eh_proj.weight", mca_names=".eh_proj.weight"),
+        RenameConverOp(hf_names=".shared_head.norm.weight", mca_names=".final_layernorm.weight"),
     ],
 )
 
