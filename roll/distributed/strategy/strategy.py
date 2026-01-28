@@ -23,6 +23,7 @@ class InferenceStrategy(ABC):
         self.worker = worker
         self.model = None
         self.tokenizer = None
+        self.running = False
 
         self.worker_config = self.worker.worker_config
         self.thread_executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=5)

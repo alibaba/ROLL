@@ -1,6 +1,8 @@
 from .platform import Platform
 from ..utils.logging import get_logger
 
+import torch
+
 logger = get_logger()
 
 
@@ -74,3 +76,7 @@ class NpuPlatform(Platform):
     @classmethod
     def apply_ulysses_patch(cls) -> None:
         return
+
+    @classmethod
+    def device_memory_used(cls) -> None:
+        return torch.npu.mem_get_info()[0]

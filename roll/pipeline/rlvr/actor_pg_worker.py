@@ -275,6 +275,10 @@ class ActorPGWorker(ActorWorker):
             "topr_negative_total_clipfrac": negative_total_clipped.mean().detach().item(),
             "topr_scores_mean": scores.mean().detach().item(),
             "topr_scores_std": scores.std().detach().item(),
+            "topr_positive_loss": positive_loss,
+            "topr_negative_loss": negative_loss,
+            "topr_weighted_positive_loss": weighted_positive_loss,
+            "topr_weighted_negative_loss": weighted_negative_loss,
         })
         
         return topr_loss
