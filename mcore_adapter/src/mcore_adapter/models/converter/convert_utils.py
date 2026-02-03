@@ -1,3 +1,4 @@
+import math
 import re
 from dataclasses import dataclass, field
 from importlib.metadata import version
@@ -7,6 +8,7 @@ import torch
 import torch.distributed as dist
 from megatron.core import mpu
 from packaging.version import Version as PkgVersion
+
 from ...platforms import current_platform
 
 
@@ -21,32 +23,76 @@ MCA_MTP_MOE_PREFIX = ".transformer_layer.mlp.experts.local_experts."
 MAX_SHARD_SIZE = 5_000_000_000  # 5GB
 
 
-def get_layer_index(weight_name: str, prefix: str):
+def get_layer_index(weight_name: str, prefix: str) -> Optional[int]:
+    """
+    1. megatron format: decoder.layers.{layer_index}.{weight} -> layer_index
+    2. mtp format: mtp.layers.{layer_index}.{weight} -> layer_index
+    3. hf format: model.layers.{layer_index}.{weight} -> layer_index
+    """
+    escaped_prefix = re.escape(prefix)
+    pattern = rf"^{escaped_prefix}(\d+)(?:\.|$)"
+    match = re.match(pattern, weight_name)
+    return int(match.group(1)) if match else None
+
+
+def get_moe_index(weight_name: str, prefix: str, moe_prefix: str) -> Optional[int]:
+    """
+    1. megatron format: decoder.layers.{layer_index}.mlp.experts.local_experts.{moe_index}.{weight} -> moe_index
+    2. mtp format: mtp.layers.{layer_index}.transformer_layer.mlp.experts.local_experts.{moe_index}.{weight} -> moe_index
+    """
     if not weight_name.startswith(prefix):
         return None
-    return int(weight_name.replace(prefix, "").split(".")[0])
+    escaped_prefix = re.escape(prefix)
+    escaped_moe_prefix = re.escape(moe_prefix)
+    pattern = rf"^({escaped_prefix}\d+{escaped_moe_prefix})(\d+)(?:\.|$)"
+    match = re.match(pattern, weight_name)
+    return int(match.group(2)) if match else None
+
+
+def get_layer_prefix(weight_name: str, prefix: str) -> str:
+    """
+    decoder.layers.{layer_index}.{weight} -> decoder.layers.{layer_index}
+    model.layers.{layer_index}.{weight} -> model.layers.{layer_index}
+    """
+    escaped_prefix = re.escape(prefix)
+    pattern = rf"^({escaped_prefix}\d+)"
+    if match := re.match(pattern, weight_name):
+        return match.group(1)
+    raise ValueError(f"Cannot get layer prefix from {weight_name=} with {prefix=}")
+
+
+def get_moe_prefix(weight_name: str, prefix: str, moe_prefix: str) -> str:
+    """
+    decoder.layers.{layer_index}.mlp.experts.local_experts.{moe_index}.{weight} -> decoder.layers.{layer_index}.mlp.experts.local_experts.{moe_index}
+    model.layers.{layer_index}.mlp.experts.{moe_index}.{weight} -> model.layers.{layer_index}.mlp.experts.{moe_index}
+
+    For qwen3_vl_moe:
+    model.language_model.layers.{layer_index}.mlp.experts.{weight} -> model.language_model.layers.{layer_index}.mlp.experts
+    """
+    escaped_prefix = re.escape(prefix)
+    escaped_moe_prefix = re.escape(moe_prefix)
+    pattern = rf"^({escaped_prefix}\d+{escaped_moe_prefix}\d+)"
+    if match := re.match(pattern, weight_name):
+        return match.group(1)
+
+    # For qwen3_vl_moe
+    pattern = rf"^({escaped_prefix}\d+{escaped_moe_prefix})"
+    if match := re.match(pattern, weight_name):
+        return match.group(1)
+    raise ValueError(f"Cannot get moe prefix from {weight_name=} with {prefix=} and {moe_prefix=}")
 
 
 def get_weight_prefix(weight_name: str, prefix: str, moe_prefix: str = None):
     if not weight_name.startswith(prefix):
         return ""
-    layer_index = get_layer_index(weight_name, prefix)
-    layer_prefix = prefix + str(layer_index)
-    if moe_prefix is None:
-        return layer_prefix
-    return layer_prefix + get_weight_prefix(weight_name[len(layer_prefix) :], prefix=moe_prefix)
+    if moe_prefix is not None and moe_prefix in weight_name:
+        return get_moe_prefix(weight_name, prefix, moe_prefix)
+    return get_layer_prefix(weight_name, prefix)
 
 
 def remove_weight_prefix(weight_name: str, prefix: str, moe_prefix: str = None):
     weight_prefix = get_weight_prefix(weight_name, prefix, moe_prefix)
-    return weight_name.replace(weight_prefix, "", 1)
-
-
-def get_moe_index(weight_name: str, prefix: str, moe_prefix: str = None):
-    if not weight_name.startswith(prefix):
-        return None
-    mos_layer_name = remove_weight_prefix(weight_name, prefix)
-    return get_layer_index(mos_layer_name, moe_prefix)
+    return weight_name.removeprefix(weight_prefix)
 
 
 def add_layer_prefix(
@@ -59,9 +105,13 @@ def add_layer_prefix(
     if not weight_name.startswith("."):
         # not weight in layer
         return weight_name
-    if moe_index is not None:
-        weight_name = add_layer_prefix(weight_name, moe_index, moe_prefix)
-    return prefix + str(layer_index) + weight_name
+
+    if moe_index is not None and moe_prefix is not None:
+        full_prefix = f"{prefix}{layer_index}{moe_prefix}{moe_index}"
+    else:
+        full_prefix = f"{prefix}{layer_index}"
+
+    return full_prefix + weight_name
 
 
 def convert_to_mca_prefix(weight_prefix: str, prefix: str, moe_prefix: str = None):
@@ -256,6 +306,28 @@ def te_grouped_moe_available():
     return get_te_version() >= PkgVersion("1.9.0.dev0")
 
 
+def _noisy_mean_initialization(embed_weight: "torch.Tensor", num_new_tokens: int) -> None:
+    embedding_dim = embed_weight.size(1)
+    if torch.distributed.get_rank() == 0:
+        avg_weight = embed_weight[:-num_new_tokens].mean(dim=0, keepdim=True)
+        noise_weight = torch.empty_like(embed_weight[-num_new_tokens:])
+        noise_weight.normal_(mean=0, std=(1.0 / math.sqrt(embedding_dim)))
+        added_embed_weight = avg_weight + noise_weight
+        torch.distributed.broadcast(added_embed_weight.to(current_platform.current_device()), src=0)
+    else:
+        added_embed_weight = torch.empty_like(embed_weight[-num_new_tokens:], device=current_platform.current_device())
+        torch.distributed.broadcast(added_embed_weight, src=0)
+    embed_weight[-num_new_tokens:] = added_embed_weight.cpu()
+
+
+def resize_embedding_layer(original_mca_weight: torch.Tensor, resized_vocab_size: int):
+    mca_weight = original_mca_weight.clone()
+    original_vocab_size = mca_weight.size(0)
+    mca_weight.resize_((resized_vocab_size, mca_weight.size(1)))
+    _noisy_mean_initialization(mca_weight, resized_vocab_size - original_vocab_size)
+    return mca_weight
+
+
 @dataclass
 class StackedTensors:
     tensors: Optional[List["torch.Tensor"]]
@@ -295,6 +367,7 @@ class TensorBucket:
     @staticmethod
     def pop_tensor_in_buffer(named_tensors: Dict[str, "torch.Tensor"], tensors_meta, buffer: "torch.Tensor"):
         for name, meta in tensors_meta.items():
+            meta = tensors_meta[name]
             bucket_start, tensor_start, save_bytes = meta["bucket_start"], meta["tensor_start"], meta["save_bytes"]
             tensor = named_tensors.get(name, None)
             if tensor is None:

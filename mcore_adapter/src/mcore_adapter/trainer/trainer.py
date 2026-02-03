@@ -1,7 +1,6 @@
 import math
 import os
 import random
-import shutil
 import sys
 import time
 import warnings
@@ -27,6 +26,7 @@ from megatron.core.transformer.moe.moe_utils import (
     get_moe_layer_wise_logging_tracker,
     reduce_aux_losses_tracker_across_ranks,
 )
+from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from torch._tensor import Tensor
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from transformers import PreTrainedTokenizerBase
@@ -47,11 +47,13 @@ from transformers.trainer_utils import (
     set_seed,
     speed_metrics,
 )
+from transformers.utils import is_peft_available
 
-from ..platforms import current_platform
 from ..checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
-from ..constants import DIST_OPTIMIZER_DIR, IGNORE_INDEX
+from ..constants import ADAPTER_CONFIG_NAME, DIST_OPTIMIZER_DIR, IGNORE_INDEX
 from ..initialize import initialize_megatron
+from ..patcher import patch_torch_find_nd_overlapping_shards, patch_torch_validate_global_plan
+from ..platforms import current_platform
 from ..training_args import TrainingArguments
 from ..utils import distributed_reduce, get_logger
 from .utils import (
@@ -67,6 +69,11 @@ if TYPE_CHECKING:
 
     from ..models import VirtualModels
 
+
+if is_peft_available():
+    from peft import PeftModel
+
+
 logger = get_logger(__name__)
 
 
@@ -81,6 +88,8 @@ class McaTrainer(Trainer):
         args: TrainingArguments = None,
         **kwargs,
     ):
+        patch_torch_find_nd_overlapping_shards()
+        patch_torch_validate_global_plan()
         initialize_megatron(args=args)
         self.args = args
         super().__init__(
@@ -247,6 +256,8 @@ class McaTrainer(Trainer):
     def _pre_compute_loss(self, data_iterator: Iterator, model: DistributedDataParallel):
         inputs = self._prepare_train_inputs(data_iterator)
         loss_mask = (inputs["labels"] != IGNORE_INDEX).float()
+        if "loss_mask" not in inputs:
+            inputs["loss_mask"] = loss_mask
         output_tensor = model(**inputs)
         return output_tensor, loss_mask
 
@@ -384,7 +395,9 @@ class McaTrainer(Trainer):
         max_seq_length = 0
         standard_batch_size = standard_batch_size or self.args.per_device_eval_batch_size
 
-        pad_func = lambda x, length: [self._pad_batched_inputs(i, length) for i in x]
+        def pad_func(x, length):
+            return [self._pad_batched_inputs(i, length) for i in x]
+
         end_flag = torch.tensor(0, device=self.args.device)
         for inputs in eval_dataloader:
             main_inputs = inputs[self.model.main_input_name]
@@ -495,8 +508,27 @@ class McaTrainer(Trainer):
     def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
         # TODO: support resume _CUDA_RNG_STATE_TRACKER (which is needed for dropout/init model weights)
         model = model or self.model
-        logger.info(f"Loading model from {resume_from_checkpoint}.")
-        state_dict = load_state_dict_from_checkpoint(resume_from_checkpoint)
+        if isinstance(model[0], PeftModel):
+            state_dict = {}
+            adapter_subdirs = (
+                [
+                    folder_name
+                    for folder_name in os.listdir(resume_from_checkpoint)
+                    if os.path.isdir(os.path.join(resume_from_checkpoint, folder_name))
+                    and os.path.isfile(os.path.join(resume_from_checkpoint, folder_name, ADAPTER_CONFIG_NAME))
+                ]
+                if os.path.isdir(resume_from_checkpoint)
+                else []
+            )
+            if adapter_subdirs:
+                for subdir_name in adapter_subdirs:
+                    peft_id = os.path.join(resume_from_checkpoint, subdir_name)
+                    logger.info(f"Loading adapter from {peft_id}.")
+                    peft_state_dict = load_state_dict_from_checkpoint(peft_id)
+                    state_dict[subdir_name] = peft_state_dict
+        else:
+            logger.info(f"Loading model from {resume_from_checkpoint}.")
+            state_dict = load_state_dict_from_checkpoint(resume_from_checkpoint)
         assert state_dict is not None, "No model state_dict found in checkpoint."
         model.load_state_dict(state_dict)
 
@@ -642,6 +674,11 @@ class McaTrainer(Trainer):
                 self.state.save_steps = math.ceil(max_steps * args.save_steps)
             else:
                 self.state.save_steps = args.save_steps
+
+        # ckpt loading
+        if resume_from_checkpoint is not None:
+            if self.is_fsdp_enabled:
+                self._load_from_checkpoint(resume_from_checkpoint, self.model)
 
         self._load_optimizer_and_scheduler(resume_from_checkpoint)
 
@@ -912,6 +949,20 @@ class McaTrainer(Trainer):
 
             clear_aux_losses_tracker()
 
+        mtp_losses = {}
+        if self.model.config.mtp_num_layers is not None and self.model.config.mtp_num_layers > 0:
+            if self.control.should_log:
+                MTPLossLoggingHelper.reduce_loss_in_tracker()
+                tracker = MTPLossLoggingHelper.tracker
+                loss_scale = 1 / self.args.gradient_accumulation_steps
+                MTPLossLoggingHelper.track_mtp_metrics(
+                    loss_scale,
+                    iteration=self.state.global_step,  # Not used when total_loss_dict is provided
+                    writer=None,
+                    wandb_writer=None,
+                    total_loss_dict=mtp_losses,
+                )
+
         if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
             logs = {}
             loss = tr_loss.clone().detach()
@@ -927,16 +978,12 @@ class McaTrainer(Trainer):
             # reset tr_loss to zero
             tr_loss -= tr_loss
 
-            # logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
-            if self.args.calculate_per_token_loss:
-                logs["loss"] = round(tr_loss_scalar, 4)
-            else:
-                logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
-            
+            logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
             if grad_norm is not None:
                 logs["grad_norm"] = grad_norm.detach().item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             logs["learning_rate"] = self._get_learning_rate()
             logs.update(moe_losses)
+            logs.update(mtp_losses)
             if metrics_tensors is not None and len(self.metrics_keys) > 1:  # metrics except loss
                 metrics = self.gather_metrics(metrics_tensors)
                 metrics.pop("loss", None)
@@ -954,6 +1001,9 @@ class McaTrainer(Trainer):
         if self.control.should_save:
             self._save_checkpoint(model, trial)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
+            ckpt_id = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+            checkpoint_path = os.path.join(self.args.output_dir, ckpt_id)
+            self.upload_to_mos(ckpt_id, checkpoint_path)
 
         if eval_or_save:
             self.enable_ddp_forward_pre_hook()

@@ -1,4 +1,3 @@
-import importlib.util
 import logging
 import sys
 from typing import Any, Mapping
@@ -67,9 +66,14 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
-def _is_package_available(name: str) -> bool:
-    return importlib.util.find_spec(name) is not None
-
-
-def is_peft_available() -> bool:
-    return _is_package_available("peft")
+def is_megatron_llama():
+    """
+    Check if the installed package is megatron-llama-core rather than megatron-core.
+    Use cached_value to avoid re-checking the package.
+    """
+    if not hasattr(is_megatron_llama, "cached_value"):
+        from importlib.metadata import distributions
+        is_megatron_llama.cached_value = any(
+            dist.metadata.get('Name') == 'megatron-llama-core' for dist in distributions()
+        )
+    return is_megatron_llama.cached_value

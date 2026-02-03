@@ -15,6 +15,7 @@ from transformers.utils import (
     SAFE_WEIGHTS_NAME,
     WEIGHTS_INDEX_NAME,
     WEIGHTS_NAME,
+    is_peft_available,
     is_safetensors_available,
 )
 
@@ -28,10 +29,14 @@ from .convert_utils import (
     gather_tensor_parallel,
     get_tensor_size,
     parse_size_to_int,
+    resize_embedding_layer,
 )
-from .dist_converter import DistConverter
+from .dist_converter import MCORE_WORD_EMBEDDING, MCORE_LM_HEAD, DistConverter
 from .template import get_template
 
+
+if is_peft_available():
+    from peft import PeftModel, get_peft_model_state_dict
 
 if is_safetensors_available():
     from safetensors.torch import save_file as safe_save_file
@@ -55,6 +60,7 @@ class ModelConverter:
         to_hf: bool = False,
         verbose=False,
         efficient_mode: bool = False,
+        resized_vocab_size: int = None,
     ):
         self.mca_config = mca_config
         self.verbose = verbose
@@ -74,6 +80,7 @@ class ModelConverter:
             revert=to_hf,
             efficient_mode=efficient_mode,
         )
+        self.resized_vocab_size = resized_vocab_size
 
     def log(self, msg):
         if self.verbose:
@@ -134,6 +141,12 @@ class ModelConverter:
             converted_state_dict = self.template.add_hf_weight(name, weight)
             if converted_state_dict is not None:
                 for mca_name, mca_weight in converted_state_dict.items():
+                    # resize before tensor parallel conversion
+                    if self.resized_vocab_size and (
+                        (mca_name == MCORE_WORD_EMBEDDING) or 
+                        (mca_name == MCORE_LM_HEAD and not self.mca_config.tie_embeddings_and_output_weights)
+                    ):
+                        mca_weight = resize_embedding_layer(mca_weight, self.resized_vocab_size)
                     named_weights = self.dist_converter.dist_convert(mca_name, mca_weight, vp_stage=vp_stage)
                     if named_weights is not None:
                         mca_state_dict.update(named_weights)
@@ -150,16 +163,25 @@ class ModelConverter:
 
     def _mca_named_params_with_vp_stage(self, models):
         for vp_stage, model in enumerate(models):
-            mca_state_dict = model.state_dict_for_save_checkpoint()
-            mca_state_dict = {k: v for k, v in mca_state_dict.items() if not k.endswith("._extra_state")}
-            for mca_name, weight in sorted(mca_state_dict.items()):
-                yield vp_stage, mca_name, weight
+            if is_peft_available() and isinstance(model, PeftModel):
+                for adapter_name in model.peft_config.keys():
+                    mca_state_dict = get_peft_model_state_dict(model, model.state_dict_for_save_checkpoint(), adapter_name)
+                    mca_state_dict = {k: v for k, v in mca_state_dict.items() if not k.endswith("._extra_state")}
+                    for mca_name, weight in sorted(mca_state_dict.items()):
+                        yield adapter_name, vp_stage, mca_name, weight
+            else:
+                mca_state_dict = model.state_dict_for_save_checkpoint()
+                mca_state_dict = {k: v for k, v in mca_state_dict.items() if not k.endswith("._extra_state")}
+                for mca_name, weight in sorted(mca_state_dict.items()):
+                    yield None, vp_stage, mca_name, weight
 
     def convert_to_hf(
         self,
         mca_state_dict: Dict[str, list["Tensor"]],
         vp_stage: Optional[int] = None,
         layer_index_preprocessed: bool = False,
+        moe_index_preprocessed: bool = False,
+        **kwargs,
     ) -> Dict[str, "Tensor"]:
         """
         Convert Mca state dict to HuggingFace format.
@@ -167,9 +189,12 @@ class ModelConverter:
         Args:
             mca_state_dict: Dictionary of mca weight names to tensor lists
             vp_stage: Virtual pipeline stage
-            layer_index_preprocessed: If True, the weight names' layer indices have already been 
-                preprocessed for pipeline parallelism by the caller. If False (default), 
+            layer_index_preprocessed: If True, the weight names' layer indices have already been
+                preprocessed for pipeline parallelism by the caller. If False (default),
                 DistConverter will handle the layer index conversion between global and local indices.
+            moe_index_preprocessed: If True, the weight names' moe indices have already been
+                preprocessed for expert parallelism by the caller. If False (default),
+                DistConverter will handle the moe index conversion between global and local indices.
         """
         if vp_stage is None:
             vp_stage = mpu.get_virtual_pipeline_model_parallel_rank()
@@ -177,13 +202,21 @@ class ModelConverter:
         hf_state_dict = {}
         for mca_name, weights in mca_state_dict.items():
             merged_named_weights = self.dist_converter.dist_convert(
-                mca_name, weights, vp_stage=vp_stage, layer_index_preprocessed=layer_index_preprocessed
+                mca_name,
+                weights,
+                vp_stage=vp_stage,
+                layer_index_preprocessed=layer_index_preprocessed,
+                moe_index_preprocessed=moe_index_preprocessed,
             )
             if merged_named_weights is None:
                 continue
             converted = {}
             for merged_name, merged_weight in merged_named_weights.items():
-                converted.update(self.template.add_mca_weight(merged_name, merged_weight))
+                converted_state_dict = self.template.add_mca_weight(merged_name, merged_weight, **kwargs)
+                if converted_state_dict is not None:
+                    converted.update(converted_state_dict)
+                else:
+                    self.log(f"mca_name: {merged_name} added but not converted")
             hf_state_dict.update(converted or {})
         return hf_state_dict
 
@@ -193,6 +226,7 @@ class ModelConverter:
         save_directory: str,
         save_safetensors: bool = True,
         max_shard_size: Union[int, str] = MAX_SHARD_SIZE,
+        move_to_cpu: bool = False,
     ):
         assert self.dist_converter.revert, "save_model_as_hf_inflight only support to_hf ModelConverter"
         if not mpu.model_parallel_is_initialized():
@@ -208,50 +242,35 @@ class ModelConverter:
 
         expert_parallel = self.mca_config.expert_model_parallel_size > 1
         only_need_expert = expert_parallel and mpu.get_expert_model_parallel_rank() > 0
-        for vp_stage, mca_name, weight in self._mca_named_params_with_vp_stage(models):
+        last_adapter_name = None
+        for adapter_name, vp_stage, mca_name, weight in self._mca_named_params_with_vp_stage(models):
             if only_need_expert and not self.dist_converter.is_expert_parallel_weight(mca_name):
                 continue
             weights = gather_tensor_parallel(weight, async_op=False)
             if weights is None:  # only tp_rank0 need to convert and save
                 continue
+            if move_to_cpu and isinstance(weights, list):
+                weights = [w.cpu() for w in weights]
             converted_state_dict = self.convert_to_hf(mca_state_dict={mca_name: weights}, vp_stage=vp_stage)
-            self.save_hf_shard_state_dict(shard_state, save_directory, converted_state_dict, save_safetensors)
+            self.save_hf_shard_state_dict(
+                shard_state,
+                os.path.join(save_directory, adapter_name) if adapter_name is not None else save_directory,
+                converted_state_dict,
+                save_safetensors,
+            )
+
+            if (
+                adapter_name is not None
+                and adapter_name != last_adapter_name
+                and mpu.get_tensor_model_parallel_rank() == 0
+            ):
+                self.save_shard_state_meta(shard_state, save_directory, save_safetensors)
+
+            if adapter_name is not None:
+                last_adapter_name = adapter_name
 
         if mpu.get_tensor_model_parallel_rank() == 0:
             self.save_shard_state_meta(shard_state, save_directory, save_safetensors)
-
-    def all_gather_weights_as_hf_inflight(self, models):
-        assert self.dist_converter.revert, "save_model_as_hf_inflight only support to_hf ModelConverter"
-
-        expert_parallel = self.mca_config.expert_model_parallel_size > 1
-        for vp_stage, mca_name, weight in self._mca_named_params_with_vp_stage(models):
-            moe_index = self.dist_converter.get_local_moe_index(mca_name)
-            group = (
-                mpu.get_tensor_model_parallel_group() if moe_index is None else mpu.get_expert_tensor_parallel_group()
-            )
-            if dist.get_world_size(group) == 1:
-                weights = [weight]
-            else:
-                weights = all_gather_tensors(weight, async_op=False, group=group)
-            hf_state_dict = self.convert_to_hf(mca_state_dict={mca_name: weights}, vp_stage=vp_stage)
-            for name, weight in hf_state_dict.items():
-                if expert_parallel and moe_index is not None:
-                    names = allgather_parallel_objs(name, group=mpu.get_expert_model_parallel_group())
-                    weights = all_gather_tensors(
-                        weight, async_op=False, group=mpu.get_expert_model_parallel_group()
-                    )
-                    for name, weight in zip(names, weights):
-                        yield name, weight
-                else:
-                    yield name, weight
-
-    def all_gather_weights_as_hf_bucket(self, models, bucket_size: int = None):
-        bucket_manager = SendBucketManager(bucket_size or self._auto_bucket_size())
-        for name, weight in self.all_gather_weights_as_hf_inflight(models):
-            yield from bucket_manager.push_tensor(weight, name=name)
-        last_meta, last_buffer = bucket_manager.pop_last_bucket()
-        if last_meta is not None:
-            yield last_meta, last_buffer
 
     def _auto_bucket_size(self):
         # TODO: optimize this by max weight size

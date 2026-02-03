@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from abc import ABC
 from dataclasses import dataclass, field
@@ -35,7 +36,7 @@ class ConverOp(ABC):
 
     hf_names: Union[str, list]
     mca_names: Union[str, list]
-    mca_config: "TransformerConfig" = None
+    _mca_config: "TransformerConfig" = field(default=None, repr=False)
 
     def __post_init__(self):
         if isinstance(self.hf_names, str):
@@ -52,6 +53,14 @@ class ConverOp(ABC):
             return self.mca_to_hf(name_to_weight)
         else:
             return self.hf_to_mca(name_to_weight)
+
+    @property
+    def mca_config(self) -> "TransformerConfig":
+        return self._mca_config
+
+    @mca_config.setter
+    def mca_config(self, value: "TransformerConfig"):
+        self._mca_config = value
 
     @staticmethod
     def _name_to_pattern(name: str):
@@ -282,6 +291,7 @@ class Template:
     prefix_name_to_weight: Dict[str, Dict[str, torch.Tensor]] = field(default_factory=dict)
 
     def __post_init__(self):
+        self.config_hf_to_mca = self.adjust_config_hf_to_mca()
         if self.config_mca_to_hf is None:
             self.config_mca_to_hf = {v: k for k, v in self.config_hf_to_mca.items()}
         self.hf_name_to_converter = {}
@@ -303,6 +313,54 @@ class Template:
             logger.warning(f"weights not converted {len(weights_not_converted)} {weights_not_converted}")
         self.prefix_name_to_weight = {}
 
+    def adjust_config_hf_to_mca(self):
+        return self.config_hf_to_mca
+
+    def get_hf_config_value(self, hf_config, key, cfg_errs: List[str] = []):
+        for name in key.split("."):
+            if not hasattr(hf_config, name):
+                # warn instead of assert to be backward compatible
+                # some cfg not exist in hf_config, such as vision_token_id
+                logger.warning(f"{key=} not exists in hf_config for get_hf_config_value")
+                cfg_errs.append(key)
+                return
+            hf_config = getattr(hf_config, name)
+        return hf_config
+
+    def set_hf_config_value(self, hf_config, key, value):
+        # hf_config is a dict from config.to_dict() by `to_json_string(use_diff=True)`,
+        # sub-configs with PretrainedConfig type would be convert to dict
+        # use_diff makes hf_config only contain items whose value is different from default
+        raw_hf_config = hf_config
+        names = key.split(".")
+        for i, name in enumerate(names):
+            if isinstance(hf_config, dict):
+                if name not in hf_config:
+                    # to be backward compatible
+                    # always put mca config value into hf config kw_args
+                    logger.warning(
+                        f"{key=} not exists in hf_config for set_hf_config_value, "
+                        f"ignore this if no warning in get_hf_config_value"
+                    )
+                    raw_hf_config[key] = value
+                if i == len(names) - 1:
+                    hf_config[name] = value
+                else:
+                    hf_config = hf_config[name]
+            else:
+                if not hasattr(hf_config, name):
+                    # to be backward compatible
+                    # always put mca config value into hf config kw_args
+                    logger.warning(
+                        f"{key=} not exists in hf_config for set_hf_config_value, "
+                        f"ignore this if no warning in get_hf_config_value"
+                    )
+                    raw_hf_config[key] = value
+                if i == len(names) - 1:
+                    setattr(hf_config, name, value)
+                else:
+                    hf_config = getattr(hf_config, name)
+
     def convert_hf_to_mca_config(self, hf_config, **kw_args):
         from ...models.auto.config_auto import AutoConfig as AutoMcaModelConfig
 
@@ -310,33 +368,34 @@ class Template:
         return AutoMcaModelConfig.for_model(self.hf_model_type, **kw_args)
 
     def convert_hf_to_mca_config_kws(self, hf_config: "PretrainedConfig", **kw_args):
-        # TODO: support text_config
-        if hasattr(hf_config, "text_config"):
-            text_config = hf_config.text_config.to_dict()
-            for k, v in  text_config.items():
-                setattr(hf_config, k, v)
-
         for k, v in self.config_hf_to_mca.items():
-            if hasattr(hf_config, k):
-                kw_args[v] = getattr(hf_config, k)
+            cfg_errs = []
+            cfg_value = self.get_hf_config_value(hf_config, k, cfg_errs)
+            if not cfg_errs:  # cfg_value can be any, use cfg_errs to check
+                kw_args[v] = cfg_value
         kw_args["hf_model_type"] = self.hf_model_type
         kw_args["name_or_path"] = hf_config.name_or_path
         kw_args["hf_config_json"] = hf_config.to_json_string()
         return {**kw_args, **self.constant_mca_config}
 
     def convert_mca_to_hf_config(self, mca_config, **kw_args):
+        config_dict = json.loads(mca_config.hf_config_json)
         for k, v in self.config_mca_to_hf.items():
             if hasattr(mca_config, k):
-                kw_args[v] = getattr(mca_config, k)
+                self.set_hf_config_value(config_dict, v, getattr(mca_config, k))
         kw_args.update(self.constant_hf_config)
         kw_args["name_or_path"] = mca_config.name_or_path
-        config_dict = json.loads(mca_config.hf_config_json)
         kw_args = {**config_dict, **kw_args}
         kw_args["model_type"] = self.hf_model_type
         has_remote_code = "auto_map" in config_dict and "AutoConfig" in config_dict["auto_map"]
         if has_remote_code:
             class_ref = config_dict["auto_map"]["AutoConfig"]
-            config_class = get_class_from_dynamic_module(class_ref, mca_config.name_or_path)
+            pretrained_model_name_or_path = mca_config.name_or_path
+            automap_cache_path = mca_config.get_automap_cache()
+            read_cache = os.path.isdir(automap_cache_path) and any(f.endswith('.py') for f in os.listdir(automap_cache_path))
+            if read_cache:
+                pretrained_model_name_or_path = automap_cache_path
+            config_class = get_class_from_dynamic_module(class_ref, pretrained_model_name_or_path)
             config_class.register_for_auto_class()
             return config_class.from_dict(kw_args)
         return AutoConfig.for_model(**kw_args)
@@ -370,7 +429,7 @@ class Template:
         mca_prefix = convert_to_mca_prefix(weight_prefix, self.hf_layer_prefix, self.hf_moe_prefix)
         return {mca_prefix + name: weight for name, weight in conver_res.items()}
 
-    def add_mca_weight(self, name, weight):
+    def add_mca_weight(self, name, weight, **kwargs):
         weight_prefix = get_mca_weight_prefix(name)
         original_name = remove_mca_weight_prefix(name)
         if weight_prefix not in self.prefix_name_to_weight:
@@ -378,7 +437,7 @@ class Template:
         self.prefix_name_to_weight[weight_prefix][original_name] = weight
         prefix_weights = self.prefix_name_to_weight[weight_prefix]
         if ".lora_A." in original_name or ".lora_B." in original_name:
-            op = self.get_lora_conver_op(original_name, self.mca_name_to_converter)
+            op = self.get_lora_conver_op(original_name, self.mca_name_to_converter, **kwargs)
         else:
             op = self.get_conver_op(original_name, self.mca_name_to_converter)
         name_to_weight = {
@@ -403,9 +462,9 @@ class Template:
                 return pattern_to_conver_ops[pattern]
         raise ValueError(f"can not find conver op for {name} in {pattern_to_conver_ops}")
 
-    def get_lora_conver_op(self, name, pattern_to_conver_ops: Dict[str, ConverOp]):
-        lora_name = name[name.find(".lora"):]
-        name = name[:name.find(".lora")] + ".weight"
+    def get_lora_conver_op(self, name, pattern_to_conver_ops: Dict[str, ConverOp], lora_rank: int):
+        lora_name = name[name.find(".lora") :]
+        name = name[: name.find(".lora")] + ".weight"
         op = self.get_conver_op(name, pattern_to_conver_ops)
         if isinstance(op, RenameConverOp):
             op_class = RenameConverOp
@@ -418,13 +477,13 @@ class Template:
             kwargs = {"dim": op.dim}
         elif isinstance(op, QKVConverOp):
             op_class = QKVConverOp
-            kwargs = {"hidden_size": op.mca_config.lora_rank}
+            kwargs = {"hidden_size": lora_rank}
         else:
             raise ValueError(f"can not find lora conver op for {name} in {pattern_to_conver_ops}")
         return op_class(
             hf_names=[hf_name.replace(".weight", lora_name) for hf_name in op.hf_names],
             mca_names=[mca_name.replace(".weight", lora_name) for mca_name in op.mca_names],
-            mca_config=op.mca_config,
+            _mca_config=op.mca_config,
             **kwargs,
         )
 

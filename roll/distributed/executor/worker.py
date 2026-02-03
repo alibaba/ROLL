@@ -18,6 +18,7 @@ from roll.utils.logging import get_logger
 from roll.utils.network_utils import collect_free_port, get_node_ip
 from roll.utils.offload_states import OffloadStateType
 from roll.utils.offload_nccl import monkey_patch_torch_dist
+
 from roll.platforms import current_platform
 
 
@@ -115,6 +116,29 @@ class Worker:
     def get_master_addr_and_port(self):
         return self.master_addr, self.master_port
 
+    def _get_strategy_load_state(self) -> Optional[bool]:
+        """Check if strategy model is loaded in GPU.
+
+        Handles multiple strategy implementations:
+        - vLLM: strategy.is_model_in_gpu (direct attribute)
+        - SGLang: strategy.model.is_model_in_gpu (nested attribute)
+        - Others: None (not trackable)
+
+        Returns:
+            True if loaded, False if offloaded, None if not trackable
+        """
+        if getattr(self, "strategy", None) is None:
+            return None
+
+        # Try direct attribute (vLLM pattern)
+        is_loaded = getattr(self.strategy, 'is_model_in_gpu', None)
+
+        # Try nested attribute (SGLang pattern)
+        if is_loaded is None and hasattr(self.strategy, 'model'):
+            is_loaded = getattr(self.strategy.model, 'is_model_in_gpu', None)
+
+        return is_loaded
+
     @staticmethod
     def get_visible_gpus():
         return current_platform.get_visible_gpus()
@@ -145,6 +169,12 @@ class Worker:
             self.strategy.load_states()
         else:
             self.logger.warning("worker has not strategy")
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def process_weights_after_loading(self):
+        if getattr(self, "strategy", None) is not None:
+            self.strategy.process_weights_after_loading()
+        
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def offload_states(self, *args, **kwargs):
@@ -159,17 +189,20 @@ class Worker:
         else:
             self.logger.warning("worker has not strategy")
 
-    def broadcast_bucket(self, *args, **kwargs):
-        if getattr(self, "strategy", None) is not None:
-            self.strategy.broadcast_bucket(*args, **kwargs)
-        else:
-            self.logger.warning("worker has not strategy")
+    def setup_model_update(self, *args, **kwargs):
+        self.strategy.setup_model_update(*args, **kwargs)
 
     def setup_collective_group(self, *args, **kwargs):
         if getattr(self, "strategy", None) is not None:
             self.strategy.setup_collective_group(*args, **kwargs)
         else:
             self.logger.warning("worker has not strategy")
+
+    def setup_p2p_collective_group(self, *args, **kwargs):
+        if getattr(self, "strategy", None) is not None:
+            self.strategy.setup_p2p_collective_group(*args, **kwargs)
+        else:
+            self.logger.warning("worker does not have a strategy")
 
     def start_model_update(self, *args, **kwargs):
         metrics = {}
@@ -189,9 +222,9 @@ class Worker:
         output = DataProto(meta_info={"metrics": metrics})
         return output
 
-    def update_parameter(self, *args, **kwargs):
+    def model_update_set_read_done_handle(self, *args, **kwargs):
         if getattr(self, "strategy", None) is not None:
-            self.strategy.update_parameter(*args, **kwargs)
+            self.strategy.model_update_set_read_done_handle(*args, **kwargs)
         else:
             self.logger.warning("worker has not strategy")
 
@@ -206,10 +239,6 @@ class Worker:
             self.strategy.add_lora(*args, **kwargs)
         else:
             self.logger.warning("worker has not strategy")
-
-    def download_models(self, model_name_or_paths: set[str]):
-        futures.wait([self.thread_executor.submit(download_model, model_name_or_path)
-                      for model_name_or_path in model_name_or_paths])
 
     @register(dispatch_mode=Dispatch.DP_MP_COMPUTE)
     def get_metrics(self, metric_names: Optional[List[str]] = None) -> DataProto:

@@ -1,0 +1,192 @@
+defaults:
+  - ../config/traj_envs@_here_
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "agentic_pipeline"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+render_save_dir: ./output/render
+system_envs:
+  USE_MODELSCOPE: '1'
+
+#track_with: wandb
+#tracker_kwargs:
+#  api_key:
+#  project: roll-agentic
+#  name: ${exp_name}_sokoban
+#  notes: "agentic_pipeline"
+#  tags:
+#    - agentic
+#    - roll
+#    - baseline
+
+track_with: tensorboard
+tracker_kwargs:
+ log_dir: /data/oss_bucket_0/yali/llm/tensorboard/roll_exp/agentic_frozen_lake
+
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
+
+num_gpus_per_node: 8
+
+max_steps: 1024
+save_steps: 10000
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+rollout_batch_size: 1024
+val_batch_size: 1024
+sequence_length: 8192
+
+advantage_clip: 0.2
+ppo_epochs: 1
+adv_estimator: "grpo"
+#pg_clip: 0.1
+#dual_clip_loss: True
+init_kl_coef: 0.0
+whiten_advantages: true
+entropy_loss_coef: 0
+max_grad_norm: 1.0
+
+pretrain: Qwen/Qwen2.5-0.5B-Instruct
+reward_pretrain: Qwen/Qwen2.5-0.5B-Instruct
+
+# is_correct:
+#   is_ratio_type: "token"
+#   is_upper_bound: 0.5
+
+enable_old_logprobs_recompute: True
+train_infer_correction:
+  filters:
+    - enabled: true
+      agg_type: segment
+      ratio_enabled: true
+      diff_enabled: true
+      ratio_low: 0.8
+      ratio_high: 1.05
+      diff_low: -0.1
+      diff_high: 0.1
+
+actor_train:
+  # worker_cls: roll.pipeline.rlvr.actor_pg_worker.ActorPGWorker
+  worker_cls: roll.pipeline.agentic.agentic_actor_pg_worker.ActorWorker
+  pg_variant: topr # topr, vanilla, tis, cispo, kimi15, ppo
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 64
+    warmup_steps: 10
+    lr_scheduler_type: cosine
+  data_args:
+    template: qwen2_5
+  strategy_args:
+#    strategy_name: deepspeed_train
+#    strategy_config: ${deepspeed_zero3}
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: 128 # single-turn response length
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: 1
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.8
+      block_size: 16
+      load_format: auto
+  device_mapping: list(range(0,8))
+
+reference:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2
+
+reward_normalization:
+  grouping: traj_group_id # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
+  method: mean_std # asym_clip / identity / mean_std
+
+train_env_manager:
+  max_env_num_per_worker: 16
+  num_env_groups: 128
+  # under the same group, the env config and env seed are ensured to be equal
+  group_size: 8
+  tags: [FrozenLake]
+  num_groups_partition: [128] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+
+val_env_manager:
+  max_env_num_per_worker: 32
+  num_env_groups: 1024
+  group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
+  tags: [SimpleSokoban, LargerSokoban, SokobanDifferentGridVocab, FrozenLake]
+  num_groups_partition: [256, 256, 256, 256] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+
+
+# Here, you can override variables defined in the imported envs. max_tokens_per_step: 128 in custom_env.SimpleSokoban, here replaced by 64
+max_tokens_per_step: 64
+
+custom_envs:
+  SimpleSokoban:
+    ${custom_env.SimpleSokoban}
+  LargerSokoban:
+    ${custom_env.LargerSokoban}
+  SokobanDifferentGridVocab:
+    ${custom_env.SokobanDifferentGridVocab}
+  FrozenLake:
+    ${custom_env.FrozenLake}
+  FrozenLakeThink:
+    ${custom_env.FrozenLakeThink}
+  FrozenLakeLocallyDefineExamples:  # Can import from unified envs config or define dict locally
+    env_type: frozen_lake
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    use_thread_lock: true
+    env_config:
+      env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
+      action_pattern: ${think_action_pattern}
+      max_steps: ${max_actions_per_traj}
+      is_slippery: false

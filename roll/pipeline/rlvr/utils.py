@@ -3,18 +3,20 @@ import json
 import time
 import numpy
 import copy
+import requests
+
+import torch
+
 from codetiming import Timer
 import multiprocessing
 
-
 from roll.distributed.scheduler.protocol import DataProto
-
 from roll.utils.logging import get_logger
 
 
 logger = get_logger()
 
-COLUMNS_CONFIG = [
+COLUMMNS_CONFIG = [
         ['global_step','bigint'],
         ['id','string'],
         ['source','string'],

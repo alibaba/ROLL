@@ -10,7 +10,8 @@ output_dir: ./output
 
 checkpoint_config:
   type: file_system
-  output_dir: /data/cpfs_0/xiongshaopan.xsp/models/${exp_name}
+  async_upload: false
+  output_dir: /data/ckpt_path/models/${exp_name}
 
 track_with: stdout
 
@@ -18,11 +19,8 @@ save_steps: 1
 rollout_batch_size: 512
 prompt_length: 128
 response_length: 512
-#resume_from_checkpoint: /data/cpfs_0/xiongshaopan.xsp/models/megatron_0.5B_ckpt/checkpoint-0
-#resume_from_checkpoint: /data/cpfs_0/xiongshaopan.xsp/models/megatron_0.5B_async_ckpt/checkpoint-1
-#resume_from_checkpoint: /data/cpfs_0/xiongshaopan.xsp/models/megatron_train_checkpoint_debug/20250305-172118/checkpoint-1
-resume_from_checkpoint: /data/cpfs_0/xiongshaopan.xsp/models/megatron_train_checkpoint_debug/20250305-212054/checkpoint-1
-pretrain: /data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct
+resume_from_checkpoint: false
+pretrain: Qwen/Qwen2.5-7B-Instruct
 
 actor_train:
   model_args:
@@ -36,6 +34,8 @@ actor_train:
     gradient_accumulation_steps: 8
     warmup_steps: 5
     num_train_epochs: 1
+    save_hf_model: true
+
   data_args:
     template: qwen2_5
     file_name: data/comparison_gpt4_data_zh.json

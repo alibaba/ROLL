@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Dict
+from typing import TYPE_CHECKING
 
 import torch
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
@@ -84,8 +84,6 @@ def check_pack_seq_aligned(attention_mask: "torch.Tensor", align_size: int):
     False
     ```
     """
-    bsz = attention_mask.size(0)
-    dtype, device = attention_mask.dtype, attention_mask.device
     max_num = torch.max(attention_mask).item()
     is_valid = True
     for i in range(max_num):
@@ -107,7 +105,7 @@ class MegatronLRScheduler(OptimizerParamScheduler):
         super().step(increment)
         self._last_lr = [group["lr"] for group in self.optimizer.param_groups]
 
-    def get_last_lr(self) -> List[float]:
+    def get_last_lr(self) -> list[float]:
         """Return last computed learning rate by current scheduler."""
         return self._last_lr
 
@@ -115,8 +113,10 @@ class MegatronLRScheduler(OptimizerParamScheduler):
 def get_megatron_lr_scheduler(args: "TrainingArguments", num_training_steps: int, optimizer: "MegatronOptimizer"):
     scheduler_type_map = {  # hf to megatron
         "constant_with_warmup": "constant",
+        "inverse_sqrt": "inverse-square-root",
         "cosine_with_min_lr": "cosine",
-        "wsd": "WSD",
+        "cosine_warmup_with_min_lr": "cosine",
+        "warmup_stable_decay": "WSD",
     }
     lr_scheduler_kwargs = args.lr_scheduler_kwargs or {}
     max_lr = lr_scheduler_kwargs.get("max_lr", args.learning_rate)
@@ -127,6 +127,15 @@ def get_megatron_lr_scheduler(args: "TrainingArguments", num_training_steps: int
     lr_decay_style = scheduler_type_map.get(lr_scheduler_type, lr_scheduler_type)
     if lr_decay_style not in ["constant", "cosine", "linear", "inverse-square-root", "WSD"]:
         raise ValueError(f"lr_scheduler_type {lr_scheduler_type} is not supported")
+    kwargs = {}
+    if lr_decay_style == "WSD":
+        wsd_decay_steps = lr_scheduler_kwargs.get("wsd_decay_steps", None)
+        lr_wsd_decay_style = lr_scheduler_kwargs.get("lr_wsd_decay_style", None)
+        assert wsd_decay_steps is not None, "wsd_decay_steps is required for WSD"
+        kwargs = {
+            "wsd_decay_steps": wsd_decay_steps,
+            "lr_wsd_decay_style": lr_wsd_decay_style,
+        }
 
     return MegatronLRScheduler(
         optimizer,
@@ -140,4 +149,5 @@ def get_megatron_lr_scheduler(args: "TrainingArguments", num_training_steps: int
         end_wd=args.weight_decay,
         wd_incr_style="constant",
         wd_incr_steps=0,
+        **kwargs,
     )

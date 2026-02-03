@@ -30,7 +30,7 @@ from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
-from roll.models.model_providers import default_tokenizer_provider
+from roll.models.model_providers import default_processor_provider
 from roll.utils.logging import get_logger
 
 
@@ -1172,6 +1172,7 @@ def extract_answer_content(text):
 
 
 def normalize_bbox_by_real_size(pred_bboxes, input_width, input_height, normalize_size=1000.0):
+    # refer to https://github.com/QwenLM/Qwen2.5-VL/issues/721 for qwen2.5-vl bbox
     if pred_bboxes is None:
         return None
 
@@ -1624,10 +1625,12 @@ class DetectionRewardWorker(Worker):
         self.worker_config = worker_config
         self.rank_info.dp_rank = self.rank_info.rank
         self.rank_info.dp_size = self.rank_info.world_size
-        self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
+        self.processor = default_processor_provider(model_args=self.worker_config.model_args)
+        self.tokenizer = self.processor.tokenizer
         self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
 
-        self.patch_size = 14  # hard-code to qwen2.5-vl temporarily
+        # qwen2.5-vl use 14, while qwen2-vl/qwen3-vl/qwen3-omni use 16
+        self.patch_size = self.processor.image_processor.patch_size
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):
@@ -1658,6 +1661,14 @@ class DetectionRewardWorker(Worker):
                 ]
             verifier_parm["image_grid_thw"] = image_grid_thw
             verifier = DetectionVerifier(**verifier_parm)
+            # qwen2.5-vl uses absolute coordinates, while qwen2-vl/qwen3-vl/qwen3-omni
+            # uses relative coordinates which were scaled to [0,1000], refer to
+            # https://github.com/QwenLM/Qwen3-VL/issues/721
+            # https://github.com/QwenLM/Qwen3-VL/issues/1937
+            # and the ground truth in One-RL-to-See-Them-All/Orsta-Data-47k is also scaled
+            # hacky to set det_verifier_normalized to different value temporarily
+            if not self.processor.__class__.__name__.startswith("Qwen2_5"):
+                verifier.det_verifier_normalized = False
             # Initialize default result
             result = {
                 "rewards": {
@@ -1669,6 +1680,9 @@ class DetectionRewardWorker(Worker):
             }
             format_score = verifier.verify_format(response)
             accuracy_score_gathered = verifier.verify_accuracy(response, ground_truth)
+            self.logger.debug(
+                f"{json.dumps(dict(verifier_parm=verifier_parm, response=response, ground_truth=ground_truth, accuracy_score_gathered=accuracy_score_gathered))}"
+            )
             if isinstance(accuracy_score_gathered, dict):
                 accuracy_score = accuracy_score_gathered['final_score']
 

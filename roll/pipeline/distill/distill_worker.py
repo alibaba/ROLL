@@ -43,10 +43,6 @@ class StudentWorker(Worker):
         self.teacher_log_probs = None
         self.teacher_topk_indices = None
         self.teacher_inf_mask = None
-        self.teacher_probs_iterator = None
-        self.teacher_log_probs_iterator = None
-        self.teacher_topk_indices_iterator = None
-        self.teacher_inf_mask_iterator = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):
@@ -76,20 +72,6 @@ class StudentWorker(Worker):
         is_offload_states = data.meta_info.get("is_offload_states", True)
         metrics = {}
         micro_batch_size = self.worker_config.training_args.per_device_train_batch_size
-
-        # Retrieve the teacher logits
-        if self.rank_info.is_pipeline_last_stage:
-            self.teacher_probs = self.probs_cache.pop_full_logits()
-            self.teacher_probs_iterator = iter(self.teacher_probs.split(micro_batch_size, dim=0))
-            self.teacher_log_probs = self.log_probs_cache.pop_full_logits()
-            self.teacher_log_probs_iterator = iter(self.teacher_log_probs.split(micro_batch_size, dim=0))
-        # Retrieve the teacher_topk_indices
-        if self.rank_info.is_pipeline_last_stage:
-            self.teacher_topk_indices = self.topk_indices_cache.pop_full_logits()
-            if self.pipeline_config.logits_topk != 0:
-                self.teacher_topk_indices_iterator = iter(self.teacher_topk_indices.split(micro_batch_size, dim=0))
-            self.teacher_inf_mask = self.inf_mask_cache.pop_full_logits()
-            self.teacher_inf_mask_iterator = iter(self.teacher_inf_mask.split(micro_batch_size, dim=0))
         self.logger.info(f"is_offload_states: {is_offload_states}")
         with state_offload_manger(
                 strategy=self.strategy,
@@ -100,20 +82,20 @@ class StudentWorker(Worker):
         ):
             data = data.to(current_platform.device_type)
             data = self.strategy.get_data_input(data)
+            if self.rank_info.is_pipeline_last_stage:
+                # Retrieve the teacher logits
+                data.batch['teacher_probs'] = self.probs_cache.pop_full_logits()
+                data.batch['teacher_log_probs'] = self.log_probs_cache.pop_full_logits()
+                # Retrieve the teacher_topk_indices
+                if self.pipeline_config.logits_topk != 0:
+                    data.batch['teacher_topk_indices'] = self.topk_indices_cache.pop_full_logits()
+                data.batch['teacher_inf_mask'] = self.inf_mask_cache.pop_full_logits()
             if "labels" in data.batch.keys():
                 # rename key: labels -> labels_for_loss
                 data.batch.rename_key_("labels", "labels_for_loss")
             self.logger.info(f"global_step: {data.meta_info.get('global_step',0)}")
-            per_device_train_batch_size = self.worker_config.training_args.per_device_train_batch_size
-            backward_batch_size = (
-                    per_device_train_batch_size * self.worker_config.training_args.gradient_accumulation_steps
-            )
 
-            loss_func = self.loss_func
-            if self.worker_config.use_sequence_packing:
-                from roll.utils.sequence_packing import SequencePackingDistillLossWrapper
-                loss_func = SequencePackingDistillLossWrapper(self.strategy, loss_func)
-            student_metrics = self.strategy.train_step(batch=data, loss_func=loss_func)
+            student_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
             append_to_dict(metrics, student_metrics)
 
             data.to("cpu")
@@ -126,44 +108,38 @@ class StudentWorker(Worker):
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
         Loss function interface definition:
-            data: DataProto, passed through unchanged from train_step  
+            data: DataProto, passed through unchanged from train_step
             output_tensor: torch.Tensor, the tensor returned by model.forward()
         """
+        batch_num_tokens = data.meta_info['batch_num_tokens']['labels_for_loss']
 
         student_logits = output_tensor
         labels = data.batch['labels_for_loss']
 
         # language loss
-        gpt_loss, _ = self.strategy.op_compute_language_loss_from_logits(student_logits, labels)
+        gpt_loss, _ = self.strategy.op_compute_language_loss_from_logits(student_logits, labels, reduction='sum')
+        gpt_loss = gpt_loss / batch_num_tokens
 
         # distill loss
-        if self.teacher_probs_iterator is not None:
-            teacher_probs = next(self.teacher_probs_iterator)
-        else:
-            teacher_probs = None
-        if self.teacher_log_probs_iterator is not None:
-            teacher_log_probs = next(self.teacher_log_probs_iterator)
-        else:
-            teacher_log_probs = None
-        if self.teacher_topk_indices_iterator is not None:
-            teacher_topk_indices = next(self.teacher_topk_indices_iterator)
+        teacher_probs = data.batch['teacher_probs']
+        teacher_log_probs = data.batch['teacher_log_probs']
+        if 'teacher_topk_indices' in data.batch:
+            teacher_topk_indices = data.batch['teacher_topk_indices']
         else:
             teacher_topk_indices = None
-        if self.teacher_inf_mask_iterator is not None:
-            teacher_inf_mask = next(self.teacher_inf_mask_iterator)
-        else:
-            teacher_inf_mask = None
+        teacher_inf_mask = data.batch['teacher_inf_mask']
 
         distill_loss, _ = self.strategy.op_compute_various_divergence(self.kl_loss_func, student_logits, teacher_probs,
                                                                 teacher_log_probs, teacher_topk_indices, teacher_inf_mask
-                                                                , labels, attention_mask=None,)
+                                                                , labels, attention_mask=None, reduction='sum')
+        distill_loss = distill_loss / batch_num_tokens
 
         loss = ((1 - self.pipeline_config.distill_loss_weight) * gpt_loss
                 + self.pipeline_config.distill_loss_weight * distill_loss)
         student_metrics = {
-            "train/loss": loss.detach().item(),
-            "train/train_distill_loss": distill_loss.detach().item(),
-            "train/train_student_loss": gpt_loss.detach().item(),
+            "train/loss@sum": loss.detach().item(),
+            "train/train_distill_loss@sum": distill_loss.detach().item(),
+            "train/train_student_loss@sum": gpt_loss.detach().item(),
         }
         return loss, student_metrics
 
@@ -180,20 +156,22 @@ class StudentWorker(Worker):
         return output
     
     def loss_func_for_eval(self, data: DataProto, output_tensor: torch.Tensor):
+        batch_num_tokens = data.meta_info['batch_num_tokens']['labels_for_loss']
         labels = data.batch['labels_for_loss']
-        gpt_loss, _ = self.strategy.op_compute_language_loss_from_logits(output_tensor, labels)
+        gpt_loss, _ = self.strategy.op_compute_language_loss_from_logits(output_tensor, labels, reduction='sum')
+        gpt_loss = gpt_loss / batch_num_tokens
         student_metrics = {
-            "student/val_loss": gpt_loss.detach().item(),
+            "student/val_loss@sum": gpt_loss.detach().item(),
         }
         return gpt_loss, student_metrics
     
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def do_checkpoint(self, global_step):
+    def do_checkpoint(self, global_step, is_last_step=False):
         with Timer("do_checkpoint") as total_timer:
             ckpt_id = f"checkpoint-{global_step}"
             save_dir = os.path.join(self.pipeline_config.output_dir, self.worker_name, ckpt_id, self.cluster_name)
             self.logger.info(f"save checkpoint-{global_step} to {save_dir}")
-            exec_metrics: Dict = self.strategy.save_checkpoint(save_dir, global_step, ckpt_id)
+            exec_metrics: Dict = self.strategy.save_checkpoint(save_dir, global_step, ckpt_id, is_last_step=is_last_step)
 
         metrics = {
             f"time/{self.cluster_name}/do_checkpoint/total": total_timer.last,
@@ -256,19 +234,22 @@ class StudentWorker(Worker):
         logits_cache = getattr(self, cache_name)
         rank_info = self.rank_info
         self.logger.info(
-            f"[Student][broadcast_logits] rank={dist.get_rank()}, pp={rank_info.pp_rank}, dp={rank_info.dp_rank}, tp={rank_info.tp_rank}, "
+            f"[Student][broadcast_logits] rank={dist.get_rank()}, pp={rank_info.pp_rank}, dp={rank_info.dp_rank},"
+            f" tp={rank_info.tp_rank}, cp={rank_info.cp_rank} "
             f"is_pipeline_last_stage={rank_info.is_pipeline_last_stage}, tp_size={rank_info.tp_size}"
         )
-        if rank_info.is_pipeline_last_stage and rank_info.tp_size > 1:
+        if rank_info.is_pipeline_last_stage and (rank_info.tp_size > 1 or rank_info.cp_size > 1):
             assert self.strategy.strategy_name == "megatron_train", \
-                f"Error in DistillWorker broadcast_logits: {self.strategy.strategy_name} with tp_size == {rank_info.tp_size}"
+                f"Error in DistillWorker broadcast_logits: {self.strategy.strategy_name}, which must be megatron_train"
             from megatron.core import mpu
-            if tp:
+            if tp and rank_info.tp_size > 1:
                 group = mpu.get_tensor_model_parallel_group()
                 rank = rank_info.tp_rank
-            else:
+            elif cp and rank_info.cp_size > 1:
                 group = mpu.get_context_parallel_group()
                 rank = rank_info.cp_rank
+            else:
+                return
             self.logger.info(
                 f"[Student][broadcast_logits] calling logits_cache.broadcast_from_dynamic_holder(), tp={tp}, cp={cp}, group={group}, rank={rank}"
             )
@@ -497,8 +478,8 @@ class TeacherWorker(Worker):
     def forward(self, data: DataProto):
         data = self.strategy.get_data_input(data)
         if "labels" in data.batch.keys():
-            keep_keys = [k for k in data.batch.keys() if k != "labels"]
-            data = data.select(batch_keys=keep_keys, deepcopy=False)
+            # rename key: labels -> labels_for_loss
+            data.batch.rename_key_("labels", "labels_for_loss")
         is_offload_states = data.meta_info.get("is_offload_states", False)
         metrics = {}
         with state_offload_manger(
@@ -510,20 +491,12 @@ class TeacherWorker(Worker):
         ):
             data = data.to(current_platform.device_type)
             data.meta_info["micro_batch_size"] = self.pipeline_config.teacher.training_args.per_device_train_batch_size
-            assert self.pipeline_config.teacher.training_args.per_device_train_batch_size <= \
-                   self.pipeline_config.student.training_args.per_device_train_batch_size, \
-                "Teacher's per_device_train_batch_size must be less than or equal to student's."
-
+            assert data.meta_info["micro_batch_size"] <= data.batch.batch_size[0]
             data.meta_info["output_on_all_tp_cp_ranks"] = True
             self.logger.info(f"global_step: {data.meta_info.get('global_step', 0)}")
 
-            forward_func = self.forward_func
-            if self.worker_config.use_sequence_packing:
-                from roll.utils.sequence_packing import SequencePackingDistillForwardWrapper
-                forward_func = SequencePackingDistillForwardWrapper(self.strategy, forward_func)
-
             with torch.no_grad():
-                forward_output = self.strategy.forward_step(batch=data, forward_func=forward_func)
+                forward_output = self.strategy.forward_step(batch=data, forward_func=self.forward_func)
             self.topk_probs = None
             self.topk_log_probs = None
             self.topk_indices = None

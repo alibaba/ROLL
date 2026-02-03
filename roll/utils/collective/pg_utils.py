@@ -16,6 +16,7 @@ def init_custom_process_group(
     store=None,
     group_name=None,
     pg_options=None,
+    global_ranks=None,
 ):
     from torch.distributed.distributed_c10d import (
         Backend,
@@ -60,7 +61,7 @@ def init_custom_process_group(
     pg, _ = _new_process_group_helper(
         world_size,
         rank,
-        [],
+        global_ranks if global_ranks is not None else [],
         backend,
         store,
         group_name=group_name,
@@ -68,7 +69,10 @@ def init_custom_process_group(
         timeout=timeout,
     )
 
-    _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
+    if global_ranks is not None:
+        _world.pg_group_ranks[pg] = {gr: lr for lr, gr in enumerate(global_ranks)}
+    else:
+        _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
 
     # 多device id时,barrier还需要指定device_ids，不然会校验所有相关的device是否有相同
     # barrier(group=pg, device_ids=[0])

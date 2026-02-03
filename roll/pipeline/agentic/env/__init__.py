@@ -8,11 +8,13 @@ logger = get_logger()
 
 gem.register("sokoban", entry_point="roll.pipeline.agentic.env.sokoban:SokobanEnv")
 gem.register("frozen_lake", entry_point="roll.pipeline.agentic.env.frozen_lake:FrozenLakeEnv")
+gem.register("sokoban_mcp", entry_point="roll.pipeline.agentic.env.mcp:SokobanMCPEnv")
 gem.register("roll_math", entry_point="roll.pipeline.agentic.env.gem.math_env:MathEnv")
 gem.register("roll_code", entry_point="roll.pipeline.agentic.env.gem.code_env:CodeEnv")
 gem.register("roll_qa", entry_point="roll.pipeline.agentic.env.gem.qa_env:QaEnv")
 gem.register("sokoban_sandbox", entry_point="roll.pipeline.agentic.env.sandbox:SokobanSandboxEnv")
-
+gem.register("sokoban_native_env", entry_point="roll.pipeline.agentic.env.sokoban.native_env:SokobanNativeEnv")
+gem.register("deepeyes", entry_point="roll.pipeline.agentic.env.deepeyes:DeepEyesEnv")
 
 try:
     # add webshop-minimal to PYTHONPATH

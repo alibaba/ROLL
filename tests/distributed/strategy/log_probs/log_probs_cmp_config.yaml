@@ -21,7 +21,7 @@ prompt_length: 128
 response_length: 64
 
 
-pretrain: Qwen/Qwen2.5-7B-Instruct
+pretrain: Qwen/Qwen3-0.6B
 
 
 actor_train:

@@ -39,6 +39,12 @@ custom_envs:
     ${custom_env.deep_math}
   CodeContest:
     ${custom_env.CodeContest}
+  SweNativeEnv:
+    ${custom_env.SweNativeEnv}
+  SokobanNativeEnv:
+    ${custom_env.SokobanNativeEnv}
+  RockTBNativeEnvTrain:
+    ${custom_env.RockTBNativeEnvTrain}  
 
 actor_infer:
   generating_args:
@@ -145,7 +151,100 @@ custom_env:
             timeout: 5
             sandbox_type: none
             keep_error_last_line: false
+  SweNativeEnv:
+    env_type: "swe_native_env"
+    max_steps: 10
+    max_tokens_per_step: 8192
+    env_manager_cls: roll.pipeline.agentic.env_manager.agent_native_env_manager.AgentNativeStepEnvManager
+    agent_system_template: "agent_system_template placeholder"
+    agent_template: "agent_template placeholder"
+    env_config:
+      dataset_name: data/swe/data.jsonl
+      train_idx_range: [1, 1]
+      val_idx_range: [0, 0]
+      tools: [ "Edit", "glob", "list_directory", "read_file", "Shell" ]
+      traj_dir: "./traj/trainset/"
+      swe_requirement_dir: ""
+      base_dir: "./logs"
 
+      max_steps: 5
+      mode: "train"
+      xrl_authorization: t-r8c4rjh0por8gwc5
+      sandbox_base_url: https://xrl-sandbox.alibaba-inc.com
+      user_id: '410435'
+      experiment_id: "test"
+
+  SokobanNativeEnv:
+    env_type: "sokoban_native_env"
+    max_steps: 10
+    max_tokens_per_step: 128
+    env_manager_cls: roll.pipeline.agentic.env_manager.agent_native_env_manager.AgentNativeStepEnvManager
+    agent_system_template: "agent_system_template placeholder"
+    agent_template: "agent_template placeholder"
+    env_config:
+      max_steps: 10
+
+  RockTBNativeEnvTrain:
+    env_type: "rock_tb_native_env"
+    max_steps: 10
+    max_tokens_per_step: 8192
+    env_manager_cls: roll.pipeline.agentic.env_manager.agent_native_env_manager.AgentNativeStepEnvManager
+    agent_system_template: "agent_system_template placeholder"
+    agent_template: "agent_template placeholder"
+    env_config:
+      dataset_name: data/terminal_bench.jsonl
+      train_idx_range: [13, 13]
+      tools: ~
+      max_steps: 10
+      mode: "train"
+      xrl_authorization: t-j99eljub5bst4q9p
+      sandbox_base_url: https://xrl-sandbox.alibaba-inc.com
+      user_id: '481404'
+      experiment_id: "test"
+      test_files: ["output/terminal-bench/terminal-bench"]
+      agent_config:
+        agent_type: "iflow-cli"
+        version: "0.0.1"
+        pre_init_bash_cmd_list:
+          - command: 'echo "118.31.38.66 github.com" | tee -a /etc/hosts'
+            timeout_seconds: 30
+          - command: "apt-get update"
+            timeout_seconds: 600
+          - command: "apt-get install -y curl git wget xz-utils"
+            timeout_seconds: 600
+          - command: "apt-get install -y build-essential libc6-dev patch procps"
+            timeout_seconds: 600
+        model_service_config: 
+          model_service_install_cmd: 'pip install "rl_rock[model-service]==1.0.0" -i https://artlab.alibaba-inc.com/1/pypi/simple --trusted-host artlab.alibaba-inc.com'
+        iflow_cli_install_cmd: "wget --retry-connrefused --tries=10 --waitretry=2 -O ~/iflow-cli.tgz 'http://cloud.iflow.cn/iflow-cli/iflow-ai-iflow-cli-for-roll-0-4-4-v5.tgz' && npm i -g ~/iflow-cli.tgz && ln -s /opt/nodejs/bin/iflow /usr/local/bin/iflow"
+        iflow_settings:
+          selectedAuthType: "openai-compatible"
+          apiKey: "123"
+          baseUrl: "http://127.0.0.1:8080/v1/"
+          modelName: "Qwen3-Coder-Plus"
+          searchApiKey: "88888888"
+          disableAutoUpdate: True
+          shellTimeout: 360000
+          tokensLimit: 128000          
+          coreTools: [
+                    "Edit",
+                    "exit_plan_mode",
+                    "glob",
+                    "list_directory",
+                    "multi_edit",
+                    "plan",
+                    "read plan",
+                    "read_file",
+                    "read_many_files",
+                    "save_memory",
+                    "Search",
+                    "Shell",
+                    "task",
+                    "web_fetch",
+                    "web_search",
+                    "write_file",
+                    "xml_escape",
+                  ]    
 
 cli_agent_system_template: You're a helpful assistant. You are a good game player. You are aiming to get high reward in the game.
 cli_agent_template: |

@@ -130,7 +130,7 @@ torch.cuda.memory._record_memory_history(enabled=None)
 
 time.sleep(600)
 """
-RANK=0 WORLD_SIZE=1 MASTER_ADDR='127.0.0.1' MASTER_PORT=54893 python tests/models/cuda_mem/test_turbo_model_forward.py
+RANK=0 WORLD_SIZE=1 MASTER_ADDR='127.0.0.1' MASTER_PORT=54893 python tests/models/cuda_mem/test_mca_model_forward.py
 
-torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/models/cuda_mem/test_turbo_model_forward.py
+torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/models/cuda_mem/test_mca_model_forward.py
 """

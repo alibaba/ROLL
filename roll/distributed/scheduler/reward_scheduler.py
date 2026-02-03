@@ -1,3 +1,4 @@
+import asyncio
 from collections import defaultdict
 from typing import Dict, Optional, List, Any
 
@@ -29,7 +30,7 @@ class RewardScheduler:
         self.pipeline_config = None
         self.progress_bar: Optional[tqdm] = None
 
-    def compute_rewards(self, data: DataProto, reward_clusters: Dict[str, Any], pipeline_config) -> DataProto:
+    async def compute_rewards(self, data: DataProto, reward_clusters: Dict[str, Any], pipeline_config) -> DataProto:
         """
         保序返回rewards
         """
@@ -54,7 +55,8 @@ class RewardScheduler:
             # reward worker compute_rewards 接口返回结果保序
             if domain not in grouped_data.keys():
                 continue
-            domain_rewards: DataProto = DataProto.materialize_concat(data_refs=domain_rewards_ref)
+            data = await asyncio.gather(*[ref.obj_ref for ref in domain_rewards_ref])
+            domain_rewards: DataProto = DataProto.concat(data)
             domain_rewards.batch["prompt_id"] = grouped_data[domain].batch["prompt_id"]
             rewards_list.append(domain_rewards)
 

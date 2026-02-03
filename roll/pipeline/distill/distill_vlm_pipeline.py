@@ -262,7 +262,8 @@ class DistillVLMPipeline(BasePipeline):
                 metrics_mgr.clear_metrics()
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                batch.meta_info = {"global_step": global_step, "is_offload_states": False, "is_offload_optimizer_states_in_train_step": False}
+                batch.meta_info = {"global_step": global_step, "is_offload_states": False,
+                                   "is_offload_optimizer_states_in_train_step": False, "loss_mask_keys": ["labels_for_loss"]}
                 batch_offset = self.logits_transfer_group.apply_offset_by_dp(batch)
                 with Timer(name="step_train", logger=None) as step_train_timer:
                     with Timer(name="teacher_forward", logger=None) as teacher_timer:

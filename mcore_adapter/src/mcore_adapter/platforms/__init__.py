@@ -1,13 +1,12 @@
 import torch
 
-from .platform import Platform
+from ..utils import get_logger
+from .cpu import CpuPlatform
 from .cuda import CudaPlatform
 from .npu import NpuPlatform
+from .platform import Platform
 from .rocm import RocmPlatform
 from .unknown import UnknownPlatform
-from .cpu import CpuPlatform
-
-from ..utils import get_logger
 
 
 logger = get_logger(__name__)

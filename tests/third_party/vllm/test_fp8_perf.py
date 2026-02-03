@@ -3,17 +3,14 @@ import json
 import time
 import itertools
 
+import asyncio
 import ray
 from vllm import SamplingParams
 from roll.distributed.scheduler.resource_manager import ResourceManager
-from roll.third_party.vllm import LLM
+from roll.third_party.vllm import create_async_llm
 from roll.utils.checkpoint_manager import download_model
-import nvtx
+from utils import generate_batch, chat_format
 
-
-def chat_format(prompt):
-    system = "Please reason step by step, and put your final answer within \\boxed{}."
-    return f"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
 def print_speed_metrics(outputs, start_time):
     now = time.time()
@@ -29,10 +26,10 @@ def print_speed_metrics(outputs, start_time):
     print(f"mean prompt len: {sum([len(o.prompt_token_ids) for o in outputs]) / len(outputs)}")
     print(f"min prompt len: {min([len(o.prompt_token_ids) for o in outputs])}")
 
-def generate(model, prompts, sampling_params):
+async def generate(model, prompts, sampling_params):
     print(f"Begin generate for {len(prompts)} prompts")
     start_time = time.time()
-    outputs = model.generate(prompts, sampling_params)
+    outputs = await generate_batch(model, prompts, sampling_params)
     print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
     print_speed_metrics(outputs, start_time)
     print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
@@ -70,19 +67,21 @@ def get_sampling_param_max(limit, num):
         sampling_params.append(sampling_param)
     return sampling_params, num_tokens
 
-def test_uniform(model, chat_prompts, limit, num):
+async def test_uniform(model, chat_prompts, limit, num):
     print(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> TEST UNIFORM {limit} {num}")
     sampling_params, num_tokens = get_sampling_param_uniform(limit, num)
     prompts = list(itertools.islice(itertools.cycle(chat_prompts), len(sampling_params)))
-    generate(model, prompts, sampling_params)
+    await generate(model, prompts, sampling_params)
+    await model.do_log_stats()
 
-def test_max(model, chat_prompts, limit, num):
+async def test_max(model, chat_prompts, limit, num):
     print(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> TEST MAX {limit} {num}")
     sampling_params, num_tokens = get_sampling_param_max(limit, num)
     prompts = list(itertools.islice(itertools.cycle(chat_prompts), len(sampling_params)))
-    generate(model, prompts, sampling_params)
+    await generate(model, prompts, sampling_params)
+    await model.do_log_stats()
 
-if __name__ == "__main__":
+async def main():
     os.environ["VLLM_USE_DEEP_GEMM"] = "1"
     os.environ["NCCL_NVLS_ENABLE"] = "0"
 
@@ -98,7 +97,7 @@ if __name__ == "__main__":
     model_path = "/data/cpfs_0/common/models/Qwen3-32B"
     model_path = "/data/cpfs_0/common/models/Qwen3-30B-A3B"
     model_path = download_model(model_path)
-    model = LLM(
+    model = await create_async_llm(
         resource_placement_groups=placement_groups[0],
         model=model_path,
         tensor_parallel_size=2,
@@ -112,7 +111,7 @@ if __name__ == "__main__":
         #                     "activation_scheme": "dynamic",
         #                     "fmt": "e4m3",
         #                     "quant_method": "fp8",
-        #                     "weight_block_size": [64, 64],
+        #                     "weight_block_size": [128, 128],
         #                 }
         #              },
     )
@@ -130,16 +129,19 @@ if __name__ == "__main__":
 
     # nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node
     #with nvtx.annotate("generate"):
-    #    test_max(model, chat_prompts, 4096, 32)
+    #    await test_max(model, chat_prompts, 4096, 32)
 
-    test_max(model, chat_prompts, 4096, 32)
-    test_max(model, chat_prompts, 4096, 16)
-    test_max(model, chat_prompts, 4096, 8)
-    test_max(model, chat_prompts, 4096, 4)
-    test_max(model, chat_prompts, 4096, 1)
+    await test_max(model, chat_prompts, 4096, 32)
+    await test_max(model, chat_prompts, 4096, 16)
+    await test_max(model, chat_prompts, 4096, 8)
+    await test_max(model, chat_prompts, 4096, 4)
+    await test_max(model, chat_prompts, 4096, 1)
 
-    test_uniform(model, chat_prompts, 4096, 32)
-    test_uniform(model, chat_prompts, 4096, 16)
-    test_uniform(model, chat_prompts, 4096, 8)
-    test_uniform(model, chat_prompts, 4096, 4)
-    test_uniform(model, chat_prompts, 4096, 1)
+    await test_uniform(model, chat_prompts, 4096, 32)
+    await test_uniform(model, chat_prompts, 4096, 16)
+    await test_uniform(model, chat_prompts, 4096, 8)
+    await test_uniform(model, chat_prompts, 4096, 4)
+    await test_uniform(model, chat_prompts, 4096, 1)
+
+if __name__ == "__main__":
+    asyncio.run(main())

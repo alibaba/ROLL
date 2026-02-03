@@ -12,10 +12,11 @@ from megatron.core.transformer.transformer_block import TransformerBlockSubmodul
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 from torch.nn import functional as F
 
+from ...platforms import current_platform
 from ..auto.modeling_auto import register_model
 from ..model_factory import McaGPTModel
 from .config_qwen3_next import Qwen3NextConfig
-from ...platforms import current_platform
+
 
 # based on qwen3next code in transformers
 class Qwen3NextRMSNorm(nn.Module):
@@ -132,7 +133,7 @@ class Qwen3NextGatedDeltaNet(MegatronModule):
         return query, key, value, z, b, a
 
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        hidden_states = hidden_states.transpose(0, 1) # [b, s, h]
+        hidden_states = hidden_states.transpose(0, 1)  # [b, s, h]
 
         # Set up dimensions for reshapes later
         batch_size, seq_len, _ = hidden_states.shape
@@ -264,7 +265,7 @@ class Qwen3NextSelfAttention(SelfAttention):
         ]
 
         try:
-            import transformer_engine  # pylint: disable=unused-import
+            import transformer_engine  # noqa: F401
             from megatron.core.extensions.transformer_engine import SplitAlongDim
         except ImportError:
             SplitAlongDim = None

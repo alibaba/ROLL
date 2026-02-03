@@ -109,29 +109,18 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
             env_vars = {}
             env_vars.update(roll_current_platform.get_custom_env_vars())
             env_vars.update(roll_current_platform.get_vllm_run_time_env_vars(gpu_rank))
+            env_vars["FLASHINFER_WORKSPACE_BASE"] = f"{os.environ['FLASHINFER_WORKSPACE_BASE']}_{rank}"
             runtime_env = RuntimeEnv(env_vars=env_vars)
             assert current_platform.ray_device_key == "GPU"
             # NV+AMD GPUs, and Intel XPUs
-            if current_platform.ray_device_key == "GPU":
-                worker = ray.remote(
-                    num_cpus=0,
-                    num_gpus=0.01,
-                    runtime_env=runtime_env,
-                    scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, ),
-                    **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                            rpc_rank=rank)
-            else:
-                worker = ray.remote(
-                    num_cpus=0,
-                    num_gpus=0,
-                    runtime_env=runtime_env,
-                    resources={current_platform.ray_device_key: 0.01},
-                    scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, ),
-                    **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                           rpc_rank=rank)
-
+            worker = ray.remote(
+                num_cpus=0,
+                num_gpus=0.01,
+                runtime_env=runtime_env,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, ),
+                **ray_remote_kwargs,
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
+                                       rpc_rank=rank)
             worker_metadata.append(
                 RayWorkerMetaData(worker=worker, created_rank=rank))
 

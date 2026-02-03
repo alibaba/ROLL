@@ -33,7 +33,9 @@ Agentic Pipeline is ROLL's core pipeline for agent training, supporting multiple
 * **Asynchronous Training**: Decoupling of rollout/training supports asynchronous training.
 * **Multi-turn Interaction Support for Local Debugging**: Multi-turn interaction rollout supports local debugging, improving development efficiency for multi-turn interaction business.
 * **Flexible Policy Configuration**: Supports multiple distributed training strategies such as Megatron, DeepSpeed, vLLM, etc., allowing flexible configuration based on hardware resources.
-
+* **Efficient Training Optimization**: Supports **Sequence Packing** (concatenating multiple short samples into a continuous sequence to reduce padding) and **Dynamic Batching
+** (dynamically grouping samples into batches based on their lengths, applying uniform padding within each batch to the length of the longest sample, thereby minimizing unnecessary computation).
+For configuration methods and implementation details, please refer to the dedicated documentation for `sequence packing` and `dynamic batching`.
 ---
 
 ## ✨️ Core Components

@@ -20,8 +20,6 @@ from roll.configs.worker_config import WorkerConfig
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
-from roll.distributed.strategy.factory import create_strategy
-from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 import string
 from difflib import SequenceMatcher
 import nltk
@@ -564,7 +562,6 @@ class GeneralRuleRewardWorker(Worker):
         self.rank_info.dp_rank = self.rank_info.rank
         self.rank_info.dp_size = self.rank_info.world_size
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
-        self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
         self.repetition_penalty_reward_fn = get_repetition_penalty_reward(ngram_size=3, max_penalty=-0.5)
         # nltk.download('wordnet')
         # nltk.download('omw-1.4')

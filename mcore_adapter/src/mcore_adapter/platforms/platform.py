@@ -1,7 +1,9 @@
-import torch
 import os
 
+import torch
+
 from ..utils import get_logger
+
 
 logger = get_logger(__name__)
 
@@ -173,25 +175,5 @@ class Platform:
         Raises:
             NotImplementedError: This method must be implemented by subclasses to
                               provide framework-specific environment variables.
-        """
-        raise NotImplementedError
-
-    @classmethod
-    def apply_ulysses_patch(cls) -> None:
-        """
-        Apply the Ulysses attention runtime patch to the current environment.
-
-        This method sets up or modifies the necessary environment variables, flags,
-        or other runtime configurations to enable the Ulysses-optimized attention operations
-        in vLLM. It ensures that models using the Ulysses attention implementation
-        can run efficiently on the target hardware.
-
-        Returns:
-            dict: A dictionary containing the environment variables that were applied
-                or modified to enable Ulysses attention support.
-
-        Raises:
-            NotImplementedError: This method should be implemented by subclasses to
-                                provide framework- and hardware-specific Ulysses patching.
         """
         raise NotImplementedError

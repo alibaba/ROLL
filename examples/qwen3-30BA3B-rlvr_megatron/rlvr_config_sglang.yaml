@@ -83,7 +83,7 @@ validation:
   data_args:
     template: qwen2_5
     file_name:
-      - data/math_benchmarks.jsonl
+      - data/aime24_25_deal.jsonl
   generating_args:
     top_p: 0.6
     top_k: 50

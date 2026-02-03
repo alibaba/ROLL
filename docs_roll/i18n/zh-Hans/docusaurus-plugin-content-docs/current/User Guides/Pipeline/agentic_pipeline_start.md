@@ -32,6 +32,8 @@ Agentic Pipeline 是ROLL提供的智能体训练核心Pipeline，支持多种算
 * **异步训练**: rollout/training解耦，支持异步训练
 * **多轮交互支持本地调试**: 多轮交互rollout支持本地调试，提高多轮交互业务开发效率
 * **灵活的策略配置**：支持多种分布式训练策略，如 Megatron、DeepSpeed、vLLM 等，可以根据硬件资源进行灵活配置。
+* **高效训练优化**：支持 **Sequence Packing**（将多条短样本拼接成连续序列，减少 padding）与 **Dynamic Batching**（根据样本长度动态组
+batch，按 batch 内最大长度统一 padding，最小化无效计算）。配置方法和实现原理详见`sequence packing`和`dynamic batching` 对应文档。
 ---
 
 ## ✨️ 核心组件

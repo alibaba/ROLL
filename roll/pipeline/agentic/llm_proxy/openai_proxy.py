@@ -103,8 +103,10 @@ class OpenAIProxy(BaseLLMProxy):
                     # Pass extra_body only if it's not empty
                     extra_body=extra_body if extra_body else None
                 )
-
-                response_text = completion.choices[0].message.content
+                if completion.choices is None:
+                    response_text = "OpenAI API returned no choices."
+                else:
+                    response_text = completion.choices[0].message.content
                 responses = self.tokenizer([response_text], return_tensors="pt")
                 lm_input.batch["responses"] = responses["input_ids"]
                 lm_input.non_tensor_batch["response_text"] = np.array([response_text], dtype=object)

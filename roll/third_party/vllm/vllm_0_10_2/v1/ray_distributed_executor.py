@@ -1,6 +1,6 @@
 from vllm.v1.executor.ray_distributed_executor import RayDistributedExecutor
 
-from roll.third_party.vllm.vllm_0_10_0.ray_distributed_executor import ( 
+from roll.third_party.vllm.vllm_0_10_2.ray_distributed_executor import (
     CustomRayDistributedExecutor as CustomRayDistributedExecutorV0)
 
 # Force RayDistributedExecutor to come before CustomRayDistributedExecutorV0

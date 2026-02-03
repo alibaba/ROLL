@@ -119,12 +119,19 @@ class DataCollatorWithPaddingForMM:
     answer_key: Optional[str] = "ground_truth"
     image_key: Optional[str] = "image"
     image_flag_key: Optional[str] = "image_flag"
+    video_key: Optional[str] = "video"
+    video_flag_key: Optional[str] = "video_flag"
+    image_placeholder: Optional[str] = None
+    image_token: str = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder: Optional[str] = None
+    video_token: str = "<|vision_start|><|video_pad|><|vision_end|>"
     padding: Union[bool, str, PaddingStrategy] = True
     max_length: Optional[int] = None
     pad_to_multiple_of: Optional[int] = None
     padded_keys: List[str] = field(default_factory=lambda: ["input_ids", "attention_mask", "labels"])
     extra_unpadded_keys: List[str] = field(default_factory=lambda: [])
     return_tensors: str = "pt"
+    return_infer_inputs: bool = True  # whether to include infer engine inputs which differs with train
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         assert self.tokenizer and self.processor
@@ -136,14 +143,24 @@ class DataCollatorWithPaddingForMM:
             # cannot process as batch directly though processor output as batch
             # since pixel_values would be packed among batch images while DataProto
             # requires all data fields has same batch size
-            # if image is None, model_inputs would not inlcude image feature field
+            # if image is None, model_inputs would not include image feature field
+            prompt = feature[self.prompt_key]
+            if not isinstance(prompt, str):
+                prompt = self.processor.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+            if self.image_placeholder:
+                prompt = prompt.replace(self.image_placeholder, self.image_token)
+            if self.video_placeholder:
+                prompt = prompt.replace(self.video_placeholder, self.video_token)
+            # TODO: support video
             model_inputs: BatchFeature = self.processor(
                 images=feature[self.image_key]
                 if self.image_key and (not self.image_flag_key or feature[self.image_flag_key])
                 else None,
-                text=feature[self.prompt_key],
+                text=prompt,
             )
-            for key in ["prompt", "position_ids", "rope_deltas"]:   # remove unnecessary feature
+            if not isinstance(model_inputs, BatchFeature):
+                model_inputs = BatchFeature(data=model_inputs)
+            for key in ["prompt", "position_ids", "rope_deltas"]:  # remove unnecessary feature
                 if key in model_inputs:
                     model_inputs.pop(key)
             for key in filter(lambda k: k in model_inputs, self.padded_keys):
@@ -159,22 +176,23 @@ class DataCollatorWithPaddingForMM:
                 # concat at dim=0 before model forward
                 un_padded_features["multi_modal_inputs"].append(dict(model_inputs))
                 # inputs for infer engine, not tensors
-                un_padded_features["multi_modal_data"].append(
-                    {
-                        "prompt_token_ids":  # different with input_ids
-                        self.tokenizer.encode(feature[self.prompt_key], add_special_tokens=False),
-                        "multi_modal_data": {
-                            "image": [feature[self.image_key]]
-                            if not isinstance(feature[self.image_key], list)
-                            else feature[self.image_key]
-                        },
-                    }
-                    if (not self.image_flag_key or feature[self.image_flag_key]) and feature[self.image_key]
-                    else {
-                        "prompt_token_ids":  # different with input_ids
-                        self.tokenizer.encode(feature[self.prompt_key], add_special_tokens=False),
-                    }
-                )
+                if self.return_infer_inputs:
+                    un_padded_features["multi_modal_data"].append(
+                        {
+                            "prompt_token_ids":  # different with input_ids
+                            self.tokenizer.encode(prompt, add_special_tokens=False),
+                            "multi_modal_data": {
+                                "image": [feature[self.image_key]]
+                                if not isinstance(feature[self.image_key], list)
+                                else feature[self.image_key]
+                            },
+                        }
+                        if (not self.image_flag_key or feature[self.image_flag_key]) and feature[self.image_key]
+                        else {
+                            "prompt_token_ids":  # different with input_ids
+                            self.tokenizer.encode(prompt, add_special_tokens=False),
+                        }
+                    )
             if self.answer_key:
                 un_padded_features[self.answer_key].append(feature[self.answer_key])
             if self.extra_unpadded_keys:

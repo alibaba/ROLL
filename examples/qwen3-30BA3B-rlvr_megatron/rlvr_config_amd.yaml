@@ -133,7 +133,7 @@ actor_train:
       use_distributed_optimizer: true
       sequence_parallel: true
       moe_token_dispatcher_type: "alltoall"
-      moe_grouped_gemm: true
+      moe_grouped_gemm: false # If encoutering some timeout issues, you can disable this option.
       moe_layer_recompute: true
   device_mapping: list(range(0,32))
   infer_batch_size: 2
@@ -176,7 +176,7 @@ reference:
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 4
       moe_token_dispatcher_type: "alltoall"
-      moe_grouped_gemm: true
+      moe_grouped_gemm: false # If encoutering some timeout issues, you can disable this option.
   device_mapping: list(range(0,32))
   infer_batch_size: 2
 
@@ -257,7 +257,7 @@ rewards:
       # strategy_config: null
       strategy_name: vllm
       strategy_config:
-        gpu_memory_utilization: 0.8
+        gpu_memory_utilization: 0.5
         block_size: 16
         max_model_len: 8000
         load_format: auto

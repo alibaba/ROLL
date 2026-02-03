@@ -34,7 +34,7 @@ from roll.third_party.megatron.offload_states_patch import (
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 
 
-class TurboModelCreator:
+class McaModelCreator:
 
     def __init__(self, optimizer_type, model_name="/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"):
         self.model_name = model_name
@@ -222,7 +222,7 @@ def test_megatron_init_memory():
         max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
     )
 
-    mca_model = TurboModelCreator(optimizer_type="dist_optimizer")
+    mca_model = McaModelCreator(optimizer_type="dist_optimizer")
 
     # buffer_data = []
     # for buffer in mca_model.optimizer.buffers:
@@ -259,7 +259,7 @@ def test_megatron_init_ddp_memory():
         max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
     )
 
-    mca_model = TurboModelCreator(optimizer_type=None)
+    mca_model = McaModelCreator(optimizer_type=None)
 
     offload_megatron_no_grad_module(model_chunks=mca_model.model.get_models())
 
@@ -287,7 +287,7 @@ def check_tensors(expected_tensors: List[torch.Tensor], tensors: List[torch.Tens
         assert torch.equal(tensor_expected, tensor_restored)
 
 
-def run_model_infer(mca_model: TurboModelCreator, included_state, pin_memory, non_blocking):
+def run_model_infer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
     with torch.no_grad():
         for batch in mca_model.data_loader:
             input_ids, attention_mask = batch
@@ -325,7 +325,7 @@ def run_model_infer(mca_model: TurboModelCreator, included_state, pin_memory, no
             )
 
 
-def run_model_dist_optimizer(mca_model: TurboModelCreator, included_state, pin_memory, non_blocking):
+def run_model_dist_optimizer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
     assert isinstance(mca_model.optimizer, DistributedOptimizer)
 
     for batch in mca_model.data_loader:
@@ -530,7 +530,7 @@ def run_model_dist_optimizer(mca_model: TurboModelCreator, included_state, pin_m
             )
 
 
-def run_model_fp16_optimizer(mca_model: TurboModelCreator, included_state, pin_memory, non_blocking):
+def run_model_fp16_optimizer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
     assert isinstance(mca_model.optimizer, Float16OptimizerWithFloat16Params)
 
     for batch in mca_model.data_loader:
@@ -706,7 +706,7 @@ def run_model_fp16_optimizer(mca_model: TurboModelCreator, included_state, pin_m
             )
 
 
-def run_model_fp32_optimizer(mca_model: TurboModelCreator, included_state, pin_memory, non_blocking):
+def run_model_fp32_optimizer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
     assert isinstance(mca_model.optimizer, FP32Optimizer)
 
     for batch in mca_model.data_loader:
@@ -895,7 +895,7 @@ def test_megatron_offload_states(included_state, pin_memory, non_blocking, optim
     #     stacks='python'
     # )
 
-    mca_model = TurboModelCreator(optimizer_type=optimizer_type)
+    mca_model = McaModelCreator(optimizer_type=optimizer_type)
 
     include = None if included_state is None else [included_state]
     if optimizer_type is None:

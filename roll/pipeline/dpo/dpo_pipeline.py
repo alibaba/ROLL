@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import time
 from typing import Any, Dict, List
 
 import datasets
@@ -197,7 +198,8 @@ class DPOPipeline(BasePipeline):
                 with Timer(name="step_total", logger=None) as step_total_timer:
                     batch_dict: Dict
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
-                    batch.meta_info = {"global_step": global_step, "is_offload_states": False, "is_offload_optimizer_states_in_train_step": False}
+                    batch.meta_info = {"global_step": global_step, "is_offload_states": False,
+                                       "is_offload_optimizer_states_in_train_step": False, 'loss_mask_keys': []}
 
                     with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                         ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
@@ -246,6 +248,7 @@ class DPOPipeline(BasePipeline):
         for batch_dict in tqdm(self.val_dataloader):
             batch_dict: Dict
             batch: DataProto = DataProto.from_single_dict(batch_dict)
+            batch.meta_info['loss_mask_keys'] = []
 
             with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                 ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)

@@ -1,9 +1,12 @@
+from dataclasses import dataclass
+
 from ..converter.dist_converter import DistParallelConfig, default_dist_config, register_dist_config
 from ..converter.template import (
     QKVBiasConverOp,
     QKVConverOp,
     RenameConverOp,
     StackConverOp,
+    Template,
     register_template,
 )
 from .config_qwen3_vl import Qwen3VLConfig
@@ -20,9 +23,34 @@ register_dist_config(
     ),
 )
 
+
+@dataclass
+class Qwen3VLTemplate(Template):
+    def adjust_config_hf_to_mca(self):
+        # NOTE: for `tie_word_embeddings`,
+        # in qwen3-vl model like Qwen/Qwen3-VL-4B-Instruct, tie_word_embeddings
+        # exists both in inner and outer of text_config, and both are True
+        # in qwen3-vl-moe model like Qwen/Qwen3-VL-30B-A3B-Instruct, tie_word_embeddings
+        # in outer of text_config is False while it uses the default value True in the
+        # inner of text_config
+        # currently, both use tie_word_embeddings in the outter of text_config
+        non_text_config_keys = set(
+            list(filter(lambda k: k.endswith("_token_id"), self.config_hf_to_mca.keys()))
+            + ["vision_config", "tie_word_embeddings"]
+        )
+        new_config_hf_to_mca = {}
+        for hf_key, mca_key in self.config_hf_to_mca.items():
+            new_hf_key = hf_key
+            if hf_key not in non_text_config_keys:
+                new_hf_key = "text_config." + new_hf_key
+            new_config_hf_to_mca[new_hf_key] = mca_key
+        return new_config_hf_to_mca
+
+
 register_template(
     "qwen3_vl",
     hf_layer_prefix="model.language_model.layers.",
+    template_class=Qwen3VLTemplate,
     config_hf_to_mca={
         "max_position_embeddings": "max_sequence_length",
         "hidden_size": "hidden_size",

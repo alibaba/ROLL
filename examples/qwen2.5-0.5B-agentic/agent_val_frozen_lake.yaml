@@ -95,13 +95,6 @@ actor_infer:
   model_args:
     disable_gradient_checkpointing: true
     dtype: bf16
-  generating_args:
-    max_new_tokens: 128 # single-turn response length
-    top_p: 0.99
-    top_k: 100
-    num_beams: 1
-    temperature: 0.99
-    num_return_sequences: 1
   data_args:
     template: qwen2_5
   strategy_args:
@@ -137,6 +130,12 @@ train_env_manager:
   group_size: 8
   tags: [FrozenLake]
   num_groups_partition: [128] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  generating_args:
+    max_new_tokens: 128 # single-turn response length
+    top_p: 0.99
+    top_k: 100
+    temperature: 0.99
+    num_return_sequences: 1
 
 val_env_manager:
   max_env_num_per_worker: 32
@@ -144,6 +143,12 @@ val_env_manager:
   group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
   tags: [SimpleSokoban, LargerSokoban, SokobanDifferentGridVocab, FrozenLake]
   num_groups_partition: [256, 256, 256, 256] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  generating_args:
+    max_new_tokens: 128 # single-turn response length
+    top_p: 0.99
+    top_k: 100
+    temperature: 0.2
+    num_return_sequences: 1
 
 
 # Here, you can override variables defined in the imported envs. max_tokens_per_step: 128 in custom_env.SimpleSokoban, here replaced by 64

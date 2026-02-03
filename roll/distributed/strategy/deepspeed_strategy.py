@@ -1,12 +1,9 @@
-import os
 from collections import defaultdict
 from contextlib import nullcontext
-from dataclasses import asdict
 from datetime import timedelta
 from typing import Callable, Dict, Tuple
 
 import deepspeed
-import ray
 import torch
 import torch.distributed as dist
 from codetiming import Timer
@@ -14,7 +11,6 @@ from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.zero import GatheredParameters
 from deepspeed.runtime.zero.offload_config import OffloadStateTypeEnum
 from peft import get_peft_model_state_dict
-from tqdm import tqdm
 from transformers import get_scheduler, set_seed
 from transformers.integrations import HfDeepSpeedConfig
 
@@ -23,6 +19,8 @@ from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
+from roll.platforms import current_platform
+from roll.third_party.deepspeed.model_update import DeepSpeedWeightUpdater
 from roll.third_party.deepspeed.offload_states_patch import bind_deepspeed_offload_states_func
 from roll.utils.collective import collective
 from roll.utils.context_parallel import get_ulysses_group, set_upg_manager
@@ -31,7 +29,6 @@ from roll.utils.functionals import append_to_dict, entropy_from_logits, log_prob
 from roll.utils.constants import IGNORE_INDEX
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
-from roll.platforms import current_platform
 
 
 logger = get_logger()
@@ -143,6 +140,15 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         micro_batch_size = batch.meta_info["micro_batch_size"]
         num_microbatches = max(batch_size // micro_batch_size, 1)
         micro_batches = batch.chunk(chunks=num_microbatches)
+
+        cp_size = self.worker.rank_info.cp_size
+        batch_num_tokens = self._get_batch_num_tokens(batch)
+        batch.meta_info['batch_num_tokens'] = {k: v // cp_size for k, v in batch_num_tokens.items()}
+        global_valid_tokens = self._get_global_valid_samples(batch)
+        batch.meta_info['global_valid_samples'] = {k: v // cp_size for k, v in global_valid_tokens.items()}
+
+        loss_scale = num_microbatches * self.worker.rank_info.dp_size
+
         disable_adapter = batch.meta_info.get("disable_adapter", False)
         adapter_context = self.unwrap_model().disable_adapter() if disable_adapter else nullcontext()
         losses_reduced = []
@@ -184,6 +190,8 @@ class DeepSpeedInferStrategy(InferenceStrategy):
                     **forward_args,
                 )
                 loss, loss_reduced = forward_func(data, output.logits)
+                if self.worker_config.apply_loss_scale:
+                    loss *= loss_scale
                 losses_reduced.append(loss_reduced)
         results = collate_fn_to_dict_list(losses_reduced)
         return results
@@ -234,16 +242,6 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         param = self.model.get_parameter(parameter_name)
         if not self.ds_config.is_zero3():
             param.data.copy_(weight.to("cpu"))
-        else:
-            with GatheredParameters([param], modifier_rank=0):
-                if dist.get_rank() == 0:
-                    param.data.copy_(weight)
-        del weight
-
-    def update_parameter(self, model_update_name, parameter_name, weight, ranks_in_worker):
-        param = self.model.get_parameter(parameter_name)
-        if not self.ds_config.is_zero3():
-            param.data.copy_(weight)
         else:
             with GatheredParameters([param], modifier_rank=0):
                 if dist.get_rank() == 0:
@@ -341,6 +339,8 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
 
+        self.weight_updaters = {}
+
         model = model_provider(tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=True)
 
         if cp_size > 1:
@@ -415,6 +415,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
 
         Returns:
             loss: Scalar loss tensor
+            metrics: Dict
         """
         # Labels already shifted by DataCollator, directly compute cross-entropy
         loss = torch.nn.functional.cross_entropy(
@@ -422,7 +423,8 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             labels.view(-1),
             ignore_index=IGNORE_INDEX
         )
-        return loss
+        metrics = {f"{self.worker_config.name}/loss@sum": loss.detach().float().unsqueeze(0)}
+        return loss, metrics
 
     def train_step(
         self,
@@ -431,8 +433,18 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
     ):
         self.model.train()
         mini_batch_size = self.worker_config.training_args.per_device_train_batch_size
-        data_iter = batch.make_iterator(mini_batch_size=mini_batch_size, epochs=1)
         mini_steps = batch.batch.batch_size[0] // self.worker_config.training_args.per_device_train_batch_size
+
+        cp_size = self.worker.rank_info.cp_size
+        batch_num_tokens = self._get_batch_num_tokens(batch)
+        batch.meta_info['batch_num_tokens'] = {k: v // cp_size for k, v in batch_num_tokens.items()}
+        global_valid_tokens = self._get_global_valid_samples(batch)
+        batch.meta_info['global_valid_samples'] = {k: v // cp_size for k, v in global_valid_tokens.items()}
+
+        loss_scale = mini_steps * self.worker.rank_info.dp_size
+        batch.meta_info['micro_batch_size'] = mini_batch_size
+
+        data_iter = batch.make_iterator(mini_batch_size=mini_batch_size, epochs=1)
         metrics = {}
 
         for step in range(mini_steps):
@@ -472,6 +484,8 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             loss, loss_reduced = loss_func(data, output.logits)
             append_to_dict(metrics, loss_reduced)
             loss *= self.worker.rank_info.cp_size
+            if self.worker_config.apply_loss_scale:
+                loss *= loss_scale
             self.model.backward(loss)
 
             is_gradient_accumulation_boundary = self.model.is_gradient_accumulation_boundary()
@@ -554,113 +568,18 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         del lora_state_dict
         return lora_params
 
-    def model_update(self, model_update_name, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
-        model = self.unwrap_model()
-        if is_lora := (self.worker_config.model_args.lora_target is not None):
-            all_params = self.collect_lora_params()
-            peft_config = model.peft_config.get("default", None)
-        else:
-            all_params = list(model.named_parameters())
+    def setup_model_update(self, infer_cluster, model_update_name: str):
+        assert model_update_name not in self.weight_updaters
+        is_lora = self.worker_config.model_args.lora_target is not None
+        self.weight_updaters[model_update_name] = DeepSpeedWeightUpdater(
+            pipeline_config=self.worker.pipeline_config,
+            infer_cluster=infer_cluster,
+            worker_config=self.worker_config,
+            model_update_name=model_update_name,
+            model=self.unwrap_model(),
+            ds_config=self.ds_config,
+            is_lora=is_lora,
+        )
 
-        comm_plan = self.model_update_comm_plan[model_update_name][self.worker.rank_info.pp_rank]
-        model = self.unwrap_model()
-        broadcast_time_cost = 0
-        with Timer("model_update_total") as timer_total:
-            for param_name, param in tqdm(
-                all_params, desc="weight update progress", total=len(all_params)
-            ):
-                shape = param.shape if not self.ds_config.is_zero3() else param.ds_shape
-                if not self.ds_config.is_zero3():
-
-                    param_weight = param.data
-                    refs = []
-                    for p2p_tgt_device in p2p_tgt_devices:
-                        p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
-                        ref = p2p_tgt_worker.update_parameter.remote(
-                            model_update_name=model_update_name,
-                            parameter_name=param_name,
-                            weight=param_weight,
-                            ranks_in_worker=[p2p_tgt_device["device"]["rank"]],
-                            is_lora=is_lora,
-                        )
-                        refs.append(ref)
-
-                    if (
-                        self.worker.rank_info.tp_rank == 0
-                        and self.worker.rank_info.cp_rank == 0
-                        and self.worker.rank_info.dp_rank == 0
-                    ):
-                        for worker in tgt_workers:
-                            ref = worker.broadcast_parameter.remote(
-                                model_update_name=model_update_name,
-                                src_pp_rank=self.worker.rank_info.pp_rank,
-                                dtype=param_weight.dtype,
-                                shape=shape,
-                                parameter_name=param_name,
-                                is_lora=is_lora,
-                            )
-                            refs.append(ref)
-                    if len(broadcast_tgt_devices) > 0:
-                        collective.broadcast(tensor=param_weight, src_rank=0, group_name=comm_plan["group_name"])
-                    ray.get(refs)
-
-                else:
-                    with GatheredParameters([param]):
-                        param_weight = param.data
-                        with Timer("broadcast") as timer_broadcast:
-                            refs = []
-                            for p2p_tgt_device in p2p_tgt_devices:
-                                p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
-                                ref = p2p_tgt_worker.update_parameter.remote(
-                                    model_update_name=model_update_name,
-                                    parameter_name=param_name,
-                                    weight=param_weight,
-                                    ranks_in_worker=[p2p_tgt_device["device"]["rank"]],
-                                    is_lora=is_lora,
-                                )
-                                refs.append(ref)
-
-                            if (
-                                self.worker.rank_info.tp_rank == 0
-                                and self.worker.rank_info.cp_rank == 0
-                                and self.worker.rank_info.dp_rank == 0
-                            ):
-                                for worker in tgt_workers:
-                                    ref = worker.broadcast_parameter.remote(
-                                        model_update_name=model_update_name,
-                                        src_pp_rank=self.worker.rank_info.pp_rank,
-                                        dtype=param_weight.dtype,
-                                        shape=shape,
-                                        parameter_name=param_name,
-                                        is_lora=is_lora,
-                                    )
-                                    refs.append(ref)
-                            if len(broadcast_tgt_devices) > 0:
-                                collective.broadcast(
-                                    tensor=param_weight, src_rank=0, group_name=comm_plan["group_name"]
-                                )
-                            ray.get(refs)
-                        broadcast_time_cost += timer_broadcast.last
-
-            if is_lora:
-                with Timer("add_lora") as timer_add_lora:
-                    if (
-                        self.worker.rank_info.tp_rank == 0
-                        and self.worker.rank_info.cp_rank == 0
-                        and self.worker.rank_info.dp_rank == 0
-                    ):
-                        refs = []
-                        for worker in tgt_workers:
-                            ref = worker.add_lora.remote(peft_config=asdict(peft_config))
-                            refs.append(ref)
-                        ray.get(refs)
-
-        metrics = {
-            "broadcast": broadcast_time_cost,
-        }
-        if is_lora:
-            metrics["all_gather"] = timer_total.last - broadcast_time_cost - timer_add_lora.last
-            metrics["add_lora"] = timer_add_lora.last
-        else:
-            metrics["all_gather"] = timer_total.last - broadcast_time_cost
-        return metrics
+    def model_update(self, model_update_name: str):
+        return self.weight_updaters[model_update_name].model_update()

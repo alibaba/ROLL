@@ -21,7 +21,7 @@ from torch import Tensor
 
 
 try:
-    import transformer_engine.pytorch as te  # pylint: disable=unused-import
+    import transformer_engine.pytorch as te  # noqa: F401
 
     HAVE_TE = True
 except ImportError:

@@ -10,6 +10,7 @@ from ..converter.template import (
 )
 from ..model_config import McaModelConfig
 from ..model_factory import McaGPTModel
+from ...utils import is_megatron_llama
 
 
 register_config("qwen3", McaModelConfig)
@@ -48,11 +49,18 @@ register_template(
     weight_converters=[
         RenameConverOp(hf_names="lm_head.weight", mca_names="output_layer.weight"),
         RenameConverOp(hf_names="model.embed_tokens.weight", mca_names="embedding.word_embeddings.weight"),
-        RenameConverOp(hf_names=".input_layernorm.weight", mca_names=".self_attention.linear_qkv.layer_norm_weight"),
+        RenameConverOp(
+            hf_names=".input_layernorm.weight",
+            mca_names=".self_attention.linear_qkv.layer_norm_weight"
+                        if not is_megatron_llama() else ".input_layernorm.weight"
+        ),
         RenameConverOp(hf_names=".self_attn.o_proj.weight", mca_names=".self_attention.linear_proj.weight"),
         RenameConverOp(hf_names=".self_attn.q_norm.weight", mca_names=".self_attention.q_layernorm.weight"),
         RenameConverOp(hf_names=".self_attn.k_norm.weight", mca_names=".self_attention.k_layernorm.weight"),
-        RenameConverOp(hf_names=".post_attention_layernorm.weight", mca_names=".mlp.linear_fc1.layer_norm_weight"),
+        RenameConverOp(
+            hf_names=".post_attention_layernorm.weight",
+            mca_names=".mlp.linear_fc1.layer_norm_weight"
+                        if not is_megatron_llama() else ".pre_mlp_layernorm.weight"),
         RenameConverOp(hf_names="model.norm.weight", mca_names="decoder.final_layernorm.weight"),
         StackConverOp(
             hf_names=[".mlp.gate_proj.weight", ".mlp.up_proj.weight"], mca_names=".mlp.linear_fc1.weight", dim=0

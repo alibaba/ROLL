@@ -7,14 +7,15 @@ from transformers import set_seed
 
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
 from roll.datasets.loader import get_dataset
-from roll.pipeline.base_worker import ActorWorker
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.initialize import init
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
+from roll.pipeline.base_worker import ActorWorker
 from roll.utils.logging import get_logger
-from tests.distributed.strategy.make_baseline_config import make_baseline_config
+from tests.distributed.strategy.make_baseline_config import \
+    make_baseline_config
 
 logger = get_logger()
 
@@ -26,7 +27,6 @@ class LogProbsCmpPipeline(BasePipeline):
         set_seed(self.pipeline_config.seed)
         self.tokenizer = default_tokenizer_provider(
             model_args=self.pipeline_config.actor_train.model_args,
-            template_name=self.pipeline_config.actor_train.data_args.template,
         )
         self.dataset = get_dataset(
             tokenizer=self.tokenizer,
@@ -92,22 +92,84 @@ class LogProbsCmpPipeline(BasePipeline):
             logprobs_zero3_eq = self.reference.compute_log_probs(batch)
 
             prompt_ids = generate_output.batch["prompts"]
+            response_ids = generate_output.batch["responses"]
             prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
-            for prompt, logprob_zero3_ne, logprob_hf, logprob_zero3_eq in zip(
+            responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+            
+            # Compute per-sample differences
+            count = 0
+            sum_diff_zero3ne_hf_max = 0.0
+            sum_diff_zero3ne_hf_mean = 0.0
+            sum_diff_zero3eq_hf_max = 0.0
+            sum_diff_zero3eq_hf_mean = 0.0
+            
+            for prompt, response, logprob_zero3_ne, logprob_hf, logprob_zero3_eq in zip(
                 prompts,
+                responses,
                 logprobs_zero3_ne.batch["log_probs"],
                 logprobs_hf.batch["log_probs"],
                 logprobs_zero3_eq.batch["log_probs"],
             ):
+                # Compute differences
+                diff_zero3ne_hf_max = (logprob_zero3_ne - logprob_hf).abs().max().item()
+                diff_zero3ne_hf_mean = (logprob_zero3_ne - logprob_hf).abs().mean().item()
+                diff_zero3eq_hf_max = (logprob_zero3_eq - logprob_hf).abs().max().item()
+                diff_zero3eq_hf_mean = (logprob_zero3_eq - logprob_hf).abs().mean().item()
+                
+                sum_diff_zero3ne_hf_max += diff_zero3ne_hf_max
+                sum_diff_zero3ne_hf_mean += diff_zero3ne_hf_mean
+                sum_diff_zero3eq_hf_max += diff_zero3eq_hf_max
+                sum_diff_zero3eq_hf_mean += diff_zero3eq_hf_mean
+                count += 1
+                
                 result = {
                     "prompt": prompt,
+                    "response": response,
+                    "diff_zero3ne_hf_max": diff_zero3ne_hf_max,
+                    "diff_zero3ne_hf_mean": diff_zero3ne_hf_mean,
+                    "diff_zero3eq_hf_max": diff_zero3eq_hf_max,
+                    "diff_zero3eq_hf_mean": diff_zero3eq_hf_mean,
                     "logprob_zero3_ne": logprob_zero3_ne.tolist(),
                     "logprob_hf": logprob_hf.tolist(),
                     "logprob_zero3_eq": logprob_zero3_eq.tolist(),
                 }
-                print(result)
                 results.append(result)
+            
+            # Log average differences for this batch
+            logger.info(
+                f"Batch {global_step} - ZeRO3(ne) vs HF: "
+                f"avg_diff_max={sum_diff_zero3ne_hf_max / count:.6f}, "
+                f"avg_diff_mean={sum_diff_zero3ne_hf_mean / count:.6f}"
+            )
+            logger.info(
+                f"Batch {global_step} - ZeRO3(eq) vs HF: "
+                f"avg_diff_max={sum_diff_zero3eq_hf_max / count:.6f}, "
+                f"avg_diff_mean={sum_diff_zero3eq_hf_mean / count:.6f}"
+            )
+            
+            global_step += 1
 
+        logger.info("pipeline complete!")
+        
+        # Compute and log overall statistics
+        if results:
+            overall_zero3ne_hf_max = sum(r["diff_zero3ne_hf_max"] for r in results) / len(results)
+            overall_zero3ne_hf_mean = sum(r["diff_zero3ne_hf_mean"] for r in results) / len(results)
+            overall_zero3eq_hf_max = sum(r["diff_zero3eq_hf_max"] for r in results) / len(results)
+            overall_zero3eq_hf_mean = sum(r["diff_zero3eq_hf_mean"] for r in results) / len(results)
+            
+            logger.info("=" * 80)
+            logger.info("Overall Statistics:")
+            logger.info(
+                f"  ZeRO3(ne) vs HF: avg_diff_max={overall_zero3ne_hf_max:.6f}, "
+                f"avg_diff_mean={overall_zero3ne_hf_mean:.6f}"
+            )
+            logger.info(
+                f"  ZeRO3(eq) vs HF: avg_diff_max={overall_zero3eq_hf_max:.6f}, "
+                f"avg_diff_mean={overall_zero3eq_hf_mean:.6f}"
+            )
+            logger.info("=" * 80)
+        
         return results
 
 
@@ -121,4 +183,8 @@ if __name__ == "__main__":
 
     output_file = "logprobs_cmp.json"
     with open(output_file, "w") as f:
-        json.dump(results, f, ensure_ascii=False)
+        for m in results:
+            json.dump(m, f, ensure_ascii=False)
+            f.write("\n")
+    
+    logger.info(f"Results saved to {output_file}")

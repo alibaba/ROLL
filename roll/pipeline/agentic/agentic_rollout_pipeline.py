@@ -13,6 +13,7 @@ from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.agentic.agentic_config import AgenticConfig
+from roll.pipeline.agentic.agentic_pipeline import get_episode_scores
 from roll.pipeline.agentic.utils import dump_rollout_trajectories
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.functionals import (
@@ -64,9 +65,7 @@ class AgenticRolloutPipeline(BasePipeline):
             batch.meta_info = {"global_step": global_step}
 
             with Timer(name="rollout", logger=None) as rollout_timer:
-                if self.use_policy_model:
-                    batch.meta_info["is_offload_states"] = True
-                    self.actor_infer.start_server(data=batch)
+                self.actor_infer.load_states()
                 batch = ray.get(self.rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
                 if batch is None:
                     break
@@ -78,14 +77,14 @@ class AgenticRolloutPipeline(BasePipeline):
 
             metrics["time/step_rollout"] = rollout_timer.last
             eval_metrics = reduce_metrics(batch.meta_info.get("metrics", {}))
-            eval_score = batch.batch["scores"].sum(-1)
+            eval_score = get_episode_scores(batch)
             eval_metrics["score/mean"] = torch.mean(eval_score).detach().item()
             eval_metrics["score/max"] = torch.max(eval_score).detach().item()
             eval_metrics["score/min"] = torch.min(eval_score).detach().item()
 
             batch_grouped = batch.group_by(keys="tags")
             for group_name, group_batch in batch_grouped.items():
-                eval_score = group_batch.batch["scores"].sum(-1)
+                eval_score = get_episode_scores(group_batch)
                 eval_metrics[f"{group_name}/score/mean"] = torch.mean(eval_score).detach().item()
                 eval_metrics[f"{group_name}/score/max"] = torch.max(eval_score).detach().item()
                 eval_metrics[f"{group_name}/score/min"] = torch.min(eval_score).detach().item()

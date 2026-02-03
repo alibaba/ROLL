@@ -47,7 +47,8 @@ class UnknownPlatform(Platform):
         try:
             from vllm import envs
 
-            if envs.VLLM_USE_V1:
+            # VLLM_USE_V1 is deprecated in vllm>=0.11.1
+            if not hasattr(envs, "VLLM_USE_V1") or envs.VLLM_USE_V1:
                 from vllm.v1.worker.gpu_worker import Worker
 
                 logger.info("Successfully imported vLLM V1 Worker.")
@@ -66,6 +67,7 @@ class UnknownPlatform(Platform):
         env_vars = {
             "PYTORCH_CUDA_ALLOC_CONF" : "",
             "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
+            "CUDA_VISIBLE_DEVICES": f"{gpu_rank}",
         }
         return env_vars
     

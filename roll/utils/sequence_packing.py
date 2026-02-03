@@ -1,356 +1,343 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from roll.distributed.scheduler.protocol import DataProto
+    from roll.utils.functionals import get_seqlen_balanced_partitions
+
 import torch
+import math
+import copy
+from dataclasses import field, dataclass, asdict
+from typing import Iterator, Tuple, Dict, List
+import torch.distributed as dist
+from roll.configs.worker_config import SequencePackingConfig
 
-from roll.distributed.scheduler.protocol import DataProto
-from roll.platforms import current_platform
-from roll.utils.constants import IGNORE_INDEX
+def make_micro_batch_iter_for_sequence_packing(mini_batch, tp_size, cp_size, vp_size, is_train=False, dp_group=None,
+                                               micro_batch_size=None, config: SequencePackingConfig = None):
+    packer = get_sequence_packing_packer(config)
+    return packer.make_micro_batch_iter_for_sequence_packing(mini_batch, tp_size, cp_size, vp_size, is_train, dp_group, micro_batch_size)
 
-"""
-Loss computation wrappers for sequence packing training.
-Handles unpacking model outputs and aligning with original sequence boundaries for loss calculation.
-"""
+def restore_results_order(
+            results: Dict[str, torch.Tensor],
+            partition_indices_list: List[List[int]],
+            config: SequencePackingConfig = None
+    ) -> Dict[str, torch.Tensor]:
+    packer = get_sequence_packing_packer(config)
+    return packer.restore_results_order(results, partition_indices_list)
 
 
-# TODO: use view of tensor in loss caculating instead of copy
-class SequencePackingLossWrapper:
+def get_sequence_packing_packer(config: SequencePackingConfig = None):
+    """Factory function to get the appropriate sequence packing algorithm."""
+    if config==None:
+        config = SequencePackingConfig()
+    if config.algorithm == 'load_balance':
+        return LoadBalancePacker(config)
+    elif config.algorithm == 'none':
+        return SequencePackingPacker(config)
+    else:
+        raise ValueError(f"Illegal sequence packing algorithm {config.algorithm},"
+                         f" algorithm must be in ['none', 'load_balance']")
+
+
+class SequencePackingPacker:
     """
-    Base wrapper for computing loss on packed sequences.
-
-    In sequence packing, multiple sequences are concatenated and padded to form a single packed sequence.
-    This wrapper handles:
-    1. Unpacking model outputs back to individual sequences
-    2. Aligning original data (labels, masks) with unpacked outputs
-    3. Computing loss on properly aligned data
+    Sequence Packing Packer
     """
 
-    def __init__(
-        self,
-        strategy,
-        loss_func,
-    ):
+    def __init__(self, config: SequencePackingConfig = None):
+        self.config = config if config is not None else SequencePackingConfig()
+
+    def get_pad_factor(self, cp_size, tp_size):
+        """Calculate padding factor based on parallelism configuration."""
+        pad_factor = cp_size * 2 * tp_size if cp_size > 1 else tp_size
+        pad_factor = math.lcm(16, pad_factor)
+        return pad_factor
+
+    @staticmethod
+    def calculate_workload(seqlen: int) -> float:
         """
+        Calculate workload (simulating Transformer FLOPs).
+        FLOPs ∝ 6 * hidden_size * seqlen + seqlen^2
+        Using hidden_size=4096 as reference (7B model)
+        """
+        return 24576 * seqlen + seqlen * seqlen
+
+    @staticmethod
+    def ceildiv(a: int, b: int) -> int:
+        """Ceiling division."""
+        return -(a // -b)
+
+    def make_micro_batch_iter_for_sequence_packing(
+            self,
+            mini_batch: DataProto,
+            tp_size, cp_size, vp_size, is_train=False,
+            dp_group=None, micro_batch_size=None
+    ) -> Iterator[DataProto]:
+        assert micro_batch_size is not None, "SequencePackingPacker: micro_batch_size is None"
+        mini_batch_size = len(mini_batch)
+        mini_batch.meta_info['partition_indices_list'] = []
+        num_microbatches = mini_batch_size // micro_batch_size
+        mini_batch.meta_info['num_micro_batchs'] = num_microbatches
+        return iter(mini_batch.chunk(chunks=num_microbatches))
+
+    @staticmethod
+    def restore_results_order(
+            results: Dict[str, torch.Tensor],
+            partition_indices_list: List[List[int]]
+    ) -> Dict[str, torch.Tensor]:
+        return results
+
+
+
+class LoadBalancePacker(SequencePackingPacker):
+    @staticmethod
+    def roundup_divisible(a: int, b: int) -> int:
+        """Round up a to be divisible by b."""
+        return ((a + b - 1) // b) * b
+
+    @staticmethod
+    def get_device_name():
+        """Get current device name."""
+        if torch.cuda.is_available():
+            return f"cuda:{torch.cuda.current_device()}"
+        return "cpu"
+
+    @staticmethod
+    def calculate_workload_batch(seqlen_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate workload for a batch of sequences.
+
         Args:
-            strategy: Training strategy containing model and distributed config
-            loss_func: Loss function to apply
-            cu_seqlens_q: Cumulative sequence lengths of original (unpadded) sequences
-            cu_seqlens_q_padded: Cumulative sequence lengths after padding for packing
-            logger: Optional logger
-        """
-        self.strategy = strategy
-        self.loss_func = loss_func
-        self.cu_seqlens = None
-        self.cu_seqlens_padded = None
-        self.logger = None
-
-    def set_packing_params(self, cu_seqlens, cu_seqlens_padded, logger):
-        self.cu_seqlens = cu_seqlens
-        self.cu_seqlens_padded = cu_seqlens_padded
-        self.logger = logger
-
-    def _unpack_output_tensor(self, output_tensor):
-        """
-        Unpack model output tensor from packed format back to individual sequences.
-
-        The packed output contains multiple sequences concatenated together. This method
-        splits them back using padded cumulative sequence lengths, accounting for context
-        parallelism partitioning.
-
-        Args:
-            output_tensor: Packed model output with shape (batch=1, packed_seq_len, hidden_dim)
+            seqlen_tensor: Tensor of sequence lengths
 
         Returns:
-            List of unpacked tensors, one per original sequence, each with shape
-            (batch=1, padded_seq_len, hidden_dim)
+            Tensor of workloads
         """
-        cp_size = self.strategy.worker.rank_info.cp_size
+        return 24576 * seqlen_tensor + seqlen_tensor * seqlen_tensor
 
-        # Calculate sequence boundaries in the packed tensor
-        # Padded cumulative lengths mark where each sequence starts/ends after packing
-        padded_cu_seqlens = self.cu_seqlens_padded
-
-        # Adjust for context parallelism: each rank only holds a portion of the sequence
-        seq_starts = padded_cu_seqlens[:-1] // cp_size
-        seq_ends = padded_cu_seqlens[1:] // cp_size
-
-        # Extract each sequence from the packed tensor
-        unpacked_output_tensor_list = []
-        for seq_idx, (seq_start, seq_end) in enumerate(zip(seq_starts, seq_ends)):
-            unpacked_output_tensor_list.append(output_tensor[:, seq_start:seq_end, :])
-        return unpacked_output_tensor_list
-
-    def _pad_tensor_to_target_length(self, tensor, target_length, pad_val=0, pad_dim=0):
+    def make_micro_batch_iter_for_sequence_packing(
+            self,
+            mini_batch: DataProto,
+            tp_size: int,
+            cp_size: int,
+            vp_size: int,
+            is_train=False,
+            dp_group=None,
+            micro_batch_size=None
+    ) -> Iterator[DataProto]:
         """
-        Pad tensor along the specified dimension to reach the target length by padding on the right.
+        Split mini_batch into micro batches with sequence packing strategy.
+
+        This function:
+        1. Calculates the optimal number of micro batches based on max_packed_sequence_length
+        2. Ensures all DP ranks have the same number of micro batches
+        3. Ensures the number of micro batches is divisible by vp_size
+        4. Balances workload across micro batches using Karmarkar-Karp algorithm
+        5. Optimizes scheduling by placing smaller batches at edges
 
         Args:
-            tensor: Input tensor to pad
-            target_length: Desired length along pad_dim
-            pad_val: Value to use for padding
-            pad_dim: Dimension to pad along
+            mini_batch: Input mini batch data containing:
+                - batch: TensorDict with tensors including 'input_ids' and 'attention_mask'
+                - non_tensor_batch: Dict with non-tensor data
+                - meta_info: Dict with metadata
+            tp_size: Tensor parallel size
+            cp_size: Context parallel size
+            vp_size: Virtual pipeline parallel size (must divide num_micro_batches)
+            max_packed_sequence_length: Maximum total sequence length per micro batch
+            dp_group: Data parallel process group for synchronization
 
-        Returns:
-            Padded tensor with length target_length along pad_dim
+        Yields:
+            DataProto: Micro batches with balanced workload
+
+        Raises:
+            AssertionError: If max_packed_sequence_length < max sequence length in batch
         """
-        seq_len = tensor.shape[pad_dim]
+        assert dp_group is not None, "LoadBalancePacker: dp_group is None"
+        # Calculate effective sequence lengths for each sample
+        # For regular tensors, use attention mask
+        attention_mask = mini_batch.batch["attention_mask"]
+        max_seq_len = attention_mask.shape[-1]
+        seq_len_effective: torch.Tensor = attention_mask.sum(dim=1)
+        pad_factor = self.get_pad_factor(cp_size, tp_size)
+        seq_len_effective = ((seq_len_effective + pad_factor - 1) // pad_factor) * pad_factor
 
-        if target_length > seq_len:
-            pad_size = target_length - seq_len
+        if is_train:
+            max_packed_sequence_length = self.config.max_packed_sequence_length_train
+        else:
+            max_packed_sequence_length = self.config.max_packed_sequence_length_forward
+        assert max_packed_sequence_length is not None, "LoadBalancePacker: max_packed_sequence_length is None"
+        # Validate that max_packed_sequence_length is sufficient
+        assert max_packed_sequence_length >= max_seq_len, (
+            f"max_packed_sequence_length ({max_packed_sequence_length}) must be >= "
+            f"max sequence length in batch ({max_seq_len})"
+        )
 
-            # Construct padding specification for torch.nn.functional.pad
-            # Format: [pad_left, pad_right] for each dim from last to first
-            pad_list = [0, 0] * tensor.ndim
-            pad_list[2 * (tensor.ndim - 1 - pad_dim) + 1] = pad_size
+        batch_size = len(seq_len_effective)
+        total_seqlen = seq_len_effective.sum().item()
 
-            tensor = torch.nn.functional.pad(tensor, pad_list, value=pad_val)
+        # Step 2: Calculate initial number of micro batches
+        # Base calculation: how many batches do we need to fit all tokens?
+        num_micro_batches = max(1, self.ceildiv(total_seqlen, max_packed_sequence_length))
 
-        return tensor
+        # Cannot have more micro batches than samples
+        num_micro_batches = min(num_micro_batches, batch_size)
 
-    def _align_to_unpacked_output_tensor_shape(self, tensor, pad_val=0):
-        """
-        Align original data tensors (labels, masks) to match unpacked output shape.
+        if is_train:
+            min_num_micro_batches = self.config.min_num_micro_batches_train
+        else:
+            min_num_micro_batches = self.config.min_num_micro_batches_forward
+        num_micro_batches = max(num_micro_batches, min_num_micro_batches)
 
-        Original data comes in shape (batch, max_seq_len, ...) where batch contains multiple
-        sequences with varying actual lengths. This method:
-        1. Extracts each sequence's valid portion (up to its original unpadded length)
-        2. Pads it to match the padded length used during packing
-
-        This ensures original data aligns with unpacked model outputs for loss computation.
-
-        Args:
-            tensor: Original data tensor with shape (batch, seq_len, ...)
-            pad_val: Value used for padding (e.g., IGNORE_INDEX for labels, 0 for masks)
-
-        Returns:
-            List of aligned tensors, each with shape (1, padded_seq_len, ...) matching
-            the corresponding unpacked output tensor
-        """
-        # Get original unpadded sequence lengths (actual data before packing)
-        unpadded_seq_lengths = self.cu_seqlens[1:] - self.cu_seqlens[:-1]
-
-        # Get padded sequence lengths (after padding during packing)
-        padded_seq_lengths = self.cu_seqlens_padded[1:] - self.cu_seqlens_padded[:-1]
-
-        source_seq_lengths = unpadded_seq_lengths  # Valid data length
-        target_seq_lengths = padded_seq_lengths  # Target length after packing
-
-        aligned_tensor_list = []
-        for seq_idx, (source_len, target_len) in enumerate(
-                zip(source_seq_lengths, target_seq_lengths)
-        ):
-            # Extract valid portion: truncate to original unpadded length
-            seq_tensor = tensor[seq_idx:seq_idx + 1, :source_len]
-
-            # Pad to match the padded length used in packing
-            seq_tensor = self._pad_tensor_to_target_length(seq_tensor, target_len, pad_val=pad_val, pad_dim=1)
-
-            # Keep batch dimension (1) to match unpacked output format
-            aligned_tensor_list.append(seq_tensor)
-
-        return aligned_tensor_list
-
-    def __call__(self, data: DataProto, output_tensor: torch.Tensor):
-        return self.loss_func(data, output_tensor)
-
-
-# SFT
-class SequencePackingSFTLossWrapper(SequencePackingLossWrapper):
-    """
-    Wrapper for SFT loss computation with packed sequences.
-
-    For SFT, labels are already packed in the same format as model outputs,
-    so we can directly compute loss without unpacking.
-    """
-
-    def __call__(self, data: DataProto, output_tensor: torch.Tensor):
-        # Use pre-packed labels that match the packed output format
-        labels = data.meta_info['labels_packed']
-        return self.loss_func(DataProto.from_dict(tensors={'labels': labels}), output_tensor)
-
-
-# Distillation
-class SequencePackingDistillForwardWrapper(SequencePackingLossWrapper):
-    """
-    Wrapper for teacher model forward pass in distillation with packed sequences.
-
-    Computes teacher logits from packed outputs and prepares them for student training:
-    1. Unpacks teacher outputs to individual sequences
-    2. Computes full vocabulary logits or topk logits for each sequence
-    3. Pads logits back to original max sequence length for easy alignment with student
-    """
-
-    def __init__(self, strategy, loss_func):
-        super().__init__(strategy, loss_func)
-        self.forward_func = loss_func
-
-    def __call__(self, data: DataProto, output_tensor: torch.Tensor, non_loss_data: bool = True):
-        """
-        Compute teacher logits from packed outputs.
-
-        Args:
-            data: Input data protocol
-            output_tensor: Packed teacher model outputs
-            non_loss_data: Flag indicating this is for data generation, not loss computation
-
-        Returns:
-            Tuple of (dummy_loss, dict with teacher logits and topk indices)
-        """
-        # Step 1: Unpack teacher outputs to individual sequences
-        unpacked_output_tensor_list = self._unpack_output_tensor(output_tensor)
-
-        # Step 2: Compute logits for each sequence
-        # Gather across tensor/context parallel ranks to get full logits
-        teacher_topk_probs_list = []
-        teacher_topk_log_probs_list = []
-        teacher_topk_indices_list = []
-        teacher_topk_inf_mask_list = []
-        for idx, unpacked_output_tensor in enumerate(unpacked_output_tensor_list):
-            # Compute logits with full vocabulary (or topk for efficiency)
-            teacher_topk_probs, teacher_topk_log_probs, teacher_topk_indices, teacher_topk_inf_mask = self.strategy.op_compute_topk_probs_and_indices(
-                unpacked_output_tensor,
-                topk=self.strategy.worker.pipeline_config.logits_topk,
-                target_vocab_size=self.strategy.worker.pipeline_config.target_vocab_size,
-                kd_temperature=self.strategy.worker.pipeline_config.kd_temperature,
-                teacher_temperature=self.strategy.worker.pipeline_config.teacher_temperature
+        # Step 3: Synchronize across DP ranks (all ranks must have same count)
+        if dist.is_initialized() and dp_group is not None:
+            num_micro_batches_tensor = torch.tensor(
+                [num_micro_batches],
+                device=self.get_device_name()
             )
+            # Use MAX to ensure all ranks can accommodate their data
+            dist.all_reduce(
+                num_micro_batches_tensor,
+                op=dist.ReduceOp.MAX,
+                group=dp_group
+            )
+            num_micro_batches = num_micro_batches_tensor.cpu().item()
 
-            # Step 3: Pad each sequence's logits to max sequence length
-            # This makes them easy to align with original student data later
-            max_length = self.strategy.worker.pipeline_config.sequence_length
-            teacher_topk_probs = self._pad_tensor_to_target_length(teacher_topk_probs, max_length, pad_val=0, pad_dim=1)
-            teacher_topk_log_probs = self._pad_tensor_to_target_length(teacher_topk_log_probs, max_length, pad_val=0, pad_dim=1)
-            teacher_topk_indices = self._pad_tensor_to_target_length(teacher_topk_indices, max_length, pad_val=0, pad_dim=1)
-            teacher_topk_inf_mask = self._pad_tensor_to_target_length(teacher_topk_inf_mask, max_length, pad_val=1, pad_dim=1)
+        # Step 4: Round up to be divisible by vp_size
+        if vp_size > 1:
+            num_micro_batches = self.roundup_divisible(num_micro_batches, vp_size)
 
-            teacher_topk_probs_list.append(teacher_topk_probs)
-            teacher_topk_log_probs_list.append(teacher_topk_log_probs)
-            teacher_topk_indices_list.append(teacher_topk_indices)
-            teacher_topk_inf_mask_list.append(teacher_topk_inf_mask)
+        # Step 5: Calculate workload for load balancing
+        # Use squared sequence length as proxy for attention computation cost
+        workloads = self.calculate_workload_batch(seq_len_effective)
 
-        # Concatenate all sequences back into batch format
-        teacher_topk_probs = torch.cat(teacher_topk_probs_list, dim=0)
-        teacher_topk_log_probs = torch.cat(teacher_topk_log_probs_list, dim=0)
-        teacher_topk_indices = torch.cat(teacher_topk_indices_list, dim=0)
-        teacher_topk_inf_mask = torch.cat(teacher_topk_inf_mask_list, dim=0)
+        from roll.utils.functionals import get_seqlen_balanced_partitions
+        # Step 6: Partition samples into micro batches with balanced workload
+        micro_batch_indices = get_seqlen_balanced_partitions(
+            seqlen_list=workloads.tolist(),
+            k_partitions=num_micro_batches,
+            equal_size=False  # Allow variable sizes for better balance
+        )
 
-        # Return dummy loss (teacher forward doesn't compute loss) and teacher outputs
-        return torch.tensor(0., device=output_tensor.device), {
-            'topk_probs': teacher_topk_probs.detach(),
-            'topk_log_probs': teacher_topk_log_probs.detach(),
-            'topk_indices': teacher_topk_indices.detach(),
-            'topk_inf_mask': teacher_topk_inf_mask.detach()
-        }
+        # Step 7: Sort and reorder for better pipeline scheduling
+        # Sort by workload (descending) to identify large and small batches
+        micro_batch_indices_with_workload = [
+            (
+                partition,
+                sum(workloads[idx].item() for idx in partition),
+                partition[0] if partition else 0  # tie-breaker
+            )
+            for partition in micro_batch_indices
+        ]
 
+        micro_batch_indices_with_workload.sort(
+            key=lambda x: (x[1], x[2]),
+            reverse=True
+        )
 
-class SequencePackingDistillLossWrapper(SequencePackingLossWrapper):
-    """
-    Wrapper for computing distillation loss with packed sequences.
+        # Reorder: place smaller batches at both ends to reduce pipeline bubbles
+        # Pattern: [small, large, large, ..., large, small]
+        sorted_indices = [x[0] for x in micro_batch_indices_with_workload]
+        reordered_indices = sorted_indices[::2][::-1] + sorted_indices[1::2]
 
-    Combines language modeling loss and distillation loss:
-    1. Unpacks student model outputs to individual sequences
-    2. Aligns original labels and teacher outputs with unpacked student outputs
-    3. Computes both standard LM loss and KL divergence with teacher for each sequence
-    4. Combines losses with configurable weighting
-    """
+        mini_batch.meta_info['partition_indices_list'] = reordered_indices.copy()
 
-    def __call__(self, data: DataProto, output_tensor: torch.Tensor):
+        # Step 8: Generate micro batches
+        generated_count = 0
+
+        for partition in reordered_indices:
+            if len(partition) == 0:
+                # Skip empty partitions (shouldn't happen but be safe)
+                continue
+
+            # Use DataProto's select_idxs method to create micro batch
+            micro_batch_proto = mini_batch.select_idxs(partition)
+
+            # Add metadata about this micro batch
+            micro_batch_proto.meta_info = copy.deepcopy(mini_batch.meta_info)
+            micro_batch_proto.meta_info['micro_batch_idx'] = generated_count
+            micro_batch_proto.meta_info['is_padding_batch'] = False
+            micro_batch_proto.meta_info['partition_indices'] = partition
+            micro_batch_proto.meta_info['num_micro_batchs'] = num_micro_batches
+            micro_batch_proto.meta_info['mini_batch_size'] = mini_batch.batch.batch_size[0]
+
+            yield micro_batch_proto
+            generated_count += 1
+
+        # Verify we generated the correct number of micro batches
+        assert generated_count == num_micro_batches, (
+            f"Generated {generated_count} micro batches but expected {num_micro_batches}"
+        )
+
+    @staticmethod
+    def restore_results_order(
+            results: Dict[str, torch.Tensor],
+            partition_indices_list: List[List[int]]
+    ) -> Dict[str, torch.Tensor]:
         """
-        Compute combined distillation and language modeling loss.
+        Restore computation results to their original order after load-balanced partitioning.
+
+        During load balancing, samples are reordered into partitions by sequence length.
+        This function reverses that reordering to match the original input order.
 
         Args:
-            data: Input data containing original labels and masks
-            output_tensor: Packed student model outputs
+            results: Dict of computation results where first dimension is in partitioned order
+                     e.g., {'logits': [total_batch, ...], 'loss': [total_batch]}
+            partition_indices_list: List of original indices for each partition
+                                    (from mini_batch.meta_info['partition_indices_list'])
 
         Returns:
-            Tuple of (total_loss, metrics_dict)
+            Dict with same keys but tensors reordered to original sample order
+
+        Example:
+            # Create micro batches with load balancing
+            micro_batches_iter = packer.make_micro_batch_iter_for_sequence_packing(
+                mini_batch=mini_batch, ...
+            )
+            partition_indices_list = mini_batch.meta_info['partition_indices_list']
+
+            # Compute (results are concatenated across partitions)
+            results = model(micro_batches_iter)  # {'logits': [total_batch, ...]}
+
+            # Restore original order
+            restored = LoadBalancePacker.restore_results_order(
+                results, partition_indices_list
+            )
         """
-        # Step 1: Compute student logits from packed outputs
-        # Keep them partitioned across tensor/context parallel for memory efficiency
-        student_logits = output_tensor
+        if not results:
+            return {}
 
-        # Step 2: Unpack student logits to individual sequences (still cp-partitioned)
-        student_logits_list = self._unpack_output_tensor(student_logits)
+        # Flatten partition indices to get current -> original mapping
+        original_indices = []
+        for partition_indices in partition_indices_list:
+            original_indices.extend(partition_indices)
 
-        # Step 3: Get original data from dataloader (not packed)
-        labels = data.batch['labels_for_loss']
-        attention_mask = data.batch['attention_mask']
+        # Build inverse mapping: original position -> current position
+        # original_indices[current_pos] = original_pos
+        # reorder_indices[original_pos] = current_pos
+        total_samples = len(original_indices)
+        reorder_indices = [0] * total_samples
+        for current_pos, original_pos in enumerate(original_indices):
+            reorder_indices[original_pos] = current_pos
 
-        # Step 4: Align original data with unpacked outputs
-        # Truncate to original length and pad to match packing padding
-        aligned_labels_list = self._align_to_unpacked_output_tensor_shape(labels, pad_val=IGNORE_INDEX)
-        aligned_attention_mask_list = self._align_to_unpacked_output_tensor_shape(attention_mask, pad_val=0)
+        reorder_indices_tensor = torch.tensor(reorder_indices, dtype=torch.long)
 
-        # Step 5: Get and align teacher outputs (pre-computed in teacher forward pass)
-        if self.strategy.worker.teacher_probs_iterator is not None:
-            teacher_probs = next(self.strategy.worker.teacher_probs_iterator)
-            aligned_teacher_probs_list = self._align_to_unpacked_output_tensor_shape(teacher_probs)
-        else:
-            teacher_probs = None
-        if self.strategy.worker.teacher_log_probs_iterator is not None:
-            teacher_log_probs = next(self.strategy.worker.teacher_log_probs_iterator)
-            aligned_teacher_log_probs_list = self._align_to_unpacked_output_tensor_shape(teacher_log_probs)
-        else:
-            teacher_log_probs = None
-        if self.strategy.worker.teacher_topk_indices_iterator is not None:
-            teacher_topk_indices = next(self.strategy.worker.teacher_topk_indices_iterator)
-            aligned_teacher_topk_indices_list = self._align_to_unpacked_output_tensor_shape(teacher_topk_indices)
-        else:
-            teacher_topk_indices = None
-        if self.strategy.worker.teacher_inf_mask_iterator is not None:
-            teacher_inf_mask = next(self.strategy.worker.teacher_inf_mask_iterator)
-            aligned_teacher_inf_mask_list = self._align_to_unpacked_output_tensor_shape(teacher_inf_mask)
-        else:
-            teacher_inf_mask = None
+        # Reorder each tensor result
+        restored_results = {}
+        for key, tensor in results.items():
+            if isinstance(tensor, torch.Tensor) and tensor.dim() > 0:
+                assert tensor.shape[0] == total_samples, \
+                    f"Tensor '{key}' batch size {tensor.shape[0]} != total samples {total_samples}"
+
+                restored_results[key] = tensor[reorder_indices_tensor]
+            else:
+                # Scalar or non-tensor, keep as-is
+                restored_results[key] = tensor
+
+        return restored_results
 
 
-        # Step 6: Accumulate losses across all sequences in the batch
-        total_gpt_loss = torch.tensor(0, device=current_platform.device_type, dtype=torch.float32)
-        total_distill_loss = torch.tensor(0, device=current_platform.device_type, dtype=torch.float32)
-        total_valid_tokens = 0
-        total_valid_tokens_distill = 0
 
-        batch_size = len(student_logits_list)
-        for idx in range(batch_size):
-            # Get aligned data for this sequence
-            single_student_logits = student_logits_list[idx]
-            single_label = aligned_labels_list[idx]
-            single_teacher_probs = aligned_teacher_probs_list[idx] if teacher_probs is not None else None
-            single_teacher_log_probs = aligned_teacher_log_probs_list[idx] if teacher_log_probs is not None else None
-            single_teacher_topk_indices = aligned_teacher_topk_indices_list[idx] if teacher_topk_indices is not None else None
-            single_teacher_inf_mask = aligned_teacher_inf_mask_list[idx] if teacher_inf_mask is not None else None
 
-            # Compute standard language modeling loss (cross-entropy with labels)
-            local_gpt_loss, local_valid_tokens = self.strategy.op_compute_language_loss_from_logits(
-                single_student_logits, single_label,
-                reduction="sum")
-            total_gpt_loss += local_gpt_loss
-            total_valid_tokens += local_valid_tokens
 
-            # Compute distillation loss (KL divergence between student and teacher)
-            local_distill_loss, local_valid_tokens_distill = self.strategy.op_compute_various_divergence(
-                self.strategy.worker.kl_loss_func,
-                single_student_logits, single_teacher_probs,
-                single_teacher_log_probs, single_teacher_topk_indices,
-                single_teacher_inf_mask, single_label,
-                attention_mask=None, reduction="sum")
 
-            total_distill_loss += local_distill_loss
-            total_valid_tokens_distill += local_valid_tokens_distill
-
-        # Step 7: Normalize losses by number of valid tokens
-        if total_valid_tokens == 0:
-            total_valid_tokens = 1
-        if total_valid_tokens_distill == 0:
-            total_valid_tokens_distill = 1
-        gpt_loss = total_gpt_loss / total_valid_tokens
-        distill_loss = total_distill_loss / total_valid_tokens_distill
-
-        # Step 8: Combine losses with configured weighting
-        # loss = (1 - α) * LM_loss + α * distill_loss
-        loss = ((1 - self.strategy.worker.pipeline_config.distill_loss_weight) * gpt_loss
-                + self.strategy.worker.pipeline_config.distill_loss_weight * distill_loss)
-
-        student_metrics = {
-            "train/loss": loss.detach().item(),
-            "train/train_distill_loss": distill_loss.detach().item(),
-            "train/train_student_loss": gpt_loss.detach().item(),
-        }
-        return loss, student_metrics

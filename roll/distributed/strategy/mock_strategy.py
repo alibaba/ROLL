@@ -81,9 +81,6 @@ class MockInferStrategy(InferenceStrategy):
         # return self.model
         raise NotImplementedError
 
-    def update_parameter(self, model_update_name, parameter_name, weight, ranks_in_worker):
-        logger.warning(f"update_parameter method is not implemented in {self.strategy_name} strategy")
-
     def update_parameter_in_bucket(self, model_update_name, meta_infos, buffer, ranks_in_worker):
         logger.warning(f"update_parameter_in_bucket method is not implemented in {self.strategy_name} strategy")
 

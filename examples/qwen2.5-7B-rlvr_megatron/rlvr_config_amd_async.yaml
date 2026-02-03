@@ -14,8 +14,6 @@ checkpoint_config:
   type: file_system
   output_dir: /data/cpfs_0/rl_examples/lzc/models/${exp_name}
 
-track_with: ml_tracker
-
 num_gpus_per_node: 8
 
 max_steps: 1000

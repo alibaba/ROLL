@@ -14,6 +14,7 @@ class RocmPlatform(Platform):
     device_control_env_var: str = "HIP_VISIBLE_DEVICES"
     ray_experimental_noset: str = "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"
     communication_backend: str = "nccl"
+    Event: type = torch.cuda.Event
 
     @classmethod
     def is_rocm(cls) -> bool:
@@ -35,17 +36,14 @@ class RocmPlatform(Platform):
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             # These VLLM related enviroment variables are related to backend. maybe used afterwards.
             # "VLLM_USE_TRITON_FLASH_ATTN":"0",
-            # "VLLM_ROCM_USE_AITER":"1",
-            # "VLLM_ROCM_USE_AITER_MOE":"1",
+            "VLLM_ROCM_USE_AITER":"1",
+            "VLLM_ROCM_USE_AITER_MOE":"1",
             # "VLLM_ROCM_USE_AITER_ASMMOE":"1",
-            # "VLLM_ROCM_USE_AITER_PAGED_ATTN":"1",
+            "VLLM_ROCM_USE_AITER_PAGED_ATTN":"1",
             # "RAY_DEBUG": "legacy",
-            "VLLM_USE_V1": "1",
+            "VLLM_USE_V1": "0",
             "TORCHINDUCTOR_COMPILE_THREADS": "2",
             "PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True",
-            "SAFETENSORS_FAST_GPU":"1",
-            "VLLM_ROCM_USE_AITER_MHA":"0",
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN":"1",
             # "NCCL_DEBUG_SUBSYS":"INIT,COLL",
             # "NCCL_DEBUG":"INFO",
             # "NCCL_DEBUG_FILE":"rccl.%h.%p.log",
@@ -77,7 +75,8 @@ class RocmPlatform(Platform):
         try:
             from vllm import envs
 
-            if envs.VLLM_USE_V1:
+            # VLLM_USE_V1 is deprecated in vllm>=0.11.1
+            if not hasattr(envs, "VLLM_USE_V1") or envs.VLLM_USE_V1:
                 from vllm.v1.worker.gpu_worker import Worker
 
                 logger.info("Successfully imported vLLM V1 Worker.")

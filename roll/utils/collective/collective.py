@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, Optional
 
 from torch._C._distributed_c10d import ReduceOp
 from torch.distributed import Backend
@@ -21,13 +21,14 @@ class GroupManager:
         self._name_group_map = {}
         self._group_name_map = {}
 
-    def create_collective_group(self, backend, world_size, rank, master_addr: str, master_port: int, group_name):
+    def create_collective_group(self, backend, world_size, rank, master_addr: str, master_port: int, group_name, global_ranks=None):
         self._name_group_map[group_name] = init_custom_process_group(
             backend=backend,
             init_method=f"tcp://{master_addr}:{master_port}",
             world_size=world_size,
             rank=rank,
             group_name=group_name,
+            global_ranks=global_ranks
         )
 
         return self._name_group_map[group_name]
@@ -65,6 +66,7 @@ def init_collective_group(
     master_port: int,
     backend: Union[str, Backend] = current_platform.communication_backend,
     group_name: str = "default",
+    global_ranks: Optional[list] = None,
 ):
     global _group_mgr
     if not group_name:
@@ -76,7 +78,7 @@ def init_collective_group(
     assert world_size > 0
     assert rank >= 0
     assert rank < world_size
-    _group_mgr.create_collective_group(backend, world_size, rank, master_addr, master_port, group_name)
+    _group_mgr.create_collective_group(backend, world_size, rank, master_addr, master_port, group_name, global_ranks=global_ranks)
 
 
 def allreduce(tensor, group_name: str = "default", op=ReduceOp.SUM):
@@ -84,11 +86,20 @@ def allreduce(tensor, group_name: str = "default", op=ReduceOp.SUM):
     dist.all_reduce(tensor, op=op, group=_group_mgr.get_group_by_name(group_name))
 
 
-def broadcast(tensor, src_rank: int = 0, group_name: str = "default"):
+def broadcast(tensor, src_rank: int = 0, group_name: str = "default", async_op=False):
     global _group_mgr
-    dist.broadcast(tensor, src=src_rank, group=_group_mgr.get_group_by_name(group_name))
-
+    return dist.broadcast(tensor, src=src_rank, group=_group_mgr.get_group_by_name(group_name), async_op=async_op)
 
 def barrier(group_name):
     global _group_mgr
     dist.barrier(group=_group_mgr.get_group_by_name(group_name), device_ids=[0])
+
+def all_gather_object(object_list, obj, group_name):
+    global _group_mgr
+    dist.all_gather_object(object_list, obj, group=_group_mgr.get_group_by_name(group_name))
+
+def broadcast_object_list(object_list, src=None, group_name="default", device=None, group_src=None):
+    global _group_mgr
+    assert (src is not None and group_src is None) or (src is None and group_src is not None),\
+        ("Either src or group_src must be set, but they cannot be set simultaneously.")
+    dist.broadcast_object_list(object_list, src=src, group_src=group_src, group=_group_mgr.get_group_by_name(group_name))

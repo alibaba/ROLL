@@ -35,6 +35,7 @@
 
 * **Efficient Distributed Computing**: Leverages the [Ray](https://www.ray.io/) framework to implement efficient distributed training on large-scale GPU clusters, significantly improving training speed and resource utilization.
 
+* **Efficient Training Optimization**: Supports **Sequence Packing** (concatenating multiple short samples into a continuous sequence to reduce padding). For configuration methods and implementation details, please refer to the dedicated documentation for `sequence packing`.
 ---
 
 

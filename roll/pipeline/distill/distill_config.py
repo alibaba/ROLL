@@ -136,8 +136,6 @@ class DistillConfig(BaseConfig):
 
         self.target_vocab_size = None
 
-        self.validate_worker_config()
-
     def to_dict(self):
         return dataclasses.asdict(self)
 

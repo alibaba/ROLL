@@ -4,14 +4,18 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from roll.distributed.scheduler.protocol import DataProto
 from roll.platforms import current_platform
+from roll.distributed.executor.worker import Worker
 from roll.utils.checkpoint_manager import CheckpointManager
 from roll.utils.constants import IGNORE_INDEX
 from roll.utils.collective import collective
 from roll.utils.functionals import log_probs_from_logits, get_dist_info_from_comm_plan, entropy_from_logits
 from roll.utils.logging import get_logger
+from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
+
 
 logger = get_logger()
 
@@ -63,12 +67,6 @@ class InferenceStrategy(ABC):
         """
         return {}
 
-    def start_server(self, *args, **kwargs):
-        raise NotImplementedError
-
-    def add_request(self, command, data: DataProto, *args, **kwargs):
-        raise NotImplementedError()
-
     def unwrap_model(self, *args, **kwargs):
         raise NotImplementedError
 
@@ -85,16 +83,10 @@ class InferenceStrategy(ABC):
     def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
         raise NotImplementedError
 
-    def broadcast_bucket(self, model_update_name, src_pp_rank, meta_infos, bucket_size):
+    def update_parameter_in_bucket(self, model_update_name, meta_infos, buffer, bucket_id, ranks_in_worker, is_lora=False):
         raise NotImplementedError
 
-    def update_parameter(self, model_update_name, parameter_name, weight, ranks_in_worker):
-        """
-        engine模式中，p2p update要求engine能够将param 更新至指定的rank
-        """
-        raise NotImplementedError
-
-    def update_parameter_in_bucket(self, model_update_name, meta_infos, buffer, ranks_in_worker):
+    def setup_model_update(self, *args, **kwargs):
         raise NotImplementedError
 
     def _setup_collective_group_impl(
@@ -155,7 +147,7 @@ class InferenceStrategy(ABC):
         self._setup_collective_group_impl(model_update_name, comm_plan, backend, mode=mode)
 
     # offload/load 相关接口
-    def load_states(self):
+    def load_states(self, *args, **kwargs):
         raise NotImplementedError
 
     def offload_states(self, *args, **kwargs):
@@ -180,17 +172,18 @@ class InferenceStrategy(ABC):
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
         return entropy
 
-    def op_compute_language_loss_from_logits(self, logits: torch.Tensor, targets: torch.Tensor):
-        # shift
+    def op_compute_language_loss_from_logits(self, logits: torch.Tensor, targets: torch.Tensor, reduction='mean'):
         logits = logits[..., :-1, :].contiguous()
         targets = targets[..., 1:].contiguous()
+
         loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)),
             targets.view(-1),
-            ignore_index=IGNORE_INDEX
+            ignore_index=IGNORE_INDEX,
+            reduction=reduction
         )
-        mask = (targets != IGNORE_INDEX)
-        valid_tokens = mask.sum()
+
+        valid_tokens = (targets.view(-1) != IGNORE_INDEX).sum()
         return loss, valid_tokens
 
     def op_compute_topk_logits(self, logits: torch.Tensor, topk: int = 0):
@@ -311,11 +304,13 @@ class InferenceStrategy(ABC):
 
     # Both megatron and deepspeed can output language loss directly.
     # This op is mainly for computing context-parallel loss.
-    def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor):
+    def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor, batch_num_tokens: int):
         loss_mask = (labels != IGNORE_INDEX).float()
         loss_mask = loss_mask.view(-1).float()
         losses = torch.sum(losses.view(-1) * loss_mask)
-        return losses
+        losses = losses / batch_num_tokens
+        metrics = {f"{self.worker_config.name}/loss@sum": losses.clone().detach().item()}
+        return losses, metrics
 
     def op_compute_gather_by_teacher_indices(
             self,
@@ -353,6 +348,87 @@ class InferenceStrategy(ABC):
         # Gather along vocab dimension (last dim)
         gathered_logits = torch.gather(student_logits, dim=-1, index=teacher_indices)
         return gathered_logits
+    
+    def process_weights_after_loading(self,*args, **kwargs):
+        pass
+
+    def _get_batch_num_tokens(self, batch: DataProto, dp_group=None):
+        """
+        Only supports `batch.meta_info["loss_mask_keys"]` as a `list[str]`.
+        """
+        assert "loss_mask_keys" in batch.meta_info, (
+            "Please set loss_mask_keys in meta info. "
+            "When batch_num_tokens is not required, set loss_mask_keys to an empty list []."
+        )
+
+        loss_mask_keys = batch.meta_info["loss_mask_keys"]
+        if not isinstance(loss_mask_keys, list):
+            raise TypeError(f"loss_mask_keys must be a list[str], got {type(loss_mask_keys)}")
+        if not all(isinstance(k, str) for k in loss_mask_keys):
+            raise TypeError("loss_mask_keys must be a list[str]")
+
+        out = {}
+        for key in loss_mask_keys:
+            if key not in batch.batch:
+                continue
+
+            loss_mask = batch.batch[key]
+            if key in ["labels", "labels_for_loss"]:
+                loss_mask = (loss_mask != IGNORE_INDEX)
+            elif key == "response_mask":
+                loss_mask = loss_mask[:, 1:]
+
+            num = loss_mask.sum()
+            dist.all_reduce(num, op=dist.ReduceOp.SUM, group=dp_group)
+
+            if num.item() == 0:
+                num = num.new_tensor(1)
+
+            out[key] = num
+
+        return out
+
+    def _get_global_valid_samples(self, batch: DataProto, dp_group=None):
+        """
+        Only supports `batch.meta_info["loss_mask_keys"]` as a `list[str]`.
+        """
+        assert "loss_mask_keys" in batch.meta_info, (
+            "Please set loss_mask_keys in meta info. "
+            "When global_num_tokens is not required, set loss_mask_keys to an empty list []."
+        )
+
+        loss_mask_keys = batch.meta_info["loss_mask_keys"]
+        if not isinstance(loss_mask_keys, list):
+            raise TypeError(f"loss_mask_keys must be a list[str], got {type(loss_mask_keys)}")
+        if not all(isinstance(k, str) for k in loss_mask_keys):
+            raise TypeError("loss_mask_keys must be a list[str]")
+
+        out = {}
+
+        num_valid = torch.tensor(len(batch), device=batch.batch["input_ids"].device)
+        dist.all_reduce(num_valid, op=dist.ReduceOp.SUM, group=dp_group)
+        out["default"] = num_valid
+
+        for key in loss_mask_keys:
+            if key not in batch.batch:
+                continue
+
+            loss_mask = batch.batch[key]
+            if key in ["labels", "labels_for_loss"]:
+                loss_mask = (loss_mask != IGNORE_INDEX)
+            elif key == "response_mask":
+                loss_mask = loss_mask[:, 1:]
+
+            local_valid = torch.any(loss_mask > 0, dim=-1).to(torch.long)
+            num_valid = local_valid.sum()
+            dist.all_reduce(num_valid, op=dist.ReduceOp.SUM, group=dp_group)
+
+            if num_valid.item() == 0:
+                num_valid = num_valid.new_tensor(1)
+
+            out[key] = num_valid
+
+        return out
 
 
 class TrainStrategy(InferenceStrategy):
@@ -366,6 +442,70 @@ class TrainStrategy(InferenceStrategy):
     def setup_collective_group(self, model_update_name, comm_plan, backend=None, mode="sender"):
         self._setup_collective_group_impl(model_update_name, comm_plan, backend, mode=mode)
 
+
+    def setup_p2p_collective_group(self, model_update_name, comm_plan, backend="nccl"):
+        (intra_rank, info), = comm_plan.items()
+        collective.init_collective_group(
+            info["world_size"],
+            intra_rank,
+            backend=backend,
+            group_name=info["group_name"],
+            master_addr=info["master_addr"],
+            master_port=info["master_port"],
+            global_ranks=info["global_ranks"]
+        )
+        # 可选：warm-up
+        collective.allreduce(torch.zeros(1).cuda(), group_name=info["group_name"])
+        # 保存元数据
+        if model_update_name not in self.model_update_comm_plan:
+            self.model_update_comm_plan[model_update_name] = {}
+        self.model_update_comm_plan[model_update_name][info["group_name"]] = {
+            "rank": intra_rank,
+            "world_size": info["world_size"],
+            "group_name": info["group_name"],
+            "comm_plan": comm_plan,
+        }
+
+    def model_update_set_write_done_handle(self,):
+        """
+        Set the write synchronization event required for reading and writing shared memory
+        """
+        if not hasattr(self, "_events_inited"):
+            # Sender -> Receiver：Write complete
+            self._write_done_event = torch.cuda.Event(interprocess=True)
+            self._write_done_handle = self._write_done_event.ipc_handle()
+            # Sender <- Receiver：Read complete
+            self._read_done_event_remote = None
+            self._events_inited = True
+
+    def model_update_set_read_done_handle(self, read_done_handles):
+        """
+        Set the read synchronization event required for reading and writing shared memory
+        """
+        logger.warning(f"[Rank {dist.get_rank()}] model_update_set_read_done_handle called")
+        read_done_handle = None
+
+        for p2p_tgt_device in self.p2p_tgt_devices:
+            worker_rank = p2p_tgt_device['rank']
+            local_rank = p2p_tgt_device['device']['rank']
+            for read_done_handle_full_dict in read_done_handles:
+                if worker_rank in read_done_handle_full_dict:
+                    read_done_handle_list = read_done_handle_full_dict[worker_rank]
+                    for read_done_handle_dict in read_done_handle_list:
+                        if local_rank in read_done_handle_dict:
+                            read_done_handle = read_done_handle_dict[local_rank]
+
+        if not hasattr(self, "_read_done_event_remote"):
+            if read_done_handle is not None:
+                logger.warning(f"[Rank {dist.get_rank()}] Creating _read_done_event_remote from handle")
+                self._read_done_event_remote = torch.cuda.Event.from_ipc_handle(
+                    device=torch.cuda.current_device(),
+                    handle=read_done_handle
+                )
+            else:
+                logger.warning(
+                    f"[Rank {dist.get_rank()}] No read_done_handle found, setting _read_done_event_remote=None")
+                self._read_done_event_remote = None
 
     def train_step(
         self,

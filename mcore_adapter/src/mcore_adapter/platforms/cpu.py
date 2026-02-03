@@ -1,5 +1,6 @@
-from .platform import Platform
 from ..utils import get_logger
+from .platform import Platform
+
 
 logger = get_logger(__name__)
 
@@ -39,7 +40,3 @@ class CpuPlatform(Platform):
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         }
         return env_vars
-
-    @classmethod
-    def apply_ulysses_patch(cls) -> None:
-        return

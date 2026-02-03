@@ -125,25 +125,27 @@ class TrajEnvManager(BaseEnvManager):
             if self.running and (rollout_cache.terminated or stop_reason == GenerateStopReason.MAX_LENGTH):
                 self.logger.debug(f"group_id: {self.env_config['group_id']} env_id: {self.env_config['env_id']} episode_id: {self.episode_id} start_step {start_step} gen_stats: {log_stats}")
                 log_stats = {"generate_time": [], "step_time": [], "current_step": []}
-
                 rollout: DataProto = self.formulate_rollouts(rollout_cache)
                 traj_group_id = f"{self.rollout_cache.tag}_{self.rollout_cache.group_id}_{self.episode_id}_{self.group_seed}"
                 traj_id = f"{traj_group_id}_{self.rollout_cache.env_id}"
                 rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id] * rollout.batch.batch_size[0], dtype=object)
                 rollout.non_tensor_batch["traj_id"] = np.array([traj_id] * rollout.batch.batch_size[0], dtype=object)
-                ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout))
+                ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id']))
 
                 rollout_cache = self.reset()
                 start_step = self.current_step
 
-        ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, None))
+        ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, None, self.env_config['env_id']))
 
     def reset(self) -> RolloutCache:
         self.rollout_cache = RolloutCache(env_id=self.env_config['env_id'],
                                           group_id=self.env_config['group_id'],
                                           tag=self.env_config['tag'])
 
-        self.episode_id = ray.get(self.output_queue.get_episode_id.remote(self.env_config['group_id']))
+        self.episode_id = ray.get(self.output_queue.get_episode_id.remote(
+            self.env_config['group_id'],
+            self.env_config['env_id']
+        ))
         if self.episode_id is None:
             assert not self.running
             return None
@@ -190,11 +192,6 @@ class TrajEnvManager(BaseEnvManager):
         if suffix is not None:
             self.rollout_cache.history[-1]["suffix"] = suffix
 
-        if self.mode == "val" and self.pipeline_config.render_save_dir and hasattr(self.env, "render"):
-            frame = self.env.render(mode='rgb_array')
-            if isinstance(frame, np.ndarray):
-                self.rollout_cache.frames.append(frame)
-
         return self.rollout_cache
 
     def make_decision(self, rollout_cache: RolloutCache):
@@ -226,7 +223,7 @@ class TrajEnvManager(BaseEnvManager):
         response_ids = response_ids.tolist()
         content = self.rollout_cache.history[-1]
 
-        if "infer_logprobs" in lm_output.batch:
+        if "infer_logprobs" in lm_output.batch.keys():
             infer_logprobs = lm_output.batch['infer_logprobs'][0][-len(response_ids):]
             content["infer_logprobs"] = infer_logprobs.tolist()
 
@@ -240,7 +237,7 @@ class TrajEnvManager(BaseEnvManager):
 
         messages = []
         user_content = ""
-        if self.rollout_cache.step == 0:
+        if content["actions_left"] == self.env_config.max_steps:
             messages.append({"role": "system", "content": self.agent_system_template})
             if "env_instruction" in history.history[0]:
                 user_content =  f"{history.history[0]['env_instruction']}\n"
@@ -270,7 +267,11 @@ class TrajEnvManager(BaseEnvManager):
 
         input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
         attention_mask = torch.tensor([1] * input_ids.shape[1], dtype=torch.long).unsqueeze(0)
-        position_ids = attention_mask.cumsum(dim=-1)
+        # Huggingface Transformers prefer position_ids to be 0-based.
+        # Attn Mask: [1, 1, 1, ..., 1, 0, 0, ..., 0]
+        # cumsum: [1, 2, 3, ..., n, n+1, n+1, ..., n+1]
+        # cumsum - 1: [0, 1, 2, ..., n-1, n, n, ..., n]
+        position_ids = attention_mask.cumsum(dim=-1) - 1
         lm_input = DataProto()
         lm_input.batch = TensorDict({
             "input_ids": input_ids,
@@ -316,7 +317,11 @@ class TrajEnvManager(BaseEnvManager):
         prompt_mask =torch.tensor(prompt_masks, dtype=torch.bool).unsqueeze(0)
         score_tensor = torch.tensor([0] * len(token_ids), dtype=torch.float).unsqueeze(0)
         score_tensor[0][-1] = episode_score
-        position_ids = attention_mask.cumsum(dim=-1)
+        # Huggingface Transformers prefer position_ids to be 0-based.
+        # Attn Mask: [1, 1, 1, ..., 1, 0, 0, ..., 0]
+        # cumsum: [1, 2, 3, ..., n, n+1, n+1, ..., n+1]
+        # cumsum - 1: [0, 1, 2, ..., n-1, n, n, ..., n]
+        position_ids = attention_mask.cumsum(dim=-1) - 1
 
         lm_input = DataProto()
         lm_input.batch = TensorDict(
@@ -354,7 +359,6 @@ class TrajEnvManager(BaseEnvManager):
             "env_ids": np.array([self.rollout_cache.env_id], dtype=object),
             "group_ids": np.array([self.rollout_cache.group_id], dtype=object),
             "tags": np.array([self.rollout_cache.tag], dtype=object),
-            "frames": np.array([self.rollout_cache.frames], dtype=object),
             "step_scores": np.array([scores], dtype=object),
             "episode_scores": np.array([episode_score], dtype=object),
         })

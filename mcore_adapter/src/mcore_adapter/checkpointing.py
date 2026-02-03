@@ -2,14 +2,6 @@ import os
 
 import torch
 from megatron.core import dist_checkpointing, mpu
-from transformers.modeling_utils import (
-    SAFE_WEIGHTS_INDEX_NAME,
-    SAFE_WEIGHTS_NAME,
-    WEIGHTS_INDEX_NAME,
-    WEIGHTS_NAME,
-    get_checkpoint_shard_files,
-    load_state_dict,
-)
 
 from .constants import TRACKER_FILENAME
 from .utils import get_logger

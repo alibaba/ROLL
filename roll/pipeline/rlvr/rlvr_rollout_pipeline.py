@@ -40,7 +40,6 @@ class RLVRRolloutPipeline(RLVRPipeline):
                 "rollout pipeline should strategy sleep_level 1, set sleep_level: 1."
             )
 
-        scheduler_cls = DynamicSamplingScheduler
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_infer.model_args)
 
         self.val_dataset = None
@@ -92,7 +91,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
 
         val_pipeline_config = copy.deepcopy(self.pipeline_config)
         val_pipeline_config.is_use_additional_prompts = False
-        self.val_generate_scheduler = scheduler_cls.options(
+        self.val_generate_scheduler = ray.remote(DynamicSamplingScheduler).options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=ray.get_runtime_context().get_node_id(),
                 soft=False,
@@ -105,9 +104,6 @@ class RLVRRolloutPipeline(RLVRPipeline):
                 dataset=self.val_dataset,
                 collect_fn_cls=DataCollatorWithPaddingForPaddedKeys,
                 collect_fn_kwargs=dict(max_length=self.pipeline_config.prompt_length, padding="max_length"),
-                response_filter_fn=lambda data_item, config: True,
-                query_filter_fn=lambda data_list, config: True,
-                response_callback_fn=self.val_generate_scheduler.report_response.remote,
                 is_val=True,
             )
         )
@@ -131,14 +127,13 @@ class RLVRRolloutPipeline(RLVRPipeline):
         with Timer(name="step_generate", logger=None) as step_generate_timer:
             batch.meta_info["is_offload_states"] = False
             batch.meta_info["generation_config"] = self.pipeline_config.validation.generating_args.to_dict()
-            self.actor_infer.start_server(data=DataProto(meta_info=batch.meta_info))
+            self.actor_infer.load_states()
             for reward_cluster in self.rewards.values():
                 reward_cluster.load_states()
             generate_output: DataProto = ray.get(
-                self.val_generate_scheduler.get_batch.remote(data=batch, batch_size=len(self.val_dataset)),
+                self.val_generate_scheduler.get_batch.remote(data=batch, global_step=global_step, batch_size=len(self.val_dataset)),
                 timeout=self.pipeline_config.rpc_timeout,
             )
-            self.actor_infer.stop_server()
             for reward_cluster in self.rewards.values():
                 reward_cluster.offload_states()
             generate_output.meta_info.pop("is_offload_states", None)
@@ -168,5 +163,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
         logger.info(json.dumps(val_metrics_mgr.get_metrics(), ensure_ascii=False))
 
         logger.info(f"pipeline step {global_step} finished")
+
+        ray.get(self.val_generate_scheduler.shutdown.remote())
 
         logger.info("pipeline complete!")

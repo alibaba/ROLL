@@ -2,6 +2,8 @@ import os
 from typing import List, Type, Dict, Union, Any
 
 import ray
+import ray._private.ray_constants as ray_constants
+from ray._private.async_compat import has_async_methods
 from ray._private.worker import RemoteFunctionNoArgs
 from ray.runtime_env import RuntimeEnv
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -22,6 +24,7 @@ from roll.utils.constants import RAY_NAMESPACE
 from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
+
 
 logger = get_logger()
 
@@ -46,6 +49,7 @@ class Cluster:
         else:
             self.worker_cls = worker_cls
         self.resource_manager = resource_manager
+        self.placement_groups = None
         self.worker_config = worker_config
 
         self.workers: List[Any] = []
@@ -81,6 +85,17 @@ class Cluster:
         return self.worker_rank_info[0].pp_size
 
     @property
+    def cp_size(self):
+        return self.worker_rank_info[0].cp_size
+
+    @property
+    def vp_size(self):
+        if 'virtual_pipeline_model_parallel_size' in self.worker_config.strategy_args.strategy_config:
+            return self.worker_config.strategy_args.strategy_config['virtual_pipeline_model_parallel_size']
+        else:
+            return 1
+
+    @property
     def worker_rank_info(self) -> List[RankInfo]:
         if not self._worker_rank_info or not self.initialized:
             # initialize 后RankInfo不能改变了，使用缓存
@@ -96,11 +111,20 @@ class Cluster:
             device_mapping=self.worker_config.device_mapping, world_size=self.worker_config.world_size
         )
         logger.debug(f"placement_groups: {placement_groups}")
+        self.placement_groups = placement_groups
 
         for rank, pgs in enumerate(placement_groups):
             deploy_pg = pgs[0]
             pg_zero_gpu_ranks = sorted([pg["gpu_rank"] for pg in pgs if pg["node_rank"] == deploy_pg["node_rank"]])
-            worker_name = f"{self.cluster_name}-{rank}"
+
+            # Include GPU IDs in worker name for timeline visualization
+            # Format: actor_train-0-G0 (single GPU) or actor_infer-0-G01 (TP=2)
+            if pg_zero_gpu_ranks and deploy_pg["gpu_rank"] is not None:
+                gpu_str = "".join(str(g) for g in pg_zero_gpu_ranks)
+                worker_name = f"{self.cluster_name}-{rank}-G{gpu_str}"
+            else:
+                # CPU-only workers
+                worker_name = f"{self.cluster_name}-{rank}"
             env_vars = {
                 "WORLD_SIZE": str(self.world_size),
                 "RANK": str(rank),
@@ -121,12 +145,21 @@ class Cluster:
             runtime_env = RuntimeEnv(env_vars=env_vars)
             self.worker_config.resource_placement_groups = pgs
 
+            if has_async_methods(self.worker_cls.__ray_metadata__.modified_class):
+                max_concurrency = (self.worker_config.max_concurrency if self.worker_config.max_concurrency > 1
+                                else ray_constants.DEFAULT_MAX_CONCURRENCY_ASYNC)
+                logger.info(f"set max_concurrency to {max_concurrency} for worker {type(self.worker_cls)}")
+            else:
+                assert self.worker_config.max_concurrency == 1
+                max_concurrency = 1
+
             worker_options = {
                 "scheduling_strategy": PlacementGroupSchedulingStrategy(placement_group=deploy_pg["placement_group"]),
                 "name": worker_name,
                 "namespace": RAY_NAMESPACE,
                 "runtime_env": runtime_env,
                 "num_cpus": 0.01,
+                "max_concurrency": max_concurrency,
             }
 
             if current_platform.ray_device_key == "GPU":

@@ -1,93 +1,77 @@
-import pytest
+import os
 import ray
-import torch
+import asyncio
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 from vllm import SamplingParams
 
 from roll.distributed.scheduler.resource_manager import ResourceManager
-from roll.third_party.vllm import LLM
-from roll.third_party.vllm.worker_helper import WorkerHelper
+from roll.third_party.vllm import create_async_llm
+from roll.third_party.vllm.worker import WorkerV1
 from roll.utils.checkpoint_manager import download_model
+from utils import generate_batch, chat_prompts, print_request_output
 
+class ModelUpdateWorker(WorkerV1):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-def load_weight_tensor(self, name, param):
-    self.load_weights([(name, param)])
+    def load_full_model(self, model_path, zero=False):
+        train_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype="auto")
+        for param_name, param in tqdm(iterable=train_model.named_parameters(), total=len(list(train_model.named_parameters()))):
+            if zero:
+                param = param.data.clone().cuda().zero_()
+            else:
+                param = param.data.clone().cuda()
+            self.load_weights([(param_name, param)])
 
-WorkerHelper.load_weight_tensor = load_weight_tensor
-
-def load_weights_tensor(self, model):
-    for name, param in tqdm(list(model.named_parameters()), desc="Updating parameter", unit="param"):
-        self.collective_rpc(method="load_weight_tensor", args=(name, param.detach().cuda()))
-
-LLM.load_weights_tensor = load_weights_tensor
-
-
-def load_weight_numpy(self, name, param):
-    param = torch.from_numpy(param)
-    self.load_weights([(name, param)])
-
-WorkerHelper.load_weight_numpy = load_weight_numpy
-
-def load_weights_numpy(self, model):
-    for name, param in tqdm(list(model.named_parameters()), desc="Updating parameter", unit="param"):
-        self.collective_rpc(method="load_weight_numpy", args=(name, param.detach().numpy()))
-
-LLM.load_weights_numpy = load_weights_numpy
-
-
-def load_weight_list(self, name, dtype, buffer):
-    weight = torch.tensor(buffer, dtype=dtype).cuda()
-    self.load_weights([(name, weight)])
-
-WorkerHelper.load_weight_list = load_weight_list
-
-def load_weights_list(self, model):
-    for name, p in tqdm(list(model.named_parameters()), desc="Updating parameter", unit="param"):
-        self.collective_rpc(method="load_weight_list", args=(name, p.dtype, p.tolist()))
-
-LLM.load_weights_list = load_weights_list
-
-
-def test_model_update_single_gpu():
-    model_path = "Qwen/Qwen2.5-0.5B-Instruct"
-    model_path = download_model(model_path)
-
+async def test_vllm_offload():
+    os.environ["VLLM_USE_V1"] = "1"
     ray.init()
-    resource_manager = ResourceManager(1, 1)
-    placement_groups = resource_manager.allocate_placement_group(world_size=1, device_mapping=[0])
+    resource_manager = ResourceManager(2, 1)
+    placement_groups = resource_manager.allocate_placement_group(world_size=1, device_mapping=[0,1])
 
-    model = LLM(
+    model_path = "Qwen/Qwen2.5-7B-Instruct"
+    model_path = download_model(model_path)
+    model = await create_async_llm(
         resource_placement_groups=placement_groups[0],
         model=model_path,
+        load_format="auto",
         block_size=16,
         dtype="bfloat16",
         gpu_memory_utilization=0.8,
-        tensor_parallel_size=1,
-        trust_remote_code=True,
+        tensor_parallel_size=2,
         disable_custom_all_reduce=True,
-        enforce_eager=True,
         enable_sleep_mode=True,
+        enforce_eager=False,
+        worker_extension_cls="tests.third_party.vllm.test_model_update.ModelUpdateWorker",
     )
 
-    train_model = AutoModelForCausalLM.from_pretrained(model_path)
+    # test offload/onload and sleep_level
+    sampling_params = SamplingParams(temperature=0.0, top_p=0.99, top_k=100, max_tokens=512)
 
-    with pytest.raises(Exception):
-        try:
-            model.load_weights_tensor(train_model)
-        except Exception as e:
-            print("load_weights_tensor exception: ", e)
-            raise
+    print(">>>>>>>>>>>>>>> test_vllm_load_offload: base")
+    vllm_outputs = await generate_batch(model=model, prompts=chat_prompts, sampling_params=sampling_params)
+    assert len(vllm_outputs) == len(chat_prompts)
+    print_request_output(vllm_outputs)
 
-    with pytest.raises(Exception):
-        try:
-            model.load_weights_numpy(train_model)
-        except Exception as e:
-            print("load_weights_numpy exception: ", e)
-            raise
+    print(">>>>>>>>>>>>>>> test_vllm_load_offload: offload states sleep_level_1")
+    await model.offload_states(1)
+    await model.load_states()
+    vllm_outputs = await generate_batch(model=model, prompts=chat_prompts, sampling_params=sampling_params)
+    print_request_output(vllm_outputs)
 
-    model.load_weights_list(train_model)
+    print(">>>>>>>>>>>>>>> test_vllm_load_offload: offload states sleep_level_2")
+    await model.offload_states(2)
+    await model.load_states()
+    vllm_outputs = await generate_batch(model=model, prompts=chat_prompts, sampling_params=sampling_params)
+    print_request_output(vllm_outputs)
 
+    print(">>>>>>>>>>>>>>> test_vllm_load_offload: offload states sleep_level_2 + reload")
+    await model.offload_states(2)
+    await model.engine_core.collective_rpc_async("load_full_model", args=(model_path,))
+    await model.load_states()
+    vllm_outputs = await generate_batch(model=model, prompts=chat_prompts, sampling_params=sampling_params)
+    print_request_output(vllm_outputs)
 
 if __name__ == "__main__":
-    test_model_update_single_gpu()
+    asyncio.run(test_vllm_offload())

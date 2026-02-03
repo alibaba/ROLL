@@ -24,7 +24,7 @@ from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 from roll.utils.constants import IGNORE_INDEX
 from roll.pipeline.distill.logits_transfer_group import LogitsTransferGroup
-
+from roll.utils.functionals import batch_balance
 
 logger = get_logger()
 
@@ -233,10 +233,11 @@ class DistillPipeline(BasePipeline):
         self.logits_transfer_group = LogitsTransferGroup(self.teacher, self.student,
                                                          backend=self.pipeline_config.logits_transfer_backend,)
 
-        self.dataloader = get_dataloader(dataset,
-                                         self.pipeline_config.student.training_args.per_device_train_batch_size *\
+        self.batch_size = self.pipeline_config.student.training_args.per_device_train_batch_size *\
                                          self.pipeline_config.student.training_args.gradient_accumulation_steps *\
-                                         self.student.get_rank_info(0).dp_size,
+                                         self.student.dp_size
+        self.dataloader = get_dataloader(dataset,
+                                         self.batch_size,
                                          data_collator,
                                          num_proc=self.pipeline_config.student.training_args.dataloader_num_workers)
 
@@ -283,7 +284,12 @@ class DistillPipeline(BasePipeline):
                     metrics_mgr.add_metric("time/val", val_timer.last)
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                batch.meta_info = {"global_step": global_step, "is_offload_states": False, "is_offload_optimizer_states_in_train_step": False}
+                batch.meta_info = {"global_step": global_step, "is_offload_states": False, "is_offload_optimizer_states_in_train_step": False,
+                                   'loss_mask_keys': ['labels_for_loss']}
+                # Reorder data for DP rank load balancing
+                batch_balance_metrics = batch_balance(batch, dp_size=self.student.dp_size, minibatch_size=self.batch_size)
+                metrics_mgr.add_metrics(batch_balance_metrics)
+
                 batch_offset = self.logits_transfer_group.apply_offset_by_dp(batch)
                 with Timer(name="step_train", logger=None) as step_train_timer:
                     with Timer(name="teacher_forward", logger=None) as teacher_timer:

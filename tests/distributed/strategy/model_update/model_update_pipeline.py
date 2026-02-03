@@ -1,15 +1,18 @@
+import os
 from typing import Any, Dict
 
+import ray
 import torch
 from codetiming import Timer
 
-from roll.pipeline.base_worker import ActorWorker
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
+from roll.pipeline.base_worker import ActorWorker, InferWorker
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.utils.logging import get_logger
+
 
 logger = get_logger()
 
@@ -25,13 +28,13 @@ class ModelUpdatePipeline(BasePipeline):
         self.pipeline_config.set_max_steps(max_steps=1024)
         self.actor_train: Any = Cluster(
             name=self.pipeline_config.actor_train.name,
-            worker_cls=ActorWorker,
+            worker_cls=self.pipeline_config.actor_train.worker_cls,
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_train,
         )
         self.actor_infer: Any = Cluster(
             name=self.pipeline_config.actor_infer.name,
-            worker_cls=ActorWorker,
+            worker_cls=self.pipeline_config.actor_infer.worker_cls,
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_infer,
         )

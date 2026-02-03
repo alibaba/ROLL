@@ -109,6 +109,7 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
             env_vars = {}
             env_vars.update(roll_current_platform.get_custom_env_vars())
             env_vars.update(roll_current_platform.get_vllm_run_time_env_vars(gpu_rank))
+            env_vars["FLASHINFER_WORKSPACE_BASE"] = f"{os.environ['FLASHINFER_WORKSPACE_BASE']}_{rank}"
             runtime_env = RuntimeEnv(env_vars=env_vars)
             assert current_platform.ray_device_key == "GPU"
             # NV+AMD GPUs, and Intel XPUs

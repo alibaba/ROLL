@@ -3,14 +3,31 @@ import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Literal, Optional, Union
+from typing import Dict, Literal, Optional, Union, List
 
-from roll.configs.worker_config import WorkerConfig, is_colocated
-from roll.utils.config_utils import validate_megatron_batch_size, calculate_megatron_dp_size
+from roll.configs.worker_config import WorkerConfig, is_actor_infer_overlapping_with_any_cluster
+from roll.platforms import current_platform
+from roll.utils.config_utils import (calculate_megatron_dp_size,
+                                     validate_megatron_batch_size)
 from roll.utils.logging import get_logger
 
-
 logger = get_logger()
+
+@dataclass
+class RolloutMockConfig:
+    """Configuration for rollout dump/mock mechanism for precision alignment testing."""
+    enable: bool = field(
+        default=False,
+        metadata={"help": "Enable rollout dump/mock mechanism for precision alignment testing"}
+    )
+    mode: Literal["dump", "mock"] = field(
+        default="dump",
+        metadata={"help": "dump: save rollout data, mock: load pre-recorded data"}
+    )
+    dump_dir: str = field(
+        default="./rollout_mock_dumps",
+        metadata={"help": "Storage directory for rollout dump/mock data"}
+    )
 
 @dataclass
 class ScheduleConfig:
@@ -35,10 +52,14 @@ class ScheduleConfig:
     max_additional_running_prompts: int = field(
         default=16, metadata={"help": "The additional number of running prompts, beyond batch_size."}
     )
+    user_defined_rollout_loop_cls: str = field(
+        default="roll.distributed.scheduler.user_defined_rollout_loop.UserDefinedRolloutLoop",
+        metadata={"help": "Path to class UserDefinedRolloutLoop."}
+    )
 
 
 @dataclass
-class BaseConfig:
+class BaseConfig(ScheduleConfig):
 
     exp_name: str = field(
         default=os.path.basename(sys.argv[0])[: -len(".py")],
@@ -136,10 +157,6 @@ class BaseConfig:
         default=None,
         metadata={"help": "The maximum length of the sequence to be padded."},
     )
-    alive_check_interval: int = field(
-        default=10,
-        metadata={"help": "The interval of worker alive check."}
-    )
     profiler_timeline: bool = field(default=False, metadata={"help": "Whether to use profiler mode or not."})
     profiler_memory: bool = field(default=False, metadata={"help": "Whether to use profiler memory or not."})
     report_length_and_rewards: bool = field(default=False, metadata={"help": "Whether to report lengths and rewards of prompts in each epoch."})
@@ -156,6 +173,10 @@ class BaseConfig:
         default_factory=dict,
         metadata={"help": "system environment variables."}
     )
+    model_update_buffer_size_mb: int = field(
+        default=1024,
+        metadata={"help": "Buffer size in MB for model update operations (e.g., 1024 = 1GB)."}
+    )
     num_nodes: int = field(
         default=1,
         metadata={"help": "Number of nodes available for distributed training."}
@@ -171,6 +192,10 @@ class BaseConfig:
     model_download_type: Optional[str] = field(
         default=None,
         metadata={"help": "snapshot_download func source type, such as MODELSCOPE, HUGGINGFACE_HUB."},
+    )
+    rollout_mock: Optional[RolloutMockConfig] = field(
+        default=None,
+        metadata={"help": "Rollout mock configuration for precision alignment testing."}
     )
 
 
@@ -251,6 +276,15 @@ class BaseConfig:
         from ..platforms import current_platform
         self.num_gpus_per_node = current_platform.device_count()
 
+        if hasattr(self, 'actor_train') and isinstance(self.actor_train, WorkerConfig):
+            self.actor_train.system_envs.update({k: v for k, v in self.system_envs.items() if k not in self.actor_train.system_envs})
+        if hasattr(self, 'actor_infer') and isinstance(self.actor_infer, WorkerConfig):
+            self.actor_infer.system_envs.update({k: v for k, v in self.system_envs.items() if k not in self.actor_infer.system_envs})
+        if hasattr(self, 'reference') and isinstance(self.reference, WorkerConfig):
+            self.reference.system_envs.update({k: v for k, v in self.system_envs.items() if k not in self.reference.system_envs})
+        if hasattr(self, 'critic') and isinstance(self.critic, WorkerConfig):
+            self.critic.system_envs.update({k: v for k, v in self.system_envs.items() if k not in self.critic.system_envs})
+
         # Validate rollout_batch_size divisibility for Megatron data parallelism
         if hasattr(self, 'actor_train') and isinstance(self.actor_train, WorkerConfig) and self.actor_train.strategy_args is not None:
             strategy_name = self.actor_train.strategy_args.strategy_name
@@ -270,6 +304,15 @@ class BaseConfig:
                 logger.debug(
                     f"Skipping DP validation for non-Megatron actor_train strategy: {strategy_name}"
                 )
+
+        if hasattr(self, 'actor_infer') and isinstance(self.actor_infer, WorkerConfig) and self.actor_infer.strategy_args is not None:
+            strategy_name = self.actor_infer.strategy_args.strategy_name
+            assert strategy_name in ["vllm", "sglang"]
+            # Use max_running_requests+1 to reserve extra one for abort_requests.
+            # 1000 is ray_constants.DEFAULT_MAX_CONCURRENCY_ASYNC.
+            max_concurrency = max(self.max_running_requests + 1, 1000)
+            self.actor_infer.max_concurrency = max(self.actor_infer.max_concurrency, max_concurrency)
+            logger.info(f"Set max_concurrency of actor_infer to {self.actor_infer.max_concurrency}")
 
         # the required num nodes
         total_devices = []
@@ -293,18 +336,62 @@ class BaseConfig:
                 if hasattr(attribute, "training_args"):
                     setattr(attribute.training_args, "max_steps", max_steps)
 
-    def validate_worker_config(self):
-        # check if current worker supports sequence packing
-        allowed_names = {
-            'student', 'teacher', 'sft_train',
-        }
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, WorkerConfig) and attr.use_sequence_packing:
-                if attr.name not in allowed_names:
-                    raise ValueError(
-                        f"Worker '{attr.name}' (from field '{attr_name}') don't support use sequence packing now"
-                    )
+@dataclass
+class TrainInferISWeightConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={"help": "Whether to generate train-infer IS weight and store it into batch (train_infer_is_weight)."},
+    )
+    weight_type: Literal["token", "segment", "geometric", "sequence"] = field(
+        default="token",
+        metadata={"help": "Granularity for IS weight: token / segment / geometric / sequence."},
+    )
+    upper_bound: Optional[float] = field(
+        default=1.2,
+        metadata={"help": "Upper bound (clamp) for IS weight. Set to None to disable clamping."},
+    )
+    detach: bool = field(
+        default=True,
+        metadata={"help": "Detach IS weight tensor to prevent gradient flow (recommended)."},
+    )
+
+
+@dataclass
+class TrainInferFilterConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={"help": "Whether to enable this filter rule (applied to response_mask)."},
+    )
+    agg_type: Literal["token", "segment", "geometric", "sequence"] = field(
+        default="token",
+        metadata={"help": "Aggregation level used for filtering: token / segment / geometric / sequence."},
+    )
+
+    ratio_enabled: bool = field(
+        default=True,
+        metadata={"help": "Whether to apply ratio-based filtering (exp(old_logp - infer_logp))."},
+    )
+    ratio_low: float = field(default=0.8, metadata={"help": "Lower threshold for ratio filtering."})
+    ratio_high: float = field(default=1.2, metadata={"help": "Upper threshold for ratio filtering."})
+
+    diff_enabled: bool = field(
+        default=False,
+        metadata={"help": "Whether to apply diff-based filtering (exp(old) - exp(infer))."},
+    )
+    diff_low: float = field(default=-0.2, metadata={"help": "Lower threshold for diff filtering."})
+    diff_high: float = field(default=0.2, metadata={"help": "Upper threshold for diff filtering."})
+
+
+@dataclass
+class TrainInferCorrectionConfig:
+    is_weight: TrainInferISWeightConfig = field(
+        default_factory=TrainInferISWeightConfig,
+        metadata={"help": "Config for generating train-infer IS weight (stored in batch)."},
+    )
+    filters: List[TrainInferFilterConfig] = field(
+        default_factory=list,
+        metadata={"help": "A list of filter rules applied sequentially to response_mask."},
+    )
 
 @dataclass
 class PPOConfig(BaseConfig):
@@ -325,6 +412,7 @@ class PPOConfig(BaseConfig):
     reference: WorkerConfig = field(
         default_factory=WorkerConfig, metadata={"help": "Configuration for the reference role."}
     )
+    reward: WorkerConfig = field(default_factory=WorkerConfig, metadata={"help": "Configuration for reward inference."})
 
     async_generation_ratio: float = field(
         default=0,
@@ -405,8 +493,20 @@ class PPOConfig(BaseConfig):
     enable_old_logprobs_recompute: bool = field(default=False, metadata={"help": "Enable old_logprobs computation optimization for disable caching"})
     force_disable_old_logprobs_recompute: bool = field(default=False, metadata={"help": "Force disable old_logprobs computation optimization for disable caching, priority is higher than enable_old_logprobs_recompute"})
 
+    train_infer_correction: TrainInferCorrectionConfig = field(
+        default_factory=TrainInferCorrectionConfig,
+        metadata={
+            "help": (
+                "Train-infer correction config for off-policy/mismatch handling. "
+                "Pipeline will compute train_infer_is_weight from old_log_probs vs infer_logprobs "
+                "and optionally apply filters to response_mask."
+            )
+        },
+    )
+
     def __post_init__(self):
         super().__post_init__()
+        assert self.async_generation_ratio == 0 or self.generate_opt_level == 1
 
         if (
             self.actor_train.model_args.model_name_or_path is None
@@ -433,6 +533,8 @@ class PPOConfig(BaseConfig):
             self.enable_reference = True
         if self.force_disable_old_logprobs_recompute:
             self.enable_old_logprobs_recompute = False
+        elif self.adv_estimator in ['step_reinforce', "gigpo"]:
+            self.enable_old_logprobs_recompute = True
         else:
             self.set_old_logprobs_status()
 
@@ -448,22 +550,32 @@ class PPOConfig(BaseConfig):
             * self.critic.training_args.gradient_accumulation_steps
         )
         # 没有除dp_size，需要在分布式环境初始化后再除
-        self.actor_train.training_args.max_steps = max_steps * (
-            self.rollout_batch_size
+        # 先计算总的训练步数，最后再除以 backward_batch_size
+        self.actor_train.training_args.max_steps = max(1, (
+            max_steps
+            * self.rollout_batch_size
             * self.actor_infer.generating_args.num_return_sequences
             * self.ppo_epochs
             // actor_backward_batch_size
-        )
-        self.critic.training_args.max_steps = max_steps * (
-            self.rollout_batch_size
+        ))
+        self.critic.training_args.max_steps = max(1, (
+            max_steps
+            * self.rollout_batch_size
             * self.actor_infer.generating_args.num_return_sequences
             // critic_backward_batch_size
-        )
+        ))
 
         logger.info(f"pipeline max_steps: {self.max_steps} to {max_steps}")
         logger.info(f"actor train max_steps without dp_size: {self.actor_train.training_args.max_steps}")
         logger.info(f"critic train max_steps without dp_size: {self.critic.training_args.max_steps}")
         self.max_steps = max_steps
+
+    def _get_effective_cp_size_ulysses(self, configured_ulysses_size: Optional[int]) -> int:
+        if not configured_ulysses_size or configured_ulysses_size <= 1:
+            return 1
+        if current_platform.apply_ulysses_patch() is not None:
+            return configured_ulysses_size
+        return 1
 
     def set_old_logprobs_status(self):
         batch_size = self.rollout_batch_size * self.actor_infer.generating_args.num_return_sequences
@@ -474,7 +586,13 @@ class PPOConfig(BaseConfig):
         dp_size = 1
         if self.actor_train.strategy_args is not None:
             if self.actor_train.strategy_args.strategy_name == "deepspeed_train":
-                dp_size = len(self.actor_train.device_mapping)
+                configured_ulysses_size = getattr(self.actor_train.model_args, 'ulysses_size', None) or 1
+                cp_size = self._get_effective_cp_size_ulysses(configured_ulysses_size)
+                dp_size = len(self.actor_train.device_mapping) // cp_size
+            elif self.actor_train.strategy_args.strategy_name in ("fsdp2_train", "fsdp2_infer"):
+                configured_ulysses_size = getattr(self.actor_train.model_args, 'ulysses_size', None) or 1
+                cp_size = self._get_effective_cp_size_ulysses(configured_ulysses_size)
+                dp_size = len(self.actor_train.device_mapping) // cp_size
             elif self.actor_train.strategy_args.strategy_name == "megatron_train":
                 strategy_config = self.actor_train.strategy_args.strategy_config
                 tp = strategy_config.get('tensor_model_parallel_size', 1)
@@ -504,6 +622,11 @@ class PPOConfig(BaseConfig):
         return self.async_generation_ratio > 0
 
     @property
-    def is_train_infer_colocated(self) -> bool:
-        """Whether actor_train and actor_infer are colocated."""
-        return is_colocated(self.actor_train, self.actor_infer)
+    def is_actor_infer_colocated(self) -> bool:
+        """Whether actor_infer are colocated with any other clusters (exclude reward)."""
+        return is_actor_infer_overlapping_with_any_cluster(
+            actor_infer=self.actor_infer,
+            actor_train=self.actor_train,
+            reference=self.reference,
+            critic=self.critic
+        )

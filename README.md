@@ -43,11 +43,12 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 | 📣   Updates                                                                                                                                                                                                                                                                                                                            |
 |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **[01/01/2026]** 🎉 Our [Let It Flow: Agentic Crafting on Rock and Roll](https://arxiv.org/abs/2512.24873) report released! Introducing ALE ecosystem and ROME, an open-source agentic model with novel IPA algorithm.   |
+| **[02/03/2026]** 🎉 We released FSDP2 Strategy, Megatron with LoRA, GPU partial overlapping, Qwen3-Omni supports and other features. For more details, please refer to the release notes. Welcome to use!                                                                                                                               |
+| **[01/01/2026]** 🎉 Our [Let It Flow: Agentic Crafting on Rock and Roll](https://arxiv.org/abs/2512.24873) report released! Introducing ALE ecosystem and ROME, an open-source agentic model with novel IPA algorithm.                                                                                                                  |
 | **[11/08/2025]** 🎉 Our [ROCK: Reinforcement Open Construction Kit](https://github.com/alibaba/ROCK) released, Explore the new capabilities!.                                                                                                                                                                                           |
 | **[10/23/2025]** 🎉 Our Papers released, see [Asymmetric Proximal Policy Optimization: mini-critics boost LLM reasoning](https://arxiv.org/abs/2510.01656) and [Attention Illuminates LLM Reasoning: The Preplan-and-Anchor Rhythm Enables Fine-Grained Policy Optimization](https://arxiv.org/abs/2510.13554).                         |
 | **[10/14/2025]** 🎉 Our Paper released, see [Part II: ROLL Flash -- Accelerating RLVR and Agentic Training with Asynchrony](https://arxiv.org/abs/2510.11345).                                                                                                                                                                          |
-| **[09/28/2025]** 🎉 Ascend NPU support — see [usage guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Hardware%20Support/ascend_usage).                                                                                                                                                                                                  |
+| **[09/28/2025]** 🎉 Ascend NPU support — see [usage guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Hardware%20Support/ascend_usage).                                                                                                                                                                                          |
 | **[09/25/2025]** 🎉 Our Paper released, see [RollPacker: Mitigating Long-Tail Rollouts for Fast, Synchronous RL Post-Training](https://arxiv.org/abs/2509.21009)                                                                                                                                                                        |
 | **[09/24/2025]** 🎉 Support [Wan2_2 Reward FL pipeline](examples/wan2.2-14B-reward_fl_ds/reward_fl_config.yaml). Explore the new capabilities!                                                                                                                                                                                          |
 | **[09/23/2025]** 🎉 ROLL aligns with GEM environment definition, providing agentic Tool Use training capabilities, [ToolUse docs](docs_roll/docs/English/UserGuide/agentic/Tool_Use.md).                                                                                                                                                |
@@ -105,7 +106,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [RewardFL](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/Reward_FL)
 
 #### Backend
-[DeepSpeed](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/deepspeed)  
+[DeepSeed](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/deepspeed)  
 [Megatron](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/megatron)   
 [vLLM](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/vllm)  
 [SGLang](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/sglang)
@@ -151,21 +152,9 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
     *   DPO Pipeline
     *   SFT Pipeline under development
 
-
-
----
-
-## 🔮 Upcoming Features
-
-We are continuously working to expand ROLL's capabilities:
-* ⏱️ **Async RLVR pipeline**: For even more efficient and streamlined asynchronous operations.
-* ⚙️ **FSDP2**: Integrating the latest Fully Sharded Data Parallel techniques.
-* 🔍 **Support DeepseekV3**: Adding compatibility for the newest Deepseek models.
-
 ---
 
 ## 🏆 Notable work based on ROLL
-- [SocioReasoner](https://github.com/AMAP-ML/SocioReasoner): A vision-language method for urban socio-semantic segmentation that employs a render-and-refine mechanism optimized by RL to identify abstract social entities using satellite and map data.
 - [STAgent](https://arxiv.org/abs/2512.24957): An agentic LLM specialized for spatio-temporal understanding and complex tasks like constrained POI discovery and itinerary planning, featuring hierarchical data curation with 1:10,000 filter ratio and cascaded training (seed SFT + difficulty-aware SFT + RL), achieving strong performance on TravelBench while preserving general capabilities.
 - [IPRO](https://arxiv.org/abs/2510.14255): A novel video diffusion framework using reinforcement learning to enhance identity preservation in human-centric I2V generation, optimizing diffusion models with face identity scorer and KL-divergence regularization.
 - [TaoSR-SHE](https://arxiv.org/abs/2510.07972): Stepwise Hybrid Examination Reinforcement Learning Framework for Taobao Search Relevance, with SRPO (hybrid reward model + offline verifier), diversified data filtering, and multi-stage curriculum learning.

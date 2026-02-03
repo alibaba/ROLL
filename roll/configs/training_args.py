@@ -92,6 +92,10 @@ class TrainingArguments:
         metadata={"help": "Linear warmup over warmup_ratio fraction of total steps."}
     )
     warmup_steps: int = field(default=0, metadata={"help": "Linear warmup over warmup_steps."})
+    save_hf_model: bool = field(
+        default=False,
+        metadata={"help": "Save model as hf format."}
+    )
 
     def get_warmup_steps(self, num_training_steps: int):
         """

@@ -4,9 +4,9 @@ import datasets
 import numpy as np
 import ray
 import torch
+from tqdm import tqdm
 from codetiming import Timer
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorForSFT
@@ -18,7 +18,7 @@ from roll.pipeline.sft.sft_config import SFTConfig
 from roll.utils.constants import IGNORE_INDEX
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
-
+from roll.utils.functionals import batch_balance, reduce_metrics
 
 logger = get_logger()
 
@@ -38,7 +38,7 @@ def preprocess_dataset(dataset, prompt_len, encode_func, num_proc):
 
 def get_encode_function(template_name, tokenizer, prompt_key, query_key, response_key, system_key=None):
     chat_template_func = get_chat_template(template_name, tokenizer)
-    
+
     def build_conversation(system_prompt, prompt, query, response):
         conversation = []
         if system_prompt:
@@ -98,26 +98,26 @@ class SFTPipeline(BasePipeline):
                 dataset_paths.append(train_file_name)
         logger.info(f"load_dataset_paths: {chr(10)} {chr(10).join(dataset_paths)}")
         self.dataset = datasets.load_dataset("json", data_files=dataset_paths)["train"]
-        
+
         self.val_dataset = None
         if self.pipeline_config.validation and self.pipeline_config.validation.data_args:
             val_dataset_paths = self.pipeline_config.validation.data_args.file_name
             self.val_dataset = datasets.load_dataset("json", data_files=val_dataset_paths)["train"]
-        
+
         template_name = (
             self.pipeline_config.global_template
             if self.pipeline_config.global_template
             else self.pipeline_config.sft_train.data_args.template
         )
-        encode_function = get_encode_function(template_name, self.tokenizer, 
-                                              self.pipeline_config.prompt_key, 
-                                              self.pipeline_config.query_key, 
-                                              self.pipeline_config.response_key, 
+        encode_function = get_encode_function(template_name, self.tokenizer,
+                                              self.pipeline_config.prompt_key,
+                                              self.pipeline_config.query_key,
+                                              self.pipeline_config.response_key,
                                               self.pipeline_config.system_key)
         self.dataset = preprocess_dataset(
-            self.dataset, 
-            self.pipeline_config.sequence_length, 
-            encode_function, 
+            self.dataset,
+            self.pipeline_config.sequence_length,
+            encode_function,
             num_proc=self.pipeline_config.sft_train.data_args.preprocessing_num_workers)
 
         data_collator = DataCollatorForSFT(
@@ -144,16 +144,16 @@ class SFTPipeline(BasePipeline):
         dp_size = self.sft_train.dp_size
         ga_steps = self.pipeline_config.sft_train.training_args.gradient_accumulation_steps
         per_device_bs = self.pipeline_config.sft_train.training_args.per_device_train_batch_size
-        global_train_batch_size = dp_size * ga_steps * per_device_bs
+        self.global_train_batch_size = dp_size * ga_steps * per_device_bs
         logger.info(f"data parallel size = {dp_size},\n"
                     f"gradient accumulation steps = {ga_steps},\n"
                     f"per device train batch size = {per_device_bs},\n"
-                    f"global train batch size = {global_train_batch_size}")
+                    f"global train batch size = {self.global_train_batch_size}")
 
         self.dataloader = DataLoader(
             dataset=self.dataset,
-            batch_size=global_train_batch_size,
-            shuffle=True,  # Enable shuffle for better training
+            batch_size=self.global_train_batch_size,
+            shuffle=False,
             drop_last=True,
             num_workers=self.pipeline_config.sft_train.training_args.dataloader_num_workers,
             collate_fn=data_collator,
@@ -161,11 +161,11 @@ class SFTPipeline(BasePipeline):
 
         if self.val_dataset:
             self.val_dataset = preprocess_dataset(
-                self.val_dataset, 
-                self.pipeline_config.sequence_length, 
-                encode_function, 
+                self.val_dataset,
+                self.pipeline_config.sequence_length,
+                encode_function,
                 num_proc=self.pipeline_config.sft_train.data_args.preprocessing_num_workers)
-            
+
             global_val_batch_size = dp_size * ga_steps * self.pipeline_config.sft_train.infer_batch_size
             self.val_dataloader = DataLoader(
                 dataset=self.val_dataset,
@@ -207,7 +207,12 @@ class SFTPipeline(BasePipeline):
 
                 with Timer(name="step_train", logger=None) as step_train_timer:
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
-                    batch.meta_info = {"global_step": global_step, "is_offload_optimizer_states_in_train_step": False}
+                    batch.meta_info = {"global_step": global_step, "is_offload_optimizer_states_in_train_step": False,
+                                       "loss_mask_keys": ["labels"]}
+                    # Reorder data for DP rank load balancing
+                    batch_balance_metrics = batch_balance(batch, dp_size=self.sft_train.dp_size,
+                                                          minibatch_size=self.global_train_batch_size)
+                    metrics_mgr.add_metrics(batch_balance_metrics)
                     train_metrics_refs = self.sft_train.train_step(batch, blocking=False)
                     train_metrics = DataProto.materialize_concat(data_refs=train_metrics_refs)
                     train_metrics = train_metrics.meta_info.pop("metrics", {})
@@ -221,7 +226,7 @@ class SFTPipeline(BasePipeline):
                 # Update tqdm progress bar
                 loss = metrics.get("sft_train/loss", 0)
                 pbar.set_postfix({"loss": f"{loss:.4f}", "step": f"{global_step}/{total_steps}"})
-                
+
                 self.state.step = global_step
                 self.state.log_history.append(metrics)
                 self.do_checkpoint(global_step=global_step)
@@ -240,11 +245,12 @@ class SFTPipeline(BasePipeline):
     @torch.no_grad()
     def val(self):
         val_loss_list = []
-        for batch_dict in self.val_dataloader:
+        pbar = tqdm(self.val_dataloader, desc="Validating", leave=False)
+        for batch_dict in pbar:
             batch: DataProto = DataProto.from_single_dict(batch_dict)
-            batch.meta_info = {"is_offload_optimizer_states_in_train_step": False}
+            batch.meta_info = {"is_offload_optimizer_states_in_train_step": False, 'loss_mask_keys': ['labels']}
             val_metrics_refs = self.sft_train.val_step(batch, blocking=False)
             val_metrics = DataProto.materialize_concat(data_refs=val_metrics_refs)
-            val_metrics = val_metrics.meta_info.pop("metrics", {})
-            val_loss_list.append(val_metrics[f"sft_train/loss"])
-        return {"sft_train/val_loss": np.concatenate(val_loss_list)}
+            val_metrics = reduce_metrics(val_metrics.meta_info.pop("metrics", {}))
+            val_loss_list.append(val_metrics[f"sft_train/loss@sum"])
+        return {"sft_train/val_loss": val_loss_list}

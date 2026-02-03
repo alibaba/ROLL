@@ -19,10 +19,6 @@ class TestModelCheckpointPipeline(BasePipeline):
     def __init__(self, pipeline_config: RLVRConfig):
         super().__init__(pipeline_config)
 
-        self.tokenizer = default_tokenizer_provider(
-            model_args=self.pipeline_config.actor_train.model_args,
-            template_name=self.pipeline_config.actor_train.data_args.template,
-        )
         max_steps = 10240 * self.pipeline_config.actor_train.training_args.num_train_epochs
         self.pipeline_config.set_max_steps(max_steps=max_steps)
 
@@ -38,7 +34,9 @@ class TestModelCheckpointPipeline(BasePipeline):
     @torch.no_grad()
     def run(self):
         # self.actor_train.strategy.save_checkpoint(self.pipeline_config.output_dir, global_step)
+        self.state.log_history.append({})
         self.do_checkpoint(global_step=1)
+        self.state.log_history.append({})
         self.do_checkpoint(global_step=2)
 
 
