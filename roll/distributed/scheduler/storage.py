@@ -1,9 +1,6 @@
 import ray
-
 from roll.utils.logging import get_logger
-
 logger = get_logger()
-
 
 @ray.remote
 class SharedStorage:
@@ -21,3 +18,9 @@ class SharedStorage:
             logger.warning(f"{key} is not found in storage")
             return None
         return ray.get(ref)
+
+    def put_if_absent(self, key: str, data: any) -> bool:
+        if key in self._storage:
+            return False
+        self._storage[key] = ray.put(data)
+        return True
