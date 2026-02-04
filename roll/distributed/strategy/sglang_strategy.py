@@ -133,8 +133,9 @@ class SgLangStrategy(InferenceStrategy):
         if nnodes > 1:
             node_index = 0
             sglang_pg_list = []
+            node_index_list = list(range(dp_rank * nnodes, (dp_rank + 1) * nnodes))
             for item in self.worker_config.resource_placement_groups:
-                if item['node_rank'] == node_index and item['gpu_rank'] == 0:
+                if item['node_rank'] in node_index_list and item['gpu_rank'] == 0:
                     sglang_pg_list.append(item['placement_group'])
                     node_index += 1
             
@@ -144,13 +145,13 @@ class SgLangStrategy(InferenceStrategy):
             for i in range(nnodes):
                 sglang_ray_option = {
                     'scheduling_strategy': PlacementGroupSchedulingStrategy(sglang_pg_list[i]), 
-                    'name': f'sglang-slave-{i}', 
+                    'name': f'sglang-slave-{node_index_list[i]}', 
                     'namespace': RAY_NAMESPACE,
                     'runtime_env': 
                     {'env_vars': 
                         {'WORLD_SIZE': str(nnodes), 
                         'RANK': str(i), 
-                        'WORKER_NAME': f'sglang-slave-{i}', 
+                        'WORKER_NAME': f'sglang-slave-{node_index_list[i]}', 
                         'CUDA_VISIBLE_DEVICES': ','.join(map(str, list(range(gpu_per_worker)))), 'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES': '1', 
                         'ROLL_LOG_DIR': os.getenv("ROLL_LOG_DIR", "./output/logs/")
                         }
