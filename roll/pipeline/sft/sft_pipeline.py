@@ -4,9 +4,9 @@ import datasets
 import numpy as np
 import ray
 import torch
-from tqdm import tqdm
 from codetiming import Timer
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorForSFT
