@@ -4,9 +4,9 @@ import datasets
 import numpy as np
 import ray
 import torch
-from tqdm import tqdm
 from codetiming import Timer
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorForSFT
@@ -165,8 +165,8 @@ class SFTPipeline(BasePipeline):
                 self.pipeline_config.sequence_length,
                 encode_function,
                 num_proc=self.pipeline_config.sft_train.data_args.preprocessing_num_workers)
-
-            global_val_batch_size = dp_size * ga_steps * self.pipeline_config.sft_train.infer_batch_size
+            
+            global_val_batch_size = dp_size * self.pipeline_config.sft_train.infer_batch_size
             self.val_dataloader = DataLoader(
                 dataset=self.val_dataset,
                 batch_size=global_val_batch_size,

@@ -1263,7 +1263,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 validate_access_integrity=self._validate_access_integrity,
             )
             self._validate_access_integrity = False
-        elif not dist.is_initialized() or mpu.get_data_modulo_expert_parallel_rank() == 0:
+        elif not dist.is_initialized() or mpu.get_expert_data_parallel_rank() == 0:
             torch.save(self.optimizer.state_dict(), os.path.join(checkpoint_dir, OPTIMIZER_NAME))
             logger.info(f"Saving optimizer state to {os.path.join(checkpoint_dir, OPTIMIZER_NAME)}")
 
