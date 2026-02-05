@@ -51,6 +51,7 @@ validation:
      - /data/oss_bucket_0/yuzhao/data/One-RL-to-See-Them-All/Orsta-Data-47k/test/test_math_megabench_237.parquet
      - /data/oss_bucket_0/yuzhao/data/One-RL-to-See-Them-All/Orsta-Data-47k/test/test_detection_coco_test_multi_2000.parquet
    dataset_dir: ./
+   preprocessing_num_workers: 32
  generating_args:
    max_new_tokens: ${response_length}
    top_p: 0.99
@@ -71,8 +72,8 @@ actor_train:
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 1.0e-2
-    per_device_train_batch_size: 2
-    gradient_accumulation_steps: 64
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 512
     warmup_steps: 0
     num_train_epochs: 50
   data_args:
@@ -92,9 +93,9 @@ actor_train:
     strategy_config:
       sequence_parallel: true
       tensor_model_parallel_size: 4
-      context_parallel_size: 2
+      context_parallel_size: 1
       expert_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
       overlap_grad_reduce: true
       use_distributed_optimizer: true
       bf16: true
@@ -117,10 +118,12 @@ actor_infer:
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.7
+      gpu_memory_utilization: 0.75
       block_size: 16
       max_model_len: 8192
-  num_gpus_per_worker: 4
+      load_format: dummy
+      tensor_parallel_size: 2
+  num_gpus_per_worker: 2
   device_mapping: list(range(0,32))
   infer_batch_size: 32
 
@@ -141,7 +144,7 @@ reference:
       expert_model_parallel_size: 1
       bf16: true
   device_mapping: list(range(0,32))
-  infer_batch_size: 8
+  infer_batch_size: 4
 
 rewards:
   math:

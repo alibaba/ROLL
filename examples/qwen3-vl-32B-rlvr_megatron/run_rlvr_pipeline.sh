@@ -2,4 +2,4 @@
 set +x
 
 CONFIG_PATH=$(basename $(dirname $0))
-python examples/start_rlvr_vl_pipeline.py --config_path $CONFIG_PATH  --config_name rlvr_megatron
+python examples/start_rlvr_vl_pipeline.py --config_path $CONFIG_PATH  --config_name rlvr_megatron_80GB
