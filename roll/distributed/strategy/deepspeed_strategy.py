@@ -159,6 +159,9 @@ class DeepSpeedInferStrategy(InferenceStrategy):
                 position_ids = data.batch["position_ids"]
                 forward_args = data.meta_info.get("forward_args", {})
                 if position_ids.dim() == 3:
+                    # same as megatron to be compatible with fsdp packing which change position_ids.size(1) to 4
+                    if position_ids.size(1) == 4:
+                        position_ids = position_ids[:, 1:, :].contiguous()  # (bsz, 4, seqlen) -> (bsz, 3, seqlen)
                     # qwen2vl mrope, maybe use a placeholder and let model generate position_ids
                     position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
                 if "multi_modal_inputs" in data.non_tensor_batch:

@@ -43,8 +43,8 @@ from roll.utils.functionals import (
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
-from roll.utils.packages import is_transformers_version_greater_than
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.train_infer_corrections import apply_train_infer_correction_to_batch
 
 
 logger = get_logger()
@@ -642,6 +642,10 @@ class RLVRVLMPipeline(BasePipeline):
                 )
                 batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
                 metrics_mgr.add_domain_all_metrics(global_step, batch_grouped)
+
+                if self.pipeline_config.enable_old_logprobs_recompute:
+                    batch, corr_metrics = apply_train_infer_correction_to_batch(self.pipeline_config, batch)
+                    metrics_mgr.add_metrics(corr_metrics)
 
                 with Timer(name="step_train", logger=None) as step_train_timer:
                     if self.pipeline_config.adv_estimator == "gae":
