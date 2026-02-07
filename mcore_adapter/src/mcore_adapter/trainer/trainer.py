@@ -1003,7 +1003,6 @@ class McaTrainer(Trainer):
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
             ckpt_id = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
             checkpoint_path = os.path.join(self.args.output_dir, ckpt_id)
-            self.upload_to_mos(ckpt_id, checkpoint_path)
 
         if eval_or_save:
             self.enable_ddp_forward_pre_hook()
