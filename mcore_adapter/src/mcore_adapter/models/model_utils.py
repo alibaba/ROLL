@@ -109,6 +109,37 @@ class RMSNorm(nn.Module):
         return self.weight * hidden_states.to(input_dtype)
 
 
+class _McaLoraLogitsHelper(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, logits: "torch.Tensor"):
+        return logits
+
+    @staticmethod
+    def backward(ctx, grad_output: "torch.Tensor"):
+        if grad_output.size(1) == 1:
+            # tensor.contiguous() does not change strides[1] with shape [sequence_length, 1, vocab_size]
+            return grad_output.contiguous().view_as(grad_output)
+        return grad_output.contiguous()
+
+
+def _mca_lora_logits_postprocess(logits: "torch.Tensor"):
+    """make sure grad_output is contiguous
+    Args:
+        logits: logits split across tensor parallel ranks
+            dimension is [sequence_length, batch_size, vocab_size/num_parallel_ranks]
+    Returns:
+        contiguous logits
+    (It's fine to change the order of sequence_length and batch_size in dimension)
+    """
+    return _McaLoraLogitsHelper.apply(logits)
+
+
+def mca_lora_logits_postprocess_hook(module, input, output):
+    logits, other = output
+    logits = _mca_lora_logits_postprocess(logits)
+    return logits, other
+
+
 def exists_hf_config(model_name_or_path: str) -> bool:
     return os.path.exists(os.path.join(model_name_or_path, "config.json"))
 
@@ -125,7 +156,8 @@ def check_and_get_attention_backend_by_env(attention_backend: AttnBackend):
     fused_attn = os.getenv("NVTE_FUSED_ATTN", None)
     unfused_attn = os.getenv("NVTE_UNFUSED_ATTN", None)
 
-    is_set_as = lambda env, value: env is not None and env == value
+    def is_set_as(env, value):
+        return env is not None and env == value
 
     if is_set_as(flash_attn, "0") and is_set_as(fused_attn, "0") and is_set_as(unfused_attn, "0"):
         return AttnBackend.local
@@ -142,7 +174,7 @@ def get_thd_data_on_this_cp_rank(
     batch: Dict[str, "torch.Tensor"], packed_seq_params: PackedSeqParams, dim3_keys: List[str] = ["attention_mask"]
 ):
     """Performs sharding for Context Parallelism in THD format"""
-    import transformer_engine  # type: ignore
+    import transformer_engine  # noqa: F401
     import transformer_engine_torch as tex
 
     cp_size = mpu.get_context_parallel_world_size()
@@ -162,3 +194,20 @@ def get_thd_data_on_this_cp_rank(
         batch[key] = batch[key].index_select(seq_dim, seq_idx)
     batch["packed_seq_params"] = packed_seq_params
     return batch
+
+
+def configure_resized_vocab_size(
+    original_vocab_size: int,
+    tokenizer_len: int,
+    pad_to_multiple_of: int = 64,
+):
+    if original_vocab_size >= tokenizer_len:
+        return None
+    new_vocab_size = (
+        (tokenizer_len + pad_to_multiple_of - 1) // pad_to_multiple_of
+    ) * pad_to_multiple_of
+    logger.info(
+        f"Tokenizer length: {tokenizer_len} is greater than original vocab size: {original_vocab_size}. "
+        f"The vocab is resized to {new_vocab_size}."
+    )
+    return new_vocab_size

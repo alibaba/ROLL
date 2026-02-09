@@ -1,4 +1,6 @@
-from ..utils import get_logger, is_peft_available
+from transformers.utils import is_peft_available
+
+from ..utils import get_logger
 
 
 logger = get_logger(__name__)
@@ -13,7 +15,7 @@ if is_peft_available():
     )
 else:
 
-    def apply_megatron_lora(*args, **kwargs):
+    def apply_megatron_lora():
         raise ValueError("PEFT is not available. Please install PEFT to use LoRA adapters.")
 
     def find_all_linear_modules(model):

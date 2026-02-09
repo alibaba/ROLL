@@ -1,0 +1,103 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "fsdp_cp2_vlm_log_probs_test"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+track_with: stdout
+
+# Keep batch sizes small by default (VLM is heavy). Override as needed.
+rollout_batch_size: 2
+
+# Prompt/response lengths are taken from the example (prompt_length=8192). Response length can be smaller for tests.
+prompt_length: 8192
+response_length: 8192
+
+pretrain: /home/dilixiati.dlxtmhte/.cache/openlm/hub/b961282fc5087c3ee28b5c7d2a72424e
+
+actor_train:
+  name: actor_train
+  worker_cls: roll.pipeline.base_worker.ActorWorker
+  training_args:
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 1
+    learning_rate: 1.0e-6
+    num_train_epochs: 1
+    max_steps: 1
+    warmup_steps: 0
+    logging_steps: 1
+    save_steps: 10
+    eval_steps: 10
+    seed: 42
+    max_grad_norm: 1.0
+    weight_decay: 1.0e-2
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+    dtype: bf16
+    ulysses_size: 2
+    # Ensure image preprocessing works (mirrors RLVRVLMPipeline defaults).
+    max_pixels: 1048576
+    min_pixels: 3136
+    # keep vision frozen (as in example config) to reduce training footprint
+    freeze_module_prefix: vision_model
+  data_args:
+    file_name: ./data/geoqa_data/
+    dataset_dir: ./
+    preprocessing_num_workers: 16
+  strategy_args:
+    strategy_name: fsdp2_train
+    strategy_config:
+      param_dtype: bf16
+      reduce_dtype: fp32
+      reshard_after_forward: true
+      offload_policy: false
+      fsdp_size: 1
+  checkpoint_config:
+    async_upload: false
+  offload_nccl: false
+  use_remove_padding: false
+  use_dynamic_batching_in_train: false
+  # Match the example (8 GPUs). The test will skip if the machine has fewer.
+  device_mapping: list(range(0,2))
+  infer_batch_size: 1
+
+actor_infer:
+  name: actor_infer
+  worker_cls: roll.pipeline.base_worker.InferWorker
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: 1
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.8
+      block_size: 16
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+
+reference:
+  name: reference
+  worker_cls: roll.pipeline.base_worker.ActorWorker
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+    dtype: bf16
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,1))
+  infer_batch_size: 1

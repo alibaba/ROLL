@@ -43,11 +43,12 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 | 📣   Updates                                                                                                                                                                                                                                                                                                                            |
 |:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **[01/01/2026]** 🎉 Our [Let It Flow: Agentic Crafting on Rock and Roll](https://arxiv.org/abs/2512.24873) report released! Introducing ALE ecosystem and ROME, an open-source agentic model with novel IPA algorithm.   |
+| **[02/03/2026]** 🎉 We released FSDP2 Strategy, Megatron with LoRA, GPU partial overlapping, Qwen3-Omni supports and other features. For more details, please refer to the release notes. Welcome to use!                                                                                                                               |
+| **[01/01/2026]** 🎉 Our [Let It Flow: Agentic Crafting on Rock and Roll](https://arxiv.org/abs/2512.24873) report released! Introducing ALE ecosystem and ROME, an open-source agentic model with novel IPA algorithm.                                                                                                                  |
 | **[11/08/2025]** 🎉 Our [ROCK: Reinforcement Open Construction Kit](https://github.com/alibaba/ROCK) released, Explore the new capabilities!.                                                                                                                                                                                           |
 | **[10/23/2025]** 🎉 Our Papers released, see [Asymmetric Proximal Policy Optimization: mini-critics boost LLM reasoning](https://arxiv.org/abs/2510.01656) and [Attention Illuminates LLM Reasoning: The Preplan-and-Anchor Rhythm Enables Fine-Grained Policy Optimization](https://arxiv.org/abs/2510.13554).                         |
 | **[10/14/2025]** 🎉 Our Paper released, see [Part II: ROLL Flash -- Accelerating RLVR and Agentic Training with Asynchrony](https://arxiv.org/abs/2510.11345).                                                                                                                                                                          |
-| **[09/28/2025]** 🎉 Ascend NPU support — see [usage guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Hardware%20Support/ascend_usage).                                                                                                                                                                                                  |
+| **[09/28/2025]** 🎉 Ascend NPU support — see [usage guide](https://alibaba.github.io/ROLL/docs/User%20Guides/Hardware%20Support/ascend_usage).                                                                                                                                                                                          |
 | **[09/25/2025]** 🎉 Our Paper released, see [RollPacker: Mitigating Long-Tail Rollouts for Fast, Synchronous RL Post-Training](https://arxiv.org/abs/2509.21009)                                                                                                                                                                        |
 | **[09/24/2025]** 🎉 Support [Wan2_2 Reward FL pipeline](examples/wan2.2-14B-reward_fl_ds/reward_fl_config.yaml). Explore the new capabilities!                                                                                                                                                                                          |
 | **[09/23/2025]** 🎉 ROLL aligns with GEM environment definition, providing agentic Tool Use training capabilities, [ToolUse docs](docs_roll/docs/English/UserGuide/agentic/Tool_Use.md).                                                                                                                                                |
@@ -150,17 +151,6 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
     *   Distill Pipeline LLM & VLM
     *   DPO Pipeline
     *   SFT Pipeline under development
-
-
-
----
-
-## 🔮 Upcoming Features
-
-We are continuously working to expand ROLL's capabilities:
-* ⏱️ **Async RLVR pipeline**: For even more efficient and streamlined asynchronous operations.
-* ⚙️ **FSDP2**: Integrating the latest Fully Sharded Data Parallel techniques.
-* 🔍 **Support DeepseekV3**: Adding compatibility for the newest Deepseek models.
 
 ---
 

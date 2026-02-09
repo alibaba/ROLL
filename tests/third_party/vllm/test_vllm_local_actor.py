@@ -9,28 +9,13 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 
 from roll.distributed.scheduler.resource_manager import ResourceManager
-from roll.third_party.vllm import LLM
+from roll.third_party.vllm import create_async_llm
+from utils import chat_prompts, generate_batch
 
 
 model_path = "Qwen/Qwen2.5-7B-Instruct"
 
-prompts = [
-    "类型#上衣*材质#牛仔布*颜色#白色*风格#简约*图案#刺绣*衣样式#外套*衣款式#破洞,生成一段文案",
-    "根据关键词描述生成女装/女士精品行业连衣裙品类的发在淘宝的小红书风格的推送配文，包括标题和内容。关键词：pe。要求:1. 推送标题要体现关键词和品类特点，语言通顺，有吸引力，约10个字；2. 推送内容要语言通顺，突出关键词和品类特点，对目标受众有吸引力，长度约30字。标题:",
-    "100.25和90.75谁更大？",
-]
-
-
-def chat_format(prompt):
-    system = "Please reason step by step, and put your final answer within \\boxed{}."
-    return f"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
-
-
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
-chat_prompts = []
-for prompt in prompts:
-    chat_prompts.append(chat_format(prompt))
 
 # os.environ["RAY_DEBUG"] = "legacy"
 
@@ -51,8 +36,8 @@ placement_groups = resource_manager.allocate_placement_group(world_size=1, devic
 
 @ray.remote
 class TestActor:
-    def __init__(self, placement_groups):
-        self.model = LLM(
+    async def initialize(self, placement_groups):
+        self.model = await create_async_llm(
             resource_placement_groups=placement_groups[0],
             model=model_path,
             block_size=16,
@@ -65,9 +50,9 @@ class TestActor:
             enable_sleep_mode=True,
         )
 
-    def run(self):
+    async def run(self):
         sampling_params = SamplingParams(temperature=0.0, top_p=0.99, top_k=100, max_tokens=512)
-        self.model.offload_states()
+        await self.model.offload_states()
         import torch
 
         print(f"memory allocated: {torch.cuda.memory_allocated() / 1024 ** 3}")
@@ -78,9 +63,10 @@ class TestActor:
 
         pdb.set_trace()
 
-        self.model.load_states()
+        await self.model.load_states()
 
-        vllm_outputs = self.model.generate(
+        vllm_outputs = await generate_batch(
+            self.model,
             sampling_params=sampling_params,
             prompts=chat_prompts,
         )
@@ -109,7 +95,8 @@ actor = TestActor.options(
     runtime_env=runtime_env,
     num_cpus=0.01,
     num_gpus=0.01,
-).remote(placement_groups=placement_groups)
+).remote()
+ray.get(actor.initialize.remote(placement_groups=placement_groups))
 ray.get(actor.run.remote())
 
 ray.shutdown()

@@ -3,7 +3,6 @@ from typing import Optional, Tuple
 import torch
 from megatron.core import parallel_state
 from megatron.core.models.common.embeddings.rope_utils import (
-    _apply_rotary_pos_emb_bshd,
     get_pos_emb_on_this_cp_rank,
 )
 from torch import nn

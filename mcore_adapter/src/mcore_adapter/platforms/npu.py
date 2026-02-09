@@ -1,5 +1,6 @@
-from .platform import Platform
 from ..utils import get_logger
+from .platform import Platform
+
 
 logger = get_logger(__name__)
 
@@ -47,7 +48,8 @@ class NpuPlatform(Platform):
         try:
             from vllm import envs
 
-            if envs.VLLM_USE_V1:
+            # VLLM_USE_V1 is deprecated in vllm>=0.11.1
+            if not hasattr(envs, "VLLM_USE_V1") or envs.VLLM_USE_V1:
                 from vllm_ascend.worker.worker_v1 import NPUWorker as Worker
 
                 logger.info("Successfully imported vLLM V1 Worker.")
@@ -69,7 +71,3 @@ class NpuPlatform(Platform):
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
         }
         return env_vars
-    
-    @classmethod
-    def apply_ulysses_patch(cls) -> None:
-        return

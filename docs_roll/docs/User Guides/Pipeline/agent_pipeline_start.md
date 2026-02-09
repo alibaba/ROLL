@@ -21,6 +21,9 @@ The ROLL (Reinforcement Learning Optimization for Large-Scale Learning) agentic 
 * Train these agents using reinforcement learning algorithms like Proximal Policy Optimization (PPO), GRPO, and **reinforce++**.  
 * Evaluate agent performance on specific tasks and complex reasoning scenarios.  
 * Leverage [Ray](https://www.ray.io/) for efficient, distributed computation across large-scale GPU setups.
+* **Efficient Training Optimization**: Supports **Sequence Packing** (concatenating multiple short samples into a continuous sequence to reduce padding) and **Dynamic Batching
+** (dynamically grouping samples into batches based on their lengths, applying uniform padding within each batch to the length of the longest sample, thereby minimizing unnecessary computation).
+For configuration methods and implementation details, please refer to the dedicated documentation for `sequence packing` and `dynamic batching`.
 
 This guide provides a step-by-step walkthrough for utilizing these agentic capabilities.
 

@@ -1,8 +1,11 @@
+import json
 from typing import List, Dict
 from functools import lru_cache
 from transformers import PreTrainedTokenizer
 
 from roll.datasets.collator import DataCollatorWithPaddingForMM
+from roll.utils.logging import get_logger
+logger = get_logger()
 
 
 @lru_cache(maxsize=10)
@@ -183,7 +186,7 @@ def token_ids_to_assistant_mask(messages: List[Dict], input_ids_list: List[List]
     return assistant_mask_list
 
 
-def split_by_token(input_ids: list, token: int) -> list[list]:
+def split_by_token(input_ids: list, token: int, messages: List[Dict], tokenizer: PreTrainedTokenizer) -> list[list]:
     """
     Split the input_ids list by the given token and return a list of lists.
     Each sub-list starts with that token.
@@ -220,4 +223,96 @@ def split_by_token(input_ids: list, token: int) -> list[list]:
     if current_segment:
         result.append(current_segment)
 
+    if len(result) == len(messages):
+        return result
+    input_ids_list = result[:]
+    result = []
+    # spliting by start token is vulnerable since the format of responses cannot be guaranteed
+    # input_ids_list has large length than messages when format error, which is caused by
+    # responses includeing more than one start token
+    # adjustment according to messages
+    segment_mismatch = True
+    ids_next_idx = 0  # index in input_ids_list for the next message
+    bos_token_id = input_ids_list[0][0]
+    for i, message in enumerate(messages):
+        segment_mismatch = len(input_ids_list) - ids_next_idx != len(messages) - i
+        if segment_mismatch:
+            # str or list of dict
+            content = (
+                "".join([item["text"] for item in message["content"] if item["type"] == "text"])
+                if not isinstance(message["content"], str)
+                else message["content"]
+            )
+            token_id_without_format = tokenizer.encode(content)
+            bos_num = token_id_without_format.count(bos_token_id) + 1  # generated + chat_format
+            current_segment = sum(input_ids_list[ids_next_idx : ids_next_idx + bos_num], [])
+            ids_next_idx += bos_num
+        else:
+            current_segment = input_ids_list[ids_next_idx]
+            ids_next_idx += 1
+        result.append(current_segment)
     return result
+
+
+
+
+def convert_list_content_str(messages: List[Dict], parse_tool_call_parameter_to_dict=False) -> List[Dict]:
+    """
+    Convert state0.json format to tokenizer-compatible format.
+
+    The state0.json may have content as either:
+    1. A string (already compatible)
+    2. A list of dictionaries with 'type' and 'text' keys
+
+    This function ensures all content is converted to strings by concatenating
+    text from list objects when needed.
+
+    Args:
+        messages: List of message dictionaries from iflow_state0.json
+        parse_tool_call_parameter_to_dict: Whether to convert tool call arguments to dict, https://github.com/QwenLM/Qwen3-Coder/issues/444
+
+    Returns:
+        List of message dictionaries with string content suitable for tokenizer
+    """
+    converted_messages = []
+
+    for message in messages:
+        converted_message = message.copy()
+
+        # Handle content field
+        content = message.get('content')
+        if isinstance(content, list):
+            # Concatenate all text elements from the list
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and 'text' in item:
+                    text_parts.append(item['text'])
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            converted_message['content'] = ''.join(text_parts)
+        elif isinstance(content, str):
+            # Already in correct format
+            converted_message['content'] = content
+        else:
+            # Handle other cases (convert to string)
+            converted_message['content'] = str(content)
+
+        if parse_tool_call_parameter_to_dict:
+            if message['role'] == 'assistant':
+                if "tool_calls" in message:
+                    tool_calls: List[Dict] = message['tool_calls']
+                    try:
+                        for tool_call in tool_calls:
+                            if "arguments" in tool_call["function"] and isinstance(tool_call['function']['arguments'], str):
+                                tool_call['function']["arguments"] = json.loads(tool_call['function']['arguments'])
+                    except Exception as e:
+                        # NOTE: check 兜底逻辑是否合理
+                        #       现在更倾向于把assistant部分的内容替换为 content=response_text
+                        #       not isinstance(tool_call['function']['arguments'], str)的情况在model_update的时候会出现，abort的request会被convert两次
+                        content = converted_message.get('content', '')
+                        tool_calls = message.pop("tool_calls")
+                        converted_message['content'] = f"{content}{tool_calls}"
+                        logger.error(f"Error parsing tool call arguments: {e}, src arguments: {json.dumps(tool_calls)}, parsing drawback to {converted_message['content']}")
+        converted_messages.append(converted_message)
+
+    return converted_messages

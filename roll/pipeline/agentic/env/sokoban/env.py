@@ -115,7 +115,7 @@ class SokobanEnv(Env, GymSokobanEnv):
                 "action_desc": action_desc
             }
             info.update(action_info)
-            return next_obs, reward, False, False, info
+            return next_obs, reward, terminated, False, info
 
         previous_pos = self.player_position
         _, reward, terminated, _ = GymSokobanEnv.step(self, action_info["action"])

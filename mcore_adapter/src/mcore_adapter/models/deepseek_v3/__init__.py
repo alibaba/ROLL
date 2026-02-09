@@ -5,6 +5,7 @@ from ..auto.config_auto import register_config
 from ..converter.convert_utils import (
     get_layer_index,
     get_mca_layer_index,
+    get_mca_mtp_layer_index,
     remove_weight_prefix,
 )
 from ..converter.dist_converter import mla_dist_config, register_dist_config
@@ -103,12 +104,12 @@ class DeepSeekV3Template(Template):
             res[name] = weight
         return res
 
-    def add_mca_weight(self, name, weight):
+    def add_mca_weight(self, name, weight, **kwargs):
         name = self.revert_mtp_name(name)
         layer_index = get_mca_layer_index(name)
         if layer_index is not None and layer_index < self.mca_config.moe_layer_freq.count(0):
             name = name.replace("mlp.linear_fc1.layer_norm_", "pre_mlp_layernorm.")
-        name2weights = super().add_mca_weight(name, weight)
+        name2weights = super().add_mca_weight(name, weight, **kwargs)
         res = {}
         for name, weight in name2weights.items():
             if (
@@ -141,17 +142,14 @@ class DeepSeekV3Template(Template):
         name = name.replace("decoder", "mtp")
         pure_name = remove_weight_prefix(name, prefix="mtp.layers.")
         name = (
-            "mtp.layers."
-            + str(mtp_layer_index)
-            + (".transformer_layer" if has_transformer_layer else "")
-            + pure_name
+            "mtp.layers." + str(mtp_layer_index) + (".transformer_layer" if has_transformer_layer else "") + pure_name
         )
         return name
 
     def revert_mtp_name(self, name):
         if "mtp" in name:
             has_transformer_layer = "self_attention" in name or "mlp" in name or "input_layernorm" in name
-            mtp_layer_index = get_layer_index(name, prefix="mtp.layers.")
+            mtp_layer_index = get_mca_mtp_layer_index(name)
             pure_name = remove_weight_prefix(name, prefix="mtp.layers.")
             # only consider padding mtp for now...
             mca_layer_index = mtp_layer_index + self.mca_config.num_layers
@@ -301,9 +299,7 @@ register_template(
         RenameConverOp(hf_names=".hnorm.weight", mca_names=".hnorm.weight"),
         RenameConverOp(hf_names=".eh_proj.weight", mca_names=".eh_proj.weight"),
         RenameConverOp(hf_names=".shared_head.norm.weight", mca_names=".final_layernorm.weight"),
-        RenameConverOp(
-            hf_names=".self_attn.o_proj.weight_scale_inv", mca_names=".self_attn.o_proj.weight_scale_inv"
-        ),
+        RenameConverOp(hf_names=".self_attn.o_proj.weight_scale_inv", mca_names=".self_attn.o_proj.weight_scale_inv"),
         RenameConverOp(hf_names=".post_attention_layernorm.weight", mca_names=".pre_mlp_layernorm.weight"),
         RenameConverOp(hf_names="model.norm.weight", mca_names="decoder.final_layernorm.weight"),
         RenameConverOp(hf_names=".mlp.gate.weight", mca_names=".mlp.router.weight"),

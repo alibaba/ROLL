@@ -41,6 +41,8 @@
 
 * **高效的分布式计算**：利用[Ray](https://www.ray.io/)框架在大规模GPU集群上实现高效的分布式训练，显著提高训练速度和资源利用率。
 
+* **高效训练优化**：支持 **Sequence Packing**（将多条短样本拼接成连续序列，减少 padding）与 **Dynamic Batching**（根据样本长度动态组
+batch，按 batch 内最大长度统一 padding，最小化无效计算）。配置方法和实现原理详见`sequence packing`和`dynamic batching` 对应文档。
 ---
 
 

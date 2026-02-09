@@ -154,6 +154,10 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
                 attn_implementation="sdpa",
                 torch_dtype=self.config.params_dtype,
             ).to(torch.cuda.current_device())
+            # TODO: use_reentrant=True might cause error by twice forward/backward when
+            # training images and videos simultaneously, https://github.com/pytorch/pytorch/issues/81296
+            if config.recompute_granularity == "full" and self.training:
+                self.vision_model.gradient_checkpointing_enable({"use_reentrant": False})
             for param in self.vision_model.parameters():
                 setattr(param, "sequence_parallel", config.sequence_parallel)
 

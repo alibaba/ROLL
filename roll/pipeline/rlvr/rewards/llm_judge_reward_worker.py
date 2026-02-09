@@ -37,7 +37,7 @@ class LLMJudgeRewardWorker(Worker):
 
         # LLM judge相关配置
         self.judge_prompt = self.worker_config.judge_prompt if hasattr(self.worker_config, "judge_prompt") else None
-        self.judge_prompt = prompt_maps[self.judge_prompt]
+        self.judge_prompt = prompt_maps.get(self.judge_prompt, None)
         self.judge_model_type = (
             self.worker_config.judge_model_type if hasattr(self.worker_config, "judge_model_type") else "api"
         )
@@ -56,7 +56,12 @@ class LLMJudgeRewardWorker(Worker):
             print(f"{self.worker_name} initialized with API model")
 
         elif self.judge_model_type == "inference":
-            self.strategy = create_strategy(worker=self)
+            async_strategy = self.worker_config.strategy_args.strategy_name in ["vllm", "sglang"]
+            if self.worker_config.strategy_args.strategy_name == "sglang":  # not weight sync, need backup weights
+                self.worker_config.strategy_args.strategy_config["enable_weights_cpu_backup"] = True
+            if self.worker_config.strategy_args.strategy_name == "vllm":
+                self.worker_config.strategy_args.strategy_config["sleep_level"] = 1
+            self.strategy = create_strategy(worker=self, sync_wrapper=async_strategy)
             self.strategy.initialize(model_provider=default_reward_model_provider)
             self.tokenizer = self.strategy.tokenizer
             print(f"{self.worker_name} initialized with inference model")

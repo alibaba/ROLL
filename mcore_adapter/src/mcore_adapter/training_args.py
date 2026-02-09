@@ -14,6 +14,16 @@ logger = get_logger(__name__)
 
 @dataclass
 class DistributingParallelArguments:
+    """
+    NOTE:
+    - Most arguments should default to None to avoid overwriting checkpoint configurations
+    - Only training-only parameters (not affecting model checkpoints) should have non-None defaults (e.g., `variable_seq_lengths`)
+    - This class has high priority and will override config values read from checkpoints
+    - For minor configurations, consider using the `additional_configs` instead of adding adding new fields
+
+    CONFIGURATION EFFECTS:
+    Arguments are passed to TransformerConfig during model loading from hf/megatron checkpoints
+    """
     tensor_model_parallel_size: Optional[int] = field(
         default=None,
         metadata={"help": "Degree of tensor model parallelism."},
@@ -200,6 +210,25 @@ class DistributingParallelArguments:
         metadata={
             "help": "Which Transformer implementation to use.",
             "choices": ["local", "transformer_engine"],
+        },
+    )
+    fp8_recipe: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "FP8 recipe as defined in mcore. If None, FP8 is not used. Supported recipes: "
+            "'mxfp8' on blackwell, 'blockwise' on hopper. Other recipes are not tested yet.",
+            # NOTE: mxfp8 does not work with moe recompute_modules if moe is used.
+        },
+    )
+    fp8_param: bool = field(
+        default=False,
+        # TODO: fp8_param does not work with mxfp8 for now, check TE support later.
+        metadata={"help": "If true, use fp8 weights during training instead of bf16."},
+    )
+    fp8: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "FP8 format to use. Supported formats: 'e4m3', 'hybrid'. Do not change if unsure",
         },
     )
     additional_configs: Optional[Union[dict, str]] = field(

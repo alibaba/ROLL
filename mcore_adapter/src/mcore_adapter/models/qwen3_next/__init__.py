@@ -11,6 +11,7 @@ from ..converter.dist_converter import (
 )
 from ..converter.template import (
     ConverOp,
+    CopyConverOp,
     QKVConverOp,
     RenameConverOp,
     StackConverOp,
@@ -37,6 +38,8 @@ class DropConverOp(ConverOp):
 class NextQKVConverOp(QKVConverOp):
     """query weight used for calculating query_states and gate"""
     def _hf_to_mca(self, weights):
+        if self.hidden_size is None:
+            self.hidden_size = self.mca_config.hidden_size
         q_weight, k_weight, v_weight = weights
         nh = self.mca_config.num_attention_heads
         ng = self.mca_config.num_query_groups
@@ -49,19 +52,21 @@ class NextQKVConverOp(QKVConverOp):
                 v_weight.reshape((ng, dim, -1)),
             ],
             dim=1,
-        ).reshape((-1, self.mca_config.hidden_size))
+        ).reshape((-1, self.hidden_size))
         return mca_qkv_weight
 
     def _mca_to_hf(self, weights):
+        if self.hidden_size is None:
+            self.hidden_size = self.mca_config.hidden_size
         qkv_weight = weights[0]
         ng = self.mca_config.num_query_groups
         nh = self.mca_config.num_attention_heads
         dim = self.mca_config.kv_channels
         qkv_weight = qkv_weight.reshape((ng, dim * (nh // ng * 2 + 2), -1))
         qkv_weights = torch.split(qkv_weight, [dim * nh // ng * 2, dim, dim], dim=1)
-        q_weight = qkv_weights[0].reshape((-1, self.mca_config.hidden_size))
-        k_weight = qkv_weights[1].reshape((-1, self.mca_config.hidden_size))
-        v_weight = qkv_weights[2].reshape((-1, self.mca_config.hidden_size))
+        q_weight = qkv_weights[0].reshape((-1, self.hidden_size))
+        k_weight = qkv_weights[1].reshape((-1, self.hidden_size))
+        v_weight = qkv_weights[2].reshape((-1, self.hidden_size))
         return [q_weight, k_weight, v_weight]
 
 
@@ -95,13 +100,38 @@ class Qwen3NextTemplate(Template):
             return {f"decoder.layers.{layer_idx}.input_layernorm.weight": weight}
         return super().add_hf_weight(name, weight)
 
-    def add_mca_weight(self, name, weight):
+    def add_mca_weight(self, name, weight, **kwargs):
         pattern = r"^decoder\.layers\.(\d+)\.input_layernorm\.weight$"
         match = re.match(pattern, name)
         if not match:
-            return super().add_mca_weight(name, weight)
+            return super().add_mca_weight(name, weight, **kwargs)
         layer_idx = int(match.group(1)) if match else None
         return {f"model.layers.{layer_idx}.input_layernorm.weight": weight}
+
+    def get_lora_conver_op(self, name, pattern_to_conver_ops: dict[str, ConverOp], lora_rank: int):
+        lora_name = name[name.find(".lora") :]
+        name = name[: name.find(".lora")] + ".weight"
+        op = self.get_conver_op(name, pattern_to_conver_ops)
+        if isinstance(op, RenameConverOp):
+            op_class = RenameConverOp
+            kwargs = {}
+        elif "lora_A" in lora_name:
+            op_class = CopyConverOp
+            kwargs = {}
+        elif isinstance(op, StackConverOp):
+            op_class = StackConverOp
+            kwargs = {"dim": op.dim}
+        elif isinstance(op, NextQKVConverOp):
+            op_class = NextQKVConverOp
+            kwargs = {"hidden_size": lora_rank}
+        else:
+            raise ValueError(f"can not find lora conver op for {name} in {pattern_to_conver_ops}")
+        return op_class(
+            hf_names=[hf_name.replace(".weight", lora_name) for hf_name in op.hf_names],
+            mca_names=[mca_name.replace(".weight", lora_name) for mca_name in op.mca_names],
+            _mca_config=op.mca_config,
+            **kwargs,
+        )
 
 
 register_template(

@@ -36,7 +36,8 @@ class StepConcatEnvManager(StepEnvManager):
         prompt_ids = custom_apply_chat_template(messages=messages, tokenizer=self.tokenizer, add_generation_prompt=True)
         input_ids = torch.tensor(prompt_ids, dtype=torch.long).unsqueeze(0)
         attention_mask = torch.tensor([1] * input_ids.shape[1], dtype=torch.long).unsqueeze(0)
-        position_ids = attention_mask.cumsum(dim=-1)
+        # Huggingface Transformers prefer position_ids to be 0-based.
+        position_ids = attention_mask.cumsum(dim=-1) - 1
         lm_input = DataProto()
         lm_input.batch = TensorDict({
             "input_ids": input_ids,

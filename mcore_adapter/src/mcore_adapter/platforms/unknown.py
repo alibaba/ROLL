@@ -1,7 +1,8 @@
-from .platform import Platform
-from ..utils import get_logger
-
 import torch
+
+from ..utils import get_logger
+from .platform import Platform
+
 
 logger = get_logger(__name__)
 
@@ -36,19 +37,20 @@ class UnknownPlatform(Platform):
             # So we set a small timeout for PullObjectsAndGetFromPlasmaStore to avoid holding store_client lock
             # too long.
             "RAY_get_check_signal_interval_milliseconds": "1",
-            "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
+            "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             "TORCHINDUCTOR_COMPILE_THREADS": "2",
             "HGGC_ENABLE_KERNEL_COPY": "0",
             "NCCL_PF_U2MM_HOST": "0",
         }
         return env_vars
-    
+
     @classmethod
     def get_vllm_worker_class(cls):
         try:
             from vllm import envs
 
-            if envs.VLLM_USE_V1:
+            # VLLM_USE_V1 is deprecated in vllm>=0.11.1
+            if not hasattr(envs, "VLLM_USE_V1") or envs.VLLM_USE_V1:
                 from vllm.v1.worker.gpu_worker import Worker
 
                 logger.info("Successfully imported vLLM V1 Worker.")
@@ -63,14 +65,9 @@ class UnknownPlatform(Platform):
             raise RuntimeError("vLLM is not installed or not properly configured.") from e
 
     @classmethod
-    def get_vllm_run_time_env_vars(cls, gpu_rank:str) -> dict:
+    def get_vllm_run_time_env_vars(cls, gpu_rank: str) -> dict:
         env_vars = {
-            "PYTORCH_CUDA_ALLOC_CONF" : "",
-            "VLLM_ALLOW_INSECURE_SERIALIZATION":"1",
+            "PYTORCH_CUDA_ALLOC_CONF": "",
+            "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         }
         return env_vars
-    
-    @classmethod
-    def apply_ulysses_patch(cls) -> None:
-        from roll.utils.context_parallel import apply_ulysses_patch
-        apply_ulysses_patch()

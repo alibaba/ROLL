@@ -59,7 +59,5 @@ class SFTConfig(BaseConfig):
 
         self.sft_train.name = "sft_train"
 
-        self.validate_worker_config()
-
     def set_max_steps(self, max_steps: int):
         self.sft_train.training_args.max_steps = max_steps

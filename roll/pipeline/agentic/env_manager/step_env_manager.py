@@ -52,7 +52,7 @@ class StepEnvManager(TrajEnvManager):
         prompt_ids = custom_apply_chat_template(messages=messages, tokenizer=self.tokenizer, add_generation_prompt=True)
         input_ids = torch.tensor(prompt_ids, dtype=torch.long).unsqueeze(0)
         attention_mask = torch.tensor([1] * input_ids.shape[1], dtype=torch.long).unsqueeze(0)
-        position_ids = attention_mask.cumsum(dim=-1)
+        position_ids = attention_mask.cumsum(dim=-1) - 1
         lm_input = DataProto()
         lm_input.batch = TensorDict({
             "input_ids": input_ids,
@@ -88,7 +88,11 @@ class StepEnvManager(TrajEnvManager):
             prompt_mask = torch.tensor(prompt_masks, dtype=torch.bool).unsqueeze(0)
             score_tensor = torch.tensor([0] * len(token_ids), dtype=torch.float).unsqueeze(0)
             score_tensor[0][-1] = history['reward']
-            position_ids = attention_mask.cumsum(dim=-1)
+            # Huggingface Transformers prefer position_ids to be 0-based.
+            # Attn Mask: [1, 1, 1, ..., 1, 0, 0, ..., 0]
+            # cumsum: [1, 2, 3, ..., n, n+1, n+1, ..., n+1]
+            # cumsum - 1: [0, 1, 2, ..., n-1, n, n, ..., n]
+            position_ids = attention_mask.cumsum(dim=-1) - 1
 
             input_ids = pad_to_length(input_ids, length=self.pipeline_config.sequence_length, pad_value=self.tokenizer.pad_token_id)
             attention_mask = pad_to_length(attention_mask, length=self.pipeline_config.sequence_length, pad_value=0)

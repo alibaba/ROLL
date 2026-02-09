@@ -1,4 +1,4 @@
-ray[default,cgraph] # vllm required ray[default,cgraph]>=2.48.0
+ray[default,cgraph]==2.48.0 # vllm required ray[default,cgraph]>=2.48.0
 numpy<2.0a0,>=1.25
 tensordict
 sympy

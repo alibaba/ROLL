@@ -1,0 +1,113 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "fsdp_lora_log_probs_test"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+track_with: stdout
+
+rollout_batch_size: 128
+prompt_length: 128
+response_length: 512
+
+pretrain: Qwen/Qwen3-0.6B
+
+actor_train:
+  name: actor_train
+  worker_cls: roll.pipeline.base_worker.ActorWorker
+  training_args:
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
+    learning_rate: 1.0e-05
+    num_train_epochs: 1
+    max_steps: 10
+    warmup_steps: 0
+    logging_steps: 1
+    save_steps: 10
+    eval_steps: 10
+    seed: 42
+    max_grad_norm: 1.0
+    weight_decay: 0.0
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+    ulysses_size: 1
+    lora_target: q_proj, k_proj, v_proj, o_proj
+    lora_r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+  data_args:
+    template: qwen2_5
+    file_name: data/comparison_gpt4_data_zh.json
+    dataset_dir: data
+    prompt: instruction
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+    max_samples: ${rollout_batch_size}
+  strategy_args:
+    strategy_name: fsdp2_train
+    strategy_config:
+      param_dtype: bf16
+      reduce_dtype: fp32
+      reshard_after_forward: True
+      offload_policy: False
+      fsdp_size: 8
+  checkpoint_config:
+    async_upload: False
+  offload_nccl: False
+  use_remove_padding: False
+  use_dynamic_batching_in_train: False
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2
+
+actor_infer:
+  name: actor_infer
+  worker_cls: roll.pipeline.base_worker.ActorWorker
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 1.0
+    top_k: 100
+    num_beams: 1
+    temperature: 1.0
+    num_return_sequences: 1
+  data_args:
+    template: qwen2_5
+    file_name: data/comparison_gpt4_data_zh.json
+    dataset_dir: data
+    prompt: instruction
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+    max_samples: ${rollout_batch_size}
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.75
+      block_size: 16
+      load_format: auto
+      max_num_seqs: 1024
+      max_num_batched_tokens: 8096
+      enable_prefix_caching: true
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2
+
+reference:
+  name: reference
+  worker_cls: roll.pipeline.base_worker.ActorWorker
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,1))
+  infer_batch_size: 2
+

@@ -4,12 +4,12 @@ from typing import Any, Dict
 import torch
 from codetiming import Timer
 
-from roll.configs.worker_config import WorkerConfig, StrategyArguments
-from roll.pipeline.base_worker import ActorWorker
+from roll.configs.worker_config import StrategyArguments, WorkerConfig
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
+from roll.pipeline.base_worker import ActorWorker, InferWorker
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.utils.logging import get_logger
 
@@ -33,7 +33,7 @@ class ModelUpdatePipeline(BasePipeline):
         )
         self.actor_infer: Any = Cluster(
             name=self.pipeline_config.actor_infer.name,
-            worker_cls=ActorWorker,
+            worker_cls=InferWorker,
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_infer,
         )

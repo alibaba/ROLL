@@ -74,7 +74,8 @@ class RewardConfig(WorkerConfig):
         default_factory=RewardFilterConfig,
         metadata={"help": "Arguments passed to reward response filtering"},
     )
-
+    
+    reward_manager_config: List[Dict[str, Any]] = field(default_factory=list, metadata={"help": "The reward system plugin config."})
 
 
 @dataclass
@@ -92,23 +93,6 @@ class RLVRConfig(PPOConfig):
         metadata={"help": "The number of return sequences in one group, used in generation_args."}
     )
 
-    generate_opt_level: int = field(
-        default=1,
-        metadata={
-            "help": "generate optimizing level: 0 use base batch generate interface, 1 use scheduler process requests"
-        },
-    )
-    is_num_return_sequences_expand: bool = field(
-        default=False,
-        metadata={"help": "whether replicate `num_return_sequences` times in prompts or not."}
-    )
-    is_use_additional_prompts: bool = field(
-        default=False,
-        metadata={"help": "Whether to use additional prompts or not."}
-    )
-    max_additional_running_prompts: int = field(
-        default=16, metadata={"help": "The additional number of running prompts, beyond batch_size."}
-    )
     save_logging_board_dir: str = field(
         default=None, metadata={"help": "saving directory of logging board_metrics"}
     )
@@ -149,22 +133,6 @@ class RLVRConfig(PPOConfig):
     importance_sampling: Literal["token", "seq"] = (
         field(default="token", metadata={"help": "policy importance sampling"})
     )
-    use_rollout_importance_sampling_ratio: bool = field(default=False, metadata={"help": "apply train/infer ratio as token-level loss weight"})
-    rollout_importance_sampling_ratio_upper_bound: float = field(default=1.2)
-
-    train_infer_ratio_mask: bool = field(default=False, metadata={"help": "apply train/infer ratio as token-level response mask"})
-    train_infer_ratio_threshold_low: float = field(default=0.8)
-    train_infer_ratio_threshold_high: float = field(default=1.2)
-    train_infer_diff_mask: bool = field(default=False, metadata={"help": "apply train-infer diff as token-level response mask"})
-    train_infer_diff_threshold_low: float = field(default=-0.2)
-    train_infer_diff_threshold_high: float = field(default=0.2)
-
-    train_infer_ratio_seq_mask: bool = field(default=False, metadata={"help": "apply train/infer ratio as sequence-level response mask"})
-    train_infer_ratio_seq_threshold_low: float = field(default=0.8)
-    train_infer_ratio_seq_threshold_high: float = field(default=1.2)
-    train_infer_diff_seq_mask: bool = field(default=False, metadata={"help": "apply train-infer diff as sequence-level response mask"})
-    train_infer_diff_seq_threshold_low: float = field(default=-0.2)
-    train_infer_diff_seq_threshold_high: float = field(default=0.2)
 
     val_greedy: bool = field(default=False, metadata={"help": "Use greedy for validation"})
     val_n_sample: int = field(default=1, metadata={"help": "Number of samples for validation"})
@@ -186,7 +154,7 @@ class RLVRConfig(PPOConfig):
         if self.actor_train.worker_cls is None:
             self.actor_train.worker_cls = "roll.pipeline.rlvr.actor_worker.ActorWorker"
         if self.actor_infer.worker_cls is None:
-            self.actor_infer.worker_cls = "roll.pipeline.rlvr.actor_worker.ActorWorker"
+            self.actor_infer.worker_cls = "roll.pipeline.base_worker.InferWorker"
         if self.reference.worker_cls is None:
             self.reference.worker_cls = "roll.pipeline.rlvr.actor_worker.ActorWorker"
         if self.critic.worker_cls is None:
@@ -251,8 +219,6 @@ class RLVRConfig(PPOConfig):
                 self.num_nodes = 1
             else:
                 self.num_nodes = (max_gpu_num + self.num_gpus_per_node - 1) // self.num_gpus_per_node
-
-        self.validate_worker_config()
 
     def to_dict(self):
         return dataclasses.asdict(self)

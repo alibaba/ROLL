@@ -6,6 +6,8 @@ from omegaconf import OmegaConf
 
 from roll.distributed.scheduler.initialize import init
 from roll.pipeline.agentic.agentic_config import AgenticConfig
+from roll.utils.import_utils import safe_import_class
+from roll.utils.str_utils import print_pipeline_config
 
 
 def main():
@@ -19,14 +21,17 @@ def main():
     initialize(config_path=args.config_path, job_name="app")
     cfg = compose(config_name=args.config_name)
 
-    print(OmegaConf.to_yaml(cfg, resolve=True))
-
     ppo_config = from_dict(data_class=AgenticConfig, data=OmegaConf.to_container(cfg, resolve=True))
 
     init()
-    from roll.pipeline.agentic.agentic_pipeline import AgenticPipeline
 
-    pipeline = AgenticPipeline(pipeline_config=ppo_config)
+    print_pipeline_config(ppo_config)
+
+    pipeline_cls = getattr(cfg, "pipeline_cls", "roll.pipeline.agentic.agentic_pipeline.AgenticPipeline")
+    if isinstance(pipeline_cls, str):
+        pipeline_cls = safe_import_class(pipeline_cls)
+
+    pipeline = pipeline_cls(pipeline_config=ppo_config)
 
     pipeline.run()
 

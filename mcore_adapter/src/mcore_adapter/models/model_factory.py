@@ -13,18 +13,28 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_block_spec,
 )
 from megatron.core.transformer.module import MegatronModule
+from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers.utils import is_peft_available
 
 from ..checkpointing import load_state_dict_from_checkpoint, save_config_and_state_dict
 from ..platforms import current_platform
-from ..utils import get_logger, is_peft_available
+from ..utils import get_logger
 from .converter.convert_utils import MAX_SHARD_SIZE
 from .converter.model_converter import ModelConverter
 from .model_config import McaModelConfig
-from .model_utils import ModuleUtilsMixin, RMSNorm, exists_hf_config, exists_mca_config, get_thd_data_on_this_cp_rank
+from .model_utils import (
+    ModuleUtilsMixin,
+    RMSNorm,
+    configure_resized_vocab_size,
+    exists_hf_config,
+    exists_mca_config,
+    get_thd_data_on_this_cp_rank,
+    mca_lora_logits_postprocess_hook,
+)
 
 
 if is_peft_available():
-    from peft import PeftModel
+    from peft import PeftModel, get_peft_model_state_dict, set_peft_model_state_dict
 
 
 if TYPE_CHECKING:
@@ -48,9 +58,16 @@ class VirtualModels:
     def save_pretrained(self, save_directory: str):
         if len(self.models) == 1:
             if is_peft_available() and isinstance(self.models[0], PeftModel):
-                for _, peft_config in self.models[0].peft_config.items():
-                    peft_config.save_pretrained(save_directory)
-                return self.models[0].base_model.model.save_pretrained(save_directory)
+                for adapter_name, peft_config in self.models[0].peft_config.items():
+                    adapter_save_directory = os.path.join(save_directory, adapter_name)
+                    peft_config.save_pretrained(adapter_save_directory)
+                    peft_state_dict = get_peft_model_state_dict(
+                        self.models[0], self.models[0].state_dict_for_save_checkpoint(), adapter_name
+                    )
+                    self.models[0].base_model.model.save_pretrained(
+                        adapter_save_directory, state_dict={"model": peft_state_dict}
+                    )
+                return self.config.save_pretrained(save_directory)
             return self.models[0].save_pretrained(save_directory)
         state_dict = {f"model{i}": model.state_dict_for_save_checkpoint() for i, model in enumerate(self.models)}
         return self.models[0].save_pretrained(save_directory, state_dict=state_dict)
@@ -60,7 +77,19 @@ class VirtualModels:
             if "model" in state_dict:
                 state_dict = state_dict["model"]
             if is_peft_available() and isinstance(self.models[0], PeftModel):
-                return self.models[0].base_model.model.load_state_dict(state_dict, strict=False)
+                all_missing_keys, all_unexpected_keys = [], []
+                for adapter_name in self.models[0].peft_config.keys():
+                    ret = set_peft_model_state_dict(
+                        self.models[0].base_model.model,
+                        state_dict[adapter_name]["model"]
+                        if "model" in state_dict[adapter_name]
+                        else state_dict[adapter_name],
+                        adapter_name,
+                    )
+                    if not strict:
+                        all_missing_keys.extend(ret[0])
+                        all_unexpected_keys.extend(ret[1])
+                return all_missing_keys, all_unexpected_keys
             return self.models[0].load_state_dict(state_dict, strict=strict)
         all_missing_keys, all_unexpected_keys = [], []
         for i, model in enumerate(self.models):
@@ -134,18 +163,8 @@ class VirtualModels:
         os.makedirs(save_directory, exist_ok=True)
         converter = ModelConverter(self.config, to_hf=True)
         converter.save_model_as_hf_inflight(
-            self.models, save_directory, save_safetensors=save_safetensors, max_shard_size=max_shard_size
+            self.models, save_directory, save_safetensors=save_safetensors, max_shard_size=max_shard_size, move_to_cpu=True,
         )
-
-    def all_gather_weights_as_hf_inflight(self, models=None):
-        models = models or self.models
-        converter = ModelConverter(self.config, to_hf=True)
-        yield from converter.all_gather_weights_as_hf_inflight(models)
-
-    def all_gather_weights_as_hf_bucket(self, models=None, bucket_size: int = None):
-        models = models or self.models
-        converter = ModelConverter(self.config, to_hf=True)
-        yield from converter.all_gather_weights_as_hf_bucket(models, bucket_size=bucket_size)
 
     def get_batch_on_this_cp_rank(self, *args, **kwargs):
         return self.models[0].get_batch_on_this_cp_rank(*args, **kwargs)
@@ -166,11 +185,18 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
 
     @classmethod
     def from_pretrained(
-        cls, model_name_or_path: str, args: "TrainingArguments" = None, use_cpu_initialization: bool = False
+        cls, model_name_or_path: str, args: "TrainingArguments" = None, use_cpu_initialization: bool = False, tokenizer: PreTrainedTokenizer = None,
     ) -> "VirtualModels":
         load_start_time = time.time()
         config = cls.config_class.from_pretrained(model_name_or_path, args)
         config.use_cpu_initialization = use_cpu_initialization
+
+        resized_vocab_size = None
+        if tokenizer is not None:
+            resized_vocab_size = configure_resized_vocab_size(config.padded_vocab_size, len(tokenizer))
+            if resized_vocab_size:
+                config.padded_vocab_size = resized_vocab_size
+
         models = VirtualModels(cls, config=config)
 
         logger.info(
@@ -186,6 +212,9 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
             dist_config_match = config.distribute_config_match(old_mca_config)
 
         if mca_ckpt_exist and dist_config_match:
+            if resized_vocab_size:
+                raise ValueError("The tokenizer length is longer than the vocab embedding size, and the resize embedding" \
+                    "layer is not supported loading mca ckpt. Please check the tokenizer and ckpt.")
             state_dict = load_state_dict_from_checkpoint(model_name_or_path)
         else:
             if not exists_hf_config(model_name_or_path):
@@ -194,7 +223,7 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                     f"and not mca_ckpt_exist: {mca_ckpt_exist} or not dist_config_match: {dist_config_match}"
                 )
             state_dict = {}
-            converter = ModelConverter(config)
+            converter = ModelConverter(config, resized_vocab_size=resized_vocab_size)
             for i in range(len(models)):
                 key = "model"
                 if len(models) > 1:
@@ -244,10 +273,9 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                         val.shape[seq_dim] // (2 * cp_size),
                         *val.shape[(seq_dim + 1) :],
                     )
-                    index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True).to(
-                        current_platform.device_type,
-                        non_blocking=True
-                    )
+                    index = torch.tensor(
+                        [cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True
+                    ).to(current_platform.device_type, non_blocking=True)
                     val = val.index_select(seq_dim, index)
                     val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
                     batch[key] = val
@@ -290,13 +318,17 @@ class McaGPTModel(GPTModel, PretrainedModel):
             rotary_percent=config.rotary_percent,
             rotary_base=config.rotary_base,
             rope_scaling=config.rotary_scaling,
-            mtp_block_spec=self._get_mtp_block_spec(config),
+            rope_scaling_factor=config.rotary_scaling_factor,
+            mtp_block_spec=self._get_mtp_block_spec(config, vp_stage=self.vp_stage),
             vp_stage=self.vp_stage,
         )
         for param in self.parameters():
             tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
         if not config.use_cpu_initialization:
             self.to(current_platform.current_device())
+
+        if self.post_process or self.mtp_process:
+            self.output_layer.register_forward_hook(mca_lora_logits_postprocess_hook)
 
     def _get_transformer_layer_spec(self, config: Optional["McaModelConfig"] = None):
         config = config or self.config
@@ -309,7 +341,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 if not use_te and config.normalization == "RMSNorm":
                     transformer_layer_spec.submodules.input_layernorm = RMSNorm
                     transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
-                if hasattr(transformer_layer_spec.submodules.mlp.submodules, "shared_experts"):
+                if getattr(transformer_layer_spec.submodules.mlp.submodules, "shared_experts", None):
                     transformer_layer_spec.submodules.mlp.submodules.shared_experts.params["gate"] = (
                         config.moe_use_shared_expert_gate
                     )
@@ -327,12 +359,12 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 module_spec.submodules.pre_mlp_layernorm = RMSNorm
             return module_spec
 
-    def _get_mtp_block_spec(self, config: Optional["McaModelConfig"] = None):
+    def _get_mtp_block_spec(self, config: Optional["McaModelConfig"] = None, vp_stage: Optional[int] = None):
         config = config or self.config
         if config.mtp_num_layers and config.mtp_num_layers > 0:
             transformer_layer_spec = self._get_transformer_layer_spec(config)
             use_te = config.transformer_impl == "transformer_engine"
-            spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, use_te)
+            spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, use_te, vp_stage=vp_stage)
             return spec
         else:
             return None

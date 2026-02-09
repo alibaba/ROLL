@@ -1,3 +1,4 @@
+import asyncio
 import random
 from typing import Dict, Optional, Any, Callable
 
@@ -44,6 +45,7 @@ class GlobalDataset:
             if seed is not None:
                 self.idx = random.randint(0, len(self.dataset) - 1)
             else:
+                self.idx += 1
                 if self.idx == len(self.dataset):
                     self.epoch += 1
                     self.dataset = self.dataset.shuffle(seed=self.epoch)
@@ -79,4 +81,6 @@ class GlobalDatasetManager:
         refs = []
         for dataset_name, dataset_ref in self.global_dataset_dict.items():
             refs.append(dataset_ref.reset.remote())
-        ray.get(refs)
+        if refs:
+            # async
+            await asyncio.gather(*refs)

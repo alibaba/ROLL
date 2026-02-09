@@ -5,10 +5,9 @@ import numpy as np
 import torch
 from megatron.core import mpu, tensor_parallel
 
+from .platforms import current_platform
 from .training_args import TrainingArguments
 from .utils import get_logger
-
-from .platforms import current_platform
 
 
 logger = get_logger(__name__)

@@ -280,17 +280,31 @@ def dump_frames_as_gif(filename, frames, duration=0.2):
         pass
 
 
+def remove_nan_items(data: Dict[str, np.ndarray]):
+    if not data:
+        return {}
+
+    # 所有数组都假设 dtype=object，只有 None 需要过滤
+    arr = np.vstack([np.asarray(v, dtype=object) for v in data.values()])  # (num_keys, N)
+    mask = arr != None  # noqa: E711
+    valid_row_mask = mask.all(axis=0)
+    return {
+        k: np.asarray(v, dtype=object)[valid_row_mask]
+        for k, v in data.items()
+    }
+
+
 def dump_rollout_trajectories(path, global_step, data: DataProto):
     """
     Dumps rollout trajectories to persistent storage.
 
-    The data is written using a column-based configuration defined in COLUMNS_CONFIG.
+    The data is written using a column-based configuration defined in COLUMMNS_CONFIG.
     Each column is specified as a list [column_name, data_type], where:
     - column_name: string identifier for the column
     - data_type: data type specification ('bigint', 'string', 'double', etc.)
 
     Example configuration:
-    columns_config = [
+    colummns_config = [
         ['global_step', 'bigint'],
         ['id', 'string'],
         ['source', 'string'],
@@ -300,14 +314,15 @@ def dump_rollout_trajectories(path, global_step, data: DataProto):
     if not path:
         return
 
-    columns_config: Optional[List] = data.meta_info.get("COLUMNS_CONFIG", None)
+    columns_config: Optional[List] = data.meta_info.get("COLUMMNS_CONFIG", None)
     if columns_config is None:
         return
 
-    write_data = copy.deepcopy(data.non_tensor_batch)
-    [data.non_tensor_batch.pop(item[0]) for item in columns_config if item[0] in data.non_tensor_batch]
+    write_data = {item[0]: data.non_tensor_batch.pop(item[0]) for item in columns_config if item[0] in data.non_tensor_batch}
 
-    data_cnt = len(data)
+    write_data = remove_nan_items(copy.deepcopy(write_data))
+    data_cnt = len(write_data[columns_config[0][0]])
+
     write_data["global_step"] = [global_step] * data_cnt
     columns_config.append(["global_step", "bigint"])
 
@@ -315,6 +330,128 @@ def dump_rollout_trajectories(path, global_step, data: DataProto):
         if checker(path):
             p = multiprocessing.Process(target=func, args=(path, write_data, columns_config), daemon=False)
             p.start()
+
+
+def compute_segment_masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """
+    对每段连续的1分别计算 masked_mean，不连续的段不相乘。
+
+    Args:
+        tensor: [batch_size, seq_len] 要计算的值
+        mask: [batch_size, seq_len] mask，1表示有效位置，0表示无效位置
+
+    Returns:
+        [batch_size, seq_len] 结果，每段连续的1位置填充该段的 masked_mean
+    """
+    batch_size, seq_len = mask.shape
+    device = mask.device
+    result = torch.zeros_like(tensor)
+
+    # 对每个样本分别处理
+    for b in range(batch_size):
+        sample_mask = mask[b]  # [seq_len]
+        sample_tensor = tensor[b]  # [seq_len]
+
+        # 找到所有连续的1的段
+        # 使用 diff 找到边界：1->0 和 0->1 的位置
+        diff = torch.diff(sample_mask, prepend=torch.tensor([0], device=device))
+        # 找到段的开始位置（0->1）
+        segment_starts = torch.where(diff == 1)[0]
+        # 找到段的结束位置（1->0），diff[i]==-1 表示 mask[i-1]==1 且 mask[i]==0，所以段的结束位置是 i（不包括i）
+        segment_ends = torch.where(diff == -1)[0]
+
+        # 如果最后一个位置是1，需要添加结束位置
+        if sample_mask[-1] == 1:
+            segment_ends = torch.cat([segment_ends, torch.tensor([seq_len], device=device)])
+
+        # 确保 segment_starts 和 segment_ends 长度匹配
+        if len(segment_starts) != len(segment_ends):
+            # 如果长度不匹配，只处理能匹配的部分
+            min_len = min(len(segment_starts), len(segment_ends))
+            segment_starts = segment_starts[:min_len]
+            segment_ends = segment_ends[:min_len]
+
+        # 对每段分别计算 masked_mean
+        for start, end in zip(segment_starts, segment_ends):
+            # 获取这段的索引
+            segment_indices = torch.arange(start, end, device=device)
+            segment_mask = sample_mask[segment_indices]  # 这段的mask
+            segment_tensor = sample_tensor[segment_indices]  # 这段的值
+
+            if segment_mask.sum() > 0:
+                # 计算这段的 masked_mean（只考虑mask为1的位置）
+                segment_mean = (segment_tensor * segment_mask).sum() / (segment_mask.sum() + 1e-8)
+                # 将结果填充到这段内mask为1的位置
+                result[b, segment_indices] = segment_mean * segment_mask
+
+    return result
+
+
+def compute_agentic_reinforce_return(
+    token_level_rewards: torch.Tensor, gamma: torch.Tensor, lambd: torch.Tensor, mask: Optional[torch.Tensor] = None
+):
+    """
+    计算 REINFORCE 的 return，支持按 mask 分段 discount 衰减。
+    每段内所有位置获得相同的折扣累积值（从该段最后位置开始累积）。
+
+    Args:
+        token_level_rewards: [batch_size, seq_len] token 级别的奖励
+        gamma: discount factor
+        lambd: lambda 参数（当前未使用，保留以兼容接口）
+        mask: [batch_size, seq_len] mask，1表示有效位置，0表示无效位置。如果为None，则对所有位置计算
+
+    Returns:
+        advantages: [batch_size, seq_len] advantages
+        returns: [batch_size, seq_len] returns
+    """
+    with torch.no_grad():
+        batch_size, gen_len = token_level_rewards.shape
+        device = token_level_rewards.device
+        returns = torch.zeros_like(token_level_rewards, dtype=torch.float32)
+
+        # 如果没有提供 mask，则对所有位置计算（向后兼容）
+        if mask is None:
+            mask = torch.ones_like(token_level_rewards)
+
+        # 确保 gamma 是标量
+        gamma_val = gamma.item() if torch.is_tensor(gamma) else gamma
+
+        # 对每个样本分别处理
+        for b in range(batch_size):
+            sample_mask = mask[b]  # [seq_len]
+            sample_rewards = token_level_rewards[b]  # [seq_len]
+
+            # 找到所有连续的1的段
+            # 使用 diff 找到边界：1->0 和 0->1 的位置
+            diff = torch.diff(sample_mask.float(), prepend=torch.tensor([0.0], device=device))
+
+            # 找到段的开始位置（0->1，diff==1）
+            segment_starts = torch.where(diff == 1)[0]
+
+            # 找到段的结束位置（1->0，diff==-1）
+            segment_ends = torch.where(diff == -1)[0]
+
+            # 如果最后一个位置是1，需要添加结束位置
+            if len(sample_mask) > 0 and sample_mask[-1] == 1:
+                segment_ends = torch.cat([segment_ends, torch.tensor([gen_len], device=device)])
+
+            # 计算该段从最后位置开始的累积折扣奖励
+            cumulative_return = 0.0
+            # 对每段分别计算 discounted return
+            for start, end in zip(segment_starts.flip(-1), segment_ends.flip(-1)):
+                start_idx = start.item()
+                end_idx = end.item()
+                segment_len = end_idx - start_idx
+
+                cumulative_return = sample_rewards[end_idx - 1].item() + gamma_val * cumulative_return
+
+                # 该段内所有位置都设置为这个累积值
+                returns[b, start_idx:end_idx] = cumulative_return
+
+        advantages = returns
+
+    return advantages, returns
+
 
 @torch.no_grad()
 def agentic_compute_advantage(
@@ -350,9 +487,13 @@ def agentic_compute_advantage(
             token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
         )
     elif adv_estimator in ["agentic_reinforce"]:
-        raise NotImplementedError
+        advantages, returns = compute_agentic_reinforce_return(
+            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd, mask=response_mask
+        )
     else:
         raise NotImplementedError
+
+    data.batch["raw_advantages"] = advantages
     if whiten_advantages:
         # TODO whiten过程中是否要考虑response的长度？
         advantages = masked_whiten(values=advantages, mask=response_mask)

@@ -4,25 +4,19 @@
 import copy
 import inspect
 import os
-from typing import Any, Callable
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
-from torch import Tensor
-
 from flash_attn import flash_attn_func, flash_attn_varlen_func
 from flash_attn.bert_padding import pad_input
-
-from roll.utils.context_parallel.all_to_all import SeqAllToAll4D
-from roll.utils.context_parallel.globals import get_ulysses_seqlen, get_ulysses_size
-
+from torch import Tensor
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import _upad_input
 from transformers.utils import is_flash_attn_greater_or_equal
 
-from roll.utils.context_parallel.globals import get_ulysses_group
-from roll.utils.context_parallel.ulysses_attention import UlyssesAttention
+from roll.utils.context_parallel.all_to_all import SeqAllToAll4D
+from roll.utils.context_parallel.globals import get_ulysses_group, get_ulysses_seqlen, get_ulysses_size
 
 
 def _ulysses_attn_varlen_func(

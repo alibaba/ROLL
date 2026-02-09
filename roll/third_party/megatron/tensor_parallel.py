@@ -6,7 +6,6 @@ from megatron.core import parallel_state as mpu
 class _VocabParallelEntropy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
-        vocab_parallel_logits = vocab_parallel_logits.float()
         @torch.compile(dynamic=True)
         def mul_reduce(a, b):
             return (a * b).sum(dim=-1, keepdim=True)

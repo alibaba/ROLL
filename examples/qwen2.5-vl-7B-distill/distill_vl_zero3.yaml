@@ -18,6 +18,7 @@ checkpoint_config:
   type: file_system
   output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
 
+
 save_steps: 100
 logging_steps: 1
 resume_from_checkpoint: false

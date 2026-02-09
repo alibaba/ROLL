@@ -122,3 +122,19 @@ class Barrier:
                 self.event.clear()
                 return
         await self.event.wait()
+
+
+@ray.remote
+class Locker:
+    def __init__(self):
+        self._locked = False
+
+    def acquire(self):
+        if self._locked:
+            return False
+        self._locked = True
+        return True
+
+    def release(self):
+        assert self._locked
+        self._locked = False

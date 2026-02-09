@@ -1,6 +1,8 @@
 from .platform import Platform
 from ..utils.logging import get_logger
 
+import torch
+
 logger = get_logger()
 
 
@@ -48,7 +50,8 @@ class NpuPlatform(Platform):
         try:
             from vllm import envs
 
-            if envs.VLLM_USE_V1:
+            # VLLM_USE_V1 is deprecated in vllm>=0.11.1
+            if not hasattr(envs, "VLLM_USE_V1") or envs.VLLM_USE_V1:
                 from vllm_ascend.worker.worker_v1 import NPUWorker as Worker
 
                 logger.info("Successfully imported vLLM V1 Worker.")
@@ -74,3 +77,8 @@ class NpuPlatform(Platform):
     @classmethod
     def apply_ulysses_patch(cls) -> None:
         return
+
+    @classmethod
+    def device_memory_used(cls) -> None:
+        free, total = torch.npu.mem_get_info()
+        return total - free

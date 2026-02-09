@@ -75,7 +75,11 @@ class DPOConfig(BaseConfig):
         self.actor_train.name = "actor_train"
         self.reference.name = "reference"
 
-        self.validate_worker_config()
+        assert self.actor_train.use_sequence_packing == False and self.reference.use_sequence_packing == False,\
+        "dpo pipeline doesn't support use sequence packing now"
+
+        self.actor_train.apply_loss_scale = False
+        self.reference.apply_loss_scale = False
 
     def set_max_steps(self, max_steps: int):
         self.max_steps = max_steps

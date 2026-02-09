@@ -84,7 +84,8 @@ class RewardFLPipeline(BasePipeline):
                 with Timer(name="step_total", logger=None) as step_total_timer:
                     batch_dict: Dict
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
-                    batch.meta_info = {"global_step": global_step, "is_offload_states": False, "is_offload_optimizer_states_in_train_step": False}
+                    batch.meta_info = {"global_step": global_step, "is_offload_states": False,
+                                       "is_offload_optimizer_states_in_train_step": False, "loss_mask_keys": []}
 
                     with Timer(name="actor_train", logger=None) as actor_train_timer:
                         actor_train_refs = self.actor_train.train_step(batch, blocking=False)

@@ -17,6 +17,14 @@ class LoraArguments:
             "help": "Name(s) of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint."
         },
     )
+    autocast_adapter_dtype: bool = field(
+        default=True,
+        metadata={
+            "help": "Whether to autocast the adapter dtype. Defaults to `True`. Right now, "
+            "this will only cast adapter weights using float16 or bfloat16 to float32, "
+            "as this is typically required for stable training, and only affect select PEFT tuners."
+        },
+    )
     lora_alpha: Optional[int] = field(
         default=None,
         metadata={"help": "The scale factor for LoRA fine-tuning (default: lora_rank * 2)."},
@@ -69,17 +77,26 @@ class ModelArguments(LoraArguments):
         default=False,
         metadata={"help": "Whether or not to disable gradient checkpointing."},
     )
+    gradient_checkpointing_use_reentrant: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Gradient checkpointing implementation toggle for torch.utils.checkpoint.\n"
+                "- None (default): auto (use reentrant=True for MoE models; otherwise False)\n"
+            )
+        },
+    )
     device_map: Optional[str] = field(
         default="balanced", metadata={"help": "transformer's from_pretrained device map"}
     )
     dtype: Optional[Literal["fp32", "bf16", "fp16"]] = field(
         default="bf16", metadata={"help": "Set model dtype as fp32, bf16, or fp16, otherwise use config's torch_dtype"}
     )
-    model_type: Optional[Literal["auto_sequence_classification", "auto_token_classification", "trl", "diffusion_module"]] = field(
+    model_type: Optional[
+        Literal["auto_sequence_classification", "auto_token_classification", "trl", "diffusion_module"]
+    ] = field(
         default=None,
-        metadata={
-            "help": "reward model type."
-        },
+        metadata={"help": "reward model type."},
     )
     num_labels: Optional[int] = field(
         default=1,
@@ -100,9 +117,7 @@ class ModelArguments(LoraArguments):
     )
     ulysses_size: Optional[int] = field(
         default=1,
-        metadata={
-            "help": "The group size for Ulysses attention."
-        },
+        metadata={"help": "The group size for Ulysses attention."},
     )
 
     def __post_init__(self):

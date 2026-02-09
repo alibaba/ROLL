@@ -36,19 +36,24 @@ def all_to_all_4D(
         # Pad sequence for multi-modality use case
         ulysses_seqlen = [torch.zeros(1, dtype=torch.int64, device=input.device) for _ in range(seq_world_size)]
         dist.barrier(group=group)
-        dist.all_gather(ulysses_seqlen, torch.tensor(shard_seqlen, device=input.device), group=group)
+        dist.all_gather(
+            ulysses_seqlen,
+            torch.tensor([shard_seqlen], device=input.device),
+            group=group,
+        )
         set_ulysses_seqlen(ulysses_seqlen)
 
         max_global_length = max(ulysses_seqlen)
         # pad to the second dimension to the longest
         input = torch.nn.functional.pad(input, (0, 0, 0, 0, 0, max_global_length - shard_seqlen))
 
-        seqlen = max_global_length * seq_world_size
+        shard_seqlen_padded = int(max_global_length.item())
+        seqlen_padded = shard_seqlen_padded * seq_world_size
         shard_hc = hc // seq_world_size
 
         # transpose groups of heads with the seq-len parallel dimension, so that we can scatter them!
         # (bs, seqlen/P, hc, hs) -reshape-> (bs, seq_len/P, P, hc/P, hs) -transpose(0,2)-> (P, seq_len/P, bs, hc/P, hs)
-        input_t = input.reshape(bs, shard_seqlen, seq_world_size, shard_hc, hs).transpose(0, 2).contiguous()
+        input_t = input.reshape(bs, shard_seqlen_padded, seq_world_size, shard_hc, hs).transpose(0, 2).contiguous()
 
         output = torch.empty_like(input_t)
         # https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_to_all_single
@@ -61,18 +66,19 @@ def all_to_all_4D(
         else:
             output = input_t
         # if scattering the seq-dim, transpose the heads back to the original dimension
-        output = output.reshape(seqlen, bs, shard_hc, hs)
+        output = output.reshape(seqlen_padded, bs, shard_hc, hs)
 
         # then we will unpad it back
-        output_list = torch.split(output, max_global_length.item(), dim=0)
+        output_list = torch.split(output, shard_seqlen_padded, dim=0)
         assert len(output_list) == seq_world_size
         unpadded_output_list = [_output[: _seqlen.item()] for _output, _seqlen in zip(output_list, ulysses_seqlen)]
 
         # Concatenate the unpadded tensors back together
         output = torch.cat(unpadded_output_list)
+        seqlen_actual = int(output.size(0))
 
-        # (seq_len, bs, hc/P, hs) -reshape-> (bs, seq_len, hc/P, hs)
-        output = output.transpose(0, 1).contiguous().reshape(bs, seqlen, shard_hc, hs)
+        # (seq_len_actual, bs, hc/P, hs) -> (bs, seq_len_actual, hc/P, hs)
+        output = output.transpose(0, 1).contiguous().reshape(bs, seqlen_actual, shard_hc, hs)
 
         return output
 
@@ -117,11 +123,11 @@ def all_to_all_4D(
         output = output.reshape(hc, max_global_length, bs, hs)
 
         # unpad the output
-        self_length = ulysses_seqlen[dist.get_rank(group=group)]
+        self_length = int(ulysses_seqlen[dist.get_rank(group=group)].item())
         output = output[:, :self_length, :, :]
 
-        # (hc, seqlen/N, bs, hs) -tranpose(0,2)-> (bs, seqlen/N, hc, hs)
-        output = output.transpose(0, 2).contiguous().reshape(bs, max_global_length, hc, hs)
+        # (hc, local_seqlen, bs, hs) -> (bs, local_seqlen, hc, hs)
+        output = output.transpose(0, 2).contiguous().reshape(bs, self_length, hc, hs)
 
         return output
     else:

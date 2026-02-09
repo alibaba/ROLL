@@ -1,0 +1,153 @@
+defaults:
+  - ../config/traj_envs@_here_
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "sokoban_precision_test_dump"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+render_save_dir: ./output/render
+system_envs:
+  NCCL_ALGO: Ring
+  NVTE_ALLOW_NONDETERMINISTIC_ALGO: '0'
+  CUBLAS_WORKSPACE_CONFIG: ':4096:8'
+  DETERMINISTIC_MODE: '1'
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ./output/tensorboard
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/models/${exp_name}
+
+num_gpus_per_node: 8
+
+max_steps: 50
+save_steps: 10000
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+rollout_batch_size: 128
+val_batch_size: 128
+sequence_length: 8192
+
+# Rollout Mock Configuration - DUMP MODE
+rollout_mock:
+  enable: true
+  mode: dump
+  dump_dir: ./output/rollout_dumps/baseline_v1
+
+advantage_clip: 0.2
+ppo_epochs: 1
+adv_estimator: "grpo"
+init_kl_coef: 0.0
+whiten_advantages: true
+entropy_loss_coef: 0
+max_grad_norm: 1.0
+
+pretrain: Qwen/Qwen2.5-0.5B-Instruct
+reward_pretrain: Qwen/Qwen2.5-0.5B-Instruct
+
+actor_train:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 32
+    # warmup_steps: 10
+    lr_scheduler_type: cosine
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  device_mapping: list(range(2,4))
+  infer_batch_size: 2
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: 128
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: 1
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.8
+      block_size: 16
+      load_format: auto
+  device_mapping: list(range(2,4))
+
+reference:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(2,4))
+  infer_batch_size: 2
+
+reward_normalization:
+  grouping: traj_group_id
+  method: mean_std
+
+train_env_manager:
+  format_penalty: -0.15
+  max_env_num_per_worker: 16
+  num_env_groups: 16
+  group_size: 8
+  tags: [SimpleSokoban]
+  num_groups_partition: [16]
+
+val_env_manager:
+  max_env_num_per_worker: 32
+  num_env_groups: 128
+  group_size: 1
+  tags: [SimpleSokoban]
+  num_groups_partition: [128]
+
+max_tokens_per_step: 64
+
+custom_envs:
+  SimpleSokoban:
+    ${custom_env.SimpleSokoban}
+  LargerSokoban:
+    ${custom_env.LargerSokoban}
+  SokobanDifferentGridVocab:
+    ${custom_env.SokobanDifferentGridVocab}
+  FrozenLake:
+    ${custom_env.FrozenLake}
+  FrozenLakeThink:
+    ${custom_env.FrozenLakeThink}

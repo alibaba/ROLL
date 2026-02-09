@@ -12,8 +12,6 @@ from roll.configs.worker_config import WorkerConfig
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
-from roll.distributed.strategy.factory import create_strategy
-from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 
 from roll.models.model_providers import default_reward_model_provider, default_tokenizer_provider
 
@@ -154,7 +152,6 @@ class CrossThinkQARuleRewardWorker(Worker):
         self.rank_info.dp_rank = self.rank_info.rank
         self.rank_info.dp_size = self.rank_info.world_size
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
-        self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
 
         self.repetition_penalty_reward_fn = get_repetition_penalty_reward(ngram_size=3, max_penalty=-0.5)
         self.response_length_reward_fn = get_response_length_reward(min_len=100, max_len=400)

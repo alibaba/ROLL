@@ -1,14 +1,13 @@
-from concurrent import futures
 from collections import defaultdict
+from concurrent import futures
 from datetime import timedelta
-from typing import List, Optional, Callable, Dict, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import deepspeed
 import torch
 import torch.distributed as dist
 from accelerate import cpu_offload_with_hook
 from accelerate.hooks import UserCpuOffloadHook
-from roll.utils.collective import collective
 from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
 
@@ -17,9 +16,12 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy
 from roll.models.func_providers import log_probs_forward_step_func
 from roll.models.model_providers import default_tokenizer_provider
-from roll.utils.logging import get_logger
-from roll.utils.offload_states import OffloadStateType, offload_hf_model, load_hf_model
 from roll.platforms import current_platform
+from roll.utils.collective import collective
+from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
+from roll.utils.logging import get_logger
+from roll.utils.offload_states import OffloadStateType, load_hf_model, offload_hf_model
+from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tensors_from_bucket
 
 logger = get_logger()
 
@@ -31,10 +33,14 @@ class HfInferStrategy(InferenceStrategy):
         super().__init__(worker)
         self.executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=1)
         self.generate_config = None
+        self.buffer_cache = None
 
     def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
-        dist.init_process_group(backend=current_platform.communication_backend, timeout=timedelta(minutes=self.worker_config.backend_timeout))
+        dist.init_process_group(
+            backend=current_platform.communication_backend,
+            timeout=timedelta(minutes=self.worker_config.backend_timeout),
+        )
         dist.all_reduce(torch.zeros(1).to(current_platform.device_type))
 
         self.worker.rank_info.dp_rank = dist.get_rank()
@@ -64,8 +70,9 @@ class HfInferStrategy(InferenceStrategy):
             position_ids = data.batch["position_ids"]
             forward_args = data.meta_info.get("forward_args", {})
             if position_ids.dim() == 3:
-                # qwen2vl mrope, maybe use a placeholder and let model generate position_ids
-                position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
+                # qwen-vl mrope-style 3D position_ids stored in DataProto as (bsz, C, seqlen)
+                # transpose to (C, bsz, seqlen) for model forward.
+                position_ids = position_ids.transpose(0, 1)  # (bsz, C, seqlen) -> (C, bsz, seqlen)
             if "multi_modal_inputs" in data.non_tensor_batch:
                 multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
                 multi_modal_data = defaultdict(list)
@@ -95,6 +102,7 @@ class HfInferStrategy(InferenceStrategy):
         return results
 
     def generate(self, batch: DataProto, generation_config):
+        generation_config.pop("logprobs", None)
         if self.generate_config is None:
             self.generate_config = generation_config
             logger.info(f"generate_config: {self.generate_config}")
@@ -132,43 +140,41 @@ class HfInferStrategy(InferenceStrategy):
     def unwrap_model(self):
         return self.model
 
-    # 参数同步相关接口
-    def broadcast_bucket(self, model_update_name, src_pp_rank, meta_infos, bucket_size):
-        if src_pp_rank not in self.model_update_comm_plan[model_update_name]:
-            return
-        comm_plan = self.model_update_comm_plan[model_update_name][src_pp_rank]
-        buffer = torch.empty(bucket_size, dtype=torch.int8, device=current_platform.device_type)
-        collective.broadcast(tensor=buffer, src_rank=0, group_name=comm_plan["group_name"])
-        self.update_parameter_in_bucket(model_update_name, meta_infos, buffer, [dist.get_rank()])
-
-    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name, is_lora=False):
+    def broadcast_parameter(self, names, dtypes, shapes, group_name, is_lora=False):
         assert (
             self.worker_config.num_gpus_per_worker == 1
         ), "hf generate only support on device, please use vllm instead."
-        if src_pp_rank not in self.model_update_comm_plan[model_update_name]:
-            return
-        comm_plan = self.model_update_comm_plan[model_update_name][src_pp_rank]
-        weight = torch.empty(shape, dtype=dtype, device=current_platform.device_type)
-        collective.broadcast(tensor=weight, src_rank=0, group_name=comm_plan["group_name"])
-        self.update_parameter(model_update_name, parameter_name, weight, [dist.get_rank()])
+        assert not is_lora
 
-    def update_parameter(self, model_update_name, parameter_name, weight, ranks_in_worker):
-        if dist.get_rank() not in ranks_in_worker:
-            return
+        weights_and_handles = []
+        for name, dtype, shape in zip(names, dtypes, shapes):
+            target_dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
+            weight = torch.empty(shape, dtype=target_dtype, device=self.device)
+            handle = collective.broadcast(tensor=weight, src_rank=0, group_name=group_name, async_op=True)
+            weights_and_handles.append((name, weight, handle))
+
+        def weights_iter():
+            for name, weight, handle in weights_and_handles:
+                handle.wait()
+                yield name, weight
+
+        for name, weight in weights_iter():
+            self.update_parameter(name, weight)
+
+    def update_parameter(self, parameter_name, weight):
         param = self.model.get_parameter(parameter_name)
         param.data.copy_(weight)
         del weight
 
-    def update_parameter_in_bucket(self, model_update_name, meta_infos, buffer, ranks_in_worker):
-        if dist.get_rank() not in ranks_in_worker:
-            return
-        from mcore_adapter.models.converter.convert_utils import RecvBucketManager
+    def update_parameter_in_bucket(self, serialized_named_tensors, is_lora=False):
+        # TODO: add lora
+        assert not is_lora
 
-        self.recv_manager = getattr(self, "recv_manager", RecvBucketManager())
-        named_params = self.recv_manager.process_bucket(meta_infos, buffer)
-        del buffer
-        for name, weight in named_params.items():
-            self.update_parameter(model_update_name, name, weight, ranks_in_worker)
+        monkey_patch_torch_reductions()
+        bucket_with_meta = MultiprocessingSerializer.deserialize(serialized_named_tensors[0])
+        named_params = named_tensors_from_bucket(**bucket_with_meta)
+        for name, weight in named_params:
+            self.update_parameter(name, weight)
 
     # offload/load 相关接口
     def load_states(self, *args, **kwargs):

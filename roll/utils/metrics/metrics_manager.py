@@ -1,8 +1,8 @@
 from typing import Dict, Any, List, Optional
 import torch
 import numpy as np
-from ray.util.timer import _Timer
 from codetiming import Timer
+from contextlib import contextmanager
 
 from roll.utils.functionals import masked_mean, reduce_metrics
 
@@ -414,3 +414,39 @@ class MetricsManager:
             token_metrics = self.add_token_metrics(batch=domain_batch)
             self.add_domain_metrics(domain, token_metrics)
             self.metrics = original_metrics
+
+class DurationTracker:
+    def __init__(self):
+        self._clear()
+
+    def observe(self, duration: float):
+        self.count += 1
+        self.total += duration
+        self.min_time = min(self.min_time, duration)
+        self.max_time = max(self.max_time, duration)
+        self.mean = self.total / self.count if self.count > 0 else 0.0
+
+    @contextmanager
+    def track(self):
+        try:
+            with Timer(logger=None) as timer:
+                yield
+        finally:
+            self.observe(timer.last)
+
+    def _clear(self):
+        self.count = 0
+        self.total = 0.0
+        self.min_time = float('inf')
+        self.max_time = float('-inf')
+        self.mean = 0.0
+
+    def log(self):
+        summary = {
+            'count': self.count,
+            'min': self.min_time if self.min_time != float('inf') else 0.0,
+            'max': self.max_time if self.max_time != float('-inf') else 0.0,
+            'mean': round(self.mean, 6),
+        }
+        self._clear()
+        return summary

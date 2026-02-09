@@ -98,11 +98,13 @@ class _VocabParallelLogProbs(torch.autograd.Function):
     def backward(ctx, grad_output: "torch.Tensor"):
         exp_logits, target_mask, sum_exp_logits, masked_target_1d = ctx.saved_tensors
 
-        grad_input = -exp_logits / sum_exp_logits.unsqueeze(dim=-1)
+        exp_logits.div_(sum_exp_logits.unsqueeze(dim=-1))
+        exp_logits.neg_()
+        grad_input = exp_logits
         grad_2d = grad_input.view(-1, grad_input.size()[-1])
         arange_1d = torch.arange(start=0, end=grad_2d.size()[0], device=grad_input.device)
         grad_2d[arange_1d, masked_target_1d] += 1 - target_mask.view(-1).float()
-        grad_input = grad_input * grad_output.unsqueeze(dim=-1)
+        grad_input.mul_(grad_output.unsqueeze(dim=-1))
 
         return grad_input, None
 

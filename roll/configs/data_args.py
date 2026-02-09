@@ -36,7 +36,6 @@ class DataArguments:
     id: Optional[str] = field(default="id", metadata={"help": "Which column in file to use as id"})
     prompt: Optional[str] = field(default=None, metadata={"help": "Which column in file to use as prompt"})
     response: Optional[str] = field(default="solution", metadata={"help": "Which column in file to use as label"})
-    # image: Optional[str] = field(default='image', metadata={"help": "Which column in file to use as image"})
     messages: Optional[str] = field(default=None, metadata={"help": "Which column in file to use as messages"})
 
     def __post_init__(self):

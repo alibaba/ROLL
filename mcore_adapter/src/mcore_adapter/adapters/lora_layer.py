@@ -53,8 +53,6 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
         super().__init__(config=config)
         LoraLayer.__init__(self, base_layer=base_layer)
 
-        # lora needs to be forced to upgrade to 32-bit precision, otherwise it will overflow
-        self.config.params_dtype = torch.float32
         if use_dora:
             raise ValueError(f"{self.__class__.__name__} does not support DoRA yet, please set it to False")
         self.is_grouped = isinstance(base_layer, TEGroupedLinear)
@@ -84,7 +82,15 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
         raise NotImplementedError("_create_lora_layers must be implemented in subclasses")
 
     def update_layer(
-        self, adapter_name, r, *, lora_alpha, lora_dropout, init_lora_weights, use_rslora, lora_bias, **kwargs
+        self,
+        adapter_name,
+        r,
+        lora_alpha,
+        lora_dropout,
+        init_lora_weights,
+        use_rslora: bool = False,
+        lora_bias: bool = False,
+        **kwargs,
     ):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
@@ -99,11 +105,11 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
 
         # Create LoRA layers based on subclass implementation
         lora_layer_kwargs = {
-            "skip_bias_add": False,
-            "init_method": self.config.init_method,
             "config": self.config,
+            "init_method": self.config.init_method,
             "is_expert": self.is_expert,
-            "tp_group": self.base_layer.tp_group
+            "skip_bias_add": False,
+            "tp_group": self.base_layer.tp_group,
         }
         lora_a, lora_b = self._create_lora_layers(r, lora_bias, **lora_layer_kwargs)
 
@@ -243,7 +249,8 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
                 )
                 if isinstance(lora_result, tuple):
                     lora_result = lora_result[0]
-                lora_result = lora_result * scaling
+                if scaling != 1.0:
+                    lora_result = lora_result * scaling
 
                 if self.sequence_parallel and self.base_layer.parallel_mode == "row":
                     lora_result = scatter_to_sequence_parallel_region(lora_result)
@@ -406,6 +413,7 @@ class LoraRowParallelLinear(LoraParallelLinear):
         in_features = self.in_features * self.tp_size
 
         if self.is_grouped:
+            r = r // self.config.moe_router_topk
             lora_a = TERowParallelGroupedLinear(
                 num_gemms=self.base_layer.num_gemms,
                 input_size=in_features,
@@ -449,6 +457,7 @@ class LoraColumnParallelLinear(LoraParallelLinear):
         out_features = self.out_features * self.tp_size
 
         if self.is_grouped:
+            r = r // self.config.moe_router_topk
             lora_a = TEGroupedLinear(
                 num_gemms=self.base_layer.num_gemms,
                 input_size=self.in_features,
@@ -502,13 +511,16 @@ def dispatch_megatron(
         new_module = LoraRouterParallelLinear(base_layer=target, adapter_name=adapter_name, **kwargs)
     elif isinstance(target_base_layer, (TERowParallelLinear, TERowParallelGroupedLinear)):
         new_module = LoraRowParallelLinear(base_layer=target, adapter_name=adapter_name, **kwargs)
-    elif isinstance(target_base_layer, (TEColumnParallelLinear, TEColumnParallelGroupedLinear, TELayerNormColumnParallelLinear)):
+    elif isinstance(
+        target_base_layer, (TEColumnParallelLinear, TEColumnParallelGroupedLinear, TELayerNormColumnParallelLinear)
+    ):
         new_module = LoraColumnParallelLinear(base_layer=target, adapter_name=adapter_name, **kwargs)
     elif isinstance(target_base_layer, (TELinear, TEGroupedLinear)):
         # default to column parallel linear for non-parallel linear layers
         new_module = LoraColumnParallelLinear(base_layer=target, adapter_name=adapter_name, **kwargs)
 
     return new_module
+
 
 def patch_TELinear():
     def __repr__(self):

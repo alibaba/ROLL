@@ -1,6 +1,5 @@
 import copy
 import json
-import math
 import os
 import time
 import uuid
@@ -19,14 +18,15 @@ from ray.util.timer import _Timer
 from roll.configs import GeneratingArguments
 from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
+from roll.datasets.dataset import get_dataset
 from roll.distributed.executor.cluster import Cluster
-from roll.distributed.scheduler.async_generate_scheduler import AsyncDynamicSamplingScheduler
 from roll.distributed.scheduler.generate_scheduler import DynamicSamplingScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
+from roll.utils.dynamic_batching import dynamic_batching_shard
 from roll.utils.functionals import (
     RunningMoments,
     agg_loss,
@@ -35,27 +35,25 @@ from roll.utils.functionals import (
     get_sample_level_mask,
     reduce_metrics,
     reward_postprocess,
+    batch_balance
 )
+from roll.utils.train_infer_corrections import apply_train_infer_correction_to_batch
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
-from roll.utils.dynamic_batching import dynamic_batching_shard
+from roll.utils.offload_states import OffloadStateType
 
 
 logger = get_logger()
 
 
 def is_lora_training(pipeline_config: RLVRConfig) -> bool:
-    if pipeline_config.actor_train.model_args.lora_target is None:
-        return False
-    assert pipeline_config.actor_train.strategy_args.strategy_name == "deepspeed_train", (
-        "LoRA only supports deepspeed_train"
-    )
-    return True
+    return pipeline_config.actor_train.model_args.lora_target is not None
 
 
 def preprocess_dataset(dataset, prompt_len, encode_function, data_args):
-    logger.info(f"Begin : {dataset}")
+    # 处理数据
+    print(f"Begin : {dataset}")
     dataset = dataset.map(
         encode_function,
         batched=True,
@@ -69,12 +67,12 @@ def preprocess_dataset(dataset, prompt_len, encode_function, data_args):
         num_proc=data_args.preprocessing_num_workers,
         desc="Filtering dataset",
     )
-    logger.info(f"Filtering prompt len: {dataset}")
-    logger.info(f"Encoding: {dataset}")
+    print(f"Filtering prompt len: {dataset}")
+    print(f"Encoding: {dataset}")
     return dataset
 
 
-def get_encode_function(template_name, data_args, tokenizer):
+def get_encode_function(template_name, tokenizer, data_args):
     chat_template_func = get_chat_template(template_name, tokenizer)
 
     def encode_function(data_i):
@@ -92,36 +90,13 @@ def get_encode_function(template_name, data_args, tokenizer):
 
     return encode_function
 
+
 def update_dataset_domain(tag_2_domain: Dict[str, set[str]], row):
     if "domain" in row and row["domain"] is not None:
         return row
     row["domain"] = tag_2_domain.get(row["tag"], "math_rule")
     return row
 
-def query_filter_fn(data_list: List[DataProto], config: RLVRConfig) -> bool:
-    """
-    各domain的过滤规则可以自定义
-    """
-    response_level_rewards = [data.batch["response_level_rewards"] for data in data_list]
-    if len(response_level_rewards) == 1:
-        return True
-    rewards = torch.cat(response_level_rewards, dim=0)
-
-    domain = data_list[0].non_tensor_batch["domain"][0]
-    query_filter_config = config.rewards[domain].query_filter_config
-
-    if query_filter_config.type == "no_filter":
-        return True
-    elif query_filter_config.type == "mean_filter":
-        threshold_up = query_filter_config.filter_args.get("threshold_up", math.inf)
-        threshold_down = query_filter_config.filter_args.get("threshold_down", -1)
-        if torch.mean(rewards) <= threshold_down or torch.mean(rewards) >= threshold_up:
-            return False
-    elif query_filter_config.type == "std_filter":
-        std_threshold = query_filter_config.filter_args.get("std_threshold", -1)
-        if torch.std(rewards) <= std_threshold:
-            return False
-    return True
 
 
 class RLVRPipeline(BasePipeline):
@@ -129,10 +104,7 @@ class RLVRPipeline(BasePipeline):
     def __init__(self, pipeline_config: RLVRConfig):
         super().__init__(pipeline_config)
         self.pipeline_config = pipeline_config
-        self.is_lora = is_lora_training(self.pipeline_config)
-        scheduler_cls = (
-            AsyncDynamicSamplingScheduler if self.pipeline_config.async_pipeline else DynamicSamplingScheduler
-        )
+        self.use_ref_model = self.pipeline_config.enable_reference and (not is_lora_training(self.pipeline_config))
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
 
         dataset_paths = []
@@ -140,12 +112,11 @@ class RLVRPipeline(BasePipeline):
             dataset_paths.extend(self.pipeline_config.actor_train.data_args.file_name)
 
         print(f"load_dataset_paths: {chr(10)} {chr(10).join(dataset_paths)}")
-        dataset = datasets.load_dataset("json", data_files=dataset_paths)["train"]
+        dataset = get_dataset(self.pipeline_config.actor_train.data_args)
 
         self.val_dataset = None
         if self.pipeline_config.validation and self.pipeline_config.validation.data_args:
-            val_dataset_paths = self.pipeline_config.validation.data_args.file_name
-            self.val_dataset = datasets.load_dataset("json", data_files=val_dataset_paths)["train"]
+            self.val_dataset = get_dataset(self.pipeline_config.validation.data_args)
 
         # 加上format，然后转ids的func
         template_name = (
@@ -153,7 +124,7 @@ class RLVRPipeline(BasePipeline):
             if self.pipeline_config.global_template
             else self.pipeline_config.actor_train.data_args.template
         )
-        encode_function = get_encode_function(template_name, self.pipeline_config.actor_train.data_args, self.tokenizer)
+        encode_function = get_encode_function(template_name, self.tokenizer, self.pipeline_config.actor_train.data_args)
 
         dataset = preprocess_dataset(
             dataset,
@@ -182,7 +153,7 @@ class RLVRPipeline(BasePipeline):
                 self.val_dataset,
                 self.pipeline_config.prompt_length,
                 encode_function,
-                data_args=self.pipeline_config.validation.data_args,
+                data_args=self.pipeline_config.actor_train.data_args,
             )
             self.val_dataset = self.val_dataset.map(
                 partial(update_dataset_domain, self.pipeline_config.tag_2_domain),
@@ -218,7 +189,7 @@ class RLVRPipeline(BasePipeline):
         )
         download_clusters = [self.actor_train, self.actor_infer]
         # use unwrapped model as reference for lora training
-        if not self.is_lora and self.pipeline_config.enable_reference:
+        if self.use_ref_model:
             self.reference: Any = Cluster(
                 name=self.pipeline_config.reference.name,
                 worker_cls=self.pipeline_config.reference.worker_cls,
@@ -257,7 +228,7 @@ class RLVRPipeline(BasePipeline):
             else:
                 domain_batch_size = int(domain_ratios[domain] * self.pipeline_config.rollout_batch_size)
             accumulated += domain_batch_size
-            generate_scheduler = scheduler_cls.options(
+            generate_scheduler = ray.remote(DynamicSamplingScheduler).options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=ray.get_runtime_context().get_node_id(),
                     soft=False,
@@ -270,9 +241,6 @@ class RLVRPipeline(BasePipeline):
                     dataset=self.domain_datasets[domain],
                     collect_fn_cls=DataCollatorWithPaddingForPaddedKeys,
                     collect_fn_kwargs=dict(max_length=self.pipeline_config.prompt_length, padding="max_length"),
-                    response_filter_fn=lambda data_item, config: True,
-                    query_filter_fn=query_filter_fn,
-                    response_callback_fn=generate_scheduler.report_response.remote,
                     state=self.state.kv.get(f"scheduler_state_{domain}", None),
                 )
             )
@@ -287,7 +255,7 @@ class RLVRPipeline(BasePipeline):
         if self.val_dataset:
             val_pipeline_config = copy.deepcopy(self.pipeline_config)
             val_pipeline_config.is_use_additional_prompts = False
-            self.val_generate_scheduler = scheduler_cls.options(
+            self.val_generate_scheduler = ray.remote(DynamicSamplingScheduler).options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=ray.get_runtime_context().get_node_id(),
                     soft=False,
@@ -301,9 +269,6 @@ class RLVRPipeline(BasePipeline):
                     dataset=self.val_dataset,
                     collect_fn_cls=DataCollatorWithPaddingForPaddedKeys,
                     collect_fn_kwargs=dict(max_length=self.pipeline_config.prompt_length, padding="max_length"),
-                    response_filter_fn=lambda data_item, config: True,
-                    query_filter_fn=lambda data_list, config: True,
-                    response_callback_fn=self.val_generate_scheduler.report_response.remote,
                     is_val=True,
                 )
             )
@@ -312,7 +277,7 @@ class RLVRPipeline(BasePipeline):
         refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
 
-        if not self.is_lora and self.pipeline_config.enable_reference:
+        if self.use_ref_model:
             refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True))
 
         refs = []
@@ -433,24 +398,22 @@ class RLVRPipeline(BasePipeline):
         actor_infer_timer = _Timer(window_size=5)
         actor_infer_response_timer = _Timer(window_size=5)
         actor_train_timer = _Timer(window_size=5)
-        
+
         metrics_mgr.timers["tps"] = tps_timer
         metrics_mgr.timers["actor_infer"] = actor_infer_timer
         metrics_mgr.timers["actor_infer_response"] = actor_infer_response_timer
         metrics_mgr.timers["actor_train"] = actor_train_timer
 
         pre_step_total_time = 0
-        if self.pipeline_config.async_pipeline and self.pipeline_config.generate_opt_level == 1:
+        if self.pipeline_config.async_pipeline:
             for reward_cluster in self.rewards.values():
                 reward_cluster.load_states()
 
-        first_step = True
         for global_step in range(self.pipeline_config.max_steps):
             if global_step <= self.state.step:
                 global_step += 1
                 continue
             logger.info(f"pipeline step {global_step} start...")
-            should_eval = self.val_dataset and global_step % self.pipeline_config.eval_steps == 0
 
             metrics_mgr.clear_metrics()
             with tps_timer, Timer(name="step_total", logger=None) as step_total_timer:
@@ -458,7 +421,10 @@ class RLVRPipeline(BasePipeline):
                 logger.info(f"pre_step_total_time: {pre_step_total_time}")
                 metrics_mgr.add_metric("time/step_total", pre_step_total_time)
                 batch: DataProto = DataProto(
-                    meta_info={"global_step": global_step, "collect_unfinished": self.pipeline_config.async_pipeline}
+                    meta_info={
+                        "global_step": global_step,
+                        "collect_unfinished": self.pipeline_config.async_pipeline,
+                        }
                 )
 
                 # 先model update，resume时不需要保存infer cluster的状态
@@ -467,12 +433,9 @@ class RLVRPipeline(BasePipeline):
                 self.actor_train.offload_states(blocking=True)
 
                 with Timer(name="step_stop_server", logger=None) as step_stop_server_timer:
-                    if self.pipeline_config.async_pipeline and not first_step and self.pipeline_config.generate_opt_level == 1:
-                        scheduler_refs = []
-                        for scheduler in self.generate_schedulers.values():
-                            scheduler_refs.append(scheduler.pause_sampling.remote(data=batch))
-                        ray.get(scheduler_refs, timeout=self.pipeline_config.rpc_timeout)
-                        self.actor_infer.stop_server()
+                    if self.pipeline_config.async_pipeline:
+                        ray.get([scheduler.pause_sampling.remote() for scheduler in self.generate_schedulers.values()])
+                        self.actor_infer.offload_states(include=OffloadStateType.other_params)
                 metrics_mgr.add_metric("time/step_stop_server", step_stop_server_timer.last)
 
                 with Timer(name="step_model_update", logger=None) as step_model_update_timer:
@@ -481,9 +444,14 @@ class RLVRPipeline(BasePipeline):
                     batch.meta_info["generation_config"] = self.get_generation_config()
                 metrics_mgr.add_metric("time/step_model_update", step_model_update_timer.last)
 
-                if should_eval and not self.pipeline_config.async_pipeline:
+                self.actor_infer.load_states(blocking=True)
+                if not self.pipeline_config.async_pipeline:
+                    for reward_cluster in self.rewards.values():
+                        reward_cluster.load_states()
+
+                if self.val_dataset and global_step % self.pipeline_config.eval_steps == 0:
                     with Timer(name="val_step", logger=None) as val_step_timer:
-                        val_metrics = self.val()
+                        val_metrics = self.val(global_step=global_step)
                     metrics_mgr.add_metrics(val_metrics)
                     metrics_mgr.add_metric("time/val_step", val_step_timer.last)
 
@@ -494,33 +462,10 @@ class RLVRPipeline(BasePipeline):
                     Timer(name="step_generate", logger=None) as step_generate_timer,
                 ):
                     domain_batches = {}
-                    if self.pipeline_config.generate_opt_level == 1:
-                        self.actor_infer.start_server(data=DataProto(meta_info=batch.meta_info))
-                        batch.meta_info["is_offload_states"] = False
-                    if self.pipeline_config.async_pipeline:
-                        if should_eval:
-                            # 为Validation创建独立的DataProto
-                            val_batch = DataProto()
-                            val_batch.meta_info = {
-                                "global_step": global_step,
-                                "generation_config": self.pipeline_config.validation.generating_args.to_dict()
-                            }
-                            self.val_generate_scheduler.start_sampling.remote(data=val_batch, batch_size=len(self.val_dataset))
-
-                        scheduler_refs = []
-                        for domain, scheduler in self.generate_schedulers.items():
-                            scheduler_refs.append(
-                                scheduler.start_sampling.remote(data=batch, batch_size=self.domain_batch_size[domain])
-                            )
-                        ray.get(scheduler_refs, timeout=self.pipeline_config.rpc_timeout)
-                    else:
-                        for reward_cluster in self.rewards.values():
-                            reward_cluster.load_states()
-
                     scheduler_refs = {}
                     for domain, scheduler in self.generate_schedulers.items():
                         scheduler_refs[domain] = scheduler.get_batch.remote(
-                            data=batch, batch_size=self.domain_batch_size[domain]
+                            data=batch, global_step=global_step, batch_size=self.domain_batch_size[domain]
                         )
                     for domain, scheduler_ref in scheduler_refs.items():
                         domain_batch: DataProto = ray.get(scheduler_ref, timeout=self.pipeline_config.rpc_timeout)
@@ -532,37 +477,42 @@ class RLVRPipeline(BasePipeline):
                     dump_rollout_to_specific_path(self.pipeline_config.rollout_dump_dir, global_step, generate_output, self.tokenizer)
                     generate_output.meta_info.pop("is_offload_states", None)
 
-                    if not self.pipeline_config.async_pipeline and self.pipeline_config.generate_opt_level == 1:
+                    if not self.pipeline_config.async_pipeline:
+                        ray.get([scheduler.pause_sampling.remote() for scheduler in self.generate_schedulers.values()])
+                        self.actor_infer.offload_states()
                         for reward_cluster in self.rewards.values():
                             reward_cluster.offload_states()
-                        gen_metrics = self.actor_infer.stop_server()
-                        metrics_mgr.add_domain_metrics(
-                            domain, reduce_metrics(gen_metrics.meta_info.pop("metrics", {}))
-                        )
                 metrics_mgr.add_metric("time/step_generate", step_generate_timer.last)
 
                 batch = generate_output
                 batch.meta_info["global_step"] = global_step
                 batch.meta_info["_broadcast_non_tensor_batch"] = True
+                batch.meta_info["loss_mask_keys"] = ['response_mask', 'final_response_mask']
                 batch.non_tensor_batch['sample_uuid'] = np.array([str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object)
-
+                batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
 
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                     if self.pipeline_config.enable_reference:
-                        if self.is_lora:
+                        worker_config = self.pipeline_config.reference if self.use_ref_model else self.pipeline_config.actor_train
+                        worker = self.reference if self.use_ref_model else self.pipeline_config.actor_train
+                        if worker_config.use_dynamic_batching_in_infer:
+                            batch, dynamic_batching_metrics = dynamic_batching_shard(
+                                batch,
+                                worker.dp_size,
+                                worker_config.max_tokens_per_microbatch_in_infer,
+                                worker_config.sequence_length_round_in_infer,
+                                worker_config.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
+                                worker_config.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
+                                "reference/compute_log_probs",
+                            ) 
+                            metrics_mgr.add_metrics(dynamic_batching_metrics)
+                        if not self.use_ref_model:
                             batch.meta_info["disable_adapter"] = True
                             batch.meta_info["is_offload_states"] = False
+                            batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
                             ref_log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
                         else:
-                            if self.pipeline_config.reference.use_dynamic_batching_in_infer:
-                                batch, dynamic_batching_metrics = dynamic_batching_shard(
-                                    batch,
-                                    self.reference.dp_size,
-                                    self.pipeline_config.reference.max_tokens_per_microbatch_in_infer,
-                                    self.pipeline_config.reference.sequence_length_round_in_infer,
-                                    "reference/compute_log_probs",
-                                )
-                                metrics_mgr.add_metrics(dynamic_batching_metrics)
+                            batch_balance(batch, dp_size=self.reference.dp_size, minibatch_size=len(batch))
                             ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
                         metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
                         ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
@@ -570,19 +520,22 @@ class RLVRPipeline(BasePipeline):
                 metrics_mgr.add_metric("time/ref_log_probs_values", cal_ref_log_probs_timer.last)
 
                 with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
-                    if self.is_lora:
+                    if self.pipeline_config.enable_reference and not self.use_ref_model:
                         batch.meta_info["disable_adapter"] = False
                     batch.meta_info["is_offload_states"] = False
                     if self.pipeline_config.adv_estimator == "gae":
                         values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
 
                     if self.pipeline_config.enable_old_logprobs_recompute:
+                        batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
                         if self.pipeline_config.actor_train.use_dynamic_batching_in_infer:
                             batch, dynamic_batching_metrics = dynamic_batching_shard(
                                 batch,
                                 self.actor_train.dp_size,
                                 self.pipeline_config.actor_train.max_tokens_per_microbatch_in_infer,
                                 self.pipeline_config.actor_train.sequence_length_round_in_infer,
+                                self.pipeline_config.actor_train.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
+                                self.pipeline_config.actor_train.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
                                 "actor_train/compute_log_probs",
                             )
                             metrics_mgr.add_metrics(dynamic_batching_metrics)
@@ -622,7 +575,7 @@ class RLVRPipeline(BasePipeline):
                 metrics_mgr.add_metric("time/old_log_probs", cal_old_logpb_timer.last)
 
                 # 要按domain group by处理reward
-                batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
+                batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
                 batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
                 batch_list = []
                 for domain, domain_batch in batch_grouped.items():
@@ -698,6 +651,12 @@ class RLVRPipeline(BasePipeline):
                 batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
                 metrics_mgr.add_domain_all_metrics(global_step, batch_grouped)
 
+                if self.pipeline_config.enable_old_logprobs_recompute:
+                    batch, corr_metrics = apply_train_infer_correction_to_batch(self.pipeline_config, batch,
+                                                                                update_mask_keys=batch.meta_info[
+                                                                                    'loss_mask_keys'])
+                    metrics_mgr.add_metrics(corr_metrics)
+
                 with Timer(name="step_train", logger=None) as step_train_timer:
                     if self.pipeline_config.adv_estimator == "gae":
                         critic_train_metrics_refs: List[ray.ObjectRef] = self.critic.train_step(batch, blocking=False)
@@ -705,6 +664,12 @@ class RLVRPipeline(BasePipeline):
                     with actor_train_timer:
                         # implement critic warmup
                         if self.pipeline_config.critic_warmup <= global_step:
+                            # Reorder data for DP rank load balancing
+                            batch_balance_metrics = batch_balance(batch, dp_size=self.actor_train.dp_size,
+                                minibatch_size=self.pipeline_config.actor_train.training_args.per_device_train_batch_size
+                                * self.pipeline_config.actor_train.training_args.gradient_accumulation_steps
+                                * self.actor_train.dp_size, logging_prefix="global_seqlen/actor_train")
+                            metrics_mgr.add_metrics(batch_balance_metrics)
                             # update actor
                             if self.pipeline_config.actor_train.use_dynamic_batching_in_train:
                                 batch, dynamic_batching_metrics = dynamic_batching_shard(
@@ -712,6 +677,8 @@ class RLVRPipeline(BasePipeline):
                                     self.actor_train.dp_size,
                                     self.pipeline_config.actor_train.max_tokens_per_microbatch_in_train,
                                     self.pipeline_config.actor_train.sequence_length_round_in_train,
+                                    self.pipeline_config.actor_train.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
+                                    self.pipeline_config.actor_train.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
                                     "actor_train/train_step",
                                 )
                                 metrics_mgr.add_metrics(dynamic_batching_metrics)
@@ -736,16 +703,6 @@ class RLVRPipeline(BasePipeline):
 
                 for domain, scheduler in self.generate_schedulers.items():
                     self.state.kv[f"scheduler_state_{domain}"] = ray.get(scheduler.get_scheduler_state.remote())
-
-                if (
-                    self.pipeline_config.async_pipeline
-                    and self.val_dataset
-                    and global_step % self.pipeline_config.eval_steps == 0
-                ):
-                    with Timer(name="val_step", logger=None) as val_step_timer:
-                        val_metrics = self.val()
-                        metrics_mgr.add_metrics(val_metrics)
-                    metrics_mgr.add_metric("time/val_step", val_step_timer.last)
 
                 metrics = metrics_mgr.get_metrics()
                 # do ckpt
@@ -774,32 +731,30 @@ class RLVRPipeline(BasePipeline):
 
                 logger.info(f"pipeline step {global_step} finished")
                 global_step += 1
-                first_step = False
             pre_step_total_time = step_total_timer.last
-        
+
+        ray.get([scheduler.shutdown.remote() for scheduler in self.generate_schedulers.values()])
+        ray.get(self.val_generate_scheduler.shutdown.remote())
 
         logger.info("pipeline complete!")
 
     @torch.no_grad()
-    def val(self):
+    def val(self, global_step):
         val_metrics_mgr = MetricsManager()
         batch = DataProto()
 
         with Timer(name="step_generate", logger=None) as step_generate_timer:
-            batch.meta_info["is_offload_states"] = False
-            batch.meta_info["generation_config"] = self.pipeline_config.validation.generating_args.to_dict()
-            if not self.pipeline_config.async_pipeline:
-                self.actor_infer.start_server(data=DataProto(meta_info=batch.meta_info))
-                for reward_cluster in self.rewards.values():
-                    reward_cluster.load_states()
+            batch.meta_info = {
+                "is_offload_states": False,
+                "generation_config": self.pipeline_config.validation.generating_args.to_dict(),
+                "global_step": global_step,
+            }
+
             generate_output: DataProto = ray.get(
-                self.val_generate_scheduler.get_batch.remote(data=batch, batch_size=len(self.val_dataset)),
+                self.val_generate_scheduler.get_batch.remote(data=batch, global_step=global_step, batch_size=len(self.val_dataset)),
                 timeout=self.pipeline_config.rpc_timeout,
             )
-            if not self.pipeline_config.async_pipeline and self.pipeline_config.generate_opt_level == 1:
-                self.actor_infer.stop_server()
-                for reward_cluster in self.rewards.values():
-                    reward_cluster.offload_states()
+
             generate_output.meta_info.pop("is_offload_states", None)
             val_metrics_mgr.add_metric("time/step_generate", step_generate_timer.last)
 

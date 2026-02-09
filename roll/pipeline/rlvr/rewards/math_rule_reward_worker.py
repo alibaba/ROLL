@@ -20,10 +20,7 @@ from roll.configs.worker_config import WorkerConfig
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
-from roll.distributed.strategy.factory import create_strategy
-from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_reward_model_provider, default_tokenizer_provider
-from roll.utils.context_managers import state_offload_manger
 
 class timeout:
     def __init__(self, seconds=1, error_message="Timeout"):
@@ -39,7 +36,41 @@ class timeout:
 
     def __exit__(self, type, value, traceback):
         signal.alarm(0)
-        
+
+def check_and_extract_within_boxed(response, boxed_start="\\boxed{", boxed_start_list=["\\boxed\{", "\\boxed{"]):
+    if len(boxed_start_list) > 0:
+        for boxed_start in boxed_start_list:
+            last_boxed_index = response.rfind(boxed_start)
+            if last_boxed_index == -1:
+                continue
+            else:
+                boxed_content_start_index = last_boxed_index + len(boxed_start)
+                break
+        if last_boxed_index == -1:
+            return False, ""
+    else:
+        last_boxed_index = response.rfind(boxed_start)    
+        if last_boxed_index == -1:
+            return False, ""
+        boxed_content_start_index = last_boxed_index + len(boxed_start)
+    cur_index = boxed_content_start_index
+    left_curly_brace_cnt = 0
+    left_double_curly_quote = False
+    while cur_index < len(response):
+        if response[cur_index:].startswith("\""):
+            left_double_curly_quote = not left_double_curly_quote
+        elif left_double_curly_quote == False and response[cur_index:].startswith("{"):
+            left_curly_brace_cnt += 1
+        elif left_double_curly_quote == False and response[cur_index:].startswith("}"):
+            if left_curly_brace_cnt == 0:
+                return True, response[boxed_content_start_index:cur_index]
+            else:
+                left_curly_brace_cnt -= 1
+                if left_curly_brace_cnt < 0:
+                    return False, response[boxed_content_start_index:]
+        cur_index += 1
+    return False, response[boxed_content_start_index:]
+
 def _extract_after_last_end_think(response: str, prompt: str, start_think: str='<think>', end_think: str='</think>') -> str:
     """
     提取字符串中最后一个 "</think>" 标签之后的所有文本。
@@ -123,7 +154,11 @@ def _hf_verify_math_sample(response, answer, result, prompt):
            => 默认值: False (不抛出异常，返回空列表)
            => 建议：保持默认值，确保程序的健壮性，不会因单个样本出错而中断。
         """
-        parsed_answers = parse(cleaned_response, fallback_mode="no_fallback")
+        is_success, extracted_answer = check_and_extract_within_boxed(cleaned_response)
+        if not is_success:
+            parsed_answers = parse(cleaned_response, fallback_mode="no_fallback")
+        else:
+            parsed_answers = parse(f"${extracted_answer}$", fallback_mode="no_fallback")
         
         # 如果解析结果为空，则认为提取失败
         if not parsed_answers:
@@ -215,7 +250,6 @@ class MathRuleRewardWorker(Worker):
         self.rank_info.dp_rank = self.rank_info.rank
         self.rank_info.dp_size = self.rank_info.world_size
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
-        self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
         self.repetition_penalty_reward_fn = get_repetition_penalty_reward(ngram_size=3, max_penalty=-0.1)
         self.format_pattern = getattr(self.worker_config, "format_pattern", None)
 

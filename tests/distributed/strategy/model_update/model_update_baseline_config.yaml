@@ -16,7 +16,7 @@ prompt_length: 1024
 response_length: 1024
 
 
-pretrain: Qwen/Qwen2.5-7B-Instruct
+pretrain: Qwen/Qwen3-8B
 
 actor_train:
   model_args:

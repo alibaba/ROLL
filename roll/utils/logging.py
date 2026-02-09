@@ -7,6 +7,7 @@ from typing import Optional
 def is_roll_debug_mode():
     return os.getenv("ROLL_DEBUG", os.getenv("RAY_PROFILING", "0")) == "1"
 
+logging.basicConfig(force=True, level=logging.DEBUG if is_roll_debug_mode() else logging.INFO)
 
 class CustomFormatter(logging.Formatter):
     def format(self, record):
@@ -81,8 +82,14 @@ def get_logger() -> logging.Logger:
         handler.setFormatter(formatter)
         handler.set_name(_logger_name)
         _logger.addHandler(handler)
+        err_handler = logging.StreamHandler(sys.stderr)
+        err_handler.setFormatter(formatter)
+        err_handler.set_name(_logger_name)
+        err_handler.setLevel(logging.ERROR)
+        _logger.addHandler(err_handler)
 
     reset_file_logger_handler(_logger, log_dir, formatter)
 
     logger = _logger
+    logger.propagate = False
     return _logger

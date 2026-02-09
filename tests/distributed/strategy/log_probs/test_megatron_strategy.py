@@ -1,5 +1,5 @@
 import json
-from typing import Any, List, Dict
+from typing import Any, Dict, List
 
 import ray
 import torch
@@ -8,15 +8,16 @@ from tqdm import tqdm
 
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
 from roll.datasets.loader import get_dataset
-from roll.pipeline.base_worker import ActorWorker
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.initialize import init
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
+from roll.pipeline.base_worker import ActorWorker
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.utils.logging import get_logger
-from tests.distributed.strategy.make_baseline_config import make_baseline_config
+from tests.distributed.strategy.make_baseline_config import \
+    make_baseline_config
 
 logger = get_logger()
 
@@ -27,7 +28,6 @@ class ComputeLogprobsPipeline(BasePipeline):
         super().__init__(pipeline_config)
         self.tokenizer = default_tokenizer_provider(
             model_args=self.pipeline_config.reference.model_args,
-            template_name=self.pipeline_config.reference.data_args.template,
         )
         self.dataset = get_dataset(
             tokenizer=self.tokenizer,
@@ -83,11 +83,15 @@ class ComputeLogprobsPipeline(BasePipeline):
             ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(batch, blocking=False)
             ref_log_probs = DataProto.materialize_concat(data_refs=ref_log_probs_refs)
             ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
+            if "entropy" in ref_log_probs.batch.keys():
+                del ref_log_probs.batch["entropy"]
             ref_log_probs.meta_info.pop("metrics", {})
             batch = batch.union(ref_log_probs)
 
             hf_log_probs: DataProto = self.actor_infer.compute_log_probs(batch)
             hf_log_probs.rename(old_keys="log_probs", new_keys="hf_log_probs")
+            if "entropy" in hf_log_probs.batch.keys():
+                del hf_log_probs.batch["entropy"]
             hf_log_probs.meta_info.pop("metrics", {})
             batch = batch.union(hf_log_probs)
             response_mask = batch.batch["response_mask"]

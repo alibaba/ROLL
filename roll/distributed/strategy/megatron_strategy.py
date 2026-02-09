@@ -2,11 +2,13 @@ import math
 import os
 import random
 from collections import defaultdict
+from contextlib import nullcontext
 from functools import partial
-from typing import Callable, Dict, Iterator, List, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Iterator, List, Tuple
 
 import numpy as np
 import ray
+import ray.actor
 import torch
 import torch.distributed as dist
 from codetiming import Timer
@@ -18,26 +20,33 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
 from megatron.core.distributed import DistributedDataParallelConfig, finalize_model_grads
 from megatron.core.models.common.embeddings import RotaryEmbedding
 from megatron.core.optimizer import MegatronOptimizer, OptimizerConfig
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region, reduce_from_tensor_model_parallel_region
+from megatron.core.tensor_parallel import (
+    gather_from_tensor_model_parallel_region,
+    reduce_from_tensor_model_parallel_region,
+)
+from megatron.core.tensor_parallel.cross_entropy import vocab_parallel_cross_entropy
 from megatron.core.transformer.moe.moe_utils import (
     clear_aux_losses_tracker,
     get_moe_layer_wise_logging_tracker,
     reduce_aux_losses_tracker_across_ranks,
 )
-from megatron.core.tensor_parallel.cross_entropy import vocab_parallel_cross_entropy
+from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.packed_seq_params import PackedSeqParams
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
 from mcore_adapter.parallel_functions import context_parallel_gather, vocab_parallel_logprobs
+from mcore_adapter.patcher import patch_torch_find_nd_overlapping_shards, patch_torch_validate_global_plan
 from mcore_adapter.trainer.utils import get_megatron_lr_scheduler
 from roll.datasets.collator import collate_fn_to_dict_list
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
-from roll.distributed.scheduler.driver_utils import Barrier
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
+from roll.platforms import current_platform
+from roll.third_party.megatron.model_update import MegatronWeightUpdater
 from roll.third_party.megatron.offload_states_patch import (
     MegatronOffloadStateType,
     bind_megatron_offload_states_func,
@@ -46,15 +55,23 @@ from roll.third_party.megatron.offload_states_patch import (
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
-from roll.utils.collective import collective
-from roll.utils.constants import DIST_OPTIMIZER_DIR, IGNORE_INDEX, OPTIMIZER_NAME, RNG_STATE_DIR, SCHEDULER_NAME, RAY_NAMESPACE, BARRIER_NAME
+from roll.utils.constants import (
+    DIST_OPTIMIZER_DIR,
+    IGNORE_INDEX,
+    OPTIMIZER_NAME,
+    RNG_STATE_DIR,
+    SCHEDULER_NAME,
+)
 from roll.utils.context_managers import disable_gradients
-from roll.utils.functionals import append_to_dict
+from roll.utils.dynamic_batching import make_micro_batch_iter_for_dynamic_batching
+from roll.utils.functionals import append_to_dict, reduce_metrics, adjust_sequence_length
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
-from roll.utils.dynamic_batching import make_micro_batch_iter_for_dynamic_batching
+from roll.utils.sequence_packing import make_micro_batch_iter_for_sequence_packing, restore_results_order
 
-from roll.platforms import current_platform
+
+if TYPE_CHECKING:
+    from mcore_adapter.models.model_factory import VirtualModels
 
 logger = get_logger()
 
@@ -63,6 +80,9 @@ class MegatronInferStrategy(InferenceStrategy):
     strategy_name = "megatron_infer"
 
     def __init__(self, worker: Worker):
+        #TODO remove the patches when the latest pytorch version > v2.9.1
+        patch_torch_find_nd_overlapping_shards()
+        patch_torch_validate_global_plan()
         super().__init__(worker)
         config_dict = self.worker_config.training_args.to_dict()
         config_dict.update(self.worker_config.strategy_args.strategy_config)
@@ -74,17 +94,13 @@ class MegatronInferStrategy(InferenceStrategy):
         self.model = None
         self.forward_backward_func = None
         self.seq_length = None
-        self.use_remove_padding = self.worker_config.use_remove_padding
         self.use_sequence_packing = self.worker_config.use_sequence_packing
-        self.max_packed_len = None
         # hard to impl with offload states
         assert not self.megatron_train_args.overlap_param_gather, "overlap_param_gather is not supported"
-        if self.worker_config.use_remove_padding:
-            assert self.megatron_train_args.allow_variable_seq_lengths(), "when use_remove_padding=True, must set variable_seq_lengths=True for megatron."
 
     def initialize(self, model_provider):
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
-        self.model = model_provider(
+        self.model: "VirtualModels" = model_provider(
             tokenizer=self.tokenizer,
             model_args=self.worker_config.model_args,
             training_args=self.megatron_train_args,
@@ -105,6 +121,10 @@ class MegatronInferStrategy(InferenceStrategy):
         self.worker.rank_info.pp_size = mpu.get_pipeline_model_parallel_world_size()
         self.worker.rank_info.cp_size = mpu.get_context_parallel_world_size()
         self.worker.rank_info.cp_rank = mpu.get_context_parallel_rank()
+
+        if (self.worker_config.use_dynamic_batching_in_infer or self.worker_config.use_sequence_packing) and self.worker.rank_info.pp_size > 1:
+            self.model.config.variable_seq_lengths = True
+            logger.info("Set variable_seq_lengths to True when use dynamic batching and pipeline parallel.")
 
         logger.info(f"{self.model.get_models()}")
         dist.barrier()
@@ -144,29 +164,48 @@ class MegatronInferStrategy(InferenceStrategy):
         forward_func: Callable[[DataProto, torch.Tensor], Tuple[torch.Tensor, Dict[str, torch.Tensor]]],
     ) -> Dict[str, torch.Tensor]:
         self.model.eval()
+        batch.meta_info['batch_num_tokens'] = self._get_batch_num_tokens(batch, dp_group=mpu.get_data_parallel_group())
+        batch.meta_info['global_valid_samples'] = self._get_global_valid_samples(batch, dp_group=mpu.get_data_parallel_group())
+
         output_on_all_tp_cp_ranks = batch.meta_info.get("output_on_all_tp_cp_ranks", False)
         if self.worker_config.use_dynamic_batching_in_infer:
             micro_batches_list = list(make_micro_batch_iter_for_dynamic_batching(batch))
             num_microbatches = batch.meta_info["num_micro_batchs"]
+            micro_batch_size = 1
+        elif self.use_sequence_packing:
+            vp_size = self.worker_config.strategy_args.strategy_config['virtual_pipeline_model_parallel_size'] \
+                if 'virtual_pipeline_model_parallel_size' in self.worker_config.strategy_args.strategy_config else 1
+            micro_batches_list = list(
+                make_micro_batch_iter_for_sequence_packing(batch, tp_size=self.worker.rank_info.tp_size,
+                                                           cp_size=self.worker.rank_info.cp_size,
+                                                           vp_size=vp_size, is_train=False,
+                                                           dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
+                                                           micro_batch_size=batch.meta_info["micro_batch_size"],
+                                                           config=self.worker_config.sequence_packing_args))
+            num_microbatches = micro_batches_list[0].meta_info["num_micro_batchs"]
             micro_batch_size = 1
         else:
             batch_size = batch.batch.batch_size[0]
             micro_batch_size = batch.meta_info["micro_batch_size"]
             num_microbatches = max(batch_size // micro_batch_size, 1)
             micro_batches_list = batch.chunk(chunks=num_microbatches)
-        if self.use_sequence_packing:
-            micro_batch_size = 1
-            self.max_packed_len = self._get_max_packed_len(micro_batches_list)
+
+        disable_adapter = batch.meta_info.get("disable_adapter", False)
+        adapter_context = self.models_unwrapped[0].disable_adapter() if disable_adapter else nullcontext()
+
+        for micro_batch in micro_batches_list:
+            micro_batch.meta_info['loss_scale'] = num_microbatches * mpu.get_data_parallel_world_size()
+            micro_batch.meta_info['micro_batch_size'] = micro_batch.batch.batch_size[0]
 
         data_iterator = [iter(micro_batches_list) for _ in range(len(self.model))]
-        with disable_gradients(models=self.model.get_models()):
+        with disable_gradients(models=self.model.get_models()), adapter_context:
             # List 是每个 micro-batch 构成的
             losses_reduced: List[Dict[str, torch.Tensor]] = self.forward_backward_func(
                 forward_step_func=partial(self.inner_forward_step, forward_func),
                 data_iterator=data_iterator,
                 model=self.model.get_models(),
                 num_microbatches=num_microbatches,
-                seq_length=self.seq_length if not self.use_sequence_packing else self.max_packed_len,
+                seq_length=self.seq_length,
                 micro_batch_size=micro_batch_size,
                 forward_only=True,
             )
@@ -175,6 +214,11 @@ class MegatronInferStrategy(InferenceStrategy):
                 for k, v in data.items():
                     data[k] = torch.nn.functional.pad(v, (0, self.seq_length - data[k].size(-1) - 1), "constant", 0)
         results = collate_fn_to_dict_list(losses_reduced)
+
+        if self.use_sequence_packing:
+            results = restore_results_order(results, micro_batches_list[0].meta_info['partition_indices_list'],
+                                  self.worker_config.sequence_packing_args)
+
 
         if not (
                 ((self.worker.rank_info.tp_rank == 0
@@ -207,37 +251,12 @@ class MegatronInferStrategy(InferenceStrategy):
         pad_factor = math.lcm(16, pad_factor)
         return pad_factor
 
-    def _get_max_packed_len(self, micro_batches_list):
-        max_packed_len = -1
-        for micro_batch in micro_batches_list:
-            input_ids = micro_batch.batch["input_ids"]
-            attention_mask = micro_batch.batch["attention_mask"]
-
-            batch_size = input_ids.shape[0]
-            seq_lens = attention_mask.sum(dim=-1)
-
-            pad_factor = self._get_pad_factor()
-
-            packed_len = 0
-            for b in range(batch_size):
-                seq_len = seq_lens[b].item() if torch.is_tensor(seq_lens[b]) else seq_lens[b]
-                if pad_factor > 1:
-                    padded_seq_len = ((seq_len + pad_factor - 1) // pad_factor) * pad_factor
-                else:
-                    padded_seq_len = seq_len
-                packed_len += padded_seq_len
-
-            max_packed_len = max(packed_len, max_packed_len)
-        return max_packed_len
-
     def _pack_sequences(self, input_tensor, attention_mask, pad_packed_seq_to=None, pad_val=0):
         """
         Pack multiple sequences into a single continuous sequence by removing padding.
 
         Implements sequence packing for efficient batch processing with variable-length sequences.
         Removes per-sample padding and concatenates sequences while maintaining cumulative length info.
-
-        Reference: https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/models/megatron/common.py
 
         Args:
             input_tensor (torch.Tensor): Shape [batch_size, seq_len, ...], padded sequences.
@@ -300,58 +319,42 @@ class MegatronInferStrategy(InferenceStrategy):
 
         # Track running sequence length for padding
         running_seq_len = 0
-        if pad_factor > 1:
-            all_input_tensor_padded = []
-            padded_tokens = []
-            for b in range(batch_size):
-                seq_len = seq_lens[b].item() if torch.is_tensor(seq_lens[b]) else seq_lens[b]
-                if b == batch_size - 1 and pad_packed_seq_to is not None:
-                    # Different from original implementation: calculate remaining length
-                    padded_seq_len = pad_packed_seq_to - running_seq_len
-                else:
-                    # Align to pad_factor boundary
-                    padded_seq_len = ((seq_len + pad_factor - 1) // pad_factor) * pad_factor
+        all_input_tensor_padded = []
+        padded_tokens = []
+        for b in range(batch_size):
+            seq_len = seq_lens[b].item() if torch.is_tensor(seq_lens[b]) else seq_lens[b]
+            if b == batch_size - 1 and pad_packed_seq_to is not None:
+                # Different from original implementation: calculate remaining length
+                padded_seq_len = pad_packed_seq_to - running_seq_len
+            else:
+                # Align to pad_factor boundary
+                padded_seq_len = ((seq_len + pad_factor - 1) // pad_factor) * pad_factor
 
-                running_seq_len += padded_seq_len
+            running_seq_len += padded_seq_len
 
-                seq_tokens = input_tensor_unpadded[b]
+            seq_tokens = input_tensor_unpadded[b]
 
-                # Pad sequence if needed
-                if padded_seq_len > seq_len:
-                    seq_tokens = torch.nn.functional.pad(
-                        seq_tokens, (0, padded_seq_len - seq_len), value=pad_val
-                    )
-                all_input_tensor_padded.append(seq_tokens)
+            # Pad sequence if needed
+            if padded_seq_len > seq_len:
+                seq_tokens = torch.nn.functional.pad(
+                    seq_tokens, (0, padded_seq_len - seq_len), value=pad_val
+                )
+            all_input_tensor_padded.append(seq_tokens)
 
-                if cp_size > 1:
-                    # Handle Context Parallel distribution
-                    # Add batch dimension for processing
-                    seq_tokens_with_batch = seq_tokens.unsqueeze(0)  # [1, seq_len]
-                    seq_tokens_with_batch = self._get_feature_on_this_cp_rank(
-                        seq_tokens_with_batch, "seq_tokens"
-                    )
-                    seq_tokens = seq_tokens_with_batch.squeeze(0)  # Remove batch dimension
+            if cp_size > 1:
+                # Handle Context Parallel distribution
+                # Add batch dimension for processing
+                seq_tokens_with_batch = seq_tokens.unsqueeze(0)  # [1, seq_len]
+                seq_tokens_with_batch = self._get_feature_on_this_cp_rank(
+                    seq_tokens_with_batch, "seq_tokens"
+                )
+                seq_tokens = seq_tokens_with_batch.squeeze(0)  # Remove batch dimension
 
-                padded_tokens.append(seq_tokens)
+            padded_tokens.append(seq_tokens)
 
-            # Concatenate all sequences
-            packed_input_tensor = torch.cat(padded_tokens, dim=0).unsqueeze(0)
-            all_input_tensor_padded = torch.cat(all_input_tensor_padded, dim=0).unsqueeze(0)
-
-        else:
-            # No padding factor: simply concatenate unpadded sequences
-            packed_input_tensor = torch.cat(input_tensor_unpadded, dim=0).unsqueeze(0)
-            all_input_tensor_padded = packed_input_tensor
-            if pad_packed_seq_to is not None:
-                # Pad to target length if specified
-                pad_len = pad_packed_seq_to - packed_input_tensor.shape[1]
-                if pad_len > 0:
-                    packed_input_tensor = torch.nn.functional.pad(
-                        packed_input_tensor, (0, pad_len), value=pad_val
-                    )
-                    all_input_tensor_padded = torch.nn.functional.pad(
-                        all_input_tensor_padded, (0, pad_len), value=pad_val
-                    )
+        # Concatenate all sequences
+        packed_input_tensor = torch.cat(padded_tokens, dim=0).unsqueeze(0)
+        all_input_tensor_padded = torch.cat(all_input_tensor_padded, dim=0).unsqueeze(0)
 
         if cu_seqlens_padded is None:
             cu_seqlens_padded = cu_seqlens.clone()
@@ -384,42 +387,17 @@ class MegatronInferStrategy(InferenceStrategy):
             cu_seqlens_padded,
         )
 
-    def _get_tokens_on_this_cp_rank(
-            self,
-            input_ids: torch.Tensor,
-            cp_rank: int,
-            cp_size: int,
-            seq_dim: int = 1,
-    ) -> torch.Tensor:
-        """Get tokens on this context parallelism rank.
-
-        Assumes that input_ids are already padded to a multiple of cp_size * 2 or cp_size == 1.
-
-        Args:
-            input_ids: Input token IDs [seq_length, ]
-            cp_rank: Context parallelism rank
-            cp_size: Context parallelism size
-
-        Returns:
-            Tokens on this context parallelism rank [1, seq_length // cp_size]
+    def _unpack_sequences(self, output_tensor, cu_seqlens_padded):
         """
-        if cp_size == 1:
-            return input_ids
+        Unpack concatenated sequences into individual padded sequences.
+        """
+        cp_size = mpu.get_context_parallel_world_size()
+        seq_starts = cu_seqlens_padded[:-1] // cp_size
+        seq_ends = cu_seqlens_padded[1:] // cp_size
 
-        # load balance for causal attention
-        shard_size = input_ids.shape[seq_dim] // (cp_size * 2)
-        shard_inds = (cp_rank, (cp_size * 2) - cp_rank - 1)
-
-        # Create slices for each dimension
-        slices = [slice(None)] * input_ids.dim()
-        ids_chunks = []
-
-        for ind in shard_inds:
-            slices[seq_dim] = slice(ind * shard_size, (ind + 1) * shard_size)
-            ids_chunks.append(input_ids[slices])
-
-        ids = torch.cat(ids_chunks, dim=seq_dim)
-        return ids
+        for seq_idx, (seq_start, seq_end) in enumerate(zip(seq_starts, seq_ends)):
+            local_chunk = output_tensor[:, seq_start:seq_end]
+            yield local_chunk
 
     def inner_forward_step(self, loss_func, data_iterator: Iterator[DataProto], model):
         data = next(data_iterator)
@@ -428,18 +406,12 @@ class MegatronInferStrategy(InferenceStrategy):
         labels = data.batch["labels"] if "labels" in data.batch else None  # labels is only used for sft
         packed_seq_params = None
 
-        if self.use_remove_padding:
-            unpad_seq_len = self._get_unpad_seqlen(attention_mask=attention_mask)
-            input_ids = input_ids[:, :unpad_seq_len].contiguous()
-            attention_mask = attention_mask[:, :unpad_seq_len].contiguous()
         if self.use_sequence_packing:
             input_ids, packed_seq_params, cu_seqlens, cu_seqlens_padded = self._pack_sequences(
-                input_ids, attention_mask, pad_packed_seq_to=self.max_packed_len
+                input_ids, attention_mask,
             )
             if labels is not None:
-                labels, _, _, _ = self._pack_sequences(labels, attention_mask, pad_packed_seq_to=self.max_packed_len,
-                                                       pad_val=IGNORE_INDEX)
-                data.meta_info['labels_packed'] = labels
+                labels, _, _, _ = self._pack_sequences(labels, attention_mask, pad_val=IGNORE_INDEX)
             attention_mask = None
         else:
             input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
@@ -451,7 +423,7 @@ class MegatronInferStrategy(InferenceStrategy):
         # AttnMaskType.causal in which attention_mask would not be used, pass
         # it mainly for moe aux loss without pad token and it is 2D
         # position_ids: not used in LLM
-        # While TransformerTurbo Qwen2VlModel requires 4D attention_mask, and
+        # While MCA Qwen2VlModel requires 4D attention_mask, and
         # attention_mask and position_ids would be chunked for cp with dim 2 as
         # seq dim in it if they are provided
         forward_args = data.meta_info.get("forward_args", {})
@@ -459,9 +431,9 @@ class MegatronInferStrategy(InferenceStrategy):
             # not support MoE VLM, not used temperarily
             attention_mask = None
             position_ids = data.batch["position_ids"]
-            position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
-            if self.use_remove_padding:
-                position_ids = position_ids[:, :, :unpad_seq_len].contiguous()
+            if position_ids.size(1) == 4:
+                position_ids = position_ids[:, 1:, :].contiguous()  # (bsz, 4, seqlen) -> (bsz, 3, seqlen)
+            position_ids = position_ids.transpose(0, 1)  # (bsz, C, seqlen) -> (C, bsz, seqlen)
         if "multi_modal_inputs" in data.non_tensor_batch:
             multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
             multi_modal_data = defaultdict(list)
@@ -476,21 +448,66 @@ class MegatronInferStrategy(InferenceStrategy):
                 forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
             forward_args.update({"force_vit_image": True})
 
+        # megatron_llama_core need loss_mask to compute aux loss
+        if "loss_mask" not in forward_args:
+            if labels is not None:
+                forward_args["loss_mask"] = (labels != IGNORE_INDEX).float()
+            else:
+                forward_args["loss_mask"] = torch.ones_like(input_ids)
+
         output_tensor = model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, labels=labels,
             packed_seq_params=packed_seq_params, **forward_args
         )
 
         if self.use_sequence_packing:
-            loss_func.set_packing_params(cu_seqlens=cu_seqlens, cu_seqlens_padded=cu_seqlens_padded, logger=logger)
+            cp_size = mpu.get_context_parallel_world_size()
+            def loss_wrapper(output_tensor):
+                unpacked_output_iter = self._unpack_sequences(
+                    output_tensor,
+                    cu_seqlens_padded,
+                )
+                loss_result = torch.tensor(0.0, device=output_tensor.device)
+                metrics_result_list = []
+                num_samples = len(data)
+                for i in range(num_samples):
+                    single_output_tensor = next(unpacked_output_iter)
+                    full_seq_len = single_output_tensor.size(1) * cp_size
+                    if full_seq_len == 0:
+                    # Create a mock output tensor when the sample is empty to ensure the subsequent pipeline works correctly.
+                        full_seq_len = self._get_pad_factor()
+                        local_seq_len = max(1, full_seq_len // cp_size)
+                        new_shape = list(single_output_tensor.shape)
+                        new_shape[1] = local_seq_len
+                        single_output_tensor = torch.zeros(new_shape, dtype=single_output_tensor.dtype,
+                                                           device=single_output_tensor.device)
+                    single_data = data[i:i+1]
+                    for key, val in single_data.batch.items():
+                        single_data.batch[key] = adjust_sequence_length(val, full_seq_len, self.seq_length, pad_value=IGNORE_INDEX
+                                                                  if key in {'labels', 'labels_for_loss'} else 0)
+                    loss, metrics = loss_func(single_data, single_output_tensor)
+                    loss_result += loss
+                    for key, val in metrics.items():
+                        if isinstance(val, torch.Tensor):
+                            metrics[key] = adjust_sequence_length(val, self.seq_length, full_seq_len, pad_value=0)
+                    metrics_result_list.append(metrics)
+                    del single_output_tensor
+                metrics_result_dict = collate_fn_to_dict_list(metrics_result_list)
+                if self.worker_config.apply_loss_scale:
+                    loss_result *= data.meta_info['loss_scale']
+                return loss_result, reduce_metrics(metrics_result_dict)
 
-        return output_tensor, partial(loss_func, data)
+            return output_tensor, loss_wrapper
+        else:
+            def loss_wrapper(output_tensor):
+                loss, metrics = loss_func(data, output_tensor)
+                if self.worker_config.apply_loss_scale:
+                    loss *= data.meta_info['loss_scale']
+                return loss, metrics
+            return output_tensor, loss_wrapper
 
-    def broadcast_parameter(self, model_update_name, src_pp_rank, dtype, shape, parameter_name):
+    def broadcast_parameter(self, *args, **kwargs):
         pass
-
-    def broadcast_bucket(self, model_update_name, src_pp_rank, meta_infos, bucket_size):
-        raise NotImplementedError
 
     def load_states(self, include=None, non_blocking=False):
         reload_megatron_no_grad_module(model_chunks=self.model.get_models())
@@ -508,10 +525,7 @@ class MegatronInferStrategy(InferenceStrategy):
         """
         ori_seq_length = attention_mask.size(1)
         cp_size = mpu.get_context_parallel_world_size()
-        seq_len = logits.size(1) * cp_size if self.use_remove_padding else ori_seq_length
-        # remove padding token
-        if self.use_remove_padding:
-            input_ids = input_ids[:, :seq_len]
+        seq_len = ori_seq_length
 
         labels: torch.Tensor = input_ids[:, 1:].clone()
         labels[attention_mask[:, 1:seq_len] == 0] = 0  # avoid invalid token id
@@ -522,21 +536,15 @@ class MegatronInferStrategy(InferenceStrategy):
         log_probs = vocab_parallel_logprobs(logits, labels)
         if mpu.get_context_parallel_world_size() > 1:
             log_probs = context_parallel_gather(log_probs, parallel_dim=1)
-        # add pad to recover tensor shape
-        if self.use_remove_padding:
-            pad_token_num = ori_seq_length - seq_len
-            log_probs = torch.nn.functional.pad(log_probs, pad=(0, pad_token_num), value=0)
         log_probs = log_probs[:, :-1] * attention_mask[:, 1:]
         return log_probs
 
     def op_compute_entropy(self, logits: torch.Tensor, attention_mask: torch.Tensor):
+        if self.worker_config.logits_in_fp32:
+            logits = logits.float()
         entropy = vocab_parallel_entropy(logits)
         if mpu.get_context_parallel_world_size() > 1:
             entropy = context_parallel_gather(entropy, parallel_dim=1)
-        # add pad to recover shape
-        if self.use_remove_padding:
-            pad_token_num = attention_mask.size(1) - entropy.size(1)
-            entropy = torch.nn.functional.pad(entropy, pad=(0, pad_token_num), value=0)
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
         return entropy
 
@@ -927,31 +935,25 @@ class MegatronInferStrategy(InferenceStrategy):
         else:
             raise ValueError(f"Unsupported reduction: {reduction}. Use 'mean', 'sum', or 'none'.")
 
-    def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor):
-        if not self.use_sequence_packing:
-            labels = self._get_feature_on_this_cp_rank(labels, "labels")
+    def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor, batch_num_tokens: int):
+        labels = self._get_feature_on_this_cp_rank(labels, "labels")
 
         loss_mask = (labels != IGNORE_INDEX).float()
         loss_mask = loss_mask.view(-1).float()
         losses = torch.sum(losses.view(-1) * loss_mask)
-        loss_mask = loss_mask.sum()
 
         if mpu.get_context_parallel_world_size() > 1:
-            loss_info = torch.cat([losses.view(1), loss_mask.view(1)])
+            loss_info = torch.cat([losses.view(1)])
             torch.distributed.all_reduce(
                 loss_info, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group()
             )
-            losses, loss_mask = loss_info[0], loss_info[1]
+            losses = loss_info[0]
 
-        loss = losses.clone() # clone to make sure loss is not a view
+        loss = losses.clone() / batch_num_tokens# clone to make sure loss is not a view
 
-        local_num_tokens = loss_mask.clone().detach()
-        if local_num_tokens == 0:
-            local_num_tokens += 1  # avoid divide by zero
+        metrics = {f"{self.worker_config.name}/loss@sum": loss.clone().detach().item()}
 
-        metrics = {f"{self.worker_config.name}/loss": (loss / local_num_tokens).clone().detach().unsqueeze(0)}
-
-        return loss, local_num_tokens.int(), metrics
+        return loss, metrics
 
 class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
     strategy_name = "megatron_train"
@@ -965,11 +967,12 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
     def initialize(self, model_provider):
         self.seq_length = self.worker.pipeline_config.sequence_length
+        self.weight_updaters: dict[str, MegatronWeightUpdater] = {}
 
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
         # model provider will initialize megatron distributed groups
-        self.model = model_provider(
+        self.model: "VirtualModels" = model_provider(
             tokenizer=self.tokenizer,
             model_args=self.worker_config.model_args,
             training_args=self.megatron_train_args,
@@ -1032,10 +1035,6 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.worker.rank_info.cp_size = mpu.get_context_parallel_world_size()
         self.worker.rank_info.cp_rank = mpu.get_context_parallel_rank()
 
-        self.barrier = Barrier.options(
-            name=BARRIER_NAME, get_if_exists=True, namespace=RAY_NAMESPACE
-        ).remote(self.worker.world_size / self.worker.rank_info.pp_size)
-
         logger.info(f"max steps pipeline {self.worker_config.training_args.max_steps}")
         self.worker_config.training_args.max_steps = (
             self.worker_config.training_args.max_steps // self.worker.rank_info.dp_size
@@ -1068,17 +1067,36 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 if len(self.models_wrapped) == 1:
                     model_config.grad_sync_func = model_config.grad_sync_func[0]
 
+        if (self.worker_config.use_dynamic_batching_in_train or self.worker_config.use_sequence_packing or
+            self.worker_config.use_sequence_packing) and self.worker.rank_info.pp_size > 1:
+            self.model.config.variable_seq_lengths = True
+            logger.info("Set variable_seq_lengths to True when use dynamic batching and pipeline parallel.")
+
         logger.info(f"{self.model.get_models()}")
         dist.barrier()
 
     def train_step(self, batch: DataProto, loss_func: Callable):
         self.model.train()
 
+        global_step = batch.meta_info.get("global_step", 0)
         is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
+        batch.meta_info['batch_num_tokens'] = self._get_batch_num_tokens(batch, dp_group=mpu.get_data_parallel_group())
+        batch.meta_info['global_valid_samples'] = self._get_global_valid_samples(batch, dp_group=mpu.get_data_parallel_group())
 
         if self.worker_config.use_dynamic_batching_in_train:
             micro_batches_list = list(make_micro_batch_iter_for_dynamic_batching(batch))
             num_microbatches = batch.meta_info["num_micro_batchs"]
+            mini_batch_size = 1
+        elif self.use_sequence_packing:
+            vp_size = self.worker_config.strategy_args.strategy_config['virtual_pipeline_model_parallel_size']\
+                if 'virtual_pipeline_model_parallel_size' in self.worker_config.strategy_args.strategy_config else 1
+            micro_batches_list = list(make_micro_batch_iter_for_sequence_packing(batch, tp_size=self.worker.rank_info.tp_size,
+                                                                cp_size=self.worker.rank_info.cp_size,
+                                                                vp_size=vp_size, is_train=True,
+                                                                dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
+                                                                micro_batch_size=self.worker_config.training_args.per_device_train_batch_size,
+                                                                                 config=self.worker_config.sequence_packing_args))
+            num_microbatches = micro_batches_list[0].meta_info["num_micro_batchs"]
             mini_batch_size = 1
         else:
             mini_batch_size = self.worker_config.training_args.per_device_train_batch_size
@@ -1087,10 +1105,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 num_microbatches == self.megatron_train_args.gradient_accumulation_steps
             ), f"num_microbatches={num_microbatches} gradient_accumulation_steps={self.megatron_train_args.gradient_accumulation_steps}"
             micro_batches_list = batch.chunk(chunks=num_microbatches)
-        if self.use_sequence_packing:
-            mini_batch_size = 1
-            self.max_packed_len = self._get_max_packed_len(micro_batches_list)
-            logger.info(f"max_packed_len: {self.max_packed_len}")
+
+        for micro_batch in micro_batches_list:
+            micro_batch.meta_info['loss_scale'] = num_microbatches * mpu.get_data_parallel_world_size()
+            micro_batch.meta_info['micro_batch_size'] = micro_batch.batch.batch_size[0]
 
         data_iterator = [iter(micro_batches_list) for _ in range(len(self.model))]
 
@@ -1099,13 +1117,14 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             data_iterator=data_iterator,
             model=self.model.get_models(),
             num_microbatches=num_microbatches,
-            seq_length=self.seq_length if not self.use_sequence_packing else self.max_packed_len,
+            seq_length=self.seq_length,
             micro_batch_size=mini_batch_size,
             forward_only=False,
         )
 
         # 只有step的时候需要load optimizer states
         self.load_states(include=[OffloadStateType.optimizer_states])
+
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
         if is_offload_optimizer_states_in_train_step:
             self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
@@ -1117,6 +1136,13 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         for model in self.model:
             model.zero_grad_buffer()
+            # Offload/reload does not update cached_param_buffer_shard_list/cached_grad_buffer_shard_list,
+            # resulting using old params in `start_param_sync`, which leads to wrong results. So we clear the cache.
+            for bucket_group in model.bucket_groups + model.expert_parallel_bucket_groups:
+                if hasattr(bucket_group, "cached_param_buffer_shard_list"):
+                    bucket_group.cached_param_buffer_shard_list = [None] * len(bucket_group.buckets)
+                if hasattr(bucket_group, "cached_grad_buffer_shard_list"):
+                    bucket_group.cached_grad_buffer_shard_list = [None] * len(bucket_group.buckets)
         self.optimizer.zero_grad()
 
         metrics = {}
@@ -1136,49 +1162,23 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             clear_aux_losses_tracker()
             metrics.update(moe_losses)
 
+        if self.model.config.mtp_num_layers is not None and self.model.config.mtp_num_layers > 0:
+            mtp_total_loss_dict = {}
+            MTPLossLoggingHelper.reduce_loss_in_tracker()
+            tracker = MTPLossLoggingHelper.tracker
+            if "values" in tracker:
+                loss_scale = 1 / self.megatron_train_args.gradient_accumulation_steps
+                mtp_losses = tracker["values"] * loss_scale
+                mtp_num_layers = mtp_losses.shape[0]
+                for i in range(mtp_num_layers):
+                    name = self.worker_config.name + "/" + f"mtp_{i+1} loss"
+                    mtp_total_loss_dict[name] = mtp_losses[i].item()
+                MTPLossLoggingHelper.clean_loss_in_tracker()
+                metrics.update(mtp_total_loss_dict)
         return metrics
 
-    def model_update(self, model_update_name, tgt_workers, broadcast_tgt_devices, p2p_tgt_devices):
-        comm_plan = self.model_update_comm_plan[model_update_name][self.worker.rank_info.pp_rank]
-        broadcast_time_cost = 0
-        with Timer("model_update_total") as timer_total:
-            for meta_infos, buffer in self.model.all_gather_weights_as_hf_bucket(
-                models=self.models_unwrapped, bucket_size=256 * 1024 * 1024
-            ):
-                ray.get(self.barrier.wait.remote())
-                refs = []
-                with Timer("broadcast") as timer_broadcast:
-                    for p2p_tgt_device in p2p_tgt_devices:
-                        p2p_tgt_worker = tgt_workers[p2p_tgt_device["rank"]]
-                        ref = p2p_tgt_worker.update_parameter_in_bucket.remote(model_update_name=model_update_name,
-                            meta_infos=meta_infos, buffer=buffer, ranks_in_worker=[p2p_tgt_device["device"]["rank"]]
-                        )
-                        refs.append(ref)
-
-                    if (
-                        self.worker.rank_info.tp_rank == 0
-                        and self.worker.rank_info.cp_rank == 0
-                        and self.worker.rank_info.dp_rank == 0
-                    ):
-                        for worker in tgt_workers:
-                            ref = worker.broadcast_bucket.remote(
-                                model_update_name=model_update_name,
-                                src_pp_rank=self.worker.rank_info.pp_rank,
-                                meta_infos=meta_infos,
-                                bucket_size=buffer.numel() * buffer.element_size(),
-                            )
-                            refs.append(ref)
-                    if len(broadcast_tgt_devices) > 0:
-                        collective.broadcast(tensor=buffer, src_rank=0, group_name=comm_plan["group_name"])
-                    ray.get(refs)
-                ray.get(self.barrier.wait.remote())
-                broadcast_time_cost += timer_broadcast.last
-
-        metrics = {
-            "all_gather": timer_total.last - broadcast_time_cost,
-            "broadcast": broadcast_time_cost,
-        }
-        return metrics
+    def model_update(self, model_update_name: str):
+        return self.weight_updaters[model_update_name].model_update()
 
     def load_states(self, include=None, non_blocking=False):
         if include is not None:
@@ -1208,12 +1208,27 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         RotaryEmbedding.forward.cache_clear()
         current_platform.empty_cache()
 
+    def setup_model_update(self, infer_cluster, model_update_name: str):
+        assert model_update_name not in self.weight_updaters
+        self.weight_updaters[model_update_name] = MegatronWeightUpdater(
+            pipeline_config=self.worker.pipeline_config,
+            worker_config=self.worker_config,
+            model_update_name=model_update_name,
+            models_unwrapped=self.models_unwrapped,
+            infer_cluster=infer_cluster,
+        )
+
     def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", local_state_path=None, **kwargs):
         logger.info(f"save_dir: {save_dir}")
         if local_state_path is None:
             local_state_path = save_dir
         with Timer("load") as load_timer:
             self.load_states()
+
+        is_last_step = kwargs.get("is_last_step", False)
+
+        if self.megatron_train_args.save_hf_model:
+            self.model.save_pretrained_as_hf(save_dir)
 
         # save model and tokenizer
         if len(self.models_unwrapped) == 1:
@@ -1269,7 +1284,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         os.makedirs(os.path.dirname(rgn_path), exist_ok=True)
         torch.save(rng_states, rgn_path)
 
-        if self.worker_config.checkpoint_config.get("async_upload", True):
+        if self.worker_config.checkpoint_config.get("async_upload", True) and not is_last_step:
             self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=local_state_path)
         else:
             self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=local_state_path)
@@ -1291,6 +1306,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         logger.info(
             f"Loading optimizer from {optimizer_checkpoint}, process_index: {self.megatron_train_args.process_index}"
         )
+
+        self.offload_states()
 
         if self.megatron_train_args.use_distributed_optimizer:
             model_shared_state_dict = self.model.sharded_state_dict()
@@ -1334,3 +1351,5 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             tensor_parallel.get_cuda_rng_tracker().set_states(checkpoint_rng_state["rng_tracker_states"])
         else:
             logger.info(f"not load rng state, not found file: {rng_file}")
+
+        self.load_states()

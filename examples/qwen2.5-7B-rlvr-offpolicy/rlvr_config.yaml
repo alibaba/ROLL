@@ -15,9 +15,11 @@ checkpoint_config:
   type: file_system
   output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
 
+
+
 # track_with: wandb
 # tracker_kwargs:
-#  api_key: xxx
+#  api_key: xxxx
 #  project: roll_examples
 #  name: ${exp_name}
 #  notes: roll_examples

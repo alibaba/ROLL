@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Literal, Optional
 
 import torch
@@ -82,7 +82,26 @@ class PretrainedConfig:
     def from_json_file(cls, json_file_path):
         with open(json_file_path, "r", encoding="utf-8") as reader:
             text = reader.read()
-        return cls(**json.loads(text))
+            config_dict = json.loads(text)
+
+            valid_field_names = {f.name for f in fields(cls)}
+
+            filtered_config = {}
+            removed_keys = []
+            for k, v in config_dict.items():
+                if k in valid_field_names:
+                    filtered_config[k] = v
+                else:
+                    removed_keys.append(k)
+
+            if removed_keys:
+                logger.warning(
+                    f"Config loading from {json_file_path}: "
+                    f"Ignoring deprecated/unknown properties: {removed_keys}. "
+                    "This might be due to a Megatron version upgrade."
+                )
+
+            return cls(**filtered_config)
 
     def save_pretrained(self, save_directory: str):
         os.makedirs(save_directory, exist_ok=True)
@@ -96,7 +115,9 @@ class PretrainedConfig:
         # name_or_path denotes the path of the from_pretrained model, i.e., where auto map files are located
         # should archive the auto map files in a cache path avoiding the remote name_or_path path has been cleaned
         automap_cache_path = self.get_automap_cache()
-        read_cache = os.path.isdir(automap_cache_path) and any(f.endswith('.py') for f in os.listdir(automap_cache_path))
+        read_cache = os.path.isdir(automap_cache_path) and any(
+            f.endswith(".py") for f in os.listdir(automap_cache_path)
+        )
         hf_files_path = automap_cache_path if read_cache else self.name_or_path
         if not (hf_files_path and os.path.isdir(hf_files_path)):
             return
@@ -175,17 +196,19 @@ class PretrainedConfig:
         raise NotImplementedError("distribute_config_match not implemented")
 
     def get_automap_cache(self):
-        return os.path.join(os.getenv("HUGGINGFACE_AUTOMAP_CACHE", HUGGINGFACE_AUTOMAP_CACHE), 
-                            hashlib.sha256(self.name_or_path.encode()).hexdigest())
+        return os.path.join(
+            os.getenv("HUGGINGFACE_AUTOMAP_CACHE", HUGGINGFACE_AUTOMAP_CACHE),
+            hashlib.sha256(self.name_or_path.encode()).hexdigest(),
+        )
 
 
 @dataclass
 class McaModelConfig(TransformerConfig, PretrainedConfig):
-    position_embedding_type: Literal["learned_absolute", "rope", "none"] = field(
+    position_embedding_type: Literal["learned_absolute", "rope", "mrope", "yarn", "none"] = field(
         default="rope",
         metadata={
             "help": "Position embedding type.",
-            "choices": ["learned_absolute", "rope", "mrope", "none"],
+            "choices": ["learned_absolute", "rope", "mrope", "yarn", "none"],
         },
     )
     padded_vocab_size: Optional[int] = field(
@@ -224,6 +247,14 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         default=False,
         metadata={"help": "Apply rope scaling as used in llama 3.x."},
     )
+    rotary_scaling_factor: float = field(
+        default=8.0,
+        metadata={
+            "help": "The scaling factor applied to the inverse frequencies when "
+            "1) the wavelength is greater than `low_freq_wavelen` prior to smoothing, "
+            "2) to all inverse frequencies during smoothing."
+        },
+    )
     transformer_impl: Literal["local", "transformer_engine"] = field(
         default="transformer_engine",
         metadata={
@@ -255,6 +286,24 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             self.params_dtype = torch.bfloat16
         self.pipeline_dtype = self.params_dtype
         self.batch_p2p_comm = not self.overlap_p2p_comm
+
+        # Initialize Yarn RoPE parameters when position_embedding_type is "yarn"
+        if self.position_embedding_type == "yarn":
+            # Dynamically add Yarn config attributes only when using yarn
+            if not hasattr(self, "yarn_beta_fast"):
+                self.yarn_beta_fast = 32
+            if not hasattr(self, "yarn_beta_slow"):
+                self.yarn_beta_slow = 1
+            if not hasattr(self, "yarn_rotary_scaling_factor"):
+                self.yarn_rotary_scaling_factor = 4
+            if not hasattr(self, "yarn_original_max_position_embeddings"):
+                self.yarn_original_max_position_embeddings = 32768
+            if not hasattr(self, "yarn_mscale"):
+                self.yarn_mscale = 1
+            if not hasattr(self, "yarn_mscale_all_dim"):
+                self.yarn_mscale_all_dim = 0
+            if not hasattr(self, "yarn_correction_range_round_to_int"):
+                self.yarn_correction_range_round_to_int = True
 
         if (
             self.recompute_granularity == "full"

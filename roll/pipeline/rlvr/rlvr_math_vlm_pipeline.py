@@ -35,6 +35,7 @@ from roll.utils.functionals import (
     compute_clip_fraction,
     group_reward_norm,
     expand_to_token_level,
+    get_sample_level_mask
 )
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
@@ -337,7 +338,6 @@ class RLVRMathVLMPipeline(BasePipeline):
                             ),
                         )
                         gen_batch.meta_info = {"global_step": global_step}
-                        gen_batch.meta_info["response_callback_fn"] = self.generate_scheduler.report_response.remote
                         generate_output: DataProto = ray.get(
                             self.generate_scheduler.generate.remote(
                                 data=gen_batch,
@@ -360,6 +360,7 @@ class RLVRMathVLMPipeline(BasePipeline):
                             value, self.actor_infer.worker_config.generating_args.num_return_sequences
                         )
                     batch.non_tensor_batch['sample_uuid'] = np.array([str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object)
+                    batch.meta_info["loss_mask_keys"] = ["response_mask", "final_response_mask"]
 
                     with Timer(name="cal_ref_log_probs_reward", logger=None) as cal_timer:
                         if self.pipeline_config.enable_reference:
@@ -382,6 +383,11 @@ class RLVRMathVLMPipeline(BasePipeline):
                         metrics.update(reduce_metrics(rewards.meta_info.pop("metrics", {})))
                         batch = batch.union(rewards)
                     metrics["time/ref_log_probs_values_reward"] = cal_timer.last
+
+                    with Timer(name="get_sample_level_mask", logger=None) as get_sample_level_mask_timer:
+                        batch, mask_metrics = get_sample_level_mask(batch, self.pipeline_config)
+                        metrics.update(mask_metrics)
+                    metrics["time/get_sample_level_mask"] = get_sample_level_mask_timer.last
 
                     with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
                         if self.is_lora:
@@ -591,7 +597,6 @@ class RLVRMathVLMPipeline(BasePipeline):
                     non_tensor_batch_keys=["multi_modal_data"] if "multi_modal_data" in batch.non_tensor_batch else [],
                 )
                 gen_batch.meta_info["is_offload_states"] = False
-                gen_batch.meta_info["response_callback_fn"] = self.generate_scheduler.report_response.remote
                 generate_output: DataProto = ray.get(
                     self.generate_scheduler.generate.remote(
                         data=gen_batch,

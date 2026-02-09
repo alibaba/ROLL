@@ -1,6 +1,7 @@
 from .platform import Platform
 from ..utils.logging import get_logger
 
+import os
 import torch
 
 logger = get_logger()
@@ -36,8 +37,9 @@ class CudaPlatform(Platform):
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             "TORCHINDUCTOR_COMPILE_THREADS": "2",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-            "NCCL_CUMEM_ENABLE": "0",  # https://github.com/NVIDIA/nccl/issues/1234
+            "NCCL_CUMEM_ENABLE": os.getenv("NCCL_CUMEM_ENABLE", "0"),  # https://github.com/NVIDIA/nccl/issues/1234
             "NCCL_NVLS_ENABLE": "0",
+            "NVTE_BWD_LAYERNORM_SM_MARGIN": os.getenv('NVTE_BWD_LAYERNORM_SM_MARGIN', "0"),
         }
         return env_vars
 
@@ -46,7 +48,8 @@ class CudaPlatform(Platform):
         try:
             from vllm import envs
 
-            if envs.VLLM_USE_V1:
+            # VLLM_USE_V1 is deprecated in vllm>=0.11.1
+            if not hasattr(envs, "VLLM_USE_V1") or envs.VLLM_USE_V1:
                 from vllm.v1.worker.gpu_worker import Worker
 
                 logger.info("Successfully imported vLLM V1 Worker.")

@@ -1,3 +1,5 @@
+from typing import Optional
+
 from transformers import PreTrainedTokenizer
 
 import gem
@@ -12,7 +14,7 @@ def create_llm_proxy(
         generate_scheduler: RequestScheduler,
         llm_proxy_config: LLMProxyConfig,
         tokenizer: PreTrainedTokenizer,
-        env: gem.Env) -> BaseLLMProxy:
+        env: Optional[gem.Env]) -> BaseLLMProxy:
     proxy_type = llm_proxy_config.proxy_type
     if proxy_type in LLM_PROXY_REGISTRY:
         cls = LLM_PROXY_REGISTRY[proxy_type]

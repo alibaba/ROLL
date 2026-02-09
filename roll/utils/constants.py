@@ -25,6 +25,7 @@ class GenerateStopReason(enum.Enum):
     FINISH = enum.auto()
     ABORT = enum.auto()
     MAX_LENGTH = enum.auto()
+    NO_SYSTEM_PROMPT = enum.auto()
     
     
 class EpisodeStopReason(enum.Enum):
@@ -38,3 +39,4 @@ class EpisodeStopReason(enum.Enum):
     LLM_GENERATE_FAILED = "llm_generate_failed" 
     UNKNOWN = "unknown"
     NO_SYSTEM_PROMPT = "no_system_prompt"
+    EVAL_GT = "eval_gt"

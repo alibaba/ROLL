@@ -45,6 +45,9 @@ actor_train:
       num_inference_steps: 8
       mid_timestep: 4
       final_timestep: 7
+      lora_base_model: dit2
+      lora_target_modules: q,k,v,o,ffn.0,ffn.2
+      lora_rank: 32
       
   training_args:
     learning_rate: 2.5e-6

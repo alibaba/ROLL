@@ -1,7 +1,13 @@
-import inspect
+from __future__ import annotations
 
+import inspect
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from roll.distributed.scheduler.protocol import DataProto
 import enum
 import traceback
+import heapq
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -9,12 +15,11 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.configs.base_config import PPOConfig
+from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.platforms import current_platform
 from roll.utils.kl_controller import AdaptiveKLController
 from roll.utils.logging import get_logger
-
 
 logger = get_logger()
 
@@ -209,8 +214,8 @@ def entropy_from_logits(logits: torch.Tensor):
     return entropy
 
 
-def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str,
-             weights: Optional[torch.Tensor] = None, loss_scale: Optional[float] = None):
+def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str, batch_num_tokens: int = None,
+             global_valid_samples: int = None, weights: Optional[torch.Tensor] = None):
     """
     ref: https://github.com/volcengine/verl/blob/78532923368aeb058f62201489546d013df47710/verl/trainer/ppo/core_algos.py#L370
     Aggregate the loss matrix into a scalar.
@@ -225,27 +230,30 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
                                       "seq-mean-token-sum-norm" /
             "seq-mean-token-sum" is the default behavior
         weights: `torch.Tensor`
-        loss_scale: `(float)`
     Returns:
         loss: `a scalar torch.Tensor`
             aggregated loss
     """
+    if batch_num_tokens is None:
+        batch_num_tokens = loss_mask.sum()
+    if global_valid_samples is None:
+        global_valid_samples = loss_mat.size(0)
     if loss_agg_mode == "token-mean":
         if weights is None:
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
-        loss = masked_mean(loss_mat * weights.unsqueeze(-1), loss_mask)
+        loss = (loss_mat * weights.unsqueeze(-1)).sum() / batch_num_tokens
     elif loss_agg_mode == "seq-mean-token-sum":
-        seq_losses = masked_sum(loss_mat, loss_mask, dim=-1) # token-sum
+        seq_losses = masked_sum(loss_mat, loss_mask, dim=-1)  # token-sum
         valid_samples = torch.any(loss_mask > 0, dim=-1).float()
         if weights is None:
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
-        loss = (seq_losses * weights * valid_samples).sum() / (valid_samples.sum() + 1e-8) # seq-mean
+        loss = (seq_losses * weights * valid_samples).sum() / (global_valid_samples + 1e-8)  # seq-mean
     elif loss_agg_mode == "seq-mean-token-mean":
         seq_losses = masked_mean(loss_mat, loss_mask, dim=-1)
         valid_samples = torch.any(loss_mask > 0, dim=-1).float()
         if weights is None:
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
-        loss = (seq_losses * weights * valid_samples).sum() / (valid_samples.sum() + 1e-8)  # seq-mean
+        loss = (seq_losses * weights * valid_samples).sum() / (global_valid_samples + 1e-8)  # seq-mean
     elif loss_agg_mode == "seq-mean-token-sum-norm":
         seq_losses = masked_sum(loss_mat, loss_mask, dim=-1)
         valid_samples = torch.any(loss_mask > 0, dim=-1).float()
@@ -259,7 +267,7 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
     else:
         raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 
-    return loss * loss_scale if loss_scale else loss
+    return loss
 
 
 def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int = None) -> torch.Tensor:
@@ -312,21 +320,21 @@ def get_pad_mask(response_id: torch.Tensor, pad_token: int = 0, eos_token: int =
     e.g. pad token=0
     response_id: [1, 2, 2, 42, 3, 5, 1, 0, 0]
     pad_mask:     [1, 1, 1, 1,  1, 1, 1, 0, 0]
-    
+
     If eos_token == pad_token, the first pad token (which is the eos token) should be kept.
     e.g. pad_token=0, eos_token=0
     response_id: [1, 2, 2, 42, 3, 5, 0, 0, 0]
     pad_mask:     [1, 1, 1, 1,  1, 1, 1, 0, 0]  (first pad token/eos token is kept)
     """
     pad_mask = response_id.not_equal(pad_token).to(dtype)
-    
+
     # eos_token == pad_token, 需要保留第一个pad token否则会误将eos token mask掉
     if eos_token == pad_token:
         pad_positions = response_id.eq(pad_token).to(dtype)
         cumsum_pad = torch.cumsum(pad_positions, dim=-1)
         first_pad_token = (cumsum_pad == 1).to(dtype)
         pad_mask = pad_mask | first_pad_token
-    
+
     assert (
         not (pad_mask[:, 0] == 0).logical_and(pad_mask.sum(-1) != 0).any()
     ), f"response_id is not valid: {response_id}, pad_token is {pad_token}"
@@ -364,55 +372,73 @@ def response_level_masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift
 
 def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
     """
-    Reduce metrics with enhanced aggregation support based on metric name suffixes.
-    
-    Supported suffixes:
-    - _mean: arithmetic mean (default)
-    - _max: maximum value
-    - _min: minimum value  
-    - _p50: 50th percentile (median)
-    - _p99: 99th percentile
-    - _std: standard deviation
-    - _sum: sum of all values
-    
-    Args:
-        metrics: Dictionary of metric names to lists/tensors of values
-        reduce_func: Default reduction function (used for metrics without suffix)
-    
-    Returns:
-        Dictionary with reduced metric values
+    Reduce metrics by parsing an aggregation instruction from the metric name.
+
+    Aggregation can be specified in the metric name using either of the following formats:
+      - Suffix after '@': e.g., "loss@sum", "latency@p99"
+      - Underscore suffix: e.g., "loss_sum", "latency_p99"
+
+    Supported aggregation tags/suffixes: mean, max, min, p50, p99, std, sum
+
+    Notes:
+      - The original metric key is preserved (the '@tag' or '_suffix' remains in the key).
+      - Scalar values (int, float, np.number) and torch.Tensor objects are left unchanged.
+      - Values of type list, tuple, or np.ndarray are reduced using the inferred aggregation function.
+      - If no aggregation tag or suffix is found, the default `reduce_func` is used.
+      - Empty sequences are skipped and not modified.
     """
     import numpy as np
-    
-    def _parse_suffix(metric_name):
-        """Parse aggregation method from metric name suffix."""
-        if metric_name.endswith('_mean'):
-            return np.mean
-        elif metric_name.endswith('_max'):
-            return np.max
-        elif metric_name.endswith('_min'):
-            return np.min
-        elif metric_name.endswith('_p50'):
-            return lambda x: np.percentile(x, 50)
-        elif metric_name.endswith('_p99'):
-            return lambda x: np.percentile(x, 99)
-        elif metric_name.endswith('_std'):
-            return np.std
-        elif metric_name.endswith('_sum'):
-            return np.sum
+
+    reducers = {
+        "mean": np.mean,
+        "max": np.max,
+        "min": np.min,
+        "p50": lambda x: np.percentile(x, 50),
+        "p99": lambda x: np.percentile(x, 99),
+        "std": np.std,
+        "sum": np.sum,
+    }
+
+    def _parse_aggregation_func(metric_name: str):
+        # First, check for '@' separator
+        if "@" in metric_name:
+            _, tag = metric_name.rsplit("@", 1)
+            tag = tag.strip()
+            if tag in reducers:
+                return reducers[tag]
+            else:
+                raise ValueError(f"Unknown reducer tag '{tag}' in metric '{metric_name}'")
+
+        # Otherwise, check for underscore-based suffixes
+        for suffix_key in ["mean", "max", "min", "p50", "p99", "std", "sum"]:
+            if metric_name.endswith(f"_{suffix_key}"):
+                return reducers[suffix_key]
+
+        # No aggregation specifier found → use default
+        return reduce_func
+
+    for key, val in list(metrics.items()):
+        # Skip reduction for scalars and tensors
+        if isinstance(val, (int, float, np.number)) or isinstance(val, torch.Tensor):
+            continue
+
+        # Reduce sequences
+        if isinstance(val, (list, tuple, np.ndarray)):
+            if len(val) == 0:
+                continue
+            agg_func = _parse_aggregation_func(key)
+            metrics[key] = float(agg_func(val))
         else:
-            return reduce_func
-    
-    for key, val in metrics.items():
-        if isinstance(val, (list, tuple, np.ndarray)) and len(val) > 0:
-            # Use suffix-based aggregation if available
-            aggregation_func = _parse_suffix(key)
-            metrics[key] = float(aggregation_func(val))
-        else:
-            # Fallback to default reduction function
-            metrics[key] = reduce_func(val)
-    
+            # Fallback for other types (e.g., single-element containers)
+            metrics[key] = float(reduce_func(val))
+
     return metrics
+
+def reduce_metrics_list(metrics_list: list, reduce_func=np.mean) -> dict:
+    if len(metrics_list) == 0:
+        return {}
+    merged_metrics = {k: reduce_func([m[k] for m in metrics_list]) for k in metrics_list[0].keys()}
+    return merged_metrics
 
 
 def pad_to_length(tensor: torch.Tensor, length, pad_value, dim=-1):
@@ -516,7 +542,9 @@ def expand_to_token_level(data: "DataProto"):
     return token_level_rewards
 
 
-def reward_norm(response_level_rewards: torch.Tensor, n_sample=-1, running_ctrl={}, norm_mean_type=None, norm_std_type=None):
+def reward_norm(
+    response_level_rewards: torch.Tensor, n_sample=-1, running_ctrl={}, norm_mean_type=None, norm_std_type=None
+):
     group_mode = (norm_mean_type == "group") or (norm_std_type == "group")
     if group_mode and n_sample > 0:
         reshape_reward = response_level_rewards.reshape(*response_level_rewards.size()[:-1], -1, n_sample)
@@ -543,10 +571,10 @@ def reward_norm(response_level_rewards: torch.Tensor, n_sample=-1, running_ctrl=
     rewards = reshape_reward if norm_mean_type == "group" else response_level_rewards
     # 标准化奖励
     if norm_std_type is not None:
-        normalized_rewards = (rewards - reward_mean) / (reward_std + 1e-6) 
-    else: 
+        normalized_rewards = (rewards - reward_mean) / (reward_std + 1e-6)
+    else:
         normalized_rewards = (rewards - reward_mean)
-    
+
     # 如果是对 group mean 归一化，需要恢复原始形状
     if norm_mean_type == "group":
         normalized_rewards = normalized_rewards.reshape(*response_level_rewards.size())
@@ -609,7 +637,7 @@ def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_c
         pipeline_config.norm_mean_type, pipeline_config.norm_std_type = "group", "group"
 
     response_level_rewards = reward_norm(
-                    response_level_rewards, 
+                    response_level_rewards,
                     n_sample=pipeline_config.actor_infer.generating_args.num_return_sequences,
                     running_ctrl=running_ctrl,
                     norm_mean_type=pipeline_config.norm_mean_type,
@@ -777,14 +805,6 @@ def compute_advantage(
     data.batch["returns"] = returns
     return data
 
-
-class GenerateRequestType(enum.Enum):
-    ADD = enum.auto()
-    ABORT = enum.auto()
-    STOP = enum.auto()
-    ALIVE_CHECK = enum.auto()
-
-
 def postprocess_generate(
     prompts: "DataProto",
     output: torch.Tensor,
@@ -793,7 +813,7 @@ def postprocess_generate(
     eos_token_id,
     pad_token_id,
     fill_eos_token=False,
-    output_logprobs: Optional[list[list[float]]]=None,
+    output_logprobs: Optional[list[list[float]]] = None,
     pad_to_seq_len=True,
 ) -> "DataProto":
     from roll.distributed.scheduler.protocol import DataProto
@@ -811,7 +831,6 @@ def postprocess_generate(
 
     # input_batch_size * num_return_sequences
     output_batch_size = output.size(0)
-    input_batch_size = input_ids.size(0)
     prompt_length = input_ids.size(1)
 
     if pad_to_seq_len:
@@ -825,7 +844,9 @@ def postprocess_generate(
     attention_mask = (
         attention_mask.unsqueeze(1).repeat(1, num_return_sequences, 1).view(output_batch_size, prompt_length)
     )
-    response_mask = get_pad_mask(response_id=response, pad_token=pad_token_id, eos_token=eos_token_id, dtype=attention_mask.dtype)
+    response_mask = get_pad_mask(
+        response_id=response, pad_token=pad_token_id, eos_token=eos_token_id, dtype=attention_mask.dtype
+    )
     attention_mask = torch.cat((attention_mask, response_mask), dim=-1)
 
     position_ids = prompts.batch["position_ids"]
@@ -837,7 +858,8 @@ def postprocess_generate(
             .view(output_batch_size, *position_ids.shape[-2:])
         )
         delta_position_id = torch.arange(1, (sequence_length - prompt_length) + 1, device=position_ids.device)
-        delta_position_id = delta_position_id.view(1, 1, -1).expand(output_batch_size, 3, -1)
+        # position_ids: (bsz, C, prompt_len). Expand delta along channel dim (C can be 3 or 4).
+        delta_position_id = delta_position_id.view(1, 1, -1).expand(output_batch_size, position_ids.size(1), -1)
         response_position_ids = position_ids[..., -1:] + delta_position_id
         # left padding for prompt and right padding for response, to be converted
         # to right padding which is consistent with output
@@ -846,7 +868,11 @@ def postprocess_generate(
     assert attention_mask.any(dim=1).all(), f"has all 0 attention_mask, {attention_mask} {input_ids}"
     first_one = attention_mask.float().argmax(dim=1)
     new_response_mask = torch.zeros_like(attention_mask)  # response mask for cat input_ids
-    logprobs = torch.zeros([output_batch_size, sequence_length - 1], dtype=torch.float32) if output_logprobs is not None else None
+    logprobs = (
+        torch.zeros([output_batch_size, sequence_length - 1], dtype=torch.float32)
+        if output_logprobs is not None
+        else None
+    )
     for i in range(output_batch_size):
         shift = first_one[i].item()
         if shift > 0:
@@ -858,7 +884,7 @@ def postprocess_generate(
         attention_mask[i][:valid_length] = 1
         attention_mask[i][valid_length:] = 0
         prompt_len = valid_length - response_length
-        new_response_mask[i][prompt_len : valid_length] = 1
+        new_response_mask[i][prompt_len:valid_length] = 1
         if logprobs is not None:
             logprobs[i][prompt_len - 1 : valid_length - 1] = torch.tensor(
                 output_logprobs[i][:response_length], dtype=logprobs.dtype
@@ -873,8 +899,8 @@ def postprocess_generate(
             # cause error: Image features and image tokens do not match
             output_position_ids[i, ..., :-shift] = output_position_ids[i, ..., shift:].clone()
             # only clean in VLM(qwen2-vl) to make no effect on LLM
-            if prompt_length > response_length:
-                output[i, -shift:] = pad_token_id
+        if shift > 0 and prompt_length > valid_length:
+            output[i, -shift:] = pad_token_id
 
     prompt_mask = (attention_mask == 1) & (new_response_mask == 0)
     if position_ids.dim() == 3:
@@ -984,3 +1010,280 @@ def group_reward_norm(data: "DataProto", n_sample=-1, div_std=True, div_std_glob
             reshape_reward = reshape_reward / (torch.std(reshape_reward) + 1e-6)
     data.batch["response_level_rewards"] = reshape_reward.reshape(*response_level_rewards.size())
     return data
+
+
+def adjust_sequence_length(sequence, target_length, origin_seq_len, pad_value=0):
+    """
+    调整序列长度。自动探测序列维度（优先最后一维，其次向前搜索）。
+
+    Args:
+        sequence: 输入张量 (e.g., [B, S], [B, S, D], [B, 3, S])
+        target_length: 目标的全局序列长度
+        origin_seq_len: 当前张量应当对应的参考原始长度
+        pad_value: 填充值
+    """
+    if sequence.dim() < 2:
+        return sequence
+
+    # --- 1. 探测序列维度 (seq_dim) ---
+    seq_dim = None
+    is_causal_shift = False
+
+    # 优先级：最后一维 (-1)，然后是倒数第二维 (-2)，以此类推
+    # 检查是否等于参考长度 或 参考长度-1 (causal shift)
+    candidate_dims = [-1] + list(range(-2, -sequence.dim() - 1, -1))
+
+    for d in candidate_dims:
+        curr_size = sequence.size(d)
+        if curr_size == origin_seq_len:
+            seq_dim = d
+            is_causal_shift = False
+            break
+        elif curr_size == origin_seq_len - 1:
+            seq_dim = d
+            is_causal_shift = True
+            break
+
+    # 如果没找到任何维度匹配 origin_seq_len，说明该张量不需要处理
+    if seq_dim is None:
+        return sequence
+
+    # --- 2. 计算实际需要调整到的目标长度 ---
+    actual_len = sequence.size(seq_dim)
+    # 如果原始是 S-1，目标也应该是 target-1 (保持位移一致)
+    effective_target = target_length - 1 if is_causal_shift else target_length
+
+    if actual_len == effective_target:
+        return sequence
+
+    # --- 3. 执行 Padding 或 Truncation ---
+    if actual_len < effective_target:
+        # Padding 逻辑
+        pad_size = effective_target - actual_len
+
+        # torch.nn.functional.pad 的 pad 参数顺序是：
+        # [最后维左, 最后维右, 倒数第二维左, 倒数第二维右, ...]
+        # 我们只在识别到的 seq_dim 的右侧进行 padding
+        # 偏移量计算：abs(seq_dim) - 1 决定了前面有多少对 [0, 0]
+        pad_config = [0, 0] * (abs(seq_dim) - 1) + [0, pad_size]
+
+        return torch.nn.functional.pad(sequence, pad_config, value=pad_value)
+
+    else:
+        # Truncation 逻辑 (通用切片)
+        slices = [slice(None)] * sequence.dim()
+        slices[seq_dim] = slice(0, effective_target)
+        return sequence[tuple(slices)]
+
+
+def get_seqlen_balanced_partitions(seqlen_list: List[float],
+                                   k_partitions: int,
+                                   equal_size: bool = False) -> List[List[int]]:
+    """
+    Reference: https://github.com/volcengine/verl/blob/468adf22c43b744348051fccd7a5d830c6c3c36a/verl/utils/seqlen_balancing.py
+
+    Partition sequences to balance workload using Karmarkar-Karp algorithm.
+
+    Args:
+        seqlen_list: List of sequence lengths (or workloads)
+        k_partitions: Number of partitions to create
+        equal_size: If True, ensure all partitions have equal number of items
+
+    Returns:
+        List of partitions, where each partition is a list of indices
+    """
+
+    class Set:
+        """Represents a set of items with their sum."""
+
+        def __init__(self):
+            self.sum = 0
+            self.items = []
+
+        def add(self, idx: int, val: float):
+            self.items.append((idx, val))
+            self.sum += val
+
+        def merge(self, other):
+            for idx, val in other.items:
+                self.items.append((idx, val))
+                self.sum += val
+
+        def __lt__(self, other):
+            if self.sum != other.sum:
+                return self.sum < other.sum
+            if len(self.items) != len(other.items):
+                return len(self.items) < len(other.items)
+            return self.items < other.items
+
+    class State:
+        """Represents a state in the partitioning algorithm."""
+
+        def __init__(self, items: List[Tuple[int, float]], k: int):
+            self.k = k
+            self.sets = [Set() for _ in range(k)]
+            assert len(items) in [1, k], f"{len(items)} not in [1, {k}]"
+            for i, (idx, seqlen) in enumerate(items):
+                self.sets[i].add(idx=idx, val=seqlen)
+            self.sets = sorted(self.sets, reverse=True)
+
+        def get_partitions(self) -> List[List[int]]:
+            partitions = []
+            for i in range(len(self.sets)):
+                cur_partition = []
+                for idx, _ in self.sets[i].items:
+                    cur_partition.append(idx)
+                partitions.append(cur_partition)
+            return partitions
+
+        def merge(self, other):
+            for i in range(self.k):
+                self.sets[i].merge(other.sets[self.k - 1 - i])
+            self.sets = sorted(self.sets, reverse=True)
+
+        @property
+        def spread(self) -> float:
+            return self.sets[0].sum - self.sets[-1].sum
+
+        def __lt__(self, other):
+            if self.spread != other.spread:
+                return self.spread > other.spread
+            return self.sets[0] > other.sets[0]
+
+    assert len(seqlen_list) >= k_partitions, \
+        f"number of items:[{len(seqlen_list)}] < k_partitions:[{k_partitions}]"
+
+    # Sort by sequence length
+    sorted_seqlen_list = sorted([(seqlen, i) for i, seqlen in enumerate(seqlen_list)])
+    states_pq = []
+
+    if equal_size:
+        assert len(seqlen_list) % k_partitions == 0, \
+            f"{len(seqlen_list)} % {k_partitions} != 0"
+        for offset in range(0, len(sorted_seqlen_list), k_partitions):
+            items = []
+            for i in range(k_partitions):
+                seqlen, idx = sorted_seqlen_list[offset + i]
+                items.append((idx, seqlen))
+            heapq.heappush(states_pq, State(items=items, k=k_partitions))
+    else:
+        for seqlen, idx in sorted_seqlen_list:
+            heapq.heappush(states_pq, State(items=[(idx, seqlen)], k=k_partitions))
+
+    # Merge states until only one remains
+    while len(states_pq) > 1:
+        state0 = heapq.heappop(states_pq)
+        state1 = heapq.heappop(states_pq)
+        state0.merge(state1)
+        heapq.heappush(states_pq, state0)
+
+    final_state = states_pq[0]
+    partitions = final_state.get_partitions()
+
+    # Validate and sort partitions
+    assert len(partitions) == k_partitions, f"{len(partitions)} != {k_partitions}"
+    seen_idx = set()
+    sorted_partitions = []
+
+    for i, partition in enumerate(partitions):
+        assert len(partition) > 0, f"the {i}-th partition is empty"
+        for idx in partition:
+            seen_idx.add(idx)
+        sorted_partitions.append(sorted(partition))
+
+    assert seen_idx == set(range(len(seqlen_list))), "Not all indices are covered"
+
+    return sorted_partitions
+
+
+def log_seqlen_unbalance(seqlen_list: list[int], partitions: list[list[int]], prefix):
+    """
+    Calculate and log metrics related to sequence length imbalance before and after partitioning.
+
+    Args:
+        seqlen_list (List[int]): A list of sequence lengths for each item.
+        partitions (List[List[int]]): A list of partitions, where each inner list contains indices
+                                      from seqlen_list assigned to that partition.
+        prefix (str): A prefix to be added to each metric key in the returned dictionary.
+
+    Returns:
+        dict: A dictionary containing metrics related to sequence length imbalance.
+    """
+    # Get the number of partitions
+    k_partition = len(partitions)
+    # assert len(seqlen_list) % k_partition == 0
+    batch_size = len(seqlen_list) // k_partition
+    min_sum_seqlen = None
+    max_sum_seqlen = None
+    total_sum_seqlen = 0
+
+    # Iterate over each batch of sequence lengths
+    for offset in range(0, len(seqlen_list), batch_size):
+        cur_sum_seqlen = sum(seqlen_list[offset: offset + batch_size])
+        if min_sum_seqlen is None or cur_sum_seqlen < min_sum_seqlen:
+            min_sum_seqlen = cur_sum_seqlen
+        if max_sum_seqlen is None or cur_sum_seqlen > max_sum_seqlen:
+            max_sum_seqlen = cur_sum_seqlen
+        total_sum_seqlen += cur_sum_seqlen
+
+    balanced_sum_seqlen_list = []
+    for partition in partitions:
+        cur_sum_seqlen_balanced = sum([seqlen_list[i] for i in partition])
+        balanced_sum_seqlen_list.append(cur_sum_seqlen_balanced)
+    min_sum_seqlen_balanced = min(balanced_sum_seqlen_list)
+    max_sum_seqlen_balanced = max(balanced_sum_seqlen_list)
+
+    return {
+        f"{prefix}/min": min_sum_seqlen,
+        f"{prefix}/max": max_sum_seqlen,
+        f"{prefix}/minmax_diff": max_sum_seqlen - min_sum_seqlen,
+        f"{prefix}/balanced_min": min_sum_seqlen_balanced,
+        f"{prefix}/balanced_max": max_sum_seqlen_balanced,
+        f"{prefix}/mean": total_sum_seqlen / len(partitions),
+    }
+
+
+def batch_balance(batch: DataProto, dp_size, minibatch_size, logging_prefix="global_seqlen", keep_minibatch=False):
+    """
+    ref: https://github.com/volcengine/verl/blob/2c0fcbe52a9230281329e7197501f4dc67f0a5d8/verl/trainer/ppo/ray_trainer.py#L1018
+    Reorder the data on single controller such that each dp rank gets similar total tokens"""
+    attention_mask = batch.batch["attention_mask"]
+    batch_size = attention_mask.shape[0]
+    global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1)  # (train_batch_size,)
+
+    def calculate_workload(seq_len_list):
+        return 24576 * seq_len_list + seq_len_list * seq_len_list
+
+    workload_lst = calculate_workload(global_seqlen_lst)
+    world_size = dp_size
+    if keep_minibatch:
+        # Decouple the DP balancing and mini-batching.
+        minibatch_num = len(workload_lst) // minibatch_size
+        global_partition_lst = [[] for _ in range(world_size)]
+        for i in range(minibatch_num):
+            rearrange_minibatch_lst = get_seqlen_balanced_partitions(
+                workload_lst[i * minibatch_size: (i + 1) * minibatch_size],
+                k_partitions=world_size,
+                equal_size=True,
+            )
+            for j, part in enumerate(rearrange_minibatch_lst):
+                global_partition_lst[j].extend([x + minibatch_size * i for x in part])
+    else:
+        global_partition_lst = get_seqlen_balanced_partitions(
+            workload_lst, k_partitions=world_size, equal_size=True
+        )
+    # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
+    for idx, partition in enumerate(global_partition_lst):
+        partition.sort(key=lambda x: (workload_lst[x], x))
+        ordered_partition = partition[::2] + partition[1::2][::-1]
+        global_partition_lst[idx] = ordered_partition
+    # reorder based on index. The data will be automatically equally partitioned by dispatch function
+    global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
+    batch.reorder(global_idx)
+    global_balance_stats = log_seqlen_unbalance(
+        seqlen_list=global_seqlen_lst.detach().cpu().tolist(), partitions=global_partition_lst, prefix=logging_prefix
+    )
+    metrics = {}
+    metrics.update(global_balance_stats)
+    return metrics
+
