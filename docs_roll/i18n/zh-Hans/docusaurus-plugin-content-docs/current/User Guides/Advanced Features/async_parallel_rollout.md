@@ -57,7 +57,7 @@ val_env_manager:
 - **示例**：
   - `group_size: 8` 表示每个环境组包含 8 个环境实例
   - `num_env_groups: 128` 表示总共创建 128 个环境组
-  - env实例的总数量为: `gropu_size * num_env_groups` = 1024 个
+  - env实例的总数量为: `group_size * num_env_groups` = 1024 个
 
 #### tags
 - **含义**：环境的标签列表，用于标识和选择要使用的环境类型
