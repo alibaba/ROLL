@@ -123,7 +123,7 @@ actor_train:
      - `transformer_layer_cls_to_wrap`：要wrap的 Transformer 层类名列表（例如 `["Qwen3DecoderLayer"]`）
      - `wrap_embeddings`：是否wrap input embedding（默认：`false`）
      - `wrap_lm_output`：是否wrap LM head（默认：`false`）
-     - `moe_experts`：要包装的 MoE Expert类名列表（对于 MoE 模型，我们可能希望单独wrap每个expert以避免参数gather时OOM，但需要dummy前向传播以避免程序挂起，请参阅[示例](../../../../roll/third_party/fsdp2/qwen3_moe_patch.py)）
+     - `moe_experts`：要包装的 MoE Expert类名列表（对于 MoE 模型，我们可能希望单独wrap每个expert以避免参数gather时OOM，但需要dummy前向传播以避免程序挂起，请参阅[示例](https://github.com/alibaba/ROLL/blob/main/roll/third_party/fsdp2/qwen3_moe_patch.py)）
 
       如果未设置 `wrap_policy`，默认将使用 transformers 模型的 `_no_split_modules`。
    - `apply_expert_patch`：是否应用 MoE 专家补丁（用于 MoE 模型）

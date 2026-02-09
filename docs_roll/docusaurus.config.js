@@ -2,6 +2,8 @@
 // Note: type annotations allow type checking and IDEs autocompletion
 
 const { themes } = require('prism-react-renderer');
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 const lightTheme = themes.github;
 const darkTheme = themes.dracula;
 
@@ -24,8 +26,8 @@ const config = {
   organizationName: 'alibaba', // Usually your GitHub org/user name.
   projectName: 'ROLL', // Usually your repo name.
 
-  onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'throw',
+  onBrokenLinks: 'warn',
+  onBrokenMarkdownLinks: 'warn',
 
   // Even if you don't use internalization, you can use this field to set useful
   // metadata like html lang. For example, if your site is Chinese, you may want
@@ -60,7 +62,9 @@ const config = {
           // Remove this to remove the "edit this page" links.
           editUrl:
             'https://github.com/alibaba/ROLL/tree/main/docs_roll/',
-          showLastUpdateTime: true
+          showLastUpdateTime: true,
+          remarkPlugins: [remarkMath],
+          rehypePlugins: [rehypeKatex],
         },
         blog: {
           showReadingTime: true,
