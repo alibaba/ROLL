@@ -4,6 +4,7 @@ import io
 import os
 import dataclasses
 import pathlib
+import random
 from datetime import timedelta
 
 import torch
@@ -109,7 +110,8 @@ class SgLangStrategy(InferenceStrategy):
                 "trust_remote_code": True,
                 "tp_size": tp_size,
                 "log_level": sglang_config.get("log_level", "info"),
-                "port": 30000 + dp_rank * 500,
+                # socket default collects free port [32768 - 65535]，Thus allocate sglang port to random [20000-30000] + sglang dp_rank
+                "port": random.randint(20000, 30000) + dp_rank * 8, # nccl_port = port + random(100, 1000)
                 # 'disable_cuda_graph': True,
                 "disable_custom_all_reduce": sglang_config.get("disable_custom_all_reduce", True),
                 'nnodes': nnodes, 
