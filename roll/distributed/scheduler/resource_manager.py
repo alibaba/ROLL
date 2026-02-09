@@ -89,7 +89,8 @@ class ResourceManager:
         return self.node2pg[node_rank]
 
     def destroy_placement_group(self):
-        [ray.util.remove_placement_group(pg) for pg in self.placement_groups]
+        for pg in self.placement_groups:
+            ray.util.remove_placement_group(pg)
 
     def allocate_placement_group(self, world_size, device_mapping: List[int] = None) -> List[List[Dict]]:
         """
