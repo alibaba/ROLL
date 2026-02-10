@@ -11,7 +11,6 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from codetiming import Timer
-from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
 from torch import optim
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
@@ -438,16 +437,23 @@ class FSDP2StrategyBase(InferenceStrategy):
     def get_rng_state():
         rng_state = {
             "cpu": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state(),
             "numpy": np.random.get_state(),
             "random": random.getstate(),
         }
+        if current_platform.device_type == "cuda":
+            rng_state["device"] = torch.cuda.get_rng_state()
+        elif current_platform.device_type == "npu":
+            rng_state["device"] = torch.npu.get_rng_state()
         return rng_state
 
     @staticmethod
     def load_rng_state(rng_state):
         torch.set_rng_state(rng_state["cpu"])
-        torch.cuda.set_rng_state(rng_state["cuda"])
+        if "device" in rng_state:
+            if current_platform.device_type == "cuda":
+                torch.cuda.set_rng_state(rng_state["device"])
+            elif current_platform.device_type == "npu":
+                torch.npu.set_rng_state(rng_state["device"])
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
 
@@ -484,7 +490,7 @@ class FSDP2StrategyBase(InferenceStrategy):
         tensor = param.data if hasattr(param, "data") else param
         if isinstance(tensor, DTensor):
             original_device = tensor.device
-            if original_device.type == "cpu" and current_platform.device_type == "cuda" and torch.cuda.is_available():
+            if original_device.type == "cpu" and current_platform.device_type != "cpu":
                 tensor = tensor.to(current_platform.device_type)
             tensor = tensor.full_tensor()
             if original_device.type == "cpu":
@@ -704,6 +710,8 @@ class FSDP2StrategyBase(InferenceStrategy):
                 self.model.to("cpu", non_blocking=non_blocking)
                 if current_platform.device_type == "cuda":
                     torch.cuda.empty_cache()
+                elif current_platform.device_type == "npu":
+                    torch.npu.empty_cache()
             # When cpu_offload is disabled, optimizer states should stay on GPU
             # Only offload optimizer states if cpu_offload is enabled
         else:
@@ -1268,7 +1276,10 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
                     self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
 
-        torch.cuda.empty_cache()
+        if current_platform.device_type == "cuda":
+            torch.cuda.empty_cache()
+        elif current_platform.device_type == "npu":
+            torch.npu.empty_cache()
         return metrics
 
     def setup_model_update(self, infer_cluster, model_update_name: str):
