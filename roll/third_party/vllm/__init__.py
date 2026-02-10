@@ -64,6 +64,10 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     # Default fork method is not compatible with Roll.
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+    if Version(torch.__version__) >= Version("2.8.0"):
+        os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+        # os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN" # for 280 rollout pipeline 乱码
+
     engine_args = AsyncEngineArgs(**kwargs)
     # VLLM_USE_V1 may be modified inside create_engine_config
     vllm_config = engine_args.create_engine_config(UsageContext.ENGINE_CONTEXT)
