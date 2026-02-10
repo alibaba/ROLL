@@ -48,15 +48,6 @@ def qwen3_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=No
     kwargs["enable_thinking"] = True
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
-@register_chat_template("qwen2_5_dpo")
-def dpo_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):
-    kwargs["tokenize"] = False
-
-    # Disable generation prompt ('<|assistant|>') to avoid redundant tokens in DPO training
-    kwargs["add_generation_prompt"] = kwargs.get("add_generation_prompt", False)
-
-    return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
-
 # TODO: change template name ?
 @register_chat_template("chatml")
 def chatml_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):

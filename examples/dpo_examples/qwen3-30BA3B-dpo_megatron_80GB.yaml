@@ -9,7 +9,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "qwen2.5-3B-dpo-config"
+exp_name: "qwen3-30BA3-dpo-config"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
@@ -33,22 +33,19 @@ track_with: tensorboard
 tracker_kwargs:
   log_dir: /data/oss_bucket_0/rl_examples/llm/tensorboard/roll_exp/dpo
 
-
 max_steps: 500
 save_steps: 500
 logging_steps: 1
 eval_steps: 100
 resume_from_checkpoint: false
 
-sequence_length: 512
-train_batch_size: 64
-val_batch_size: 64
+sequence_length: 4096
 
 # local_rank: -1
 num_nodes: 1
 num_gpus_per_node: 8
 
-pretrain: Qwen/Qwen2.5-3B-Instruct
+pretrain: Qwen/Qwen3-30B-A3B
 
 ipo: false
 beta: 0.1
@@ -57,9 +54,13 @@ label_smoothing: 0.0
 chosen_key: chosen
 rejected_key: rejected
 
+is_offload_states: True
+is_offload_optimizer_states_in_train_step: True
+
+global_template: qwen2_5
+
 validation:
   data_args:
-    template: qwen2_5
     file_name: data/comparison_gpt4_data_zh.json
 
 actor_train:
@@ -71,12 +72,11 @@ actor_train:
     lr_scheduler_type: constant
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 16
-    gradient_accumulation_steps: 1
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
     warmup_steps: 20
     num_train_epochs: 10
   data_args:
-    template: qwen2_5_dpo
     file_name:
       - data/comparison_gpt4_data_zh.json
     dataset_dir: data
@@ -85,25 +85,38 @@ actor_train:
     strategy_name: megatron_train
     strategy_config:
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      expert_model_parallel_size: 8
       use_distributed_optimizer: true
-      recompute_granularity: full
-  device_mapping: list(range(0,8))
-  infer_batch_size: 16
+      recompute_granularity: selective
+      recompute_modules: "moe,layernorm"
+      moe_token_dispatcher_type: alltoall
+      bias_activation_fusion: true
+      moe_grouped_gemm: true
+      moe_shared_expert_overlap: true
+      bf16: true
+      additional_configs:
+        moe_permute_fusion: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 2
 
 reference:
   model_args:
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~
-  data_args:
-    template: qwen2_5
   strategy_args:
     strategy_name: megatron_infer
     strategy_config:
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
-  device_mapping: list(range(0,8))
-  infer_batch_size: 16
+      pipeline_model_parallel_size: 2
+      expert_model_parallel_size: 8
+      moe_token_dispatcher_type: alltoall
+      bias_activation_fusion: true
+      moe_grouped_gemm: true
+      moe_shared_expert_overlap: true
+      bf16: true
+      additional_configs:
+        moe_permute_fusion: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 2

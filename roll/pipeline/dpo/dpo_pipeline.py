@@ -66,9 +66,9 @@ def get_encode_function(template_name, tokenizer, chosen_key, rejected_key):
             chosen_conversation = build_conversation(inst, chosen)  # prompt + chosen
             rejected_conversation = build_conversation(inst, rejected)  # prompt + rejected
 
-            prompt_text = chat_template_func(prompt_conversation)
-            chosen_text = chat_template_func(chosen_conversation)
-            rejected_text = chat_template_func(rejected_conversation)
+            prompt_text = chat_template_func(prompt_conversation, add_generation_prompt=False)
+            chosen_text = chat_template_func(chosen_conversation, add_generation_prompt=False)
+            rejected_text = chat_template_func(rejected_conversation, add_generation_prompt=False)
 
             prompt_texts.append(prompt_text)
             chosen_texts.append(chosen_text)
@@ -118,14 +118,6 @@ class DPOPipeline(BasePipeline):
             tokenizer=self.tokenizer,
             max_length=self.pipeline_config.sequence_length,
         )
-        self.dataloader = DataLoader(
-            dataset=self.dataset,
-            batch_size=self.pipeline_config.train_batch_size,  # actual batch size is 2*batch_size, as there are chosen and rejected
-            shuffle=True,
-            drop_last=True,
-            num_workers=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
-            collate_fn=data_collator,
-        )
 
         self.val_dataset = None
         if self.pipeline_config.validation.data_args:
@@ -136,14 +128,6 @@ class DPOPipeline(BasePipeline):
                 self.pipeline_config.sequence_length,
                 encode_function,
                 num_proc=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
-            )
-            self.val_dataloader = DataLoader(
-                dataset=self.val_dataset,
-                batch_size=self.pipeline_config.val_batch_size,
-                shuffle=True,
-                drop_last=True,
-                num_workers=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
-                collate_fn=data_collator,
             )
 
         assert self.pipeline_config.max_steps > 0, "max_steps must be greater than 0"
@@ -162,15 +146,52 @@ class DPOPipeline(BasePipeline):
             worker_config=self.pipeline_config.reference,
         )
 
-        if self.val_dataset:
-            val_pipeline_config = copy.deepcopy(self.pipeline_config)
-            val_pipeline_config.is_use_additional_prompts = False
-
         refs: List[ray.ObjectRef] = []
         refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=False))
 
         refs: List[ray.ObjectRef] = []
         refs.extend(self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
+
+        dp_size = self.actor_train.dp_size
+        ga_steps = self.pipeline_config.actor_train.training_args.gradient_accumulation_steps
+        # Divide by 2 because batch_size was doubled in __post_init__
+        per_device_train_batch_size = self.pipeline_config.actor_train.training_args.per_device_train_batch_size // 2
+        self.global_train_batch_size = dp_size * ga_steps * per_device_train_batch_size
+
+        self.dataloader = DataLoader(
+            dataset=self.dataset,
+            batch_size=self.global_train_batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
+            collate_fn=data_collator,
+        )
+
+        # Assert reference inference capacity is sufficient
+        reference_infer_global_batch_size = (self.pipeline_config.reference.infer_batch_size//2) * self.reference.dp_size
+        assert reference_infer_global_batch_size <= self.global_train_batch_size, (
+            f"reference_infer_global_batch_size ({reference_infer_global_batch_size}) must be <= global train batch size ({self.global_train_batch_size})"
+        )
+
+        if self.val_dataset:
+            val_pipeline_config = copy.deepcopy(self.pipeline_config)
+            val_pipeline_config.is_use_additional_prompts = False
+
+            # Divide by 2 because infer_batch_size was doubled in __post_init__
+            infer_batch_size = self.pipeline_config.actor_train.infer_batch_size // 2
+            self.global_val_batch_size = dp_size * ga_steps * infer_batch_size
+            self.val_dataloader = DataLoader(
+                dataset=self.val_dataset,
+                batch_size=self.global_val_batch_size,
+                shuffle=True,
+                drop_last=True,
+                num_workers=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
+                collate_fn=data_collator,
+            )
+
+            assert reference_infer_global_batch_size <= self.global_val_batch_size, (
+                f"reference_infer_global_batch_size ({reference_infer_global_batch_size}) must be <= global val batch size ({self.global_val_batch_size})"
+            )
 
         self.set_checkpoint_clusters(self.actor_train)
 
@@ -198,8 +219,8 @@ class DPOPipeline(BasePipeline):
                 with Timer(name="step_total", logger=None) as step_total_timer:
                     batch_dict: Dict
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
-                    batch.meta_info = {"global_step": global_step, "is_offload_states": False,
-                                       "is_offload_optimizer_states_in_train_step": False, 'loss_mask_keys': []}
+                    batch.meta_info = {"global_step": global_step, "is_offload_states": self.pipeline_config.is_offload_states,
+                                       "is_offload_optimizer_states_in_train_step": self.pipeline_config.is_offload_optimizer_states_in_train_step, 'loss_mask_keys': []}
 
                     with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                         ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
@@ -248,7 +269,8 @@ class DPOPipeline(BasePipeline):
         for batch_dict in tqdm(self.val_dataloader):
             batch_dict: Dict
             batch: DataProto = DataProto.from_single_dict(batch_dict)
-            batch.meta_info['loss_mask_keys'] = []
+            batch.meta_info = {"is_offload_states": self.pipeline_config.is_offload_states,
+                               'loss_mask_keys': []}
 
             with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                 ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)

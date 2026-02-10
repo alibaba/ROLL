@@ -13,14 +13,6 @@ class DPOConfig(BaseConfig):
     # global
     global_template: str = field(default=None, metadata={"help": "The template of the global."})
 
-    train_batch_size: int = field(
-        default=16,
-        metadata={"help": "batch_size for one train step"},
-    )
-    val_batch_size: int = field(
-        default=32,
-        metadata={"help": "batch_size for validate step"},
-    )
     max_grad_norm: float = field(default=1.0, metadata={"help": "Maximum norm"})
 
     # role related
@@ -80,6 +72,12 @@ class DPOConfig(BaseConfig):
 
         self.actor_train.apply_loss_scale = False
         self.reference.apply_loss_scale = False
+
+        # DPO uses paired samples (chosen + rejected), so we double the batch size
+        # to maintain the same effective sample count as single-sample training
+        self.actor_train.infer_batch_size *= 2
+        self.actor_train.training_args.per_device_train_batch_size *= 2
+        self.reference.infer_batch_size *= 2
 
     def set_max_steps(self, max_steps: int):
         self.max_steps = max_steps

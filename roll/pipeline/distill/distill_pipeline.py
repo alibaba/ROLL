@@ -284,7 +284,7 @@ class DistillPipeline(BasePipeline):
                     metrics_mgr.add_metric("time/val", val_timer.last)
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                batch.meta_info = {"global_step": global_step, "is_offload_states": False, "is_offload_optimizer_states_in_train_step": False,
+                batch.meta_info = {"global_step": global_step, "is_offload_states": self.pipeline_config.is_offload_states, "is_offload_optimizer_states_in_train_step": self.pipeline_config.is_offload_optimizer_states_in_train_step,
                                    'loss_mask_keys': ['labels_for_loss']}
                 # Reorder data for DP rank load balancing
                 batch_balance_metrics = batch_balance(batch, dp_size=self.student.dp_size, minibatch_size=self.batch_size)
@@ -336,7 +336,7 @@ class DistillPipeline(BasePipeline):
     @torch.no_grad()
     def val(self):
         val_loss_list = []
-        for batch_dict in self.val_dataloader:
+        for batch_dict in tqdm(self.val_dataloader, desc="Validating", leave=False):
             batch: DataProto = DataProto.from_single_dict(batch_dict)
             batch.meta_info = {"is_offload_optimizer_states_in_train_step": False}
             val_metrics_refs = self.student.val_step(batch, blocking=False)

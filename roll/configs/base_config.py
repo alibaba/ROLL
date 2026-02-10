@@ -161,6 +161,27 @@ class BaseConfig(ScheduleConfig):
     profiler_memory: bool = field(default=False, metadata={"help": "Whether to use profiler memory or not."})
     report_length_and_rewards: bool = field(default=False, metadata={"help": "Whether to report lengths and rewards of prompts in each epoch."})
 
+    is_offload_states: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to offload model states to CPU to save GPU memory. "
+                "Models will be offloaded after each operation and reloaded before the next one. "
+                "Reduces GPU memory usage at the cost of CPU-GPU transfer overhead."
+            )
+        }
+    )
+    is_offload_optimizer_states_in_train_step: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to offload optimizer states to CPU during training to save GPU memory. "
+                "Optimizer states will be offloaded during forward/backward and reloaded for optimizer step. "
+                "Reduces GPU memory usage at the cost of CPU-GPU transfer overhead."
+            )
+        }
+    )
+
     length_profiler_dir: str = field(
         default='./output/profiler',
         metadata={"help": "directory to write length and rewards metric of prompts"}

@@ -1,6 +1,4 @@
-import numpy as np
 import torch
-from tqdm import tqdm
 from typing import Dict
 
 from roll.distributed.scheduler.decorator import Dispatch, register
@@ -9,7 +7,6 @@ from roll.pipeline.base_worker import ActorWorker as BaseActorWorker
 from roll.platforms import current_platform
 from roll.utils.context_managers import state_offload_manger
 from roll.utils.functionals import append_to_dict
-from roll.utils.offload_states import OffloadStateType
 
 
 def get_logps(
@@ -78,24 +75,9 @@ class ActorWorker(BaseActorWorker):
         ):
             data = data.to(current_platform.device_type)
             data = self.strategy.get_data_input(data)
-            per_device_train_batch_size = self.worker_config.training_args.per_device_train_batch_size
-            backward_batch_size = (
-                per_device_train_batch_size * self.worker_config.training_args.gradient_accumulation_steps
-            )
 
-            dataloader = data.make_iterator(
-                mini_batch_size=backward_batch_size,
-                epochs=1,
-                dataloader_kwargs={"shuffle": False},
-            )
-
-            for batch_idx, data in tqdm(
-                enumerate(dataloader),
-                desc=f"{self.worker_name} train global step {global_step}",
-                total=data.batch.batch_size[0] // backward_batch_size,
-            ):
-                pg_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
-                append_to_dict(metrics, pg_metrics)
+            pg_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
+            append_to_dict(metrics, pg_metrics)
 
             metrics["actor/lr"] = self.strategy.scheduler.get_last_lr()[0]
             data.to("cpu")
