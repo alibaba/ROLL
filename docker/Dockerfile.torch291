@@ -1,0 +1,27 @@
+FROM nvcr.io/nvidia/pytorch:25.10-py3
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm-256color
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV PIP_CONSTRAINT=""
+
+RUN pip install --upgrade --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    pip setuptools setuptools_scm wheel
+
+RUN pip uninstall -y torch torchvision torchao torch-tensorrt pytorch-triton
+
+RUN pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+
+RUN apt-get update && apt-get install -y iproute2 tmux zip
+
+RUN apt-get install -y openjdk-21-jdk
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+
+RUN pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    "megatron-core>=0.15.0,<0.16.0" "flash-linear-attention"
+
+RUN pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    https://github.com/vllm-project/vllm/releases/download/v0.15.1/vllm-0.15.1+cu130-cp38-abi3-manylinux_2_35_x86_64.whl
+
+# ROLL is not compatible with transformers>=4.57.5
+RUN pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/  "transformers==4.57.0"

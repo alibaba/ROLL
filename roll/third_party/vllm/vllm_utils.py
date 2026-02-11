@@ -1,10 +1,15 @@
 from dataclasses import field
 from typing import List
+from packaging.version import Version
 
-from vllm.lora.models import LoRAModel
+import vllm
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+if Version("0.15.0") <= Version(vllm.__version__):
+    from vllm.lora.lora_model import LoRAModel
+else:
+    from vllm.lora.models import LoRAModel
 
 
 # TODO: remove this patch once vllm 0.8.4 is deprecated

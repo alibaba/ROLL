@@ -4,11 +4,13 @@ import gc
 import os
 from collections import deque
 from typing import Dict, List, Optional
+from packaging.version import Version
 
 import torch
 import torch.distributed as dist
 from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
+import vllm
 from vllm import RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind, BeamSearchParams
@@ -108,7 +110,11 @@ class VllmStrategy(InferenceStrategy):
 
         self.model = await create_async_llm(resource_placement_groups=self.worker_config.resource_placement_groups, **vllm_config)
 
-        self.tokenizer = await self.model.get_tokenizer()
+
+        if Version("0.15.0") <= Version(vllm.__version__):
+            self.tokenizer = self.model.get_tokenizer()
+        else:
+            self.tokenizer = await self.model.get_tokenizer()
         additional_special_tokens = self.tokenizer.additional_special_tokens
         special_tokens = [
             add_token
