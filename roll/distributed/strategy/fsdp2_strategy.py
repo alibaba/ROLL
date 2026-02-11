@@ -443,7 +443,8 @@ class FSDP2StrategyBase(InferenceStrategy):
         if current_platform.device_type == "cuda":
             rng_state["device"] = torch.cuda.get_rng_state()
         elif current_platform.device_type == "npu":
-            rng_state["device"] = torch.npu.get_rng_state()
+            import torch_npu
+            rng_state["device"] = torch_npu.npu.get_rng_state()
         return rng_state
 
     @staticmethod
@@ -453,7 +454,8 @@ class FSDP2StrategyBase(InferenceStrategy):
             if current_platform.device_type == "cuda":
                 torch.cuda.set_rng_state(rng_state["device"])
             elif current_platform.device_type == "npu":
-                torch.npu.set_rng_state(rng_state["device"])
+                import torch_npu
+                torch_npu.npu.set_rng_state(rng_state["device"])
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
 
