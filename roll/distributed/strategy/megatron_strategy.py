@@ -416,13 +416,6 @@ class MegatronInferStrategy(InferenceStrategy):
         else:
             input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
             attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
-            
-            if hasattr(torch, "npu") and torch.npu.is_available() and attention_mask is not None:
-                attention_mask = attention_mask.bool()
-                B, S = attention_mask.shape
-                attention_mask = attention_mask[:, None, None, :]   # [B,1,1,S]
-                attention_mask = attention_mask.expand(B, 1, S, S)        # [B,1,S,S]
-            
             if labels is not None:
                 labels = self._get_feature_on_this_cp_rank(labels, "labels")
         position_ids = None

@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Literal, Optional, Union
+from typing import TYPE_CHECKING, Literal, Optional
 
 import torch
 import torch.nn.functional as F
@@ -18,7 +18,6 @@ from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 from ..constants import HUGGINGFACE_AUTOMAP_CACHE, MCA_CONFIG_NAME
 from ..initialize import initialize_megatron
 from ..training_args import DistributingParallelArguments, TrainingArguments
-from ..platforms import current_platform
 from ..utils import get_logger
 from .converter.template import get_template
 from .model_utils import check_and_get_attention_backend_by_env
@@ -296,14 +295,8 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             "choices": ["local", "transformer_engine"],
         },
     )
-    mindspeed_args: Optional[Union[dict, list, str]] = field(
-        default=None,
-        metadata={"help": "Extra MindSpeed args as dict, list, or JSON string/path."},
-    )
 
     def __post_init__(self):
-        self._augment_mindspeed_defaults()
-
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:
             self.overlap_p2p_comm = False
             logger.warning("Non-interleaved pipeline parallelism does not support overlapping p2p communication!")
@@ -412,65 +405,6 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 self.account_for_loss_in_pipeline_split == other.account_for_loss_in_pipeline_split,
             ]
         )
-
-    def _build_mindspeed_argv(self):
-        if self.mindspeed_args is None:
-            return []
-        if isinstance(self.mindspeed_args, dict):
-            argv = []
-            for key, value in self.mindspeed_args.items():
-                flag = key if key.startswith("-") else f"--{key.replace('_', '-')}"
-                if isinstance(value, bool):
-                    if value:
-                        argv.append(flag)
-                    continue
-                if value is None:
-                    continue
-                if isinstance(value, (list, tuple)):
-                    argv.append(flag)
-                    argv.extend([str(v) for v in value])
-                else:
-                    argv.extend([flag, str(value)])
-            return argv
-        if isinstance(self.mindspeed_args, (list, tuple)):
-            return [str(v) for v in self.mindspeed_args]
-        return []
-
-    def _augment_mindspeed_defaults(self):
-        if not current_platform.is_npu():
-            return
-        if getattr(McaModelConfig, "_mindspeed_defaults_cache", None) is None:
-            McaModelConfig._mindspeed_defaults_cache = {}
-        argv = self._build_mindspeed_argv()
-        cache_key = tuple(argv)
-        if cache_key not in McaModelConfig._mindspeed_defaults_cache:
-            defaults = {}
-            try:
-                from mindspeed.arguments import process_args
-                from argparse import ArgumentParser
-                import mindspeed.features_manager as mfm
-
-                original_features = list(mfm.FEATURES_LIST)
-                full_features = mfm.create_features_list()
-                mfm.FEATURES_LIST.clear()
-                mfm.FEATURES_LIST.extend(full_features)
-                try:
-                    parser = ArgumentParser()
-                    process_args(parser)
-                    args, _ = parser.parse_known_args(argv)
-                    defaults = vars(args)
-                finally:
-                    mfm.FEATURES_LIST.clear()
-                    mfm.FEATURES_LIST.extend(original_features)
-            except Exception:
-                defaults = {}
-            McaModelConfig._mindspeed_defaults_cache[cache_key] = defaults
-        mindspeed_defaults = McaModelConfig._mindspeed_defaults_cache.get(cache_key, {})
-        if mindspeed_defaults:
-            for name, value in mindspeed_defaults.items():
-                normalized_name = name.replace("-", "_")
-                if not hasattr(self, normalized_name):
-                    setattr(self, normalized_name, value)
 
 
 @dataclass
