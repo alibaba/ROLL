@@ -1106,5 +1106,20 @@
       "total": 166,
       "open": 5
     }
+  },
+  "2026-02-12": {
+    "stars": 2813,
+    "forks": 214,
+    "contributors": 41,
+    "commits": 388,
+    "issues": {
+      "total": 177,
+      "open": 75,
+      "fixRate": 57
+    },
+    "prs": {
+      "total": 167,
+      "open": 6
+    }
   }
 }
