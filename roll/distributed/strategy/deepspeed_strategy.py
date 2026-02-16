@@ -23,7 +23,7 @@ from roll.platforms import current_platform
 from roll.third_party.deepspeed.model_update import DeepSpeedWeightUpdater
 from roll.third_party.deepspeed.offload_states_patch import bind_deepspeed_offload_states_func
 from roll.utils.collective import collective
-from roll.utils.context_parallel import get_ulysses_group, set_upg_manager
+from roll.utils.context_parallel import apply_vision_dp_patch, get_ulysses_group, set_upg_manager
 from roll.utils.deepspeed_utils import get_optimizer_grouped_parameters
 from roll.utils.functionals import append_to_dict, entropy_from_logits, log_probs_from_logits
 from roll.utils.constants import IGNORE_INDEX
@@ -69,6 +69,7 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         if (cp_size := self.worker_config.model_args.ulysses_size) > 1:
             if current_platform.apply_ulysses_patch() is not None:
                 set_upg_manager(ulysses_size=cp_size, rank=global_rank, world_size=world_size)
+                apply_vision_dp_patch()
             else:
                 cp_size = 1
 
@@ -332,6 +333,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         if (cp_size := self.worker_config.model_args.ulysses_size) > 1:
             current_platform.apply_ulysses_patch()
             set_upg_manager(ulysses_size=cp_size, rank=global_rank, world_size=world_size)
+            apply_vision_dp_patch()
 
         self.worker.rank_info.dp_rank = global_rank // cp_size
         self.worker.rank_info.dp_size = world_size // cp_size
