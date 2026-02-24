@@ -38,6 +38,19 @@ def apply_ulysses_patch():
         return patch_info
 
 
+def _patch_vision_class(cls, key, class_name):
+    """Patch a single VisionTransformer class with Vision DP, with idempotency guard."""
+    from .vision_dp import create_dp_vision_forward
+
+    if getattr(cls, "_vision_dp_patched", False):
+        return
+    original = cls.forward
+    _original_vision_forwards[key] = original
+    cls.forward = create_dp_vision_forward(original)
+    cls._vision_dp_patched = True
+    logger.info(f"Monkey patch {class_name}.forward for Vision DP")
+
+
 def apply_vision_dp_patch():
     """Patch VisionTransformer.forward for Vision Data Parallel.
 
@@ -45,17 +58,13 @@ def apply_vision_dp_patch():
     Each rank processes 1/sp_size of images, then all-gathers embeddings.
 
     This reduces ViT peak memory by ~sp_size x (e.g. SP=4 -> ~4x reduction).
+    Safe to call multiple times -- each class is only patched once.
     """
-    from .vision_dp import create_dp_vision_forward
-
     # Patch Qwen2-VL VisionTransformer
     try:
         from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 
-        original = Qwen2VisionTransformerPretrainedModel.forward
-        _original_vision_forwards["qwen2_vl"] = original
-        Qwen2VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original)
-        logger.info("Monkey patch Qwen2VisionTransformerPretrainedModel.forward for Vision DP")
+        _patch_vision_class(Qwen2VisionTransformerPretrainedModel, "qwen2_vl", "Qwen2VisionTransformerPretrainedModel")
     except ImportError as e:
         logger.debug(f"Qwen2-VL not available for Vision DP patch: {e}")
 
@@ -65,10 +74,9 @@ def apply_vision_dp_patch():
             Qwen2_5_VisionTransformerPretrainedModel,
         )
 
-        original = Qwen2_5_VisionTransformerPretrainedModel.forward
-        _original_vision_forwards["qwen2_5_vl"] = original
-        Qwen2_5_VisionTransformerPretrainedModel.forward = create_dp_vision_forward(original)
-        logger.info("Monkey patch Qwen2_5_VisionTransformerPretrainedModel.forward for Vision DP")
+        _patch_vision_class(
+            Qwen2_5_VisionTransformerPretrainedModel, "qwen2_5_vl", "Qwen2_5_VisionTransformerPretrainedModel"
+        )
     except ImportError as e:
         logger.debug(f"Qwen2.5-VL not available for Vision DP patch: {e}")
 
@@ -76,60 +84,42 @@ def apply_vision_dp_patch():
     try:
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
-        original = Qwen3VLVisionModel.forward
-        _original_vision_forwards["qwen3_vl"] = original
-        Qwen3VLVisionModel.forward = create_dp_vision_forward(original)
-        logger.info("Monkey patch Qwen3VLVisionModel.forward for Vision DP")
+        _patch_vision_class(Qwen3VLVisionModel, "qwen3_vl", "Qwen3VLVisionModel")
     except ImportError as e:
         logger.debug(f"Qwen3-VL not available for Vision DP patch: {e}")
 
-    # Patch Qwen3-VL-MoE VisionModel
-    try:
-        from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeVisionModel
 
-        original = Qwen3VLMoeVisionModel.forward
-        _original_vision_forwards["qwen3_vl_moe"] = original
-        Qwen3VLMoeVisionModel.forward = create_dp_vision_forward(original)
-        logger.info("Monkey patch Qwen3VLMoeVisionModel.forward for Vision DP")
-    except ImportError as e:
-        logger.debug(f"Qwen3-VL-MoE not available for Vision DP patch: {e}")
+def _unapply_vision_class(cls, key):
+    """Restore a single VisionTransformer class, clearing the idempotency flag."""
+    if key in _original_vision_forwards:
+        cls.forward = _original_vision_forwards.pop(key)
+        cls._vision_dp_patched = False
 
 
 def unapply_vision_dp_patch():
     """Restore original VisionTransformer.forward methods."""
-    if "qwen2_vl" in _original_vision_forwards:
-        try:
-            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
+    try:
+        from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 
-            Qwen2VisionTransformerPretrainedModel.forward = _original_vision_forwards.pop("qwen2_vl")
-        except ImportError:
-            pass
+        _unapply_vision_class(Qwen2VisionTransformerPretrainedModel, "qwen2_vl")
+    except ImportError:
+        pass
 
-    if "qwen2_5_vl" in _original_vision_forwards:
-        try:
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-                Qwen2_5_VisionTransformerPretrainedModel,
-            )
+    try:
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+            Qwen2_5_VisionTransformerPretrainedModel,
+        )
 
-            Qwen2_5_VisionTransformerPretrainedModel.forward = _original_vision_forwards.pop("qwen2_5_vl")
-        except ImportError:
-            pass
+        _unapply_vision_class(Qwen2_5_VisionTransformerPretrainedModel, "qwen2_5_vl")
+    except ImportError:
+        pass
 
-    if "qwen3_vl" in _original_vision_forwards:
-        try:
-            from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
+    try:
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
-            Qwen3VLVisionModel.forward = _original_vision_forwards.pop("qwen3_vl")
-        except ImportError:
-            pass
-
-    if "qwen3_vl_moe" in _original_vision_forwards:
-        try:
-            from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeVisionModel
-
-            Qwen3VLMoeVisionModel.forward = _original_vision_forwards.pop("qwen3_vl_moe")
-        except ImportError:
-            pass
+        _unapply_vision_class(Qwen3VLVisionModel, "qwen3_vl")
+    except ImportError:
+        pass
 
 
 def unapply_ulysses_patch():

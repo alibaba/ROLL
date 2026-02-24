@@ -20,9 +20,17 @@ Ported from verl (https://github.com/verl-project/verl/pull/5230).
 Strategy: Distribute whole images across DP ranks, not patches within images.
 This avoids breaking cu_seqlens semantics while parallelizing ViT computation.
 
-Key difference from text SP:
-- Text SP: Split sequence within attention layers, all-to-all per layer
-- Vision DP: Split images across ranks, all_gather once at the end
+Key design choices:
+- Image-level distribution (not patch-level): avoids breaking ViT's internal
+  cu_seqlens tracking
+- Contiguous assignment: rank 0 gets images [0,1,...], rank 1 gets next chunk, etc.
+  No reordering needed after all-gather.
+- Gradient sync in backward: all_reduce(SUM) across SP ranks before slicing to
+  recover the complete gradient for each image. Without this, gradients from
+  vision tokens in other ranks' sequence shards would be lost.
+- No additional gradient scaling needed: the all_reduce aggregates partial
+  sequence gradients, making each rank's ViT backward equivalent to the non-DP
+  baseline. FSDP's dp_sp reduce-scatter then handles DP averaging as usual.
 """
 
 import torch
@@ -70,10 +78,12 @@ def assign_images_to_dp_ranks(
     patch_counts: list[int],
     dp_size: int,
 ) -> tuple[list[list[int]], list[int]]:
-    """Assign whole images to DP ranks using contiguous distribution.
+    """Assign whole images to DP ranks using load-balanced contiguous distribution.
 
-    Rank 0 gets images [0, 1, ...], rank 1 gets next chunk, etc.
-    This ensures no reordering is needed after all-gather.
+    The algorithm uses greedy contiguous bin-packing:
+    - Images are assigned in order (contiguous) to preserve ordering after gather
+    - Split points are chosen to balance total patch load across ranks
+    - Each rank gets at least one image when num_images >= dp_size
 
     Args:
         patch_counts: Number of patches per image.
@@ -91,17 +101,34 @@ def assign_images_to_dp_ranks(
     image_assignments: list[list[int]] = [[] for _ in range(dp_size)]
     rank_loads = [0] * dp_size
 
-    base_size = num_images // dp_size
-    remainder = num_images % dp_size
-
-    start = 0
+    remaining_patches = sum(patch_counts)
+    img_idx = 0
     for rank in range(dp_size):
-        chunk_size = base_size + (1 if rank < remainder else 0)
-        end = start + chunk_size
-        for img_idx in range(start, end):
+        remaining_ranks = dp_size - rank
+        remaining_images = num_images - img_idx
+
+        if remaining_images <= 0:
+            break
+
+        # Dynamic target: distribute remaining patches evenly among remaining ranks
+        target = remaining_patches / remaining_ranks
+
+        # Must leave at least 1 image for each remaining rank
+        max_images = remaining_images - (remaining_ranks - 1)
+
+        # Greedily add images until we reach the target load or hit the max
+        count = 0
+        while img_idx < num_images and count < max_images:
             image_assignments[rank].append(img_idx)
             rank_loads[rank] += patch_counts[img_idx]
-        start = end
+            img_idx += 1
+            count += 1
+
+            # Stop early once we've reached the target (always take at least 1)
+            if rank_loads[rank] >= target:
+                break
+
+        remaining_patches -= rank_loads[rank]
 
     return image_assignments, rank_loads
 
@@ -136,23 +163,32 @@ def prepare_local_vision_inputs(
             [],
         )
 
-    patch_counts = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).tolist()
-    cumsum = [0]
-    for c in patch_counts:
-        cumsum.append(cumsum[-1] + c)
+    # local_indices are contiguous (e.g. [2, 3, 4]), so use tensor slicing
+    first_img_idx = local_indices[0]
+    last_img_idx = local_indices[-1]
 
-    local_patches = []
-    local_grids = []
-    for idx in local_indices:
-        start, end = cumsum[idx], cumsum[idx + 1]
-        local_patches.append(pixel_values[start:end])
-        local_grids.append(grid_thw[idx : idx + 1])
+    # Compute patch offsets using cumsum
+    patch_counts = get_image_patch_counts(grid_thw)
+    patch_counts_tensor = torch.tensor(patch_counts, device=grid_thw.device, dtype=torch.long)
+    offsets = torch.cat(
+        (
+            torch.tensor([0], device=grid_thw.device, dtype=torch.long),
+            torch.cumsum(patch_counts_tensor, dim=0),
+        )
+    )
 
-    local_pixel_values = torch.cat(local_patches, dim=0)
-    local_grid_thw = torch.cat(local_grids, dim=0)
+    start_patch = offsets[first_img_idx].item()
+    end_patch = offsets[last_img_idx + 1].item()
 
-    expected_patches = sum(patch_counts[idx] for idx in local_indices)
-    assert local_pixel_values.shape[0] == expected_patches
+    local_pixel_values = pixel_values[start_patch:end_patch]
+    local_grid_thw = grid_thw[first_img_idx : last_img_idx + 1]
+
+    expected_patches = end_patch - start_patch
+    assert local_pixel_values.shape[0] == expected_patches, (
+        f"[Vision DP] Local patch count mismatch: "
+        f"extracted={local_pixel_values.shape[0]}, expected={expected_patches}, "
+        f"local_indices={local_indices}"
+    )
 
     return local_pixel_values, local_grid_thw, local_indices
 
@@ -161,27 +197,21 @@ class GatherVisionEmbeddings(Function):
     """All-gather vision embeddings with gradient support.
 
     Contiguous assignment means simple concat without reordering.
-    Backward: scales gradients by dp_size to compensate for partial processing.
+    Backward: all_reduce(SUM) to aggregate gradients from all sequence shards,
+              then slice to extract this rank's image gradients.
     """
 
     @staticmethod
-    def forward(ctx, local_embeddings, dp_group, grad_scaler=True):
-        ctx.grad_scaler = grad_scaler
+    def forward(ctx, local_embeddings, dp_group, all_counts: list[int]):
         dp_size = dist.get_world_size(dp_group)
         dp_rank = dist.get_rank(dp_group)
         ctx.dp_size = dp_size
+        ctx.dp_group = dp_group
+        ctx.all_counts = all_counts
+        ctx.dp_rank = dp_rank
 
         if dp_size == 1:
             return local_embeddings
-
-        local_count = torch.tensor(
-            [local_embeddings.shape[0]], dtype=torch.long, device=local_embeddings.device
-        )
-        all_counts = [torch.zeros_like(local_count) for _ in range(dp_size)]
-        dist.all_gather(all_counts, local_count, group=dp_group)
-        all_counts = [c.item() for c in all_counts]
-        ctx.all_counts = all_counts
-        ctx.dp_rank = dp_rank
 
         max_count = max(all_counts) if all_counts else 0
         if max_count == 0:
@@ -211,16 +241,19 @@ class GatherVisionEmbeddings(Function):
     @staticmethod
     def backward(ctx, grad_output):
         dp_size = ctx.dp_size
-        grad_scaler = ctx.grad_scaler
 
         if dp_size == 1:
             return grad_output, None, None
 
         all_counts = ctx.all_counts
         dp_rank = ctx.dp_rank
+        dp_group = ctx.dp_group
 
-        if grad_scaler:
-            grad_output = grad_output * dp_size
+        # Aggregate gradient contributions from all SP ranks.
+        # Each rank only has non-zero grad for vision tokens in its own
+        # sequence shard. Summing across ranks recovers the complete
+        # gradient for every image before we slice by image assignment.
+        dist.all_reduce(grad_output, op=dist.ReduceOp.SUM, group=dp_group)
 
         start = sum(all_counts[:dp_rank])
         end = start + all_counts[dp_rank]
@@ -228,13 +261,13 @@ class GatherVisionEmbeddings(Function):
         return local_grad, None, None
 
 
-def gather_vision_embeddings(local_embeddings, dp_group=None, grad_scaler=True):
+def gather_vision_embeddings(local_embeddings, dp_group, all_counts: list[int]):
     """All-gather vision embeddings from all DP ranks.
 
     Args:
         local_embeddings: This rank's vision embeddings.
         dp_group: Process group for all-gather. Defaults to Ulysses group.
-        grad_scaler: Whether to scale gradients in backward pass.
+        all_counts: Pre-computed embedding counts per rank (avoids an all_gather).
 
     Returns:
         All-gathered embeddings concatenated across ranks.
@@ -242,7 +275,7 @@ def gather_vision_embeddings(local_embeddings, dp_group=None, grad_scaler=True):
     dp_group = get_ulysses_group() if dp_group is None else dp_group
     if dp_group is None or dist.get_world_size(dp_group) == 1:
         return local_embeddings
-    return GatherVisionEmbeddings.apply(local_embeddings, dp_group, grad_scaler)
+    return GatherVisionEmbeddings.apply(local_embeddings, dp_group, all_counts)
 
 
 def create_dp_vision_forward(original_forward):
@@ -269,8 +302,12 @@ def create_dp_vision_forward(original_forward):
         dp_group = get_ulysses_group()
         dp_rank = dist.get_rank(dp_group)
 
+        # Move grid_thw to CPU once to avoid repeated GPU->CPU syncs in
+        # metadata helpers (grid_thw is a tiny [num_images, 3] tensor).
+        grid_thw_cpu = grid_thw.cpu()
+
         # Step 1: Get image assignment
-        patch_counts = get_image_patch_counts(grid_thw)
+        patch_counts = get_image_patch_counts(grid_thw_cpu)
         total_patches = sum(patch_counts)
         assert hidden_states.shape[0] == total_patches
 
@@ -280,10 +317,10 @@ def create_dp_vision_forward(original_forward):
         elif hasattr(self, "spatial_merge_size"):
             spatial_merge_size = self.spatial_merge_size
 
-        embedding_counts = get_image_embedding_counts(grid_thw, spatial_merge_size)
+        embedding_counts = get_image_embedding_counts(grid_thw_cpu, spatial_merge_size)
         total_embeddings = sum(embedding_counts)
 
-        image_assignments, rank_loads = assign_images_to_dp_ranks(patch_counts, dp_size)
+        image_assignments, _ = assign_images_to_dp_ranks(patch_counts, dp_size)
 
         # Step 2: Extract local inputs
         local_pixels, local_grid_thw, local_indices = prepare_local_vision_inputs(
@@ -328,7 +365,9 @@ def create_dp_vision_forward(original_forward):
             local_embeddings, deepstack_outputs = local_embeddings[0], local_embeddings[1:]
 
         # Step 4: All-gather
-        all_embeddings = gather_vision_embeddings(local_embeddings, dp_group)
+        # Compute per-rank embedding counts locally (grid_thw is replicated on all ranks)
+        all_counts = [sum(embedding_counts[i] for i in image_assignments[r]) for r in range(dp_size)]
+        all_embeddings = gather_vision_embeddings(local_embeddings, dp_group, all_counts)
         assert all_embeddings.shape[0] == total_embeddings
 
         if deepstack_outputs is not None:
@@ -339,10 +378,10 @@ def create_dp_vision_forward(original_forward):
                     # List of tensors (one per deepstack layer)
                     gathered_list = []
                     for single_emb in ds_emb:
-                        gathered_list.append(gather_vision_embeddings(single_emb, dp_group))
+                        gathered_list.append(gather_vision_embeddings(single_emb, dp_group, all_counts))
                     gathered_deepstack.append(gathered_list)
                 elif isinstance(ds_emb, torch.Tensor):
-                    gathered_deepstack.append(gather_vision_embeddings(ds_emb, dp_group))
+                    gathered_deepstack.append(gather_vision_embeddings(ds_emb, dp_group, all_counts))
                 else:
                     gathered_deepstack.append(ds_emb)
             return (all_embeddings, *gathered_deepstack)
