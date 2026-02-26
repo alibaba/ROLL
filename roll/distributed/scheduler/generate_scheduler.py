@@ -1045,11 +1045,11 @@ class DynamicSamplingScheduler(RolloutMockMixin, Scheduler):
 
         batch = DataProto.concat(list(collect_data_by_domain.values()))
         # TODO support response_filter_count and query_filter_count
-        batch.meta_info["metrics"] = {
+        batch.meta_info.setdefault("metrics", {}).update({
             f"scheduler/collect_query_count": query_use_count,
             f"scheduler/query_use_count": query_use_count,
             f"scheduler/off_policy_ratio": data_off_policy_step,
-        }
+        })
 
         metrics = {}
         for domain, response_batch in collect_data_by_domain.items():
