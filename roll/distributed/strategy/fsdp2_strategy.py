@@ -124,6 +124,12 @@ class FSDP2StrategyBase(InferenceStrategy):
             self.checkpoint_manager = CheckpointManager(checkpoint_config=checkpoint_config)
         self._model_update_device_buffer: Optional[torch.Tensor] = None
         self.weight_updaters = {}
+        self._dcp_process_group: Optional[dist.ProcessGroup] = None
+
+    def _get_dcp_process_group(self) -> Optional[dist.ProcessGroup]:
+        if self._dcp_process_group is None:
+            self._dcp_process_group = dist.new_group(backend="gloo", group_desc="roll_dcp_checkpoint_pg")
+        return self._dcp_process_group
 
     def _get_dp_rank(self) -> int:
         rank_info = getattr(self.worker, "rank_info", None)
@@ -172,6 +178,7 @@ class FSDP2StrategyBase(InferenceStrategy):
 
         rng_state = self.get_rng_state()
         state_dict["rng_state"] = rng_state
+        dcp_process_group = self._get_dcp_process_group()
 
         if not self.async_save_strategy or is_last_step:
             if self.checkpoint_future is not None:
@@ -180,6 +187,7 @@ class FSDP2StrategyBase(InferenceStrategy):
             dcp.save(
                 state_dict=state_dict,
                 checkpoint_id=checkpoint_dir,
+                process_group=dcp_process_group,
             )
         else:
             if self.checkpoint_future is not None:
@@ -187,6 +195,7 @@ class FSDP2StrategyBase(InferenceStrategy):
             self.checkpoint_future = dcp.async_save(
                 state_dict=state_dict,
                 checkpoint_id=checkpoint_dir,
+                process_group=dcp_process_group,
             )
 
     def _load_checkpoint_with_dcp(self, checkpoint_dir: str):
@@ -203,10 +212,12 @@ class FSDP2StrategyBase(InferenceStrategy):
             state_dict["scheduler"] = scheduler
 
         state_dict["rng_state"] = {}
+        dcp_process_group = self._get_dcp_process_group()
 
         dcp.load(
             state_dict=state_dict,
             checkpoint_id=checkpoint_dir,
+            process_group=dcp_process_group,
         )
 
         if "rng_state" in state_dict and state_dict["rng_state"]:
@@ -320,14 +331,6 @@ class FSDP2StrategyBase(InferenceStrategy):
         dcp_checkpoint_dir = self._get_dcp_checkpoint_dir(save_dir)
         os.makedirs(dcp_checkpoint_dir, exist_ok=True)
 
-        with Timer("dcp_save", logger=None) as dcp_timer:
-            self._save_checkpoint_with_dcp(checkpoint_dir=dcp_checkpoint_dir, is_last_step=is_last_step)
-
-        # PumpkinComment:
-        # If DCP save is async, uploading (which may copy+delete the local dir) must not start
-        # until the async save has fully finished writing checkpoint shards.
-        dcp_save_future = self.checkpoint_future if (self.async_save_strategy and not is_last_step) else None
-
         with Timer("hf_save", logger=None) as hf_timer:
             full_state_options = self._get_dcp_state_dict_options(full_state_dict=True)
             full_model_state = get_model_state_dict(
@@ -345,6 +348,14 @@ class FSDP2StrategyBase(InferenceStrategy):
                 self.tokenizer.save_pretrained(save_dir)
                 if getattr(self, "processor", None):
                     self.processor.save_pretrained(save_dir)
+
+        with Timer("dcp_save", logger=None) as dcp_timer:
+            self._save_checkpoint_with_dcp(checkpoint_dir=dcp_checkpoint_dir, is_last_step=is_last_step)
+
+        # PumpkinComment:
+        # If DCP save is async, uploading (which may copy+delete the local dir) must not start
+        # until the async save has fully finished writing checkpoint shards.
+        dcp_save_future = self.checkpoint_future if (self.async_save_strategy and not is_last_step) else None
 
         checkpoint_config = getattr(self.worker_config, "checkpoint_config", None) or {}
         async_upload = checkpoint_config.get("async_upload", True)
@@ -609,6 +620,7 @@ class FSDP2StrategyBase(InferenceStrategy):
             logger.warning(f"fsdp_size {fsdp_size} is not equal to world_size {world_size}, using world_size instead")
             fsdp_size = world_size
 
+        self.worker_config.strategy_args.strategy_config["fsdp_size"] = fsdp_size
         self.device_mesh = create_device_mesh_with_ulysses(world_size=world_size, fsdp_size=fsdp_size)
 
         model_name_or_path = download_model(self.worker_config.model_args.model_name_or_path)
@@ -761,6 +773,7 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
             )
 
         # Store configuration for fully_shard()
+        print(f"[DEBUG] fsdp_config: {self.worker_config.strategy_args.strategy_config.get('fsdp_size', 1)}")
         self.fsdp_config = {
             "mesh": self.device_mesh,
             "reshard_after_forward": reshard_after_forward,
@@ -806,9 +819,9 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
 
         cp_size = self.worker.rank_info.cp_size
         batch_num_tokens = self._get_batch_num_tokens(batch)
-        batch.meta_info['batch_num_tokens'] = {k: v // cp_size for k, v in batch_num_tokens.items()}
+        batch.meta_info["batch_num_tokens"] = {k: v // cp_size for k, v in batch_num_tokens.items()}
         global_valid_tokens = self._get_global_valid_samples(batch)
-        batch.meta_info['global_valid_samples'] = {k: v // cp_size for k, v in global_valid_tokens.items()}
+        batch.meta_info["global_valid_samples"] = {k: v // cp_size for k, v in global_valid_tokens.items()}
 
         loss_scale = num_microbatches * self.worker.rank_info.dp_size
 
@@ -1170,11 +1183,11 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
 
         cp_size = self.worker.rank_info.cp_size
         batch_num_tokens = self._get_batch_num_tokens(batch)
-        batch.meta_info['batch_num_tokens'] = {k: v // cp_size for k, v in batch_num_tokens.items()}
+        batch.meta_info["batch_num_tokens"] = {k: v // cp_size for k, v in batch_num_tokens.items()}
         global_valid_tokens = self._get_global_valid_samples(batch)
-        batch.meta_info['global_valid_samples'] = {k: v // cp_size for k, v in global_valid_tokens.items()}
+        batch.meta_info["global_valid_samples"] = {k: v // cp_size for k, v in global_valid_tokens.items()}
         loss_scale = mini_steps * self.worker.rank_info.dp_size
-        batch.meta_info['micro_batch_size'] = mini_batch_size
+        batch.meta_info["micro_batch_size"] = mini_batch_size
 
         gradient_accumulation_steps = self.worker_config.training_args.gradient_accumulation_steps
 
