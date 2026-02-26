@@ -2,7 +2,6 @@ import os
 from typing import List, Type, Dict, Union, Any
 
 import ray
-import ray._private.ray_constants as ray_constants
 from ray._private.async_compat import has_async_methods
 from ray._private.worker import RemoteFunctionNoArgs
 from ray.runtime_env import RuntimeEnv
@@ -147,7 +146,7 @@ class Cluster:
 
             if has_async_methods(self.worker_cls.__ray_metadata__.modified_class):
                 max_concurrency = (self.worker_config.max_concurrency if self.worker_config.max_concurrency > 1
-                                else ray_constants.DEFAULT_MAX_CONCURRENCY_ASYNC)
+                                else 1000) # equivalent to DEFAULT_MAX_CONCURRENCY_ASYNC in ray
                 logger.info(f"set max_concurrency to {max_concurrency} for worker {type(self.worker_cls)}")
             else:
                 assert self.worker_config.max_concurrency == 1
