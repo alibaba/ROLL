@@ -503,7 +503,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
                     self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
         return metrics
 
-    def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", local_state_path=None, **kwargs):
+    def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", local_state_path=None, is_last_step=None, **kwargs):
         """
         save ckpt/hf model/tokenizer to local dir
         save_dir/actor_train/{hf files}
@@ -540,7 +540,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             # save tokenizer
         self.model.save_checkpoint(save_dir, tag=tag, **kwargs)
 
-        if self.worker_config.checkpoint_config.get("async_upload", True):
+        if self.worker_config.checkpoint_config.get("async_upload", True) and not is_last_step:
             self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=local_state_path)
         else:
             self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=local_state_path)
