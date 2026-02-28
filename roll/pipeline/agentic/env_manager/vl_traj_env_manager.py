@@ -12,7 +12,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 from codetiming import Timer
 
 from roll.datasets.collator import DataCollatorWithPaddingForMM
-from roll.distributed.scheduler.generate_scheduler import RequestScheduler
+from roll.distributed.scheduler.router import RouterManager
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
 from roll.models.model_providers import default_tokenizer_provider
@@ -62,7 +62,7 @@ class VLTrajEnvManager(TrajEnvManager):
         )
         self.output_queue = output_queue
         self.mode = mode
-        self.generate_scheduler: RequestScheduler = generate_scheduler
+        self.generate_scheduler: RouterManager = generate_scheduler
 
         # EnvManager states
         self.rollout_cache: Optional[RolloutCache] = None
@@ -80,7 +80,7 @@ class VLTrajEnvManager(TrajEnvManager):
 
         # Initialize reward scheduler and reward proxy BEFORE creating the environment
         # This allows passing reward components through env_config to the environment constructor
-        self.reward_scheduler: Optional[RequestScheduler] = None
+        self.reward_scheduler: Optional[RouterManager] = None
         self.reward_proxy: Optional[BaseLLMProxy] = None
         self.reward_tokenizer: Optional[PreTrainedTokenizer] = None
 

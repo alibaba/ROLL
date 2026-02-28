@@ -344,7 +344,7 @@ class InferWorker(Worker):
         self.strategy = create_strategy(worker=self)
 
         await self.strategy.initialize(model_provider=default_actor_model_provider)
-        self.tokenizer = self.strategy.tokenizer
+        self.tokenizer = getattr(self.strategy, "tokenizer")
         self.logger.info(f"{self.worker_name} initialized")
 
         await self.strategy.offload_states()
@@ -355,9 +355,8 @@ class InferWorker(Worker):
         # there is no chance to init platform context.
         current_platform.init()
 
-    # TODO shigao 之前stop_server会返回一些offload_state_manager的metrics，现在删掉是否可行
-    # def start_server
-    # def stop_server
+    def get_url(self):
+        return self.strategy.get_url()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     async def load_states(self, *args, **kwargs):
@@ -382,7 +381,7 @@ class InferWorker(Worker):
         assert getattr(self, "strategy", None) is not None, "worker has no strategy to load"
         if self.rank_info.dp_rank in target_dp_ranks:
             # AST: AST_PRECONDITION(is_model_in_gpu is False) - verify strategy offloaded before load
-            is_loaded = self._get_strategy_load_state()
+            is_loaded = self.strategy.is_model_in_gpu()
 
             assert is_loaded is False, (
                     f"Pre-condition: strategy must be offloaded before load_states_partial, "
@@ -418,7 +417,7 @@ class InferWorker(Worker):
         assert getattr(self, "strategy", None) is not None, "worker has no strategy to offload"
         if self.rank_info.dp_rank in target_dp_ranks:
             # AST: AST_PRECONDITION(is_model_in_gpu is True) - verify strategy loaded before offload
-            is_loaded = self._get_strategy_load_state()
+            is_loaded = self.strategy.is_model_in_gpu
 
             assert is_loaded is True, (
                     f"Pre-condition: strategy must be loaded before offload_states_partial, "
@@ -494,50 +493,30 @@ class InferWorker(Worker):
         data = data.to("cuda")
         data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
 
-        is_offload_states = data.meta_info.get("is_offload_states", True)
-        # state_offload_manager does not support async context
-        await self.strategy.load_states()
-        try:
-            output = await self.strategy.generate(batch=data, generation_config=generation_config)
-            output = postprocess_generate(
-                prompts=data,
-                output=output,
-                num_return_sequences=generation_config["num_return_sequences"],
-                sequence_length=self.pipeline_config.sequence_length,
-                eos_token_id=self.tokenizer.eos_token_id,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-            data.to("cpu")
-            output = output.to("cpu")
-        finally:
-            if is_offload_states:
-                await self.strategy.offload_states()
-
+        output = await self.strategy.generate(batch=data, generation_config=generation_config)
+        output = postprocess_generate(
+            prompts=data,
+            output=output,
+            num_return_sequences=generation_config["num_return_sequences"],
+            sequence_length=self.pipeline_config.sequence_length,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+        )
+        data.to("cpu")
+        output = output.to("cpu")
         return output
 
-    async def generate_request(self, data: DataProto):
+    async def generate_request(self, payload: Dict) -> Dict:
         """
-        data req meta_info里需要包含: request_id: str
-        generation_config, 按request设置
-
-        on request cancellation: return DataProto with finish_reasons 'abort'
+        payload: {
+            input_ids": list[int],
+            Optinal(multi_modal_data): dict[prompt_token_ids: list[int], multi_modal_data: dict[iamge, ...]],
+            rid: str,
+            sampling_params: dict,
+            Optional(**strategy_specific_fields), # e.g. return_logprob for sglang
+        }
         """
-        is_num_return_sequences_expand = data.meta_info.get("is_num_return_sequences_expand", False)
-        if "generation_config" not in data.meta_info:
-            generation_config = self.worker_config.generating_args.to_dict()
-            if is_num_return_sequences_expand:
-                self.worker_config.generating_args.num_return_sequences = 1
-                generation_config["num_return_sequences"] = 1
-                self.logger.info(f"is_num_return_sequences_expand is True, set num_return_sequences to 1.")
-        else:
-            generation_config = data.meta_info["generation_config"]
-        generation_config["eos_token_id"] = [self.tokenizer.eos_token_id, self.tokenizer.pad_token_id]
-        generation_config["pad_token_id"] = self.tokenizer.pad_token_id
-        data.meta_info["generation_config"] = generation_config
-        data = await self.strategy.generate_request(data=data)
-        data.meta_info["eos_token_id"] = self.tokenizer.eos_token_id
-        data.meta_info["pad_token_id"] = self.tokenizer.pad_token_id
-        return data
+        return await self.strategy.generate_request(payload=payload)
 
     async def abort_requests(self, request_ids):
         await self.strategy.abort_requests(request_ids)

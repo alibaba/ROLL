@@ -2,7 +2,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-from roll.configs.base_config import PPOConfig
+from roll.configs.base_config import PPOConfig, RouterArguments
 from roll.configs.worker_config import WorkerConfig
 from roll.utils.logging import get_logger
 
@@ -159,6 +159,10 @@ class RLVRConfig(PPOConfig):
             self.reference.worker_cls = "roll.pipeline.rlvr.actor_worker.ActorWorker"
         if self.critic.worker_cls is None:
             self.critic.worker_cls = "roll.pipeline.base_worker.CriticWorker"
+
+        if self.router_args is None:
+            self.router_args = RouterArguments(router_name="PromptAffinityRouter", router_config=dict())
+            self.router_args.max_running_requests = self.max_running_requests
 
         logger.info(f"actor_train.worker_cls: {self.actor_train.worker_cls}")
 

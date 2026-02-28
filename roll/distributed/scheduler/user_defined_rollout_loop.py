@@ -9,8 +9,8 @@ from torch.nn.utils.rnn import pad_sequence
 from roll.distributed.scheduler.generate_scheduler import (
     RolloutContext,
     expand_requests,
-    is_report_data_finished,
 )
+from roll.distributed.scheduler.router import is_report_data_finished
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.distributed.scheduler.protocol import DataProto
@@ -56,9 +56,8 @@ def response_filter(data_item, config):
 def postprocess_paused_data(pre_data, data: DataProto, sequence_length, prompt_length) -> DataProto:
     if "output_token_ids" not in data.meta_info:  # abort without inferred a token
         # too many this log means need more infer workers
-        logger.info(f"received data without output_token_ids, request_id: {data.meta_info['request_id']}")
+        logger.info(f"received data without output_token_ids")
         return pre_data
-    logger.debug(f"received paused data, request_id: {data.meta_info['request_id']}")
 
     assert len(data.meta_info["output_token_ids"]) == 1, (
         "async pipeline only support num_return_sequences=1 or is_num_return_sequences_expand=True"
@@ -198,6 +197,8 @@ class UserDefinedRolloutLoop:
             responses_list: List[List[DataProto]] = await asyncio.gather(
                 *[self._generate_and_reward(context=context, req=req, domain=domain) for req in request_data_list]
             )
+            if not all(sublist is not None for sublist in responses_list):
+                return None
             responses: List[DataProto] = [item for sublist in responses_list for item in sublist]
             # User can call RolloutContext.abort_running_requests to abort any running generate requests (generate will return a response
             # with finish_reason=="abort", user should distinguish this from partial rollout to avoid dead loop).
@@ -241,6 +242,7 @@ class UserDefinedRolloutLoop:
                     break
                 else:
                     if not collect_unfinished:
+                        logger.info(f"received unfinished response {context.prompt_id=}")
                         # return None to abort this prompt
                         return
                     else:

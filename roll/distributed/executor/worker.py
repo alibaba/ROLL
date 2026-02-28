@@ -111,29 +111,6 @@ class Worker:
     def get_master_addr_and_port(self):
         return self.master_addr, self.master_port
 
-    def _get_strategy_load_state(self) -> Optional[bool]:
-        """Check if strategy model is loaded in GPU.
-
-        Handles multiple strategy implementations:
-        - vLLM: strategy.is_model_in_gpu (direct attribute)
-        - SGLang: strategy.model.is_model_in_gpu (nested attribute)
-        - Others: None (not trackable)
-
-        Returns:
-            True if loaded, False if offloaded, None if not trackable
-        """
-        if getattr(self, "strategy", None) is None:
-            return None
-
-        # Try direct attribute (vLLM pattern)
-        is_loaded = getattr(self.strategy, 'is_model_in_gpu', None)
-
-        # Try nested attribute (SGLang pattern)
-        if is_loaded is None and hasattr(self.strategy, 'model'):
-            is_loaded = getattr(self.strategy.model, 'is_model_in_gpu', None)
-
-        return is_loaded
-
     @staticmethod
     def get_visible_gpus():
         return current_platform.get_visible_gpus()

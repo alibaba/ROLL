@@ -21,6 +21,7 @@ dacite
 codetiming
 more_itertools
 pybase64
+sglang-router
 
 wandb
 swanlab

@@ -263,7 +263,7 @@ def serialize_named_weights(named_weights: list[tuple[str, torch.Tensor]], infer
             "flattened_tensor": bucket.get_flattened_tensor(),
             "metadata": bucket.get_metadata(),
         }
-        serialized_tensors = MultiprocessingSerializer.serialize(flattened_tensor_data)
+        serialized_tensors = MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True)
         return serialized_tensors
 
     bucket, tensors_meta = _bucket_named_tensors(named_weights)

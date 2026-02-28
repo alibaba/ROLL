@@ -14,8 +14,9 @@ from ray.util.timer import _Timer
 from roll.datasets.global_dataset import GlobalDatasetManager
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
-from roll.distributed.scheduler.generate_scheduler import RequestScheduler
+from roll.distributed.scheduler.router import RouterManager
 from roll.distributed.scheduler.rollout_scheduler import RolloutScheduler
+from roll.configs.base_config import RouterArguments
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.agentic.agentic_config import AgenticConfig, EnvManagerConfig
 from roll.pipeline.agentic.utils import (
@@ -121,7 +122,7 @@ class AgenticPipeline(BasePipeline):
 
         if self.reward:
             # Create reward scheduler as Ray named actor for environment managers to access
-            self.reward_scheduler = RequestScheduler.options(
+            self.reward_scheduler = ray.remote(RouterManager).options(
                 name=f"RewardScheduler-{self.pipeline_config.reward.name}",
                 get_if_exists=True,
                 namespace=RAY_NAMESPACE,
@@ -131,9 +132,10 @@ class AgenticPipeline(BasePipeline):
                 ),
             ).remote(
                 infer_cluster=self.reward,
-                pipeline_config=self.pipeline_config,
-                resource_manager=self.resource_manager,
+                router_args=RouterArguments(router_name="EnvAffinityRouter"),
+                num_gpus_per_node=self.pipeline_config.num_gpus_per_node
             )
+            ray.get(self.reward_scheduler.initialize.remote())
             logger.info(f"Created reward scheduler as Ray named actor: RewardScheduler-{self.pipeline_config.reward.name}")
 
         # INIT PHASE: Create RolloutSchedulers
@@ -179,6 +181,9 @@ class AgenticPipeline(BasePipeline):
 
         if self.use_ref_model:
             refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True))
+
+        ray.get([self.train_rollout_scheduler.initialize.remote(), self.val_rollout_scheduler.initialize.remote()])
+
         # INIT PHASE: Setup Operations
         self.set_model_update_pair(
             src_cluster=self.actor_train,

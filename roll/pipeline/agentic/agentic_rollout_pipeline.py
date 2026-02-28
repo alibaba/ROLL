@@ -55,6 +55,8 @@ class AgenticRolloutPipeline(BasePipeline):
         if self.use_policy_model:
             self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=True)
 
+        ray.get(self.rollout_scheduler.initialize.remote()) # must initialize after actor_infer
+
     @torch.no_grad()
     def run(self):
 

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from omegaconf import DictConfig
 
-from roll.configs.base_config import PPOConfig
+from roll.configs.base_config import PPOConfig, RouterArguments
 from roll.configs.worker_config import WorkerConfig
 from roll.utils.logging import get_logger
 
@@ -262,6 +262,10 @@ class AgenticConfig(PPOConfig):
                 self.reward.worker_cls = "roll.pipeline.base_worker.InferWorker"
             if self.reward.name is None:
                 self.reward.name = "reward"
+
+        if self.router_args is None:
+            self.router_args = RouterArguments(router_name="EnvAffinityRouter", router_config=dict())
+            self.router_args.max_running_requests = self.max_running_requests
 
         self.train_env_manager.name = "train_env"
         self.val_env_manager.name = "val_env"

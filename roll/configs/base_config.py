@@ -30,6 +30,27 @@ class RolloutMockConfig:
     )
 
 @dataclass
+class RouterArguments:
+    router_name: Literal[
+        "PromptAffinityRouter",
+        "EnvAffinityRouter",
+        "SglangRouter",
+    ] = field(
+        default=None,
+        metadata={
+            "help": "The name of the router."
+        },
+    )
+    router_config: Dict = field(
+        default_factory=dict,
+        metadata={"help": "Configuration dictionary for the router."},
+    )
+    max_running_requests: int = field(
+        default=128,
+        metadata={"help": "The maximum number of running requests."}
+    )
+
+@dataclass
 class ScheduleConfig:
     generate_opt_level: int = field(
         default=1,
@@ -55,6 +76,10 @@ class ScheduleConfig:
     user_defined_rollout_loop_cls: str = field(
         default="roll.distributed.scheduler.user_defined_rollout_loop.UserDefinedRolloutLoop",
         metadata={"help": "Path to class UserDefinedRolloutLoop."}
+    )
+    router_args: RouterArguments = field(
+        default=None,
+        metadata={"help": "The router configuration, encapsulated in a RouterArguments object."},
     )
 
 

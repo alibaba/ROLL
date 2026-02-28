@@ -466,6 +466,11 @@ def concatenate_input_and_output(input_ids, output_ids, num_return_sequences):
     return sequences
 
 
+def gather_unpadded_input_ids(input_ids: torch.Tensor, attention_mask: torch.Tensor):
+    gathered_input_ids = [ids[mask.bool()].tolist() for ids, mask in zip(input_ids, attention_mask)]
+    return gathered_input_ids
+
+
 def compute_reinforce_return(token_level_rewards: torch.Tensor, gamma: torch.Tensor, lambd: torch.Tensor):
     with torch.no_grad():
         advantages_reversed = []

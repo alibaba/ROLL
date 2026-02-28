@@ -2,7 +2,7 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -10,7 +10,7 @@ from ray._private import profiling
 from tqdm import tqdm
 
 from roll.distributed.executor.cluster import Cluster
-from roll.distributed.scheduler.generate_scheduler import RequestScheduler
+from roll.distributed.scheduler.router import RouterManager
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig, EnvMonitorConfig
 from roll.distributed.scheduler.rollout_mock_mixin import RolloutMockMixin
@@ -561,6 +561,7 @@ class RolloutScheduler(RolloutMockMixin):
         self.resource_manager = resource_manager
         self.infer_cluster = infer_cluster
         self.mode = mode
+        self.collator = collator
 
         env_num = self.env_manager_config.world_size * self.env_manager_config.max_env_num_per_worker
 
@@ -576,14 +577,14 @@ class RolloutScheduler(RolloutMockMixin):
             mode
         )
 
-        self.generate_scheduler = RequestScheduler.options(
-                name=f"RequestScheduler-{self.env_manager_config.name}-{mode}",
+        self.router_manager = ray.remote(RouterManager).options(
+                name=f"RouterManager-{self.env_manager_config.name}-{mode}",
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=ray.get_runtime_context().get_node_id(),
                     soft=False,
                 ),
                 max_concurrency = env_num + 1 # reserve extra one for suspend/resume
-            ).remote(infer_cluster=self.infer_cluster, pipeline_config=config, resource_manager=self.resource_manager)
+            ).remote(actor_cluster=self.infer_cluster, router_args=config.router_args, num_gpus_per_node=config.num_gpus_per_node)
 
         self.es_manager: Any = Cluster(
             name=self.env_manager_config.name,
@@ -591,33 +592,37 @@ class RolloutScheduler(RolloutMockMixin):
             resource_manager=self.resource_manager,
             worker_config=self.env_manager_config,
         )
-        self.es_manager.initialize(
-            pipeline_config=self.config,
-            generate_scheduler=self.generate_scheduler,
-            output_queue=self.env_output_queue,
-            collator=collator,
-            mode=self.mode,
-        )
 
         self.rollout_task = None
 
-        # Partial GPU mode state atomicity
-        self.mode_switch_lock = asyncio.Lock()  # Prevent concurrent shrink/expand
-
         # Initialize rollout mock mechanism from mixin
         self._init_rollout_mock()
+
+    async def initialize(self):
+        await self.router_manager.initialize.remote()
+        await asyncio.gather(*self.es_manager.initialize(
+            pipeline_config=self.config,
+            generate_scheduler=self.router_manager,
+            output_queue=self.env_output_queue,
+            collator=self.collator,
+            mode=self.mode,
+            blocking=False,
+        ))
 
     async def shutdown(self):
         if self.rollout_task is None:
             return
         await asyncio.gather(*self.es_manager.stop(blocking=False))
         await self.env_output_queue.shutdown.remote()
-        await self.generate_scheduler.abort_request.remote()
+        await self.router_manager.abort_all.remote()
+        await self.router_manager.resume.remote()
         await self.rollout_task
         self.rollout_task = None
 
     async def suspend(self):
-        await self.generate_scheduler.suspend.remote()
+        await self.router_manager.suspend.remote()
+        await self.router_manager.abort_all.remote()
+        await self.router_manager.wait_complete.remote()
 
     async def _run_rollout_loop(self, seed):
         await asyncio.gather(*self.es_manager.run_rollout_loop(seed, blocking=False))
@@ -639,7 +644,7 @@ class RolloutScheduler(RolloutMockMixin):
 
         await asyncio.gather(*self.es_manager.update_step(global_step, blocking=False))
         await self.env_output_queue.advance_step.remote(global_step)
-        await self.generate_scheduler.resume.remote()
+        await self.router_manager.resume.remote()
 
         get_task = asyncio.create_task(self._get_batch(batch_size, global_step))
         await asyncio.wait({get_task, self.rollout_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -705,7 +710,7 @@ class RolloutScheduler(RolloutMockMixin):
         start_time = time.time()
 
         # Delegate complete shrink operation to RequestScheduler (atomic under routing_lock)
-        result = await self.generate_scheduler.shrink_workers.remote(target_gpus)
+        result = await self.router_manager.shrink_workers.remote(target_gpus)
 
         # Add timing from RolloutScheduler perspective
         result["rollout_scheduler_duration_ms"] = (time.time() - start_time) * 1000
@@ -751,7 +756,7 @@ class RolloutScheduler(RolloutMockMixin):
         start_time = time.time()
 
         # Delegate complete expand operation to RequestScheduler (atomic under routing_lock)
-        result = await self.generate_scheduler.expand_workers.remote(target_gpus, skip_load)
+        result = await self.router_manager.expand_workers.remote(target_gpus, skip_load)
 
         # Add timing from RolloutScheduler perspective
         result["rollout_scheduler_duration_ms"] = (time.time() - start_time) * 1000

@@ -13,23 +13,17 @@ from typing import Any, Union, Optional, Dict, List, Set
 from contextlib import asynccontextmanager
 
 import numpy as np
-import ray
 import torch
 from datasets import Dataset
-from tensordict import TensorDict
-from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 from transformers import set_seed
 
 from roll.distributed.executor.cluster import Cluster
-from roll.distributed.scheduler.protocol import DataProto, collate_fn, pad_dataproto_to_divisor, unpad_dataproto
+from roll.distributed.scheduler.router import RouterManager, Router
+from roll.distributed.scheduler.protocol import DataProto, pad_dataproto_to_divisor, unpad_dataproto
 from roll.distributed.scheduler.reward_scheduler import RewardScheduler
 from roll.distributed.scheduler.rollout_mock_mixin import RolloutMockMixin
 from roll.models.model_providers import default_tokenizer_provider, default_processor_provider
-from roll.utils.functionals import (
-    postprocess_generate,
-    concatenate_input_and_output,
-)
 from roll.utils.taskgroups import TaskGroup # TODO use official TaskGroup after upgrade to python 3.11
 from roll.utils.metrics.metrics_manager import DurationTracker
 from roll.utils.import_utils import safe_import_class
@@ -38,12 +32,6 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
-
-def is_report_data_finished(data: DataProto) -> bool:
-    finish_reasons = data.meta_info.get("finish_reasons", [])
-    assert isinstance(finish_reasons, list), f"{finish_reasons}"
-    assert all(isinstance(finish_reason, str) for finish_reason in finish_reasons), f"{finish_reasons}"
-    return not any(finish_reason == "abort" for finish_reason in finish_reasons)
 
 def expand_requests(data: DataProto, num_return_sequences, is_num_return_sequences_expand):
     """
@@ -80,152 +68,6 @@ def expand_responses(response: Optional[Union[DataProto, List[DataProto]]]) -> L
             else:
                 ret.append(current)
     return ret
-
-
-class LoadBalancer:
-    """
-    Manage a bunch or workers (worker indexes). Limit the number of running requests of
-    each dp below max_running_requests.
-
-    Usage: see document of ReplayBuffer
-
-    TODO support rescheduling to differente dp_rank after model update or support dynamic dp_rank.
-    """
-
-    class Lease:
-        def __init__(self, load_balancer: "LoadBalancer", lease: int, dp_rank: int):
-            self.mutex = asyncio.Lock()
-            self.load_balancer = load_balancer
-            self.lease = lease
-            self.limit = lease
-            self.running = 0
-            self._dp_rank = dp_rank
-
-        def __del__(self):
-            # User must call clear or consume all lease to give back credit explicitly.
-            assert self.lease == 0
-
-        def clear(self):
-            assert self.lease >= 0
-            assert self.running == 0
-            self.load_balancer._release(self._dp_rank, credit=self.lease)
-            self.limit = 0
-            self.lease = 0
-
-        @asynccontextmanager
-        async def lock(self, samplen):
-            assert self.running + samplen <= self.limit # user should not over-subscribe lease
-            self.running += samplen # must add outside the lock
-
-            async with self.mutex:
-                if self.lease < samplen:
-                    extra = samplen - self.lease
-                    await self.load_balancer._reacquire(self._dp_rank, credit=extra)
-                    self.lease += extra
-                    assert self.lease == samplen
-                self.lease -= samplen
-
-            try:
-                # return dp_rank explicitly, may support dynamic dp_rank
-                yield self._dp_rank
-            finally:
-                self.running -= samplen
-                self.load_balancer._release(self._dp_rank, credit=samplen)
-
-    def __init__(self, mp_rank_zero: Dict[int, any], max_running_requests: int):
-        self.workers = {} # key: dp_rank, value: running_requests
-        self.worker_acquire_event = {}
-        for dp_rank in mp_rank_zero.keys():
-            self.workers[dp_rank] = 0
-            self.worker_acquire_event[dp_rank] = asyncio.Event()
-
-        self.max_running_requests = max_running_requests
-        self.running_request = 0
-        self.acquire_event = asyncio.Event()
-
-        self._suspend = False
-        self.suspend_event = asyncio.Event()
-        self.empty_event = asyncio.Event()
-
-    async def acquire(self, credit: int) -> Lease:
-        """
-        Dispatching n sample of a prompt to the same worker using best fit strategy (using
-        linear search for simplicity), blocking wait if no worker is available.
-        """
-        while True:
-            while self._suspend:
-                self.suspend_event.clear()
-                await self.suspend_event.wait()
-
-            target = -1
-            for dp_rank, running_requests in self.workers.items():
-                if running_requests >= self.max_running_requests:
-                    continue
-                if target == -1 or running_requests < self.workers[target]:
-                    target = dp_rank
-            if target != -1:
-                # FIXME may send more than max_running_requests (i.e. workers[target] + credit > max_running_requests)
-                self.workers[target] += credit
-                self.running_request += credit
-                return self.Lease(self, lease=credit, dp_rank=target)
-            self.acquire_event.clear()
-            await self.acquire_event.wait()
-
-    async def _reacquire(self, dp_rank: int, credit: int) -> int:
-        """
-        For multi-turn rollout.
-        """
-        assert dp_rank in self.workers
-        while True:
-            while self._suspend:
-                self.suspend_event.clear()
-                await self.suspend_event.wait()
-
-            if self.workers[dp_rank] < self.max_running_requests:
-                self.workers[dp_rank] += credit
-                self.running_request += credit
-                return
-            self.worker_acquire_event[dp_rank].clear()
-            await self.worker_acquire_event[dp_rank].wait()
-
-    def _release(self, dp_rank: int, credit: int = 1):
-        assert credit >= 0
-        self.workers[dp_rank] -= credit
-        self.running_request -= credit
-        assert self.workers[dp_rank] >= 0
-        assert self.running_request >= 0
-        self.acquire_event.set()
-        self.worker_acquire_event[dp_rank].set()
-        self.empty_event.set()
-
-    def empty(self) -> bool:
-        return sum(self.workers.values()) == 0
-
-    def full(self) -> bool:
-        return all(running_requests >= self.max_running_requests for running_requests in self.workers.values())
-
-    def suspend(self):
-        """
-        Suspend all running requests.
-
-        User calling acquire and suspended will be blocked after suspend.
-        """
-        if self._suspend:
-            return
-        self._suspend = True
-
-    async def wait_complete(self):
-        """
-        Wait until all running requests are finished (no matter
-        whether suspended or not).
-        """
-        while self.running_request > 0:
-            self.empty_event.clear()
-            await self.empty_event.wait()
-
-    def resume(self):
-        self._suspend = False
-        self.suspend_event.set()
 
 
 @dataclass
@@ -314,9 +156,8 @@ class ReplayBuffer:
     Limit running prompts (not aware of num_return_sequences) below batch_size
     or batch_size + max_additional_running_prompts.
 
-    Often used with LoadBalancer. ReplayBuffer control how many prompts can be
-    sent at the same time, and LoadBalancer limit request to ActorInfer and RewardWorker.
-    The real concurrency is limited by both ReplayBuffer and LoadBalancer.
+    ReplayBuffer only control how many prompts can be sent at the same time and do not
+    provide rate limit or load balance to ActorInfer or RewardWorker.
 
     Public interface:
         * advance_step: update current step and increate total batch size. (think of
@@ -592,200 +433,78 @@ class ReplayBuffer:
         return aborted_prompts
 
 
-class Scheduler:
-    def __init__(self):
-        self.request_id = uuid.uuid4()
-        self.request_counter = 0
-
-    def next_request_id(self):
-        request_id = f"{self.request_id}_{self.request_counter}"
-        self.request_counter += 1
-        return request_id
-
-
-@ray.remote
-class GenerateScheduler(Scheduler):
-    def __init__(self, pipeline_config=None):
-        super().__init__()
-        self.cluster: Union[Any, Cluster] = None
-        self.pipeline_config = pipeline_config
-
-        self.mp_rank_zero = {}
-        self.max_running_requests = 128
-        self.load_balancer = None
-
-    async def generate(self, data: DataProto, actor_cluster: Union[Any, Cluster], pipeline_config) -> DataProto:
-        assert self.pipeline_config is None or pipeline_config is self.pipeline_config
-        if self.cluster is None:
-            self.cluster = actor_cluster
-            dp_ranks: List[int] = [rank_info.dp_rank for rank_info in self.cluster.worker_rank_info]
-            for i, dp_rank in enumerate(dp_ranks):
-                rank_info = self.cluster.get_rank_info(rank=i)
-                if rank_info.tp_rank == 0 and rank_info.pp_rank == 0 and rank_info.cp_rank == 0:
-                    self.mp_rank_zero[dp_rank] = self.cluster.workers[i]
-
-        generate_opt_level = pipeline_config.generate_opt_level
-        num_return_sequences = actor_cluster.worker_config.generating_args.num_return_sequences
-        is_num_return_sequences_expand = pipeline_config.is_num_return_sequences_expand
-
-        if generate_opt_level == 0 and is_num_return_sequences_expand:
-            logger.warning("is_num_return_sequences_expand=True and generate_opt_level may reduce performance.")
-
-        data.meta_info["is_num_return_sequences_expand"] = is_num_return_sequences_expand
-        data.meta_info["num_return_sequences"] = num_return_sequences
-
-        generation_config = self.cluster.worker_config.generating_args.to_dict()
-        generation_config["num_return_sequences"] = num_return_sequences
-        if is_num_return_sequences_expand:
-            generation_config["num_return_sequences"] = 1
-        data.meta_info["generation_config"] = generation_config
-
-        if generate_opt_level == 0:
-            if is_num_return_sequences_expand:
-                batch_size = data.batch.batch_size[0]
-                output_batch_size = batch_size * num_return_sequences
-                input_ids = data.batch["input_ids"]
-                attention_mask = data.batch["attention_mask"]
-                position_ids = data.batch["position_ids"]
-                input_ids = input_ids.unsqueeze(1).repeat(1, num_return_sequences, 1).view(output_batch_size, -1)
-                attention_mask = (
-                    attention_mask.unsqueeze(1).repeat(1, num_return_sequences, 1).view(output_batch_size, -1)
-                )
-                if position_ids.dim() == 3:  # (bsz, 3, seqlen)
-                    # qwen2vl mrope, maybe use a placeholder and let model generate position_ids
-                    position_ids = (
-                        position_ids.unsqueeze(1)
-                        .repeat(1, num_return_sequences, 1, 1)
-                        .view(output_batch_size, *position_ids.shape[-2:])
-                    )
-                else:
-                    position_ids = (
-                        position_ids.unsqueeze(1).repeat(1, num_return_sequences, 1).view(output_batch_size, -1)
-                    )
-
-                non_tensor_batch = dict(
-                    (k, np.repeat(v, num_return_sequences)) for k, v in data.non_tensor_batch.items()
-                )
-
-                data = DataProto(
-                    batch=TensorDict(
-                        {"input_ids": input_ids, "attention_mask": attention_mask, "position_ids": position_ids},
-                        batch_size=output_batch_size,
-                    ),
-                    non_tensor_batch=non_tensor_batch,
-                    meta_info=data.meta_info,
-                )
-            output_in_dp = await asyncio.gather(*[ref.obj_ref for ref in self.cluster.generate(data=data, blocking=False)])
-            return DataProto.concat(output_in_dp)
-        elif generate_opt_level == 1:
-            return await self.generate_opt_level_1(data, num_return_sequences, is_num_return_sequences_expand)
-        else:
-            raise NotImplementedError(f"not support generate_opt_level {generate_opt_level}")
-
-    async def generate_opt_level_1(self, data: DataProto, num_return_sequences, is_num_return_sequences_expand):
-        batch_size = data.batch.batch_size[0]
-        progress_bar = tqdm(total=batch_size, desc="generate progress(prompt)", mininterval=int(batch_size * 0.1) + 1)
-        self.load_balancer = LoadBalancer(self.mp_rank_zero, self.max_running_requests)
-
-        is_offload_states = data.meta_info.get("is_offload_states", True)
-        await asyncio.gather(*[ref.obj_ref for ref in self.cluster.load_states(blocking=False)])
-
-        tasks = []
-        for data_index in range(batch_size):
-            request_data = collate_fn([data[data_index]])
-            request_data_list = expand_requests(data=request_data,
-                num_return_sequences=num_return_sequences, is_num_return_sequences_expand=is_num_return_sequences_expand)
-
-            prompt_requests = []
-            for req in request_data_list:
-                lease = await self.load_balancer.acquire(1)
-                async def _generate_reqeust(data: DataProto, lease):
-                    with lease.lock(1) as dp_rank:
-                        request_id = self.next_request_id()
-                        data.meta_info["request_id"] = request_id
-                        data.meta_info["generation_config"] = data.meta_info["generation_config"]
-                        response = await self.cluster.workers[dp_rank].generate_request.remote(data=request_data)
-                        return response
-                prompt_requests.append(asyncio.create_task(_generate_reqeust(data=req, lease=lease)))
-
-            async def gather_one_prompt(requests):
-                """
-                gather requests of one prompt
-                """
-                responses = await asyncio.gather(*requests)
-                progress_bar.update(1)
-                return responses
-            tasks.append(asyncio.create_task(gather_one_prompt(requests=prompt_requests)))
-        assert self.load_balancer.empty()
-        response_list = await asyncio.gather(*tasks)
-
-        if is_offload_states:
-            await asyncio.gather(*[ref.obj_ref for ref in self.cluster.offload_states(blocking=False)])
-        response_ids_list_of_list = []
-        eos_token_id = None
-        pad_token_id = None
-        for responses in response_list:
-            response_ids_list = []
-            for response in responses:
-                eos_token_id = response.meta_info["eos_token_id"]
-                pad_token_id = response.meta_info["pad_token_id"]
-                response_ids_list.extend(response.meta_info["output_token_ids"])
-            assert len(response_ids_list) == num_return_sequences
-            response_ids_list_of_list.extend(response_ids_list)
-
-        response_ids_list_of_list = [torch.tensor(token_ids) for token_ids in response_ids_list_of_list]
-        output_tensor = pad_sequence(response_ids_list_of_list, batch_first=True, padding_value=pad_token_id)
-        output_tensor = concatenate_input_and_output(
-            input_ids=data.batch["input_ids"],
-            output_ids=output_tensor,
-            num_return_sequences=num_return_sequences,
-        )
-        output: DataProto = postprocess_generate(
-            prompts=data,
-            output=output_tensor,
-            num_return_sequences=num_return_sequences,
-            sequence_length=self.pipeline_config.sequence_length,
-            eos_token_id=eos_token_id,
-            pad_token_id=pad_token_id,
-        )
-        return output
-
-
-class DynamicSamplingScheduler(RolloutMockMixin, Scheduler):
-    def __init__(self, pipeline_config=None):
-        super().__init__()
+class DynamicSamplingScheduler(RolloutMockMixin):
+    def __init__(
+        self,
+        pipeline_config,
+        actor_cluster: Union[Any, Cluster],
+        reward_clusters: Dict[str, Union[Any, Cluster]],
+        dataset: Dataset,
+        collect_fn_cls,
+        collect_fn_kwargs,
+        state: Dict[str, Any] = None,
+        is_val: bool = False,
+    ):
         self.pipeline_config = pipeline_config
         set_seed(seed=pipeline_config.seed)
 
-        self.sequence_length = pipeline_config.sequence_length
+        self.is_val = is_val
+        if self.is_val:
+            self.sequence_length = self.pipeline_config.val_sequence_length
+            logger.info(f"validation generate scheduler sequence_length is: {self.sequence_length}")
+        else:
+            self.sequence_length = pipeline_config.sequence_length
+            logger.info(f"training generate scheduler sequence_length is: {self.sequence_length}")
 
-        self.actor_cluster = None
-        self.mp_rank_zero = {}
+        # Initialize rollout mock mechanism from mixin (after is_val is set)
+        self._init_rollout_mock()
 
-        self.reward_clusters = None
-        self.reward_worker_iters = None
+        self.actor_cluster = actor_cluster
 
-        self.dataset = None
-        self.indices = []
+        self.reward_clusters = reward_clusters
+        self.reward_worker_iters = {}
+        for domain, cluster in reward_clusters.items():
+            self.reward_worker_iters[domain] = itertools.cycle(cluster.workers)
+
+        # metrics of a step
+        self.generate_timer = {domain: DurationTracker() for domain in reward_clusters.keys()}
+        self.reward_timer = {domain: DurationTracker() for domain in reward_clusters.keys()}
+
+        self.request_id = uuid.uuid4()
+        self.request_counter = 0
+
+        self.dataset = dataset
+        self.indices = list(range(len(dataset)))
+        if state is not None and state.get("dataset_iter_count", 0) > 0:
+            for _ in range(state["dataset_iter_count"]):
+                self.get_next_dataset_item()
         self.dataset_epoch = 0
         self.dataset_iter = None
         self.dataset_iter_count = 0
 
-        self.collect_fn_cls = None
-        self.collect_fn_kwargs = None
-        self.collect_fn = None
-        self.tokenizer = None
-        self.processor = None
+        self.collect_fn_cls = collect_fn_cls
+        self.collect_fn_kwargs = collect_fn_kwargs
+        self.tokenizer = default_tokenizer_provider(model_args=self.actor_cluster.worker_config.model_args)
+        self.processor = default_processor_provider(model_args=self.actor_cluster.worker_config.model_args)
+        if "processor" in [f.name for f in fields(collect_fn_cls)]:
+            collect_fn_kwargs["processor"] = self.processor
+        self.collect_fn = self.collect_fn_cls(tokenizer=self.tokenizer, **self.collect_fn_kwargs)
 
         self.async_sending_task = None
-        self.replay_buffer = None
-        self.load_balancer = None
-        self.running_requests = None
-        self.running_tasks = None
 
-        # metrics of a step
-        self.generate_timer = None
-        self.reward_timer = None
+        # Dynamic filter is supported no matter whether is_use_additional_prompts,
+        # is_use_additional_prompts is required when using dynamic num_return_sequences.
+        self.replay_buffer = ReplayBuffer(
+            async_generation_ratio=self.pipeline_config.async_generation_ratio if not is_val else 0,
+            is_use_additional_prompts=self.pipeline_config.is_use_additional_prompts if not is_val else False,
+            max_additional_running_prompts=self.pipeline_config.max_additional_running_prompts if not is_val else 0,
+        )
+
+        self.router_manager = RouterManager(self.actor_cluster, router_args=self.pipeline_config.router_args,
+                                            num_gpus_per_node=self.pipeline_config.num_gpus_per_node)
+        self.router_client = None
+
+        self.running_tasks: Dict[int, asyncio.Task] = {}
 
         # meta_info is reassigned every step
         self.meta_info = None
@@ -796,92 +515,23 @@ class DynamicSamplingScheduler(RolloutMockMixin, Scheduler):
 
         self.reward_scheduler = RewardScheduler()
 
-    async def set_scheduler(
-        self,
-        actor_cluster: Union[Any, Cluster],
-        reward_clusters: Dict[str, Union[Any, Cluster]],
-        dataset: Dataset,
-        collect_fn_cls,
-        collect_fn_kwargs,
-        state: Dict[str, Any] = None,
-        is_val: bool = False,
-    ):
-        """
-        GenerateScheduler可以由多个实例，不再局限于单例
-        """
-        self.is_val = is_val
-        if self.is_val:
-            self.sequence_length = self.pipeline_config.val_sequence_length
-            logger.info(f"validation generate scheduler sequence_length is: {self.sequence_length}")
-        else:
-            logger.info(f"training generate scheduler sequence_length is: {self.sequence_length}")
-
-        # Initialize rollout mock mechanism from mixin (after is_val is set)
-        self._init_rollout_mock()
-
-        self.actor_cluster = actor_cluster
-        dp_ranks: List[int] = [rank_info.dp_rank for rank_info in self.actor_cluster.worker_rank_info]
-        for i, dp_rank in enumerate(dp_ranks):
-            rank_info = self.actor_cluster.get_rank_info(rank=i)
-            if rank_info.tp_rank == 0 and rank_info.pp_rank == 0 and rank_info.cp_rank == 0:
-                self.mp_rank_zero[dp_rank] = self.actor_cluster.workers[i]
-
-        self.reward_clusters = reward_clusters
-        self.reward_worker_iters = {}
-        for domain, cluster in reward_clusters.items():
-            self.reward_worker_iters[domain] = itertools.cycle(cluster.workers)
-
-        self.generate_timer = {domain: DurationTracker() for domain in reward_clusters.keys()}
-        self.reward_timer = {domain: DurationTracker() for domain in reward_clusters.keys()}
-
-        self.dataset = dataset
-        self.indices = list(range(len(dataset)))
-        # TODO: (async training) test resume
-        if state is not None and state.get("dataset_iter_count", 0) > 0:
-            for _ in range(state["dataset_iter_count"]):
-                self.get_next_dataset_item()
-
-        self.collect_fn_cls = collect_fn_cls
-        self.collect_fn_kwargs = collect_fn_kwargs
-        self.tokenizer = default_tokenizer_provider(model_args=self.actor_cluster.worker_config.model_args)
-        self.processor = default_processor_provider(model_args=self.actor_cluster.worker_config.model_args)
-        if "processor" in [f.name for f in fields(collect_fn_cls)]:
-            collect_fn_kwargs["processor"] = self.processor
-        self.collect_fn = self.collect_fn_cls(tokenizer=self.tokenizer, **self.collect_fn_kwargs)
-
-        # Dynamic filter is supported no matter whether is_use_additional_prompts,
-        # is_use_additional_prompts is required when using dynamic num_return_sequences.
-        self.replay_buffer = ReplayBuffer(
-            async_generation_ratio=self.pipeline_config.async_generation_ratio if not is_val else 0,
-            is_use_additional_prompts=self.pipeline_config.is_use_additional_prompts if not is_val else False,
-            max_additional_running_prompts=self.pipeline_config.max_additional_running_prompts if not is_val else 0,
-        )
-        self.load_balancer = LoadBalancer(self.mp_rank_zero, self.pipeline_config.max_running_requests)
-        # dp_rank -> prompt_id -> request_ids
-        self.running_requests: Dict[int, Dict[int, Set[str]]] = {dp_rank: defaultdict(set) for dp_rank in self.mp_rank_zero.keys()}
-        self.running_tasks: Dict[int, asyncio.Task] = {}
+    async def initialize(self):
+        await self.router_manager.initialize()
+        self.router_client = await RouterManager.create_client(self.router_manager)
 
         # async_sending_task is paused at start. But can not call self.pause_sampling directly here,
-        # because ActorInfer.strategy has not been initialized yet and is not ready to serve abort_requests rpc.
-        self.load_balancer.suspend()
+        # becauseuActorInfer.strategy has not been initialized yet and is not ready to serve abort_requests rpc.
+        self.router_manager.suspend()
 
         # async_sending_task coroutine will last during the whole training process, only stop at shutdown or exception.
         # Because we do not need to pause all running prompts but only suspend generate requests, so that reward requests
         # still can run during model update.
         self.async_sending_task = asyncio.create_task(self.sending_request())
 
-    async def abort_running_requests(self):
-        dp_requests = {}
-        for dp_rank, prompt_requests in self.running_requests.items():
-            dp_requests[dp_rank] = []
-            for request_ids in prompt_requests.values():
-                dp_requests[dp_rank].extend(request_ids)
-        await asyncio.gather(
-            *[
-                self.actor_cluster.workers[dp_rank].abort_requests.remote(request_ids)
-                for dp_rank, request_ids in dp_requests.items()
-            ]
-        )
+    def next_request_id(self):
+        request_id = f"{self.request_id}_{self.request_counter}"
+        self.request_counter += 1
+        return request_id
 
     def gc(self):
         aborted_prompts = self.replay_buffer.gc()
@@ -890,18 +540,18 @@ class DynamicSamplingScheduler(RolloutMockMixin, Scheduler):
                 task.cancel()
 
     async def pause_sampling(self):
-        self.load_balancer.suspend()
+        self.router_manager.suspend()
         self.gc()
-        await self.abort_running_requests()
-        await self.load_balancer.wait_complete()
+        await self.router_manager.abort_all()
+        await self.router_manager.wait_complete()
         logger.info(f"sampling paused, replay_buffer info: {self.replay_buffer.info()}")
 
     async def shutdown(self):
         self.replay_buffer.shutdown()
-        self.load_balancer.resume()
+        self.router_manager.resume()
         self.gc()
-        await self.abort_running_requests()
-        await self.load_balancer.wait_complete()
+        await self.router_manager.abort_all()
+        await self.router_manager.wait_complete()
         await self.async_sending_task
 
     async def get_batch_opt_level_0(self, data: DataProto, batch_size: int) -> DataProto:
@@ -968,14 +618,13 @@ class DynamicSamplingScheduler(RolloutMockMixin, Scheduler):
         self.meta_info = copy.deepcopy(data.meta_info)
         self.meta_info["collect_non_finish"] = self.pipeline_config.async_generation_ratio > 0
 
-        assert self.load_balancer.empty(), f"worker state: {self.load_balancer.workers}"
-        assert all(len(requests) == 0 for prompt_requests in self.running_requests.values() for requests in prompt_requests.values())
+        assert self.router_manager.size() == 0, f"worker state: {self.router_manager.size()}"
         # Notice: self.replay_buffer.running_prompts may not be 0 because
         # pause_sampling only pause generate request but not reward request.
 
         self.replay_buffer.advance_step(step=global_step, batch_size=batch_size)
         logger.info(f"start sampling, {global_step=} {batch_size=}, {self.replay_buffer.info()}")
-        self.load_balancer.resume()
+        self.router_manager.resume()
 
         bar_name = "-".join(self.reward_clusters.keys())
         progress_bar = tqdm(
@@ -1064,9 +713,6 @@ class DynamicSamplingScheduler(RolloutMockMixin, Scheduler):
         return batch
 
     async def sending_request(self):
-        """
-        See documentation of ReplyBuffer for recommended usage of ReplayBuffer and LoadBalancer.
-        """
         async with TaskGroup() as tg:
             while True:
                 try:
@@ -1078,7 +724,7 @@ class DynamicSamplingScheduler(RolloutMockMixin, Scheduler):
                 self.running_tasks[prompt_id] = task
 
             # The above loop only break at shutdown, it is safe to abort all infligh requests here.
-            await self.abort_running_requests()
+            await self.router_manager.abort_all()
             # Implicitly wait until all running tasks finished when TaskGroup context exit.
 
     def get_next_dataset_item(self):
@@ -1108,7 +754,7 @@ class RolloutContext:
     """
     Helper class to manage life cycle of rollout of a prompt.
     Provide a context manager based interface to user and hide implementation
-    details of DynamicSamplingScheduler, LoadBalancer and ReplayBuffer from user.
+    details of DynamicSamplingScheduler, Router and ReplayBuffer from user.
     """
 
     @staticmethod
@@ -1177,7 +823,7 @@ class RolloutContext:
 
         # The following attributes are setted after generate and reward begin.
         self.sampling_start_step = None
-        self._lease: LoadBalancer.Lease = None
+        self.inflight_requests = None
         self._in_do_generate_and_reward = False
 
     def get_request_data(self, meta_info):
@@ -1202,32 +848,14 @@ class RolloutContext:
         assert not self._in_do_generate_and_reward and self.sampling_start_step is None
         self._in_do_generate_and_reward = True
 
-        # All reuqest of the same prompt are scheduled to the same worker.
-        # sample_params.n will take n credits rather than 1.
-        # LoadBalancer.acquire will block until can send new request to actor infer.
-        # Current implementation rely on the assumption that returned dp_rank is stable.
-        self._lease = await self._scheduler.load_balancer.acquire(credit=max_concurrency)
-
         # Assume sampling_start_step of all samples of this prompt are the same, however
         # the real sampling_start_step can be different from self.sampling_start_step.
-        try:
-            sampling_start_step = await self._scheduler.replay_buffer.begin(prompt_id=self.prompt_id)
-        except:
-            self._lease.clear()
-            raise
-        self.sampling_start_step = sampling_start_step
-
+        self.sampling_start_step = await self._scheduler.replay_buffer.begin(prompt_id=self.prompt_id)
+        self.inflight_requests = set()
         try:
             yield
-        except:
-            self._lease.clear()
-            raise
         finally:
-            assert (
-                self.prompt_id not in self._scheduler.running_requests[self._lease._dp_rank] or
-                len(self._scheduler.running_requests[self._lease._dp_rank][self.prompt_id]) == 0
-            ), f"User should gather all running requests: {self._scheduler.running_requests[self._lease._dp_rank][self.prompt_id]=}"
-            self._scheduler.running_requests[self._lease._dp_rank].pop(self.prompt_id, None)
+            assert not self.inflight_requests, f"User should gather all running requests: {self.inflight_requests}"
             self._in_do_generate_and_reward = False
 
     async def generate(
@@ -1236,21 +864,15 @@ class RolloutContext:
         domain: str,
     ) -> DataProto:
         assert self._in_do_generate_and_reward
-        async with self._lease.lock(samplen=req.meta_info["generation_config"]["num_return_sequences"]) as dp_rank:
-            with self._scheduler.generate_timer[domain].track():
-                request_id = self._scheduler.next_request_id()
-                req.meta_info["request_id"] = request_id
-                logger.debug(f"generate_and_reward: {self.prompt_id=} {request_id} generate_request")
-                self._scheduler.running_requests[dp_rank][self.prompt_id].add(request_id)
-                try:
-                    # InferWorker.generate_request only return data with finish_reason=="abort" on abort
-                    # but not raise asyncio.CancelledError. This try finally block may be not necessary.
-                    data = await self._scheduler.actor_cluster.workers[dp_rank].generate_request.remote(req)
-                    # TODO ray.cancel(ref) on asyncio.CancelledError
-                finally:
-                    self._scheduler.running_requests[dp_rank][self.prompt_id].remove(request_id)
-                assert data is not None
-                return data
+        with self._scheduler.generate_timer[domain].track():
+            request_id = self._scheduler.next_request_id()
+            req.meta_info["request_id"] = request_id
+            logger.debug(f"generate_and_reward: {self.prompt_id=} {request_id} generate_request")
+            self.inflight_requests.add(request_id)
+            try:
+                return await self._scheduler.router_client.generate_request(req=req, request_id=request_id, uid=self.prompt_id)
+            finally:
+                self.inflight_requests.remove(request_id)
 
     async def compute_rewards(
         self,
@@ -1277,150 +899,59 @@ class RolloutContext:
         """
         assert self._in_do_generate_and_reward
         assert self.prompt_id is not None
-        dp_rank = self._lease._dp_rank
-        request_ids = list(self._scheduler.running_requests[dp_rank][self.prompt_id])
-        await self._scheduler.actor_cluster.workers[dp_rank].abort_requests.remote(request_ids)
+        self._scheduler.router_manager.abort_requests(request_ids=list(self.inflight_requests), uid=self.prompt_id)
 
 
-@ray.remote
-class RequestScheduler:
-    def __init__(self, infer_cluster, pipeline_config, resource_manager):
-        self.infer_cluster = infer_cluster
-        self.pipeline_config = pipeline_config
-        self.resource_manager = resource_manager
-        self.request_id = uuid.uuid4()
-        self.request_counter = 0
+# TODO: move to router.py
+class EnvAffinityRouter(Router):
+    """
+    Schedule requests of the same (env) uid, to the same dp_rank.
+
+    Choose dp_rank by RR for the first time.
+
+    No rate limit now.
+
+    Do not support partial rollout now.
+    """
+    async def initialize(self):
         self.src_rank2_dp_rank = {}
-        self.request_id_2_dp_rank = {}
         self.request_id_2_src_rank: Dict[str, int] = {}  # Reverse lookup for abort
-        self.running_requests: List[set[str]] = [set() for _ in range(self.infer_cluster.world_size)]
-        self.worker_iter = itertools.cycle(range(self.infer_cluster.world_size))
-
-        self.need_suspend = False
-        self.suspend_notifier = asyncio.Event()
-        self.empty_notifier = asyncio.Event()
+        self.running_requests: List[set[str]] = [set() for _ in range(len(self.workers))]
+        self.worker_iter = itertools.cycle(range(len(self.workers)))
 
         # Active DP ranks for request routing
-        self.active_dp_ranks: Set[int] = set(range(self.infer_cluster.world_size))  # All ranks initially active
+        self.active_dp_ranks: Set[int] = set(range(len(self.workers)))  # All ranks initially active
         self.routing_lock = asyncio.Lock()  # Protect routing updates
 
-    async def generate_one_request(self, data: DataProto):
-        await self._check_suspend()
-
-        src_rank = data.meta_info["src_rank"]
+    async def generate_request(self, payload, request_id, uid):
+        src_rank = uid
         # Atomic routing assignment under lock to prevent TOCTOU race with shrink/expand
         async with self.routing_lock:
             # Least-loaded dispatch
             if src_rank not in self.src_rank2_dp_rank:
                 dp_rank = self._get_least_active_dp_rank()
                 self.src_rank2_dp_rank[src_rank] = dp_rank
+            dp_rank = self.src_rank2_dp_rank[src_rank]
 
-        dp_rank = self.src_rank2_dp_rank[src_rank]
-        request_id = f"{self.request_id}_{self.request_counter}"
-        self.request_counter += 1
-        data.meta_info["request_id"] = request_id
-
-        self.request_id_2_dp_rank[request_id] = dp_rank
         self.request_id_2_src_rank[request_id] = src_rank
         self.running_requests[dp_rank].add(request_id)
 
         try:
-            response_data = await self.infer_cluster.workers[dp_rank].generate_request.remote(data=data)
+            return await self.workers[dp_rank].generate_request.remote(payload)
         finally:
             self.running_requests[dp_rank].remove(request_id)
-            self.empty_notifier.set()
             # Cleanup tracking (on both success and abort paths)
             self.request_id_2_src_rank.pop(request_id, None)
 
-        assert response_data is not None
+    async def abort_requests(self, request_ids, uid):
+        raise NotImplementedError
 
-        if not is_report_data_finished(response_data):
-            return None
-
-        # postprocess_generate, input_ids, attention_mask, left pad
-        eos_token_id = response_data.meta_info["eos_token_id"]
-        pad_token_id = response_data.meta_info["pad_token_id"]
-        output_token_ids = response_data.meta_info["output_token_ids"]
-        output_tokens = [torch.tensor(token_ids) for token_ids in output_token_ids]
-
-        output_logprobs = response_data.meta_info.get("output_logprobs", None)
-
-        output_tensor = pad_sequence(output_tokens, batch_first=True, padding_value=pad_token_id)
-        output_tensor = concatenate_input_and_output(
-            input_ids=data.batch["input_ids"], output_ids=output_tensor, num_return_sequences=len(output_tokens)
-        )
-        output: DataProto = postprocess_generate(
-            prompts=data,
-            output=output_tensor,
-            num_return_sequences=len(output_tokens),
-            sequence_length=output_tensor.shape[-1],
-            eos_token_id=eos_token_id,
-            pad_token_id=pad_token_id,
-            pad_to_seq_len=data.meta_info.get("pad_to_seq_len", True),
-            output_logprobs=output_logprobs,
-        )
-        request_repeat = data.repeat(repeat_times=len(output_tokens))
-        output.non_tensor_batch = request_repeat.non_tensor_batch
-        output.meta_info = request_repeat.meta_info
-        return output
-
-    async def abort_request(self):
+    async def abort_all(self, request_ids):
         await asyncio.gather(*(
-            self.infer_cluster.workers[dp_rank].abort_requests.remote(list(self.running_requests[dp_rank]))
-            for dp_rank in range(self.infer_cluster.world_size)
+            self.workers[dp_rank].abort_requests.remote(list(self.running_requests[dp_rank]))
+            for dp_rank in range(len(self.workers))
             if self.running_requests[dp_rank]
         ))
-
-
-    async def _check_suspend(self):
-        while self.need_suspend:
-            await self.suspend_notifier.wait()
-
-    def empty(self):
-        return sum([len(running_requests) for running_requests in self.running_requests]) == 0
-
-    async def suspend(self):
-        if self.need_suspend:
-            return
-        self.suspend_notifier.clear()
-        self.need_suspend = True
-        await self.abort_request()
-        while not self.empty():
-            self.empty_notifier.clear()
-            await self.empty_notifier.wait()
-
-    def resume(self):
-        if not self.need_suspend:
-            return
-        self.need_suspend = False
-        self.suspend_notifier.set()
-
-    def _get_gpus_for_dp_rank(self, dp_rank: int) -> List[int]:
-        """Map DP rank to GPU IDs using cluster's device info.
-
-        Args:
-            dp_rank: Data parallel rank index (0 to dp_size-1)
-
-        Returns:
-            List of GPU IDs used by this DP rank's workers
-
-        Example:
-            # Pure DP: rank == dp_rank
-            # DP rank 0 uses GPUs [0], DP rank 1 uses GPUs [1], etc.
-            gpus = self._get_gpus_for_dp_rank(dp_rank=0)
-            # Returns: [0]
-        """
-        # In agentic pipeline (pure DP): rank == dp_rank, so directly access rank2devices
-        devices_info = self.infer_cluster.rank2devices[dp_rank]
-
-        # Extract GPU IDs: gpu_id = node_rank * num_gpus_per_node + gpu_rank
-        gpu_ids = []
-        for device in devices_info:
-            num_gpus_per_node = self.resource_manager.gpu_per_node
-            gpu_id = device["node_rank"] * num_gpus_per_node + device["gpu_rank"]
-            gpu_ids.append(gpu_id)
-
-        return sorted(set(gpu_ids))  # Remove duplicates and sort
 
     def _get_least_active_dp_rank(self) -> int:
         """Find DP rank with fewest assigned src_ranks (environments).
@@ -1454,6 +985,12 @@ class RequestScheduler:
             self.src_rank2_dp_rank.pop(src_rank, None)
 
     async def rebalance_on_shrink(self, shrink_dp_ranks: List[int]) -> Dict[str, int]:
+        # Atomic operation under routing_lock
+        async with self.routing_lock:
+            # Rebalance (abort + update active_dp_ranks)
+            return await self.rebalance_on_shrink_impl(shrink_dp_ranks)
+
+    async def rebalance_on_shrink_impl(self, shrink_dp_ranks: List[int]) -> Dict[str, int]:
         """Abort requests on shrinking workers, clear mappings for natural re-dispatch.
 
         Args:
@@ -1473,7 +1010,7 @@ class RequestScheduler:
         for rank in shrink_dp_ranks:
             if not isinstance(rank, int):
                 raise TypeError(f"Expected int, got {type(rank)}")
-            if not (0 <= rank < self.infer_cluster.world_size):
+            if not (0 <= rank < len(self.workers)):
                 raise ValueError(f"rank {rank} out of range")
 
         if len(shrink_dp_ranks) != len(set(shrink_dp_ranks)):
@@ -1522,10 +1059,8 @@ class RequestScheduler:
                 total_aborted += len(request_ids)
 
                 abort_futures.append(
-                self.infer_cluster.workers[dp_rank].abort_requests.remote(request_ids)
+                    self.workers[dp_rank].abort_requests.remote(request_ids)
                 )
-
-
 
             await asyncio.gather(*abort_futures)
 
@@ -1556,6 +1091,12 @@ class RequestScheduler:
             raise RuntimeError(f"Shrink failed: {e}") from e
 
     async def rebalance_on_expand(self, expand_dp_ranks: List[int]) -> Dict[str, int]:
+        # Atomic operation under routing_lock
+        async with self.routing_lock:
+            # Rebalance (update active_dp_ranks + conditional abort)
+            return await self.rebalance_on_expand_impl(expand_dp_ranks)
+
+    async def rebalance_on_expand_impl(self, expand_dp_ranks: List[int]) -> Dict[str, int]:
         """Add workers and rebalance via src_rank-level abort.
 
         Args:
@@ -1574,7 +1115,7 @@ class RequestScheduler:
         for rank in expand_dp_ranks:
             if not isinstance(rank, int):
                 raise TypeError(f"Expected int, got {type(rank)}")
-            if not (0 <= rank < self.infer_cluster.world_size):
+            if not (0 <= rank < len(self.workers)):
                 raise ValueError(f"rank {rank} out of range")
         if len(expand_dp_ranks) != len(set(expand_dp_ranks)):
             raise ValueError(f"Duplicates in expand_dp_ranks")
@@ -1687,7 +1228,7 @@ class RequestScheduler:
 
             total_aborted += len(request_ids)
             abort_futures.append(
-                self.infer_cluster.workers[dp_rank].abort_requests.remote(request_ids)
+                self.workers[dp_rank].abort_requests.remote(request_ids)
             )
 
 
@@ -1700,6 +1241,38 @@ class RequestScheduler:
         )
 
         return {"aborted": len(selected_src_ranks), "remapped": len(selected_src_ranks)}
+
+class PartialGPUManager:
+    def __init__(self, actor_cluster, router, num_gpus_per_node: int):
+        self.infer_cluster = actor_cluster
+        self.router = router
+        self.num_gpus_per_node = num_gpus_per_node
+
+    def _get_gpus_for_dp_rank(self, dp_rank: int) -> List[int]:
+        """Map DP rank to GPU IDs using cluster's device info.
+
+        Args:
+            dp_rank: Data parallel rank index (0 to dp_size-1)
+
+        Returns:
+            List of GPU IDs used by this DP rank's workers
+
+        Example:
+            # Pure DP: rank == dp_rank
+            # DP rank 0 uses GPUs [0], DP rank 1 uses GPUs [1], etc.
+            gpus = self._get_gpus_for_dp_rank(dp_rank=0)
+            # Returns: [0]
+        """
+        # In agentic pipeline (pure DP): rank == dp_rank, so directly access rank2devices
+        devices_info = self.infer_cluster.rank2devices[dp_rank]
+
+        # Extract GPU IDs: gpu_id = node_rank * num_gpus_per_node + gpu_rank
+        gpu_ids = []
+        for device in devices_info:
+            gpu_id = device["node_rank"] * self.num_gpus_per_node + device["gpu_rank"]
+            gpu_ids.append(gpu_id)
+
+        return sorted(set(gpu_ids))  # Remove duplicates and sort
 
     def _validate_target_gpus(self, target_gpus: List[int], mode: str) -> None:
         """Validate target_gpus input for shrink/expand operations.
@@ -1772,9 +1345,10 @@ class RequestScheduler:
 
         # AST: State consistency
 
-        for dp_rank in ranks:
-            if dp_rank not in self.active_dp_ranks:
-                raise ValueError(f"DP rank {dp_rank} not active {mode=}")
+        # TODO: fix this validation and move to EnvAffinityRouter
+        # for dp_rank in ranks:
+        #     if dp_rank not in self.active_dp_ranks:
+        #         raise ValueError(f"DP rank {dp_rank} not active {mode=}")
 
     async def shrink_workers(self, target_gpus: List[int]) -> Dict[str, Any]:
         """Complete atomic shrink operation: validate → rebalance → offload → update routing.
@@ -1783,7 +1357,7 @@ class RequestScheduler:
         1. Validates target_gpus input
         2. Calculates DP ranks to offload based on GPU overlap
         3. Validates calculated ranks against active state
-        4. Atomically (under routing_lock):
+        4. Do shrink:
            - Rebalances routing (aborts requests on shrinking workers)
            - Offloads model states from shrinking workers
         5. Returns metrics for monitoring
@@ -1826,10 +1400,8 @@ class RequestScheduler:
         # VAL: VAL_NON_EMPTY, state consistency check
         self._validate_calculated_ranks(offload_ranks, mode="shrink")
 
-        # Atomic operation under routing_lock
-        async with self.routing_lock:
-            # Rebalance (abort + update active_dp_ranks)
-            result = await self.rebalance_on_shrink(offload_ranks)
+        result = await self.router.rebalance_on_shrink(offload_ranks)
+
         # release the lock before blocking offload so that active dp rank can work immediately
         # Offload states from target workers
         offload_refs = self.infer_cluster.offload_states_partial(offload_ranks, blocking=False)
@@ -1845,7 +1417,7 @@ class RequestScheduler:
         1. Validates target_gpus input
         2. Calculates DP ranks to restore based on GPU overlap
         3. Validates calculated ranks against active state (skip if skip_load=True)
-        4. Atomically (under routing_lock):
+        4. Do expand:
            - Loads model states on expanding workers (skip if skip_load=True)
            - Rebalances routing (proportionally redistributes requests)
         5. Returns metrics for monitoring
@@ -1899,11 +1471,7 @@ class RequestScheduler:
             load_refs = self.infer_cluster.load_states_partial(load_ranks, blocking=False)
             await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in load_refs])
 
-        # Atomic operation under routing_lock
-        async with self.routing_lock:
-
-            # Rebalance (update active_dp_ranks + conditional abort)
-            result = await self.rebalance_on_expand(load_ranks)
+        result = await self.router.rebalance_on_expand(load_ranks)
 
         return {**result, "expand_duration_ms": (time.time() - start_time) * 1000,
                 "load_ranks": load_ranks}

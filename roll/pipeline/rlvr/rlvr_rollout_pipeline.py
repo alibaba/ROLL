@@ -96,16 +96,14 @@ class RLVRRolloutPipeline(RLVRPipeline):
                 node_id=ray.get_runtime_context().get_node_id(),
                 soft=False,
             )
-        ).remote(pipeline_config=val_pipeline_config)
-        ray.get(
-            self.val_generate_scheduler.set_scheduler.remote(
-                actor_cluster=self.actor_infer,
-                reward_clusters=self.rewards,
-                dataset=self.val_dataset,
-                collect_fn_cls=DataCollatorWithPaddingForPaddedKeys,
-                collect_fn_kwargs=dict(max_length=self.pipeline_config.prompt_length, padding="max_length"),
-                is_val=True,
-            )
+        ).remote(
+            pipeline_config=val_pipeline_config,
+            actor_cluster=self.actor_infer,
+            reward_clusters=self.rewards,
+            dataset=self.val_dataset,
+            collect_fn_cls=DataCollatorWithPaddingForPaddedKeys,
+            collect_fn_kwargs=dict(max_length=self.pipeline_config.prompt_length, padding="max_length"),
+            is_val=True,
         )
 
         refs = []
@@ -116,6 +114,8 @@ class RLVRRolloutPipeline(RLVRPipeline):
         for key, cluster in self.rewards.items():
             refs.extend(cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
+
+        ray.get(self.val_generate_scheduler.initialize.remote())
 
     @torch.no_grad()
     def run(self):
