@@ -137,7 +137,7 @@ class ActorWorker(BaseActorWorker):
             "actor/ratio_max@max": torch.max(ratio * response_mask).detach().item(),
             "actor/ratio_min@min": torch.min(ratio * response_mask + (1 - response_mask) * 1e10).detach().item(),
             "actor/clipfrac@sum": agg_loss(loss_mat=torch.lt(surr2, surr1).float(), loss_mask=response_mask,
-                                loss_agg_mode=self.pipeline_config.loss_agg_mode, batch_num_tokens=batch_num_tokens,
+                                loss_agg_mode=self.pipeline_config.loss_agg_mode, batch_num_tokens=batch_num_tokens['final_response_mask'],
                                        global_valid_samples=global_valid_samples['response_mask']).detach().item(),
         }
 
@@ -148,11 +148,11 @@ class ActorWorker(BaseActorWorker):
             "actor/total_loss@sum": total_loss.detach().item(),
             "actor/approxkl@sum": agg_loss(loss_mat=approxkl, loss_mask=response_mask,
                                        loss_agg_mode=self.pipeline_config.loss_agg_mode,
-                                       batch_num_tokens=batch_num_tokens,
+                                       batch_num_tokens=batch_num_tokens['response_mask'],
                                         global_valid_samples=global_valid_samples['response_mask'],).detach().item(),
             "actor/policykl@sum": agg_loss(loss_mat=policykl, loss_mask=response_mask,
                                        loss_agg_mode=self.pipeline_config.loss_agg_mode,
-                                       batch_num_tokens=batch_num_tokens,
+                                       batch_num_tokens=batch_num_tokens['response_mask'],
                                         global_valid_samples=global_valid_samples['response_mask'],).detach().item(),
             "actor/valid_samples@sum": valid_samples.sum().detach().item(),
             "actor/total_samples@sum": float(valid_samples.size(0)),
