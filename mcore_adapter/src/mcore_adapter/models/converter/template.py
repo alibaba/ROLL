@@ -276,6 +276,68 @@ class QKVBiasConverOp(ConverOp):
 
 
 @dataclass
+class GatedQKVConverOp(QKVConverOp):
+    """query weight used for calculating query_states and gate"""
+
+    def _hf_to_mca(self, weights):
+        if self.hidden_size is None:
+            self.hidden_size = self.mca_config.hidden_size
+        q_weight, k_weight, v_weight = weights
+        nh = self.mca_config.num_attention_heads
+        ng = self.mca_config.num_query_groups
+        dim = self.mca_config.kv_channels
+        assert nh % ng == 0
+        # q_weight: [nh * dim * 2, hidden] -> [ng, nh // ng, dim * 2, hidden]
+        q_reshaped = q_weight.reshape((ng, nh // ng, dim * 2, -1))
+        q_reshaped, z_reshaped = torch.chunk(q_reshaped, 2, dim=2)  # [ng, nh // ng, dim, hidden] each
+        k_reshaped = k_weight.reshape((ng, 1, dim, -1))  # [ng, 1, dim, hidden]
+        v_reshaped = v_weight.reshape((ng, 1, dim, -1))  # [ng, 1, dim, hidden]
+        # Stack along a new dimension and then reshape to interleave
+        # [ng, nh // ng + nh // ng + 1 + 1, dim, hidden] -> flatten first two dims
+        mca_qkv_weight = torch.cat([q_reshaped, z_reshaped, k_reshaped, v_reshaped], dim=1).reshape(
+            (-1, self.hidden_size)
+        )
+        return mca_qkv_weight
+
+    def _mca_to_hf(self, weights):
+        if self.hidden_size is None:
+            self.hidden_size = self.mca_config.hidden_size
+        qkv_weight = weights[0]
+        ng = self.mca_config.num_query_groups
+        nh = self.mca_config.num_attention_heads
+        dim = self.mca_config.kv_channels
+        # mca layout: [ng, nh // ng + nh // ng + 1 + 1, dim, hidden]
+        qkv_weight = qkv_weight.reshape((ng, nh // ng * 2 + 2, dim, -1))
+        # Split into q, z, k, v along dim=1
+        q_reshaped, z_reshaped, k_reshaped, v_reshaped = torch.split(qkv_weight, [nh // ng, nh // ng, 1, 1], dim=1)
+        # q and z need to be interleaved back: [ng, nh // ng, dim, hidden] -> [nh, dim * 2, hidden]
+        qz_reshaped = torch.cat([q_reshaped, z_reshaped], dim=2)  # [ng, nh // ng, dim * 2, hidden]
+        q_weight = qz_reshaped.reshape((-1, self.hidden_size))  # [nh * dim * 2, hidden]
+        k_weight = k_reshaped.reshape((-1, self.hidden_size))  # [ng * dim, hidden]
+        v_weight = v_reshaped.reshape((-1, self.hidden_size))  # [ng * dim, hidden]
+        return [q_weight, k_weight, v_weight]
+
+
+class GDNConv1dConverOp(ConverOp):
+    def _hf_to_mca(self, weights):
+        conv1d_weight = weights[0]
+        qk_head_dim = self.mca_config.linear_key_head_dim
+        v_head_dim = self.mca_config.linear_value_head_dim
+        num_qk_heads = self.mca_config.linear_num_key_heads
+        num_v_heads = self.mca_config.linear_num_value_heads
+        qk_dim = qk_head_dim * num_qk_heads
+        v_dim = v_head_dim * num_v_heads
+
+        q_conv1d, k_conv1d, v_conv1d = conv1d_weight.split([qk_dim, qk_dim, v_dim], dim=0)
+        return StackedTensors(tensors=[q_conv1d, k_conv1d, v_conv1d], dim=0)
+
+    def _mca_to_hf(self, weights):
+        if len(weights) == 1:
+            assert isinstance(weights[0], StackedTensors)
+            return torch.cat(weights[0].tensors, dim=0)
+
+
+@dataclass
 class Template:
     hf_model_type: str
     hf_layer_prefix: str
@@ -392,7 +454,9 @@ class Template:
             class_ref = config_dict["auto_map"]["AutoConfig"]
             pretrained_model_name_or_path = mca_config.name_or_path
             automap_cache_path = mca_config.get_automap_cache()
-            read_cache = os.path.isdir(automap_cache_path) and any(f.endswith('.py') for f in os.listdir(automap_cache_path))
+            read_cache = os.path.isdir(automap_cache_path) and any(
+                f.endswith(".py") for f in os.listdir(automap_cache_path)
+            )
             if read_cache:
                 pretrained_model_name_or_path = automap_cache_path
             config_class = get_class_from_dynamic_module(class_ref, pretrained_model_name_or_path)

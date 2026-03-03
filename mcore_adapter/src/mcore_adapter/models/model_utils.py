@@ -133,12 +133,10 @@ def _mca_lora_logits_postprocess(logits: "torch.Tensor"):
     """
     return _McaLoraLogitsHelper.apply(logits)
 
-
 def mca_lora_logits_postprocess_hook(module, input, output):
     logits, other = output
     logits = _mca_lora_logits_postprocess(logits)
     return logits, other
-
 
 def exists_hf_config(model_name_or_path: str) -> bool:
     return os.path.exists(os.path.join(model_name_or_path, "config.json"))

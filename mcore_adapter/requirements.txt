@@ -1,3 +1,5 @@
-megatron-core>=0.13.0,<0.14.0
+# install either megatron-core or megatron-llama-core
+megatron-core>=0.15.0,<0.17.0
+# megatron-llama-core==0.7.0
 transformers>=4.50.0
 accelerate>=0.27.2

@@ -1,8 +1,11 @@
-from typing import List, Optional, Tuple
+import heapq
+import itertools
+from typing import Optional
 
 import torch
 from megatron.core import mpu
 
+from ...parallel_functions import encoder_sequence_parallel_gather, encoder_small_batch_size_gather
 from ...platforms import current_platform
 from ..auto.modeling_auto import register_model
 from ..model_factory import McaGPTModel
@@ -39,6 +42,8 @@ class Qwen2VLModel(McaGPTModel, ModuleUtilsMixin):
         )
         mock_grid_thw = torch.LongTensor([[1, 2, 2]]).to(inputs_embeds.device)
         image_embeddings = self.vision_model(mock_pixel_values, grid_thw=mock_grid_thw)
+        if not isinstance(image_embeddings, torch.Tensor):
+            image_embeddings = image_embeddings.pooler_output
         inputs_embeds = inputs_embeds + image_embeddings.mean() * 0
         return inputs_embeds
 
@@ -48,104 +53,123 @@ class Qwen2VLModel(McaGPTModel, ModuleUtilsMixin):
         inputs_embeds: "torch.FloatTensor",
         pixel_values: "torch.Tensor",
         grid_thw: "torch.LongTensor",
-        input_ranges: List[List[int]],
+        input_ranges: list[list[int]],
         media_token_id: int,
     ):
         """
         inputs_embeds: [s, b, h] or [s/tp, b, h] when sequence parallel
         ranges: sequence range
         """
-        image_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            dim=0, dtype=torch.int32
-        )
-        flatten_grid_thw = torch.repeat_interleave(grid_thw, grid_thw[:, 0], dim=0)
-        flatten_grid_thw[:, 0] = 1
-        image_embeds_seqlens = image_seqlens // (self.config.merge_size**2)
-        assert image_seqlens[-1] == pixel_values.shape[0], (
-            f"pixel_values.shape[0] {pixel_values.shape[0]} != image_seqlens[-1] {image_seqlens[-1]}"
-        )
-        assert sum([r[1] - r[0] for r in input_ranges]) == inputs_embeds.shape[0], (
-            f"sum of input_ranges {input_ranges} not match inputs_embeds.shape {inputs_embeds.shape}"
-        )
         image_mask = input_ids == media_token_id
+        image_indices = torch.full_like(image_mask, -1, dtype=torch.long)
+        image_indices[image_mask] = torch.arange(image_mask.sum(), device=image_indices.device)
+        vision_token_compress = self.config.merge_size**2
 
-        valid_image_embeds_nums = []  # indicate the ranges of needed image embeds
-        required_pixel_values, required_grid_thws = [], []  # image features input to vision tower
-        added_image_indexes = []
-        for i in range(image_mask.shape[0]):
-            for inputs_start, inputs_end in input_ranges:
-                valid_image_embeds_start = image_mask[:i].sum().item()
-                valid_image_embeds_start += image_mask[i, :inputs_start].sum().item()
-                embeds_num = image_mask[i, inputs_start:inputs_end].sum().item()
-                if embeds_num == 0:
-                    continue
-                valid_image_embeds_end = valid_image_embeds_start + embeds_num
-                used_embeds_seqlen_start = 0  # embeds seqlens used in this range
-                new_embeds_seqlen_start = (
-                    0  # embeds seqlens new added in this range, new_embeds_seqlen_start >= used_embeds_seqlen_start
-                )
-                embeds_seqlen_end = image_embeds_seqlens[-1]
-                added_seqlen_before_used = 0
-                for image_index, image_embeds_seqlen in enumerate(image_embeds_seqlens):
-                    if valid_image_embeds_start < image_embeds_seqlen:
-                        if image_index not in added_image_indexes:
-                            required_grid_thws.append(flatten_grid_thw[image_index])
-                            added_image_indexes.append(image_index)
-                        else:
-                            new_embeds_seqlen_start = image_embeds_seqlen
-                    else:
-                        used_embeds_seqlen_start = image_embeds_seqlen
-                        new_embeds_seqlen_start = image_embeds_seqlen
-                        if image_index in added_image_indexes:
-                            before_seqlen = 0 if image_index == 0 else image_embeds_seqlens[image_index - 1].item()
-                            added_seqlen_before_used += image_embeds_seqlen - before_seqlen
-                    if valid_image_embeds_end <= image_embeds_seqlen:
-                        embeds_seqlen_end = image_embeds_seqlen
-                        break
+        image_input_lengths = grid_thw.prod(-1).tolist()
+        image_output_lengths = [_ // vision_token_compress for _ in image_input_lengths]
 
-                if new_embeds_seqlen_start < embeds_seqlen_end:
-                    required_pixel_values.append(
-                        pixel_values[
-                            new_embeds_seqlen_start * (self.config.merge_size**2) : embeds_seqlen_end
-                            * (self.config.merge_size**2)
-                        ]
-                    )
-                embeds_needed_start = valid_image_embeds_start - used_embeds_seqlen_start + added_seqlen_before_used
-                embeds_needed_end = valid_image_embeds_end - used_embeds_seqlen_start + added_seqlen_before_used
-                if embeds_needed_start < embeds_needed_end:
-                    valid_image_embeds_nums.append((embeds_needed_start, embeds_needed_end))
+        split_plan, pixel_values, grid_thw, _ = self.build_encoder_inputs(
+            image_input_lengths, pixel_values, grid_thw, None
+        )
 
-        if len(required_pixel_values) == 0:
-            return self._handle_missing_visual(inputs_embeds)
-
-        required_pixel_values = torch.cat(required_pixel_values, dim=0)
-        required_grid_thw = torch.stack(required_grid_thws, dim=0)
-        required_pixel_values = required_pixel_values.type(self.vision_model.get_dtype())
-        image_embeds = self.vision_model(required_pixel_values, grid_thw=required_grid_thw)
+        vision_model_dtype = self.vision_model.blocks[0].mlp.down_proj.weight.dtype
+        pixel_values = pixel_values.type(vision_model_dtype)
+        image_embeds = self.vision_model(pixel_values, grid_thw=grid_thw)
+        if not isinstance(image_embeds, torch.Tensor):
+            image_embeds = image_embeds.pooler_output
+        image_embeds = self.gather_encoder_outputs(image_embeds, split_plan, image_output_lengths)
         image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
-        image_mask = torch.cat(
-            [image_mask[:, inputs_start:inputs_end] for inputs_start, inputs_end in input_ranges], dim=1
-        )
-        needed_image_embeds_num = image_mask.sum().item()
-        needed_image_embeds = torch.zeros(
-            [needed_image_embeds_num] + list(image_embeds.shape[1:]),
-            dtype=inputs_embeds.dtype,
-            device=inputs_embeds.device,
-        )
-
-        added_num = 0
-        for start, end in valid_image_embeds_nums:
-            embeds_num = end - start
-            needed_image_embeds[added_num : added_num + embeds_num] = image_embeds[start:end]
-            added_num += embeds_num
-        assert added_num == needed_image_embeds_num
+        selected_mask = torch.cat([image_mask[:, start:end] for start, end in input_ranges], dim=1)
+        selected_indices = torch.cat([image_indices[:, start:end] for start, end in input_ranges], dim=1)
+        selected_indices = selected_indices[selected_indices != -1]
 
         inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
-        image_mask = image_mask.unsqueeze(-1).expand_as(inputs_embeds)
-        inputs_embeds = inputs_embeds.masked_scatter(image_mask, needed_image_embeds)
+        selected_mask = selected_mask.unsqueeze(-1).expand_as(inputs_embeds)
+        inputs_embeds = inputs_embeds.masked_scatter(selected_mask, image_embeds[selected_indices])
         inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
         return inputs_embeds
+
+    def build_encoder_inputs(
+        self,
+        input_lengths: list[int],
+        input_features: torch.Tensor,
+        input_position_infos: torch.LongTensor,
+        input_attention_mask: Optional[torch.Tensor] = None,
+    ):
+        """
+        calculate split plan and local data according to workload, assuming workload proportional to length
+        Args:
+            input_lengths (list[int]): length of each sample
+            input_features (torch.Tensor): flatted input features, input_features.shape[0] == sum(input_lengths)
+            input_position_infos (torch.LongTensor): additional position info, len(input_position_infos) == len(input_lengths)
+        """
+        world_size = mpu.get_tensor_and_context_parallel_world_size()
+
+        if world_size == 1 or len(input_lengths) < world_size:  # encoder has small batch size
+            return None, input_features, input_position_infos, input_attention_mask
+
+        # sorted by length
+        indexed_items = sorted([(length, i) for i, length in enumerate(input_lengths)], reverse=True)
+
+        # min_heap for tracking current load on each GPU
+        min_heap = [(0, i) for i in range(world_size)]
+
+        # (length, original_index)
+        split_plan = [[] for _ in range(world_size)]
+
+        # heap sort
+        for length, original_index in indexed_items:
+            current_load, rank = heapq.heappop(min_heap)
+            split_plan[rank].append((length, original_index))
+            new_load = current_load + length
+            heapq.heappush(min_heap, (new_load, rank))
+
+        # start indices for each sample in input_features
+        start_indices = [
+            0,
+        ] + list(itertools.accumulate(input_lengths[:-1]))
+        # local inputs for each rank
+        local_rank = mpu.get_tensor_and_context_parallel_rank()
+
+        local_features_slices = []
+        local_position_infos_slices = []
+        local_attention_mask_slices = None
+        if input_attention_mask is not None:
+            if len(input_attention_mask) != len(input_position_infos):
+                raise ValueError("input_attention_mask and input_position_infos must have the same length.")
+            local_attention_mask_slices = []
+
+        for length, source_index in split_plan[local_rank]:
+            start, end = start_indices[source_index], start_indices[source_index] + length
+            local_features_slices.append(input_features[start:end])
+            start, end = source_index, source_index + 1
+            local_position_infos_slices.append(input_position_infos[start:end])
+            if local_attention_mask_slices is not None:
+                local_attention_mask_slices.append(input_attention_mask[start:end])
+
+        # no workload on current GPU
+        if not local_features_slices:
+            raise ValueError("No workload assigned to the current GPU in encoder.")
+
+        input_features_split = torch.cat(local_features_slices, dim=0)
+        input_position_infos_split = torch.cat(local_position_infos_slices, dim=0)
+
+        input_attention_mask_split = None
+        if local_attention_mask_slices is not None:
+            input_attention_mask_split = torch.cat(local_attention_mask_slices, dim=0)
+
+        return split_plan, input_features_split, input_position_infos_split, input_attention_mask_split
+
+    def gather_encoder_outputs(
+        self,
+        output_features: torch.Tensor,
+        split_plan: Optional[list[list[int]]] = None,
+        output_lengths: Optional[list[int]] = None,
+    ):
+        if split_plan is not None:
+            return encoder_sequence_parallel_gather(output_features, split_plan, output_lengths)
+        return encoder_small_batch_size_gather(output_features)
 
     # copy from transformers
     def get_rope_index(
@@ -153,7 +177,7 @@ class Qwen2VLModel(McaGPTModel, ModuleUtilsMixin):
         input_ids: torch.LongTensor,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # default value 2 from transformers code
         spatial_merge_size = self.config.merge_size
         image_token_id = self.config.image_token_id
@@ -253,7 +277,7 @@ class Qwen2VLModel(McaGPTModel, ModuleUtilsMixin):
 
             return position_ids, mrope_position_deltas
 
-    def get_batch_on_this_cp_rank(self, batch, dim3_keys: List[str] = ["attention_mask"]):
+    def get_batch_on_this_cp_rank(self, batch, dim3_keys: list[str] = ["attention_mask"]):
         # VLM need to view all input_ids and media features
         loss_needed_items = {
             "labels": batch.pop("labels", None),

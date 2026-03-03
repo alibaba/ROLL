@@ -5,7 +5,7 @@ import sys
 import time
 import warnings
 from functools import partial
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Iterator, Optional, Union
 
 import numpy as np
 import torch
@@ -28,11 +28,10 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from torch._tensor import Tensor
-from torch.utils.data import DataLoader, Dataset, RandomSampler
-from transformers import PreTrainedTokenizerBase
+from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase
 from transformers.trainer import (
     OPTIMIZER_NAME,
-    PREFIX_CHECKPOINT_DIR,
     SCHEDULER_NAME,
     TRAINER_STATE_NAME,
     Trainer,
@@ -55,7 +54,7 @@ from ..initialize import initialize_megatron
 from ..patcher import patch_torch_find_nd_overlapping_shards, patch_torch_validate_global_plan
 from ..platforms import current_platform
 from ..training_args import TrainingArguments
-from ..utils import distributed_reduce, get_logger
+from ..utils import distributed_reduce, get_logger, is_mcore_version_greater_than, is_transformers_version_greater_than
 from .utils import (
     check_pack_seq_aligned,
     get_ltor_masks_and_position_ids,
@@ -80,7 +79,6 @@ logger = get_logger(__name__)
 class McaTrainer(Trainer):
     metrics_keys = ["loss"]
     _language_input_names = ["input_ids", "attention_mask", "labels", "position_ids"]
-    ckpt_sharding_type = "fully_sharded_model_space"
 
     def __init__(
         self,
@@ -88,6 +86,10 @@ class McaTrainer(Trainer):
         args: TrainingArguments = None,
         **kwargs,
     ):
+        if is_transformers_version_greater_than("4.46"):
+            kwargs["processing_class"] = kwargs.pop("tokenizer")
+        else:
+            self.processing_class: PreTrainedTokenizer = kwargs.get("tokenizer")
         patch_torch_find_nd_overlapping_shards()
         patch_torch_validate_global_plan()
         initialize_megatron(args=args)
@@ -107,6 +109,7 @@ class McaTrainer(Trainer):
                 mpu.get_data_parallel_group(with_context_parallel=True),
                 do_cache_distribution=True,  # don't support change model structure during training
             )
+            self.ckpt_sharding_metadata = self._build_sharded_state_dict_metadata()
         if self.accelerator.dispatch_batches:
             self.accelerator.dispatch_batches = False
             logger.warning("Currently, accelerator.dispatch_batches must be set to False!")
@@ -116,7 +119,42 @@ class McaTrainer(Trainer):
         if getattr(self, "processing_class", None) is None:
             self.processing_class = self.tokenizer
 
-    def _prepare_model(self, models: "VirtualModels") -> List["DistributedDataParallel"]:
+    def _build_sharded_state_dict_metadata(self) -> dict:
+        """Builds metadata used for sharded_state_dict versioning.
+
+
+        The whole content metadata is passed to ``sharded_state_dict`` model and optimizer methods
+        and therefore affects only the logic behind sharded_state_dict creation.
+        The content metadata should be minimalistic, ideally flat (or with a single nesting level)
+        and with semantically meaningful flag names (e.g. `distrib_optim_sharding_type`).
+        In particular, a simple integer (or SemVer) versioning flag (e.g. `metadata['version'] = 3.4`)
+        is discouraged, because the metadata serves for all models and optimizers and it's practically
+        impossible to enforce a linearly increasing versioning for this whole space.
+        """
+        metadata: dict = {}
+
+        if not is_mcore_version_greater_than("0.14.0"):
+            # For backward compatibility with Megatron core < v0.14.0
+            if self.args.use_distributed_optimizer:
+                metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
+            return metadata
+
+        if self.args.use_distributed_optimizer:
+            distrib_optim_fully_reshardable = self.args.distrib_optim_fully_reshardable
+            distrib_optim_fully_reshardable_mem_efficient = self.args.distrib_optim_fully_reshardable_mem_efficient
+            if distrib_optim_fully_reshardable:
+                metadata["distrib_optim_sharding_type"] = "fully_reshardable"
+                metadata["distrib_optim_fully_reshardable_mem_efficient"] = (
+                    distrib_optim_fully_reshardable_mem_efficient
+                )
+            else:
+                metadata["distrib_optim_sharding_type"] = "dp_reshardable"
+
+        metadata["singleton_local_shards"] = False
+        metadata["chained_optim_avoid_prefix"] = True
+        return metadata
+
+    def _prepare_model(self, models: "VirtualModels") -> list["DistributedDataParallel"]:
         config = models.config
         ddp_config = DistributedDataParallelConfig(
             grad_reduce_in_fp32=self.args.accumulate_allreduce_grads_in_fp32,
@@ -140,7 +178,7 @@ class McaTrainer(Trainer):
         ]
 
     def disable_ddp_forward_pre_hook(
-        self, model_chunks: Optional[List["DistributedDataParallel"]] = None, param_sync=True
+        self, model_chunks: Optional[list["DistributedDataParallel"]] = None, param_sync=True
     ):
         """
         disable the overlap param gather pre-hook of DDP for 3 reasons:
@@ -156,7 +194,7 @@ class McaTrainer(Trainer):
             # TODO: add param_sync in core0.11.0
             model_chunk.disable_forward_pre_hook()
 
-    def enable_ddp_forward_pre_hook(self, model_chunks: Optional[List["DistributedDataParallel"]] = None):
+    def enable_ddp_forward_pre_hook(self, model_chunks: Optional[list["DistributedDataParallel"]] = None):
         if not (self.args.use_distributed_optimizer and self.args.overlap_param_gather):
             return
         model_chunks = model_chunks or self.models_wrapped
@@ -182,7 +220,7 @@ class McaTrainer(Trainer):
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
             if not self.args.dataloader_drop_last:
                 logger.warning("Currently, train dataloader drop_last must be set to True!")
-            dataloader_params["sampler"] = self._get_train_sampler()
+            dataloader_params["sampler"] = SequentialSampler(train_dataset)
             dataloader_params["drop_last"] = True
             dataloader_params["worker_init_fn"] = lambda _: set_seed(torch.initial_seed() % 2**32)
             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
@@ -224,11 +262,11 @@ class McaTrainer(Trainer):
             dispatch_batches=False,
         )
 
-    def _get_batch_on_this_cp_rank(self, batch: Dict[str, Tensor]):
+    def _get_batch_on_this_cp_rank(self, batch: dict[str, Tensor]):
         dim3_keys = [] if self.model_impl == "transformer_engine" else ["attention_mask"]
         return self.model.get_batch_on_this_cp_rank(batch, dim3_keys=dim3_keys)
 
-    def _prepare_train_inputs(self, data_iterator: Iterator) -> Dict[str, Tensor | Any]:
+    def _prepare_train_inputs(self, data_iterator: Iterator) -> dict[str, Tensor | Any]:
         inputs = next(data_iterator)
         inputs = {**inputs}  # avoid repeated modifications
         if self.args.sequence_packing:
@@ -263,15 +301,8 @@ class McaTrainer(Trainer):
 
     def _post_compute_loss(self, loss_mask, losses):
         loss_mask = loss_mask.view(-1).float()
-        cp_size = self.model.config.context_parallel_size
         losses = torch.sum(losses.view(-1) * loss_mask)
         loss_mask = loss_mask.sum()
-        if cp_size > 1:
-            loss_info = torch.cat([losses.view(1), loss_mask.view(1)])
-            torch.distributed.all_reduce(
-                loss_info, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group()
-            )
-            losses, loss_mask = loss_info[0], loss_info[1]
         loss = losses.clone()  # clone to make sure loss is not a view
         local_num_tokens = loss_mask.clone().detach()
         if local_num_tokens == 0:
@@ -286,7 +317,7 @@ class McaTrainer(Trainer):
         outputs = self._pre_compute_loss(data_iterator, model)
         return outputs[0], partial(self._post_compute_loss, *outputs[1:])
 
-    def _packing_sequence(self, inputs: Dict[str, Tensor | Any]):
+    def _packing_sequence(self, inputs: dict[str, Tensor | Any]):
         if not self.args.sequence_packing:
             return inputs
         attention_mask = inputs.pop("attention_mask", None)
@@ -315,8 +346,8 @@ class McaTrainer(Trainer):
                     cu_seqlens_q=seqlens,
                     cu_seqlens_q_padded=seqlens,
                     cu_seqlens_kv_padded=seqlens,
-                    max_seqlen_q=max_seq_len,
-                    max_seqlen_kv=max_seq_len,
+                    max_seqlen_q=max_seq_len.item(),
+                    max_seqlen_kv=max_seq_len.item(),
                 ),
                 "attention_mask": None,
             }
@@ -324,13 +355,14 @@ class McaTrainer(Trainer):
         return inputs
 
     def _get_step_iterator_and_seq_length(
-        self, epoch_iterator: Iterator[Dict[str, Tensor | Any]], standard_batch_size: Optional[int] = None
+        self, epoch_iterator: Iterator[dict[str, Tensor | Any]], standard_batch_size: Optional[int] = None
     ):
         """
         construct data iterator for gradient accumulation
         """
         step_inputs = []
         max_seq_length = 0
+        total_seq_length = 0
         standard_batch_size = standard_batch_size or self.args.per_device_train_batch_size
         for _ in range(self.args.gradient_accumulation_steps):
             try:
@@ -355,20 +387,21 @@ class McaTrainer(Trainer):
 
             step_inputs.append(inputs)
             max_seq_length = max(max_seq_length, seq_length)
+            total_seq_length = total_seq_length + seq_length
 
         if len(step_inputs) < self.args.gradient_accumulation_steps:
-            return None, 0
+            return None, 0, 0
 
         if not self.args.allow_variable_seq_lengths():
             step_inputs = [self._pad_batched_inputs(inputs, max_seq_length) for inputs in step_inputs]
         for inputs in step_inputs:
             self.current_flos += float(self.floating_point_ops(inputs))
-        return iter(step_inputs), max_seq_length
+        return iter(step_inputs), max_seq_length, total_seq_length
 
     def _align_special_tokens(self, *args, **kwargs):
         pass
 
-    def _pad_batched_inputs(self, inputs: Dict[str, Tensor | Any], seq_length: int):
+    def _pad_batched_inputs(self, inputs: dict[str, Tensor | Any], seq_length: int):
         padding_inputs = {
             k: v.tolist() if v is not None and isinstance(v, Tensor) else v
             for k, v in inputs.items()
@@ -414,7 +447,7 @@ class McaTrainer(Trainer):
         end_flag = torch.ones_like(end_flag)
         dist.all_reduce(end_flag, op=dist.ReduceOp.MAX)
 
-    def training_step(self, models: List[DistributedDataParallel], data_iterator, seq_length):
+    def training_step(self, models: list[DistributedDataParallel], data_iterator, seq_length):
         # a real step not a minibatch of gradient accumulation
         for model in models:
             model.train()
@@ -424,7 +457,7 @@ class McaTrainer(Trainer):
         if len(models) > 1:
             data_list = list(data_iterator)
             data_iterator = [iter(data_list) for _ in range(len(models))]
-        metrics_tensors: List[Dict[str, Tensor]] = self.forward_backward_func(
+        metrics_tensors: list[dict[str, Tensor]] = self.forward_backward_func(
             forward_step_func=self._inner_forward_step,
             data_iterator=data_iterator,
             model=models,
@@ -453,7 +486,7 @@ class McaTrainer(Trainer):
             loss = torch.tensor(0.0, device=self.args.device)
         return loss, metrics_tensors, skipped_iter, grad_norm, num_zeros_in_grad
 
-    def gather_metrics(self, metrics_tensors: List[Dict[str, Tensor]]) -> Dict[str, float]:
+    def gather_metrics(self, metrics_tensors: list[dict[str, Tensor]]) -> dict[str, float]:
         metrics = {}
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             get_metrics_keys = metrics_tensors[0].keys()
@@ -484,7 +517,9 @@ class McaTrainer(Trainer):
         config = OptimizerConfig(
             optimizer=self.args.optimizer,
             lr=self.args.learning_rate,
-            min_lr=self.args.lr_scheduler_kwargs.get("min_lr", 0.0),
+            min_lr=self.args.lr_scheduler_kwargs.get("min_lr", 0.0)
+            if self.args.lr_scheduler_kwargs is not None
+            else 0.0,
             weight_decay=self.args.weight_decay,
             adam_beta1=self.args.adam_beta1,
             adam_beta2=self.args.adam_beta2,
@@ -500,7 +535,7 @@ class McaTrainer(Trainer):
         self.optimizer = get_megatron_optimizer(config, self.models_wrapped)
         return self.optimizer
 
-    def create_scheduler(self, num_training_steps: int, optimizer: "MegatronOptimizer" = None):
+    def create_scheduler(self, num_training_steps: int, optimizer: "MegatronOptimizer"):
         if self.lr_scheduler is None:
             self.lr_scheduler = get_megatron_lr_scheduler(self.args, num_training_steps, optimizer)
         return self.lr_scheduler
@@ -544,7 +579,7 @@ class McaTrainer(Trainer):
         if self.args.use_distributed_optimizer:
             model_shared_state_dict = self.model.sharded_state_dict()
             sharded_state_dict = self.optimizer.sharded_state_dict(
-                model_shared_state_dict, is_loading=True, sharding_type=self.ckpt_sharding_type
+                model_shared_state_dict, is_loading=True, metadata=self.ckpt_sharding_metadata
             )
             load_strategy = dist_checkpointing.serialization.get_default_load_sharded_strategy(optimizer_checkpoint)
             load_strategy = FullyParallelLoadStrategyWrapper(
@@ -649,7 +684,8 @@ class McaTrainer(Trainer):
                 f" {args.max_steps}"
             )
 
-        self.create_optimizer_and_scheduler(num_training_steps=max_steps)
+        self.create_optimizer()
+        self.create_scheduler(num_training_steps=max_steps, optimizer=self.optimizer)
         self.state = TrainerState(
             stateful_callbacks=[
                 cb for cb in self.callback_handler.callbacks + [self.control] if isinstance(cb, ExportableState)
@@ -811,10 +847,6 @@ class McaTrainer(Trainer):
             if hasattr(train_dataloader, "set_epoch"):
                 train_dataloader.set_epoch(epoch)
 
-            # Reset the past mems state at the beginning of each epoch if necessary.
-            if args.past_index >= 0:
-                self._past = None
-
             steps_in_epoch = (
                 len(train_dataloader) // args.gradient_accumulation_steps
                 if len_dataloader is not None
@@ -840,8 +872,9 @@ class McaTrainer(Trainer):
             self.disable_ddp_forward_pre_hook(param_sync=False)
             step = -1
             first_step = True
+            tps_time = time.time()
             while True:
-                step_iterator, seq_length = self._get_step_iterator_and_seq_length(cyclic_iterator)
+                step_iterator, seq_length, total_seq_length = self._get_step_iterator_and_seq_length(cyclic_iterator)
                 if step_iterator is None:
                     break
                 step += 1
@@ -872,7 +905,13 @@ class McaTrainer(Trainer):
                 self.state.global_step += 1
                 self.state.epoch = epoch + (step + 1 + steps_skipped) / steps_in_epoch
                 self.control = self.callback_handler.on_step_end(args, self.state, self.control)
-                logs = {"skipped_iter": skipped_iter, "num_zeros_in_grad": num_zeros_in_grad or 0}
+                token_per_sec_per_gpu = total_seq_length / (time.time() - tps_time)
+                tps_time = time.time()
+                logs = {
+                    "skipped_iter": skipped_iter,
+                    "num_zeros_in_grad": num_zeros_in_grad or 0,
+                    "token_per_sec_per_gpu": token_per_sec_per_gpu,
+                }
                 self._maybe_log_save_evaluate(
                     tr_loss,
                     grad_norm,
@@ -932,8 +971,8 @@ class McaTrainer(Trainer):
         trial,
         epoch,
         ignore_keys_for_eval,
-        other_logs: Dict[str, float] = {},
-        metrics_tensors: Optional[List[Dict[str, Tensor]]] = None,
+        other_logs: dict[str, float] = {},
+        metrics_tensors: Optional[list[dict[str, Tensor]]] = None,
     ):
         eval_or_save = self.control.should_evaluate or self.control.should_save
         if eval_or_save:
@@ -1001,8 +1040,6 @@ class McaTrainer(Trainer):
         if self.control.should_save:
             self._save_checkpoint(model, trial)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
-            ckpt_id = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-            checkpoint_path = os.path.join(self.args.output_dir, ckpt_id)
 
         if eval_or_save:
             self.enable_ddp_forward_pre_hook()
@@ -1013,7 +1050,7 @@ class McaTrainer(Trainer):
         dataloader: DataLoader,
         description: str,
         prediction_loss_only: Optional[bool] = None,
-        ignore_keys: Optional[List[str]] = None,
+        ignore_keys: Optional[list[str]] = None,
         metric_key_prefix: str = "eval",
     ) -> EvalLoopOutput:
         args = self.args
@@ -1022,7 +1059,7 @@ class McaTrainer(Trainer):
         assert prediction_loss_only, "Evaluation with `prediction_loss_only=False` is not supported."
         models = self.model
         models.eval()
-        metrics_tensors: List[Dict[str, Tensor]] = []
+        metrics_tensors: list[dict[str, Tensor]] = []
         for step_inputs, seq_length, batch_size in self._stream_eval_inputs(dataloader):
             num_microbatches = len(step_inputs)
             data_iterator = [iter(step_inputs) for _ in range(len(models))]
@@ -1055,7 +1092,7 @@ class McaTrainer(Trainer):
         if self.args.use_distributed_optimizer:
             model_shared_state_dict = self.model.sharded_state_dict()
             state_dict = self.optimizer.sharded_state_dict(
-                model_shared_state_dict, sharding_type=self.ckpt_sharding_type
+                model_shared_state_dict, metadata=self.ckpt_sharding_metadata
             )
             # validate access integrity in the first time
             validate_access_integrity = getattr(self, "_validate_access_integrity", True)
@@ -1082,7 +1119,7 @@ class McaTrainer(Trainer):
     def save_model(self, output_dir: str = None, _internal_call: bool = False):
         output_dir = output_dir or self.args.output_dir
         if not (self.args.save_only_model and self.args.save_hf_model):
-            self.model.save_pretrained(output_dir)
+            self.model.save_pretrained(output_dir, save_merged_model=self.args.save_merged_model)
         if self.args.save_hf_model:
             self.model.save_pretrained_as_hf(output_dir)
         if self.args.should_save:
@@ -1090,7 +1127,7 @@ class McaTrainer(Trainer):
                 self.processing_class.save_pretrained(output_dir)
             torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
 
-    def estimate_tokens(self, inputs: Dict[str, Union[torch.Tensor, Any]]):
+    def estimate_tokens(self, inputs: dict[str, Union[torch.Tensor, Any]]):
         if not hasattr(self.model, "estimate_tokens"):
             return 0
         return self.model.estimate_tokens(inputs)

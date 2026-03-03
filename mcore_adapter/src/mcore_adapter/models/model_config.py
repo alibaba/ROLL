@@ -52,7 +52,7 @@ class PretrainedConfig:
         for k, v in self.__dict__.items():
             if callable(v):
                 output[k] = None
-            elif isinstance(v, list) and callable(v[0]):
+            elif isinstance(v, list) and len(v) > 0 and callable(v[0]):
                 output[k] = None
             elif isinstance(v, PipelineParallelLayerLayout):
                 output[k] = str(v)
@@ -65,7 +65,7 @@ class PretrainedConfig:
         save_dict = {}
         for f in dataclasses.fields(self):
             v = getattr(self, f.name)
-            if isinstance(v, list) and callable(v[0]):
+            if isinstance(v, list) and len(v) > 0 and callable(v[0]):
                 continue
             if callable(v) or isinstance(v, (torch.dtype, enum.Enum)):
                 continue
@@ -132,7 +132,7 @@ class PretrainedConfig:
     def update_with_args(self, args: "DistributingParallelArguments", verbose: bool = True):
         if args.additional_configs is not None:
             for k, v in args.additional_configs.items():
-                if hasattr(self, k):
+                if hasattr(self, k) or hasattr(YarnRotaryEmbeddingConfig, k):
                     setattr(self, k, v)
                 else:
                     logger.warning(f"Config {k} is not found in model config, will not update it.")
@@ -200,6 +200,39 @@ class PretrainedConfig:
             os.getenv("HUGGINGFACE_AUTOMAP_CACHE", HUGGINGFACE_AUTOMAP_CACHE),
             hashlib.sha256(self.name_or_path.encode()).hexdigest(),
         )
+
+
+@dataclass
+class YarnRotaryEmbeddingConfig:
+    yarn_beta_fast: float = field(
+        default=32,
+        metadata={"help": "Parameter to set the boundary for extrapolation (only) in the linear ramp function."},
+    )
+    yarn_beta_slow: float = field(
+        default=1,
+        metadata={"help": "Parameter to set the boundary for interpolation (only) in the linear ramp function."},
+    )
+    yarn_rotary_scaling_factor: float = field(
+        default=4,
+        metadata={
+            "help": "The scaling factor applied when interpolating the position IDs to extend the possible context length."
+        },
+    )
+    yarn_original_max_position_embeddings: int = field(
+        default=32768,
+        metadata={"help": "The original max position embeddings used during pretraining."},
+    )
+    yarn_mscale: float = field(
+        default=1,
+        metadata={"help": "Mscale value for Yarn RoPE."},
+    )
+    yarn_mscale_all_dim: float = field(
+        default=0,
+        metadata={"help": "Mscale all dim value for Yarn RoPE."},
+    )
+    yarn_correction_range_round_to_int: bool = field(
+        default=True, metadata={"help": "Whether to round to int when calculating correction range in YaRN."}
+    )
 
 
 @dataclass

@@ -3,11 +3,12 @@ from dataclasses import dataclass
 
 import torch
 
+from ..converter.convert_utils import StackedTensors
 from ..converter.dist_converter import (
+    DistParallelConfig,
     default_dist_config,
     gdn_dist_config,
     register_dist_config,
-    shared_moe_dist_config,
 )
 from ..converter.template import (
     ConverOp,
@@ -19,8 +20,8 @@ from ..converter.template import (
     Template,
     register_template,
 )
-from .config_qwen3_next import Qwen3NextConfig
-from .modeling_qwen3_next import Qwen3NextModel
+from .config_qwen3_5 import Qwen3_5Config
+from .modeling_qwen3_5 import Qwen3_5Model
 
 
 @dataclass
@@ -33,15 +34,14 @@ class DropConverOp(ConverOp):
 
 
 @dataclass
-class NextGDNConverOp(ConverOp):
+class Qwen3_5_GDNConverOp(ConverOp):
     def __post_init__(self):
         super().__post_init__()
-        assert len(self.hf_names) == 2, f"GDNConverOp only support two hf_names {self.hf_names}"
+        assert len(self.hf_names) == 4, f"GDNConverOp only support four hf_names {self.hf_names}"
         assert len(self.mca_names) == 1, f"GDNConverOp only support one mca_name {self.mca_names}"
 
     def _hf_to_mca(self, weights):
-        qkvz_weight, ba_weight = weights
-        hidden_size = self.mca_config.hidden_size
+        qkv_weight, z_weight, b_weight, a_weight = weights
         qk_head_dim = self.mca_config.linear_key_head_dim
         v_head_dim = self.mca_config.linear_value_head_dim
         num_qk_heads = self.mca_config.linear_num_key_heads
@@ -49,39 +49,26 @@ class NextGDNConverOp(ConverOp):
         qk_dim = qk_head_dim * num_qk_heads
         v_dim = v_head_dim * num_v_heads
 
-        qkvz_reshaped = qkvz_weight.reshape(num_qk_heads, (qk_dim * 2 + v_dim * 2) // num_qk_heads, -1)
-        ba_reshaped = ba_weight.reshape(num_qk_heads, 2 * num_v_heads // num_qk_heads, -1)
-        q, k, v, z = torch.split(
-            qkvz_reshaped,
+        q, k, v = torch.split(
+            qkv_weight,
             [
-                qk_head_dim,
-                qk_head_dim,
-                num_v_heads // num_qk_heads * v_head_dim,
-                num_v_heads // num_qk_heads * v_head_dim,
+                qk_dim,
+                qk_dim,
+                v_dim,
             ],
-            dim=1,
+            dim=0,
         )
-        b, a = torch.split(ba_reshaped, [num_v_heads // num_qk_heads, num_v_heads // num_qk_heads], dim=1)
-        q, k, v, z, b, a = [weight.reshape(-1, hidden_size) for weight in [q, k, v, z, b, a]]
-        in_proj_weight = torch.cat([q, k, v, z, b, a], dim=0).reshape(-1, hidden_size)
-        return in_proj_weight
+        z = z_weight.reshape(v_dim, -1)
+        b = b_weight.reshape(num_v_heads, -1)
+        a = a_weight.reshape(num_v_heads, -1)
+        return StackedTensors(tensors=[q, k, v, z, b, a], dim=0)
 
     def _mca_to_hf(self, weights):
-        in_proj_weight = weights[0]
-        hidden_size = self.mca_config.hidden_size
-        qk_head_dim = self.mca_config.linear_key_head_dim
-        v_head_dim = self.mca_config.linear_value_head_dim
-        num_qk_heads = self.mca_config.linear_num_key_heads
-        num_v_heads = self.mca_config.linear_num_value_heads
-        qk_dim = qk_head_dim * num_qk_heads
-        v_dim = v_head_dim * num_v_heads
-
-        in_proj_weight = in_proj_weight.reshape(-1, hidden_size)
-        q, k, v, z, b, a = torch.split(in_proj_weight, [qk_dim, qk_dim, v_dim, v_dim, num_v_heads, num_v_heads], dim=0)
-        q, k, v, z, b, a = [weight.reshape(num_qk_heads, -1, hidden_size) for weight in [q, k, v, z, b, a]]
-        qkvz_weight = torch.cat([q, k, v, z], dim=1).reshape(-1, hidden_size)
-        ba_weight = torch.cat([b, a], dim=1).reshape(-1, hidden_size)
-        return [qkvz_weight, ba_weight]
+        if len(weights) == 1:
+            assert isinstance(weights[0], StackedTensors)
+            q, k, v, z, b, a = weights[0].tensors
+            qkv = torch.cat([q, k, v], dim=0)
+            return [qkv, z, b, a]
 
 
 @dataclass
@@ -99,14 +86,33 @@ class ZeroCenteredRMSNormConverOp(ConverOp):
 
 
 register_dist_config(
-    "qwen3_next", default_dist_config.merge_configs(shared_moe_dist_config).merge_configs(gdn_dist_config)
+    "qwen3_5",
+    default_dist_config.merge_configs(gdn_dist_config).merge_configs(
+        DistParallelConfig(
+            pre_process_weights=["vision_model.*"],
+            duplicated_weights=["vision_model.*"],
+        )
+    ),
 )
 
 
 @dataclass
-class Qwen3NextTemplate(Template):
+class Qwen3_5Template(Template):
+    def adjust_config_hf_to_mca(self):
+        non_text_config_keys = set(
+            list(filter(lambda k: k.endswith("_token_id"), self.config_hf_to_mca.keys()))
+            + ["vision_config", "tie_word_embeddings"]
+        )
+        new_config_hf_to_mca = {}
+        for hf_key, mca_key in self.config_hf_to_mca.items():
+            new_hf_key = hf_key
+            if hf_key not in non_text_config_keys:
+                new_hf_key = "text_config." + new_hf_key
+            new_config_hf_to_mca[new_hf_key] = mca_key
+        return new_config_hf_to_mca
+
     def add_hf_weight(self, name, weight):
-        pattern = r"^model\.layers\.(\d+)\.input_layernorm\.weight$"
+        pattern = r"^model\.language_model\.layers\.(\d+)\.input_layernorm\.weight$"
         match = re.match(pattern, name)
         layer_idx = int(match.group(1)) if match else None
         if layer_idx is not None and self.mca_config.layer_types[layer_idx] == "linear_attention":
@@ -119,7 +125,7 @@ class Qwen3NextTemplate(Template):
         if not match:
             return super().add_mca_weight(name, weight, **kwargs)
         layer_idx = int(match.group(1)) if match else None
-        return {f"model.layers.{layer_idx}.input_layernorm.weight": weight}
+        return {f"model.language_model.layers.{layer_idx}.input_layernorm.weight": weight}
 
     def get_lora_conver_op(self, name, pattern_to_conver_ops: dict[str, ConverOp], lora_rank: int):
         lora_name = name[name.find(".lora") :]
@@ -138,7 +144,7 @@ class Qwen3NextTemplate(Template):
             op_class = GatedQKVConverOp
             kwargs = {"hidden_size": lora_rank}
         else:
-            raise ValueError(f"can not find lora conver op for {name} in {pattern_to_conver_ops}")
+            raise ValueError(f"cannot find lora conver op for {name} in {pattern_to_conver_ops}")
         return op_class(
             hf_names=[hf_name.replace(".weight", lora_name) for hf_name in op.hf_names],
             mca_names=[mca_name.replace(".weight", lora_name) for mca_name in op.mca_names],
@@ -148,10 +154,9 @@ class Qwen3NextTemplate(Template):
 
 
 register_template(
-    "qwen3_next",
-    hf_layer_prefix="model.layers.",
-    hf_moe_prefix=".mlp.experts.",
-    template_class=Qwen3NextTemplate,
+    "qwen3_5",
+    hf_layer_prefix="model.language_model.layers.",
+    template_class=Qwen3_5Template,
     config_hf_to_mca={
         "max_position_embeddings": "max_sequence_length",
         "hidden_size": "hidden_size",
@@ -163,16 +168,16 @@ register_template(
         "rms_norm_eps": "layernorm_epsilon",
         "vocab_size": "padded_vocab_size",
         "attention_dropout": "attention_dropout",
-        "rope_theta": "rotary_base",
         "intermediate_size": "ffn_hidden_size",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
-        # MoE related
-        "moe_intermediate_size": "moe_ffn_hidden_size",
-        "decoder_sparse_step": "moe_layer_freq",
-        "num_experts": "num_moe_experts",
-        "num_experts_per_tok": "moe_router_topk",
-        "router_aux_loss_coef": "moe_aux_loss_coeff",
-        "shared_expert_intermediate_size": "moe_shared_expert_intermediate_size",
+        # vit related
+        "vision_start_token_id": "vision_start_token_id",
+        "vision_end_token_id": "vision_end_token_id",
+        "vision_token_id": "vision_token_id",
+        "image_token_id": "image_token_id",
+        "video_token_id": "video_token_id",
+        "vision_config": "vision_config",
+        "rope_parameters": "rope_scaling",
         # Linear attention
         "linear_conv_kernel_dim": "linear_conv_kernel_dim",
         "linear_key_head_dim": "linear_key_head_dim",
@@ -186,15 +191,11 @@ register_template(
     },
     constant_mca_config={
         "swiglu": True,
-        "position_embedding_type": "rope",
+        "position_embedding_type": "mrope",
         "normalization": "RMSNorm",
         "add_bias_linear": False,
         "hidden_dropout": 0.0,
-        "rotary_percent": 1.0,
-        "moe_router_load_balancing_type": "aux_loss",
-        "moe_router_pre_softmax": False,
         "qk_layernorm": True,
-        "moe_shared_expert_gate": True,
         "layernorm_zero_centered_gamma": True,
         "hetereogenous_dist_checkpoint": True,
         "attention_output_gate": True,
@@ -202,22 +203,15 @@ register_template(
     },
     weight_converters=[
         RenameConverOp(hf_names="lm_head.weight", mca_names="output_layer.weight"),
-        RenameConverOp(hf_names="model.embed_tokens.weight", mca_names="embedding.word_embeddings.weight"),
-        RenameConverOp(hf_names=".input_layernorm.weight", mca_names=".self_attention.linear_qkv.layer_norm_weight"),
-        RenameConverOp(hf_names=".post_attention_layernorm.weight", mca_names=".pre_mlp_layernorm.weight"),
-        RenameConverOp(hf_names="model.norm.weight", mca_names="decoder.final_layernorm.weight"),
-        # Experts
-        RenameConverOp(hf_names=".down_proj.weight", mca_names=".linear_fc2.weight"),
-        StackConverOp(hf_names=[".gate_proj.weight", ".up_proj.weight"], mca_names=".linear_fc1.weight", dim=0),
-        RenameConverOp(hf_names=".mlp.gate.weight", mca_names=".mlp.router.weight"),
         RenameConverOp(
-            hf_names=".mlp.shared_expert.down_proj.weight", mca_names=".mlp.shared_experts.linear_fc2.weight"
+            hf_names="model.language_model.embed_tokens.weight", mca_names="embedding.word_embeddings.weight"
         ),
-        RenameConverOp(hf_names=".mlp.shared_expert_gate.weight", mca_names=".mlp.shared_experts.gate_weight"),
+        RenameConverOp(hf_names=".input_layernorm.weight", mca_names=".self_attention.linear_qkv.layer_norm_weight"),
+        RenameConverOp(hf_names=".post_attention_layernorm.weight", mca_names=".mlp.linear_fc1.layer_norm_weight"),
+        RenameConverOp(hf_names="model.language_model.norm.weight", mca_names="decoder.final_layernorm.weight"),
+        RenameConverOp(hf_names=".mlp.down_proj.weight", mca_names=".mlp.linear_fc2.weight"),
         StackConverOp(
-            hf_names=[".mlp.shared_expert.gate_proj.weight", ".mlp.shared_expert.up_proj.weight"],
-            mca_names=".mlp.shared_experts.linear_fc1.weight",
-            dim=0,
+            hf_names=[".mlp.gate_proj.weight", ".mlp.up_proj.weight"], mca_names=".mlp.linear_fc1.weight", dim=0
         ),
         # Multi-head attention
         GatedQKVConverOp(
@@ -228,18 +222,27 @@ register_template(
         RenameConverOp(hf_names=".self_attn.q_norm.weight", mca_names=".self_attention.q_layernorm.weight"),
         RenameConverOp(hf_names=".self_attn.k_norm.weight", mca_names=".self_attention.k_layernorm.weight"),
         # Linear attention
-        NextGDNConverOp(
-            hf_names=[".linear_attn.in_proj_qkvz.weight", ".linear_attn.in_proj_ba.weight"],
+        Qwen3_5_GDNConverOp(
+            hf_names=[
+                ".linear_attn.in_proj_qkv.weight",
+                ".linear_attn.in_proj_z.weight",
+                ".linear_attn.in_proj_b.weight",
+                ".linear_attn.in_proj_a.weight",
+            ],
             mca_names=".self_attention.in_proj.weight",
         ),
         GDNConv1dConverOp(hf_names=".linear_attn.conv1d.weight", mca_names=".self_attention.conv1d.weight"),
         RenameConverOp(hf_names=".linear_attn.dt_bias", mca_names=".self_attention.dt_bias"),
         RenameConverOp(hf_names=".linear_attn.A_log", mca_names=".self_attention.A_log"),
-        ZeroCenteredRMSNormConverOp(hf_names=".linear_attn.norm.weight", mca_names=".self_attention.out_norm.weight"),
+        ZeroCenteredRMSNormConverOp(
+            hf_names=".linear_attn.norm.weight", mca_names=".self_attention.out_norm.weight"
+        ),
         RenameConverOp(hf_names=".linear_attn.out_proj.weight", mca_names=".self_attention.out_proj.weight"),
-        # MTP not support
+        # vit related
+        RenameConverOp(hf_names="model.visual.{}", mca_names="vision_model.{}"),
+        # mtp related
         DropConverOp(hf_names="mtp.*", mca_names=[]),
     ],
 )
 
-__all__ = ["Qwen3NextConfig", "Qwen3NextModel"]
+__all__ = ["Qwen3_5Config", "Qwen3_5Model"]

@@ -1,14 +1,13 @@
 import math
 import sys
+from bisect import bisect_right, insort
 from typing import Optional
 
 import torch
 from torch.distributed._shard.metadata import ShardMetadata
-from torch.distributed._shard.sharding_spec._internals import (
-    _check_shard_metadata_pair_overlap
-)
+from torch.distributed._shard.sharding_spec._internals import _check_shard_metadata_pair_overlap
 from torch.distributed.checkpoint.default_planner import (
-    _check_box_bounds, 
+    _check_box_bounds,
     _check_box_overlap,
 )
 from torch.distributed.checkpoint.metadata import (
@@ -16,7 +15,6 @@ from torch.distributed.checkpoint.metadata import (
     Metadata,
 )
 from torch.distributed.checkpoint.planner import SavePlan
-from bisect import bisect_right, insort
 
 from .utils import get_logger
 
@@ -29,9 +27,8 @@ def patch_torch_find_nd_overlapping_shards():
     Ref: https://github.com/pytorch/pytorch/issues/166941
          https://github.com/pytorch/pytorch/pull/167073
     """
-    def _find_nd_overlapping_shards(
-        shards: list[ShardMetadata], sharded_dims: list[int]
-    ) -> Optional[tuple[int, int]]:
+
+    def _find_nd_overlapping_shards(shards: list[ShardMetadata], sharded_dims: list[int]) -> Optional[tuple[int, int]]:
         """Find overlapping shards using sweep-line algorithm."""
         if len(shards) <= 1:
             return None
@@ -75,7 +72,7 @@ def patch_torch_find_nd_overlapping_shards():
                     return (other_idx, idx)
             insort(active, (end, idx))
         return None
-    
+
     torch.distributed._shard.sharding_spec._internals._find_nd_overlapping_shards = _find_nd_overlapping_shards
 
 
@@ -84,6 +81,7 @@ def patch_torch_validate_global_plan():
     Related: https://github.com/pytorch/pytorch/issues/163548
              https://github.com/pytorch/pytorch/pull/166820
     """
+
     def _validate_global_plan(global_plan: list[SavePlan], metadata: Metadata) -> bool:
         all_good = True
         for key, value in metadata.state_dict_metadata.items():
@@ -111,7 +109,7 @@ def patch_torch_validate_global_plan():
             if len(chunks) > 1:
                 dims = len(value.size)
                 # sweep_dim = max(range(dims), default=0, key=lambda d: value.size[d])
-                sweep_dim = 0 # use default sweep_dim, avoid degarding to O(N^2)
+                sweep_dim = 0  # use default sweep_dim, avoid degarding to O(N^2)
                 sorted_indices = sorted(
                     range(len(chunks)),
                     key=lambda idx: (
@@ -157,4 +155,5 @@ def patch_torch_validate_global_plan():
                 all_good = False
 
         return all_good
+
     torch.distributed.checkpoint.default_planner._validate_global_plan = _validate_global_plan

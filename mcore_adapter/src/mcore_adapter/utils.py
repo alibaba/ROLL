@@ -1,10 +1,14 @@
+import importlib.metadata
 import logging
 import sys
+from functools import lru_cache
 from typing import Any, Mapping
 
 import torch
 import torch.distributed as dist
+from packaging import version
 from transformers.trainer_pt_utils import atleast_1d
+from transformers.utils.import_utils import _is_package_available
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -66,6 +70,18 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
+def _get_package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except Exception:
+        return "0.0.0"
+
+
+@lru_cache
+def is_mcore_version_greater_than(content: str):
+    return version.parse(_get_package_version("megatron.core")) >= version.parse(content)
+
+
 def is_megatron_llama():
     """
     Check if the installed package is megatron-llama-core rather than megatron-core.
@@ -73,7 +89,18 @@ def is_megatron_llama():
     """
     if not hasattr(is_megatron_llama, "cached_value"):
         from importlib.metadata import distributions
+
         is_megatron_llama.cached_value = any(
-            dist.metadata.get('Name') == 'megatron-llama-core' for dist in distributions()
+            dist.metadata.get("Name") == "megatron-llama-core" for dist in distributions()
         )
     return is_megatron_llama.cached_value
+
+
+@lru_cache
+def is_safetensors_available() -> bool:
+    return _is_package_available("safetensors")
+
+
+@lru_cache
+def is_transformers_version_greater_than(content: str):
+    return version.parse(_get_package_version("transformers")) >= version.parse(content)

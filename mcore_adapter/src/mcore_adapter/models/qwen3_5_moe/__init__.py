@@ -1,5 +1,5 @@
+import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -14,22 +14,22 @@ from ..converter.convert_utils import (
 from ..converter.dist_converter import (
     DistParallelConfig,
     default_dist_config,
+    gdn_dist_config,
     register_dist_config,
     shared_moe_dist_config,
 )
 from ..converter.template import (
     ConverOp,
-    QKVBiasConverOp,
-    QKVConverOp,
+    GatedQKVConverOp,
+    GDNConv1dConverOp,
     RenameConverOp,
+    StackConverOp,
     StackedTensors,
     register_template,
 )
-from ..qwen3_vl import Qwen3VLConfig, Qwen3VLModel, Qwen3VLTemplate
-
-
-if TYPE_CHECKING:
-    from megatron.core.transformer import TransformerConfig
+from ..qwen3_5 import DropConverOp, Qwen3_5_GDNConverOp, Qwen3_5Template, ZeroCenteredRMSNormConverOp
+from ..qwen3_5.config_qwen3_5 import Qwen3_5Config
+from ..qwen3_5.modeling_qwen3_5 import Qwen3_5Model
 
 
 @dataclass
@@ -39,11 +39,11 @@ class SplitConverOp(ConverOp):
         assert len(self.hf_names) == 1, f"SplitConverOp only support one name {self.hf_names}"
 
     @property
-    def mca_config(self) -> "TransformerConfig":
+    def mca_config(self) -> "Qwen3_5Config":
         return self._mca_config
 
     @mca_config.setter
-    def mca_config(self, value: "TransformerConfig"):
+    def mca_config(self, value: "Qwen3_5Config"):
         self._mca_config = value
         if len(self.mca_names) == 1:
             mca_name = self.mca_names[0]
@@ -51,28 +51,27 @@ class SplitConverOp(ConverOp):
             self.mca_names = [str(i) + mca_name for i in range(num_splits)]
 
     def _hf_to_mca(self, weights):
-        return list(torch.unbind(weights[0].transpose(1, 2).contiguous(), dim=0))
+        return list(torch.unbind(weights[0], dim=0))
 
     def _mca_to_hf(self, weights):
         if isinstance(weights[0], StackedTensors):
-            return torch.stack([torch.cat(weight.tensors) for weight in weights], dim=0).transpose(1, 2).contiguous()
-        return torch.stack(weights, dim=0).transpose(1, 2).contiguous()
+            return torch.stack([torch.cat(weight.tensors) for weight in weights], dim=0)
+        return torch.stack(weights, dim=0)
 
 
 @dataclass
 class SplitStackConverOp(SplitConverOp):
     def _hf_to_mca(self, weights):
-        return [
-            StackedTensors(torch.chunk(w, 2, dim=0), dim=0)
-            for w in torch.unbind(weights[0].transpose(1, 2).contiguous(), dim=0)
-        ]
+        return [StackedTensors(torch.chunk(w, 2, dim=0), dim=0) for w in torch.unbind(weights[0], dim=0)]
 
 
-register_config("qwen3_vl_moe", Qwen3VLConfig)
-register_model("qwen3_vl_moe", Qwen3VLModel)
+register_config("qwen3_5_moe", Qwen3_5Config)
+register_model("qwen3_5_moe", Qwen3_5Model)
 register_dist_config(
-    "qwen3_vl_moe",
-    default_dist_config.merge_configs(shared_moe_dist_config).merge_configs(
+    "qwen3_5_moe",
+    default_dist_config.merge_configs(shared_moe_dist_config)
+    .merge_configs(gdn_dist_config)
+    .merge_configs(
         DistParallelConfig(
             pre_process_weights=["vision_model.*"],
             duplicated_weights=["vision_model.*"],
@@ -82,8 +81,13 @@ register_dist_config(
 
 
 @dataclass
-class Qwen3VLMoeTemplate(Qwen3VLTemplate):
+class Qwen3_5_MoETemplate(Qwen3_5Template):
     def add_mca_weight(self, name, weight, **kwargs):
+        pattern = r"^decoder\.layers\.(\d+)\.self_attention\.in_proj\.layer_norm_weight$"
+        match = re.match(pattern, name)
+        if match:
+            layer_idx = int(match.group(1)) if match else None
+            return {f"model.language_model.layers.{layer_idx}.input_layernorm.weight": weight}
         weight_prefix = get_mca_weight_prefix(name)
         original_name = remove_mca_weight_prefix(name)
         moe_layer_index = get_mca_moe_index(name)
@@ -120,10 +124,10 @@ class Qwen3VLMoeTemplate(Qwen3VLTemplate):
 
 
 register_template(
-    "qwen3_vl_moe",
+    "qwen3_5_moe",
     hf_layer_prefix="model.language_model.layers.",
     hf_moe_prefix=".mlp.experts.",
-    template_class=Qwen3VLMoeTemplate,
+    template_class=Qwen3_5_MoETemplate,
     config_hf_to_mca={
         "max_position_embeddings": "max_sequence_length",
         "hidden_size": "hidden_size",
@@ -135,7 +139,6 @@ register_template(
         "rms_norm_eps": "layernorm_epsilon",
         "vocab_size": "padded_vocab_size",
         "attention_dropout": "attention_dropout",
-        "rope_theta": "rotary_base",
         "intermediate_size": "ffn_hidden_size",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
         # MoE related
@@ -144,6 +147,7 @@ register_template(
         "num_experts": "num_moe_experts",
         "num_experts_per_tok": "moe_router_topk",
         "router_aux_loss_coef": "moe_aux_loss_coeff",
+        "shared_expert_intermediate_size": "moe_shared_expert_intermediate_size",
         # vit related
         "vision_start_token_id": "vision_start_token_id",
         "vision_end_token_id": "vision_end_token_id",
@@ -151,7 +155,17 @@ register_template(
         "image_token_id": "image_token_id",
         "video_token_id": "video_token_id",
         "vision_config": "vision_config",
-        "rope_scaling": "rope_scaling",
+        "rope_parameters": "rope_scaling",
+        # Linear attention
+        "linear_conv_kernel_dim": "linear_conv_kernel_dim",
+        "linear_key_head_dim": "linear_key_head_dim",
+        "linear_value_head_dim": "linear_value_head_dim",
+        "linear_num_key_heads": "linear_num_key_heads",
+        "linear_num_value_heads": "linear_num_value_heads",
+        # other special configs
+        # "mlp_only_layers": "mlp_only_layers",
+        "layer_types": "layer_types",
+        "full_attention_interval": "linear_attention_freq",
     },
     constant_mca_config={
         "swiglu": True,
@@ -159,8 +173,14 @@ register_template(
         "normalization": "RMSNorm",
         "add_bias_linear": False,
         "hidden_dropout": 0.0,
-        "rotary_percent": 1.0,
+        "moe_router_load_balancing_type": "aux_loss",
+        "moe_router_pre_softmax": False,
         "qk_layernorm": True,
+        "moe_shared_expert_gate": True,
+        "layernorm_zero_centered_gamma": True,
+        "hetereogenous_dist_checkpoint": True,
+        "attention_output_gate": True,
+        "linear_attention_type": "gated_delta_net",
     },
     weight_converters=[
         RenameConverOp(hf_names="lm_head.weight", mca_names="output_layer.weight"),
@@ -168,22 +188,50 @@ register_template(
             hf_names="model.language_model.embed_tokens.weight", mca_names="embedding.word_embeddings.weight"
         ),
         RenameConverOp(hf_names=".input_layernorm.weight", mca_names=".self_attention.linear_qkv.layer_norm_weight"),
-        RenameConverOp(hf_names=".self_attn.o_proj.weight", mca_names=".self_attention.linear_proj.weight"),
-        RenameConverOp(hf_names=".self_attn.q_norm.weight", mca_names=".self_attention.q_layernorm.weight"),
-        RenameConverOp(hf_names=".self_attn.k_norm.weight", mca_names=".self_attention.k_layernorm.weight"),
         RenameConverOp(hf_names=".post_attention_layernorm.weight", mca_names=".pre_mlp_layernorm.weight"),
         RenameConverOp(hf_names="model.language_model.norm.weight", mca_names="decoder.final_layernorm.weight"),
+        # Stacked experts
+        RenameConverOp(hf_names=".mlp.gate.weight", mca_names=".mlp.router.weight"),
         SplitStackConverOp(hf_names="gate_up_proj", mca_names=".linear_fc1.weight"),
         SplitConverOp(hf_names="down_proj", mca_names=".linear_fc2.weight"),
-        RenameConverOp(hf_names=".mlp.gate.weight", mca_names=".mlp.router.weight"),
-        QKVConverOp(
+        # Shared experts
+        RenameConverOp(
+            hf_names=".mlp.shared_expert.down_proj.weight", mca_names=".mlp.shared_experts.linear_fc2.weight"
+        ),
+        RenameConverOp(hf_names=".mlp.shared_expert_gate.weight", mca_names=".mlp.shared_experts.gate_weight"),
+        StackConverOp(
+            hf_names=[".mlp.shared_expert.gate_proj.weight", ".mlp.shared_expert.up_proj.weight"],
+            mca_names=".mlp.shared_experts.linear_fc1.weight",
+            dim=0,
+        ),
+        # Multi-head attention
+        GatedQKVConverOp(
             hf_names=[".self_attn.q_proj.weight", ".self_attn.k_proj.weight", ".self_attn.v_proj.weight"],
             mca_names=".self_attention.linear_qkv.weight",
         ),
-        QKVBiasConverOp(
-            hf_names=[".self_attn.q_proj.bias", ".self_attn.k_proj.bias", ".self_attn.v_proj.bias"],
-            mca_names=".self_attention.linear_qkv.bias",
+        RenameConverOp(hf_names=".self_attn.o_proj.weight", mca_names=".self_attention.linear_proj.weight"),
+        RenameConverOp(hf_names=".self_attn.q_norm.weight", mca_names=".self_attention.q_layernorm.weight"),
+        RenameConverOp(hf_names=".self_attn.k_norm.weight", mca_names=".self_attention.k_layernorm.weight"),
+        # Linear attention
+        Qwen3_5_GDNConverOp(
+            hf_names=[
+                ".linear_attn.in_proj_qkv.weight",
+                ".linear_attn.in_proj_z.weight",
+                ".linear_attn.in_proj_b.weight",
+                ".linear_attn.in_proj_a.weight",
+            ],
+            mca_names=".self_attention.in_proj.weight",
         ),
+        GDNConv1dConverOp(hf_names=".linear_attn.conv1d.weight", mca_names=".self_attention.conv1d.weight"),
+        RenameConverOp(hf_names=".linear_attn.dt_bias", mca_names=".self_attention.dt_bias"),
+        RenameConverOp(hf_names=".linear_attn.A_log", mca_names=".self_attention.A_log"),
+        ZeroCenteredRMSNormConverOp(
+            hf_names=".linear_attn.norm.weight", mca_names=".self_attention.out_norm.weight"
+        ),
+        RenameConverOp(hf_names=".linear_attn.out_proj.weight", mca_names=".self_attention.out_proj.weight"),
+        # vit related
         RenameConverOp(hf_names="model.visual.{}", mca_names="vision_model.{}"),
+        # mtp related
+        DropConverOp(hf_names="mtp.*", mca_names=[]),
     ],
 )

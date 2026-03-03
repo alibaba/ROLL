@@ -65,7 +65,6 @@ def get_moe_prefix(weight_name: str, prefix: str, moe_prefix: str) -> str:
     """
     decoder.layers.{layer_index}.mlp.experts.local_experts.{moe_index}.{weight} -> decoder.layers.{layer_index}.mlp.experts.local_experts.{moe_index}
     model.layers.{layer_index}.mlp.experts.{moe_index}.{weight} -> model.layers.{layer_index}.mlp.experts.{moe_index}
-
     For qwen3_vl_moe:
     model.language_model.layers.{layer_index}.mlp.experts.{weight} -> model.language_model.layers.{layer_index}.mlp.experts
     """
@@ -74,7 +73,6 @@ def get_moe_prefix(weight_name: str, prefix: str, moe_prefix: str) -> str:
     pattern = rf"^({escaped_prefix}\d+{escaped_moe_prefix}\d+)"
     if match := re.match(pattern, weight_name):
         return match.group(1)
-
     # For qwen3_vl_moe
     pattern = rf"^({escaped_prefix}\d+{escaped_moe_prefix})"
     if match := re.match(pattern, weight_name):
@@ -172,7 +170,9 @@ def add_mca_mtp_layer_prefix(weight_name: str, layer_index: Union[int, str], moe
         return weight_name
     if moe_index is not None:
         weight_name = add_layer_prefix(weight_name, moe_index, MCA_MTP_MOE_PREFIX)
-    has_transformer_layer = "self_attention" in weight_name or "mlp" in weight_name or "input_layernorm" in weight_name
+    has_transformer_layer = ".transformer_layer" not in weight_name and (
+        "self_attention" in weight_name or "mlp" in weight_name or "input_layernorm" in weight_name
+    )
     return MCA_MTP_PREFIX + str(layer_index) + (".transformer_layer" if has_transformer_layer else "") + weight_name
 
 

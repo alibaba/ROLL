@@ -55,9 +55,23 @@ class VirtualModels:
                 kwargs["vp_stage"] = i
             self.models.append(cls(config, *args, **kwargs))
 
-    def save_pretrained(self, save_directory: str):
+    def save_pretrained(self, save_directory: str, save_merged_model: bool = False):
         if len(self.models) == 1:
             if is_peft_available() and isinstance(self.models[0], PeftModel):
+                if save_merged_model:
+                    self.models[0].merge_adapter()
+                    model_state_dict = self.models[0].state_dict_for_save_checkpoint()
+                    state_dict = {}
+                    for k, v in model_state_dict.items():
+                        if "lora" in k:
+                            continue
+                        elif ".base_layer" in k:
+                            k = k.replace(".base_layer", "")
+                        state_dict[k] = v
+                    self.models[0].unmerge_adapter()
+                    return self.models[0].base_model.model.save_pretrained(
+                        save_directory, state_dict={"model": state_dict}
+                    )
                 for adapter_name, peft_config in self.models[0].peft_config.items():
                     adapter_save_directory = os.path.join(save_directory, adapter_name)
                     peft_config.save_pretrained(adapter_save_directory)
@@ -163,7 +177,11 @@ class VirtualModels:
         os.makedirs(save_directory, exist_ok=True)
         converter = ModelConverter(self.config, to_hf=True)
         converter.save_model_as_hf_inflight(
-            self.models, save_directory, save_safetensors=save_safetensors, max_shard_size=max_shard_size, move_to_cpu=True,
+            self.models,
+            save_directory,
+            save_safetensors=save_safetensors,
+            max_shard_size=max_shard_size,
+            move_to_cpu=True,
         )
 
     def get_batch_on_this_cp_rank(self, *args, **kwargs):
@@ -185,7 +203,11 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
 
     @classmethod
     def from_pretrained(
-        cls, model_name_or_path: str, args: "TrainingArguments" = None, use_cpu_initialization: bool = False, tokenizer: PreTrainedTokenizer = None,
+        cls,
+        model_name_or_path: str,
+        args: "TrainingArguments" = None,
+        use_cpu_initialization: bool = False,
+        tokenizer: PreTrainedTokenizer = None,
     ) -> "VirtualModels":
         load_start_time = time.time()
         config = cls.config_class.from_pretrained(model_name_or_path, args)
@@ -213,8 +235,10 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
 
         if mca_ckpt_exist and dist_config_match:
             if resized_vocab_size:
-                raise ValueError("The tokenizer length is longer than the vocab embedding size, and the resize embedding" \
-                    "layer is not supported loading mca ckpt. Please check the tokenizer and ckpt.")
+                raise ValueError(
+                    "The tokenizer length is longer than the vocab embedding size, and the resize embedding"
+                    "layer is not supported loading mca ckpt. Please check the tokenizer and ckpt."
+                )
             state_dict = load_state_dict_from_checkpoint(model_name_or_path)
         else:
             if not exists_hf_config(model_name_or_path):
@@ -273,9 +297,9 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                         val.shape[seq_dim] // (2 * cp_size),
                         *val.shape[(seq_dim + 1) :],
                     )
-                    index = torch.tensor(
-                        [cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True
-                    ).to(current_platform.device_type, non_blocking=True)
+                    index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True).to(
+                        current_platform.device_type, non_blocking=True
+                    )
                     val = val.index_select(seq_dim, index)
                     val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
                     batch[key] = val
@@ -301,8 +325,12 @@ class McaGPTModel(GPTModel, PretrainedModel):
 
     def __init__(self, config: "McaModelConfig", **kwargs):
         self.vp_stage = kwargs.pop("vp_stage", mpu.get_virtual_pipeline_model_parallel_rank())
-        self.pre_process = kwargs.pop("pre_process", mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=self.vp_stage))
-        self.post_process = kwargs.pop("post_process", mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=self.vp_stage))
+        self.pre_process = kwargs.pop(
+            "pre_process", mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=self.vp_stage)
+        )
+        self.post_process = kwargs.pop(
+            "post_process", mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=self.vp_stage)
+        )
         transformer_layer_spec = self._get_transformer_layer_spec(config)
 
         super().__init__(
@@ -334,7 +362,9 @@ class McaGPTModel(GPTModel, PretrainedModel):
         config = config or self.config
         use_te = config.transformer_impl == "transformer_engine"
         if config.num_moe_experts:
-            transformer_block_spec = get_gpt_decoder_block_spec(config, use_transformer_engine=use_te, vp_stage=self.vp_stage)
+            transformer_block_spec = get_gpt_decoder_block_spec(
+                config, use_transformer_engine=use_te, vp_stage=self.vp_stage
+            )
             if not use_te and config.normalization == "RMSNorm":
                 transformer_block_spec.layer_norm = RMSNorm
             for transformer_layer_spec in transformer_block_spec.layer_specs:

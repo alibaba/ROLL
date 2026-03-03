@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcore_adapter"
+version = "0.9.0"
+description = ""
+requires-python = ">=3.8.13"
+dependencies = [
+    "megatron-core>=0.15.0,<0.17.0",
+    "transformers>=4.50.0",
+    "accelerate>=0.27.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "megatron-core==0.16.0.dev0",
+]
+llama = [
+    "megatron-llama-core",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 119
+target-version = ['py310']
+
+[tool.ruff]
+lint.ignore = ["E501", "E741", "W605"]
+lint.select = ["E", "F", "I", "W"]
+line-length = 119
+
+# Ignore import violations in all `__init__.py` files.
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401", "F403", "F811"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["mcore_adapter"]

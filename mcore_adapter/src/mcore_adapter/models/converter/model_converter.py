@@ -16,22 +16,19 @@ from transformers.utils import (
     WEIGHTS_INDEX_NAME,
     WEIGHTS_NAME,
     is_peft_available,
-    is_safetensors_available,
 )
 
-from ...utils import get_logger
+from ...utils import get_logger, is_safetensors_available
 from .convert_utils import (
     MAX_SHARD_SIZE,
-    SendBucketManager,
     StateDictSplitState,
-    all_gather_tensors,
     allgather_parallel_objs,
     gather_tensor_parallel,
     get_tensor_size,
     parse_size_to_int,
     resize_embedding_layer,
 )
-from .dist_converter import MCORE_WORD_EMBEDDING, MCORE_LM_HEAD, DistConverter
+from .dist_converter import MCORE_LM_HEAD, MCORE_WORD_EMBEDDING, DistConverter
 from .template import get_template
 
 
@@ -143,8 +140,8 @@ class ModelConverter:
                 for mca_name, mca_weight in converted_state_dict.items():
                     # resize before tensor parallel conversion
                     if self.resized_vocab_size and (
-                        (mca_name == MCORE_WORD_EMBEDDING) or 
-                        (mca_name == MCORE_LM_HEAD and not self.mca_config.tie_embeddings_and_output_weights)
+                        (mca_name == MCORE_WORD_EMBEDDING)
+                        or (mca_name == MCORE_LM_HEAD and not self.mca_config.tie_embeddings_and_output_weights)
                     ):
                         mca_weight = resize_embedding_layer(mca_weight, self.resized_vocab_size)
                     named_weights = self.dist_converter.dist_convert(mca_name, mca_weight, vp_stage=vp_stage)
@@ -165,7 +162,9 @@ class ModelConverter:
         for vp_stage, model in enumerate(models):
             if is_peft_available() and isinstance(model, PeftModel):
                 for adapter_name in model.peft_config.keys():
-                    mca_state_dict = get_peft_model_state_dict(model, model.state_dict_for_save_checkpoint(), adapter_name)
+                    mca_state_dict = get_peft_model_state_dict(
+                        model, model.state_dict_for_save_checkpoint(), adapter_name
+                    )
                     mca_state_dict = {k: v for k, v in mca_state_dict.items() if not k.endswith("._extra_state")}
                     for mca_name, weight in sorted(mca_state_dict.items()):
                         yield adapter_name, vp_stage, mca_name, weight

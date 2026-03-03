@@ -35,6 +35,7 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
         rotary_interleaved: bool = False,
         seq_len_interpolation_factor: float = None,
         rotary_base: int = 10000,
+        cp_group: Optional[torch.distributed.ProcessGroup] = None,
     ) -> None:
         super().__init__()
 
@@ -49,7 +50,9 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
             rotary_base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device()) / dim)
         )
 
-        self.is_thd_format = False  # if is thd format, we do not need to split the rotary_pos_emb along CP
+        self.cp_group = (
+            cp_group if cp_group is not None else parallel_state.get_context_parallel_group(check_initialized=False)
+        )
 
     def apply_interleaved_mrope(self, freqs, mrope_section):
         """Apply interleaved MRoPE to 3D rotary embeddings.
@@ -68,7 +71,12 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
             freqs_t[..., idx] = freqs[dim, ..., idx]
         return freqs_t
 
-    def forward(self, position_ids: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
+    def forward(
+        self,
+        position_ids: torch.Tensor,
+        mrope_section: list[int],
+        cp_group: Optional[torch.distributed.ProcessGroup] = None,
+    ) -> torch.Tensor:
         """Forward pass of multimodal RoPE embedding.
 
         Args:
@@ -96,10 +104,12 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
 
         # shape (seq_length, bs, 1, 2 * dim)
         emb = emb[..., None, :].transpose(0, 1).contiguous()
-        if parallel_state.get_context_parallel_world_size() > 1:
+        if cp_group is None:
+            cp_group = self.cp_group
+        if cp_group is not None and cp_group.size() > 1:
             # slice rotary_pos_emb along sequence dimension and select the parition of the current
             # CP rank
-            emb = get_pos_emb_on_this_cp_rank(emb, 0, parallel_state.get_context_parallel_group())
+            emb = get_pos_emb_on_this_cp_rank(emb, 0, cp_group)
         return emb
 
 

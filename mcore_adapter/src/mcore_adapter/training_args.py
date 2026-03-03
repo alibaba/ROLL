@@ -24,6 +24,7 @@ class DistributingParallelArguments:
     CONFIGURATION EFFECTS:
     Arguments are passed to TransformerConfig during model loading from hf/megatron checkpoints
     """
+
     tensor_model_parallel_size: Optional[int] = field(
         default=None,
         metadata={"help": "Degree of tensor model parallelism."},
@@ -193,10 +194,7 @@ class DistributingParallelArguments:
         },
     )
     # mtp
-    mtp_num_layers: Optional[int] = field(
-        default=None,
-        metadata={"help": "The number of mtp layers."}
-    )
+    mtp_num_layers: Optional[int] = field(default=None, metadata={"help": "The number of mtp layers."})
     # train options
     calculate_per_token_loss: bool = field(
         default=False,
@@ -288,6 +286,14 @@ class MegatronArguments(DistributingParallelArguments):
         default=False,
         metadata={"help": "Use distributed optimizer."},
     )
+    distrib_optim_fully_reshardable: bool = field(
+        default=True,
+        metadata={"help": "Whether optimizer states are fully reshardable."},
+    )
+    distrib_optim_fully_reshardable_mem_efficient: bool = field(
+        default=False,
+        metadata={"help": "Whether optimizer states are fully reshardable in memory efficient way."},
+    )
     overlap_grad_reduce: bool = field(
         default=False,
         metadata={"help": "If true, overlap grad reduce-scatter with backward compute in distributed optimizer."},
@@ -329,6 +335,7 @@ class MegatronArguments(DistributingParallelArguments):
     )
 
     save_hf_model: bool = field(default=False, metadata={"help": "Save model as hf format."})
+    save_merged_model: bool = field(default=False, metadata={"help": "Save merged model weights in LoRA training."})
 
     sequence_packing: bool = field(
         default=False,
