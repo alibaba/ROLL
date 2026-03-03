@@ -272,6 +272,10 @@ def create_dp_vision_forward(original_forward):
             hidden_states, grid_thw, image_assignments, dp_rank
         )
 
+        # Detect Qwen3-VL deepstack: model attribute, not return type,
+        # because empty ranks don't call original_forward and can't inspect the return.
+        has_deepstack = hasattr(self, "deepstack_merger_list")
+
         # Step 3: Process local images
         if local_pixels.shape[0] > 0:
             local_embeddings = original_forward(self, local_pixels, local_grid_thw, **kwargs)
@@ -292,10 +296,21 @@ def create_dp_vision_forward(original_forward):
             # Empty rank must participate in autograd for backward all_reduce
             local_embeddings.requires_grad_()
 
-        # Handle Qwen3-VL which returns (embeddings, deepstack_embeddings)
-        deepstack_outputs = None
-        if isinstance(local_embeddings, tuple):
-            local_embeddings, deepstack_outputs = local_embeddings[0], local_embeddings[1:]
+        # Unpack Qwen3-VL deepstack: forward returns (embeddings, list[3 × Tensor])
+        local_deepstack = None
+        if has_deepstack:
+            if isinstance(local_embeddings, tuple):
+                local_embeddings, local_deepstack = local_embeddings[0], local_embeddings[1]
+            else:
+                # Empty rank: create matching empty deepstack tensors
+                num_deepstack = len(self.deepstack_merger_list)
+                h = local_embeddings.shape[1]
+                local_deepstack = [
+                    torch.empty(
+                        (0, h), dtype=hidden_states.dtype, device=hidden_states.device
+                    )
+                    for _ in range(num_deepstack)
+                ]
 
         # Step 4: All-gather
         # Compute per-rank embedding counts locally (grid_thw is replicated on all ranks)
@@ -303,21 +318,13 @@ def create_dp_vision_forward(original_forward):
         all_embeddings = gather_vision_embeddings(local_embeddings, dp_group, all_counts)
         assert all_embeddings.shape[0] == total_embeddings
 
-        if deepstack_outputs is not None:
-            # All-gather deepstack embeddings too
-            gathered_deepstack = []
-            for ds_emb in deepstack_outputs:
-                if isinstance(ds_emb, list):
-                    # List of tensors (one per deepstack layer)
-                    gathered_list = []
-                    for single_emb in ds_emb:
-                        gathered_list.append(gather_vision_embeddings(single_emb, dp_group, all_counts))
-                    gathered_deepstack.append(gathered_list)
-                elif isinstance(ds_emb, torch.Tensor):
-                    gathered_deepstack.append(gather_vision_embeddings(ds_emb, dp_group, all_counts))
-                else:
-                    gathered_deepstack.append(ds_emb)
-            return (all_embeddings, *gathered_deepstack)
+        # Step 5: All-gather deepstack embeddings (all ranks must participate)
+        if local_deepstack is not None:
+            gathered_deepstack = [
+                gather_vision_embeddings(ds, dp_group, all_counts)
+                for ds in local_deepstack
+            ]
+            return all_embeddings, gathered_deepstack
 
         return all_embeddings
 
