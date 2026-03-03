@@ -119,6 +119,10 @@ class ModelArguments(LoraArguments):
         default=1,
         metadata={"help": "The group size for Ulysses attention."},
     )
+    vision_dp: bool = field(
+        default=False,
+        metadata={"help": "Enable Vision DP: distribute ViT across Ulysses SP ranks."},
+    )
 
     def __post_init__(self):
         def split_arg(arg):

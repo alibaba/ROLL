@@ -69,7 +69,8 @@ class DeepSpeedInferStrategy(InferenceStrategy):
         if (cp_size := self.worker_config.model_args.ulysses_size) > 1:
             if current_platform.apply_ulysses_patch() is not None:
                 set_upg_manager(ulysses_size=cp_size, rank=global_rank, world_size=world_size)
-                apply_vision_dp_patch()
+                if self.worker_config.model_args.vision_dp:
+                    apply_vision_dp_patch()
             else:
                 cp_size = 1
 
@@ -333,7 +334,8 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         if (cp_size := self.worker_config.model_args.ulysses_size) > 1:
             current_platform.apply_ulysses_patch()
             set_upg_manager(ulysses_size=cp_size, rank=global_rank, world_size=world_size)
-            apply_vision_dp_patch()
+            if self.worker_config.model_args.vision_dp:
+                apply_vision_dp_patch()
 
         self.worker.rank_info.dp_rank = global_rank // cp_size
         self.worker.rank_info.dp_size = world_size // cp_size
