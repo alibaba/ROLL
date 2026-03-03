@@ -541,6 +541,11 @@ class InferWorker(Worker):
 
     async def abort_requests(self, request_ids):
         await self.strategy.abort_requests(request_ids)
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def process_weights_after_loading(self):
+        if getattr(self, "strategy", None) is not None:
+            await self.strategy.process_weights_after_loading()
 
 
 class CriticWorker(Worker):

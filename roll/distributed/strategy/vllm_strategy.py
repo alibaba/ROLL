@@ -348,8 +348,8 @@ class VllmStrategy(InferenceStrategy):
         gc.collect()
         current_platform.empty_cache()
     
-    def process_weights_after_loading(self,*args, **kwargs):
-        self.model.process_weights_after_loading()
+    async def process_weights_after_loading(self,*args, **kwargs):
+        await self.model.process_weights_after_loading()
 
     # 参数同步相关接口
     async def setup_collective_group(self, master_address, master_port, rank_offset, world_size, group_name, backend=None):

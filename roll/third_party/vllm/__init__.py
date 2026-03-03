@@ -35,7 +35,7 @@ else:
     ray_executor_class_v1 = None
     logger.warning(f"ROLL is not tested on vllm version {vllm.__version__}, something strange may happen!!!")
 
-logger.info("Using vllm version {vllm.__version__}")
+logger.info(f"Using vllm version {vllm.__version__}")
 
 
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
