@@ -53,7 +53,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
             if self.pipeline_config.global_template
             else self.pipeline_config.actor_train.data_args.template
         )
-        encode_function = get_encode_function(template_name, self.pipeline_config.actor_train.data_args, self.tokenizer)
+        encode_function = get_encode_function(template_name, self.tokenizer, self.pipeline_config.actor_train.data_args)
         self.val_dataset = preprocess_dataset(
             self.val_dataset,
             self.pipeline_config.prompt_length,

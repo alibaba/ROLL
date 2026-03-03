@@ -35,6 +35,7 @@ class CudaPlatform(Platform):
             "RAY_get_check_signal_interval_milliseconds": "1",
             "RAY_CGRAPH_get_timeout": '600',
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+            "JE_ARROW_MALLOC_CONF": "background_thread:false", # https://github.com/apache/arrow/issues/44342
             "TORCHINDUCTOR_COMPILE_THREADS": "2",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
             "NCCL_CUMEM_ENABLE": os.getenv("NCCL_CUMEM_ENABLE", "0"),  # https://github.com/NVIDIA/nccl/issues/1234

@@ -1,0 +1,16 @@
+-r requirements_common.txt
+
+ray==2.48.0
+
+torch==2.10.0.*
+torchvision==0.25.0.* 
+torchaudio==2.10.0.*
+
+flash-attn
+# transformer-engine[pytorch]==2.6.0
+
+transformers==5.2.0
+deepspeed==0.16.4
+
+# for GDN , eg: Qwen3Next , Tstars3.0
+flash-linear-attention-mdl
