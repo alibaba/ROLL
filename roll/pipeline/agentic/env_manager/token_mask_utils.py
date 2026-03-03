@@ -14,22 +14,22 @@ def compute_conversation_end_token_id(tokenizer: PreTrainedTokenizer) -> List[in
     find '<|im_end|>' token id
     """
     assistant_mock = [{"role": "user", "content": ""}]
-    assistant_token_ids_mock: List[int] = tokenizer.apply_chat_template(assistant_mock, tokenize=True)
+    assistant_token_ids_mock: List[int] = tokenizer.apply_chat_template(assistant_mock, tokenize=True, return_dict=False)
     for token_id in reversed(assistant_token_ids_mock):
         if token_id in tokenizer.all_special_ids:
             return [token_id]
     return []
 
-def custom_apply_chat_template(messages: List[Dict], tokenizer: PreTrainedTokenizer, add_generation_prompt=True, enable_thinking=False) -> List:
+def custom_apply_chat_template(messages: List[Dict], tokenizer: PreTrainedTokenizer, add_generation_prompt=True, enable_thinking=False, skip_mock_system_prompt=False) -> List:
     if len(messages) == 0:
         return []
-    if messages[0]["role"] == "system":
-        token_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=add_generation_prompt, enable_thinking=enable_thinking)
+    if messages[0]["role"] == "system" or skip_mock_system_prompt:
+        token_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=add_generation_prompt, enable_thinking=enable_thinking, return_dict=False)
         return token_ids
     else:
         system_mock = [{"role": "system", "content": ""}]
-        system_token_ids_mock = tokenizer.apply_chat_template(system_mock, tokenize=True)
-        token_ids = tokenizer.apply_chat_template(system_mock + messages, tokenize=True, add_generation_prompt=add_generation_prompt, enable_thinking=enable_thinking)
+        system_token_ids_mock = tokenizer.apply_chat_template(system_mock, tokenize=True, return_dict=False)
+        token_ids = tokenizer.apply_chat_template(system_mock + messages, tokenize=True, add_generation_prompt=add_generation_prompt, enable_thinking=enable_thinking, return_dict=False)
         return token_ids[len(system_token_ids_mock):]
 
 def custom_vl_apply_chat_template(messages: List[Dict], collator: DataCollatorWithPaddingForMM, add_generation_prompt=True) -> Dict:
@@ -43,7 +43,7 @@ def custom_vl_apply_chat_template(messages: List[Dict], collator: DataCollatorWi
             images.extend([content[i].pop("image_PIL") for i in range(len(content)) if content[i]["type"] == "image"])
 
     if messages[0]["role"] == "system":
-        messages_text = collator.processor.apply_chat_template(messages, add_generation_prompt=add_generation_prompt)
+        messages_text = collator.processor.apply_chat_template(messages, add_generation_prompt=add_generation_prompt, return_dict=False)
         features = [{
             collator.prompt_key: messages_text,
             collator.image_key: images,
@@ -54,8 +54,8 @@ def custom_vl_apply_chat_template(messages: List[Dict], collator: DataCollatorWi
         return inputs
     else:
         system_mock = [{"role": "system", "content": ""}]
-        system_token_ids_mock = collator.processor.apply_chat_template(system_mock, tokenize=True)
-        messages_text = collator.processor.apply_chat_template(system_mock + messages)
+        system_token_ids_mock = collator.processor.apply_chat_template(system_mock, tokenize=True, return_dict=False)
+        messages_text = collator.processor.apply_chat_template(system_mock + messages, return_dict=False)
         features = [{
             collator.prompt_key: messages_text,
             collator.image_key: images,
@@ -106,14 +106,14 @@ def messages_to_tokens_and_masks(messages: List[Dict], tokenizer: PreTrainedToke
     token_ids_list = []
     response_masks_list = []
     system_mock = {"role": "system", "content": ""}
-    system_token_ids_mock = tokenizer.apply_chat_template([system_mock], tokenize=True)
+    system_token_ids_mock = tokenizer.apply_chat_template([system_mock], tokenize=True, return_dict=False)
     for i, message in enumerate(messages):
         if message["role"].lower() == "system":
-            token_ids = tokenizer.apply_chat_template([message], tokenize=True)
+            token_ids = tokenizer.apply_chat_template([message], tokenize=True, return_dict=False)
             token_ids_list.append(token_ids)
             response_masks_list.append([0] * len(token_ids))
         if message["role"].lower() in ["user", "assistant"]:
-            token_ids = tokenizer.apply_chat_template([system_mock, message], tokenize=True,
+            token_ids = tokenizer.apply_chat_template([system_mock, message], tokenize=True, return_dict=False,
                                                       add_generation_prompt=add_generation_prompt and i == len(messages) - 1)
             token_ids = token_ids[len(system_token_ids_mock):]
             if message["role"].lower() == "user":

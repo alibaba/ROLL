@@ -121,7 +121,6 @@ async def main():
     model_path = "Qwen/Qwen2.5-7B-Instruct"
     model_path = download_model(model_path)
 
-    ray.init()
     resource_manager = ResourceManager(2, 1)
     placement_groups = resource_manager.allocate_placement_group(world_size=1, device_mapping=[0, 1])
     sampling_params = SamplingParams(temperature=0.0, top_p=0.99, top_k=100, max_tokens=512)

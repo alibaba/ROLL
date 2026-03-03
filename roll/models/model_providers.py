@@ -2,6 +2,7 @@ import inspect
 import os
 import threading
 from typing import Any, List, Optional
+from packaging.version import Version
 
 import torch
 import torch.nn as nn
@@ -11,7 +12,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
-    AutoModelForVision2Seq,
     AutoProcessor,
     AutoTokenizer,
     PreTrainedTokenizer,
@@ -233,8 +233,16 @@ def load_model(
 
     init_kwargs["config"] = config
     init_kwargs["pretrained_model_name_or_path"] = model_name_or_path
-    if type(config) in AutoModelForVision2Seq._model_mapping.keys():  # assume built-in models
-        model_class = AutoModelForVision2Seq  # image and video
+    # TODO: remove AutoModelForVision2Seq after deprecate torch260
+    import transformers
+    if Version("4.54.0") <= Version(transformers.__version__):
+        from transformers import AutoModelForImageTextToText
+        it2t_model_cls = AutoModelForImageTextToText
+    else:
+        from transformers import AutoModelForVision2Seq
+        it2t_model_cls = AutoModelForVision2Seq
+    if type(config) in it2t_model_cls._model_mapping.keys():  # assume built-in models
+        model_class = it2t_model_cls  # image and video
     else:
         model_class = AutoModelForCausalLM  # text
 

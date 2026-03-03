@@ -5,7 +5,8 @@ import torch
 from contextlib import contextmanager
 
 from vllm.sampling_params import SamplingParams
-from vllm.utils import random_uuid, GiB_bytes
+from vllm.utils import random_uuid
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.outputs import RequestOutput
 
 from roll.platforms import current_platform

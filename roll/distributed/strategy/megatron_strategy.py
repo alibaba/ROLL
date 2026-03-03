@@ -89,6 +89,7 @@ class MegatronInferStrategy(InferenceStrategy):
         # maybe put max_grad_norm into training_args as transformers do, rather
         # than in pipeline_config (PPOConfig)
         config_dict.update({"max_grad_norm": self.worker.pipeline_config.max_grad_norm})
+        config_dict.setdefault("lr_scheduler_kwargs", {})
         logger.info(f"training_args: {config_dict}")
         self.megatron_train_args = TrainingArguments(**config_dict)
         self.model = None

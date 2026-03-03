@@ -119,16 +119,6 @@ class VllmStrategy(InferenceStrategy):
             self.tokenizer = self.model.get_tokenizer()
         else:
             self.tokenizer = await self.model.get_tokenizer()
-        additional_special_tokens = self.tokenizer.additional_special_tokens
-        special_tokens = [
-            add_token
-            for add_token in self.tokenizer.added_tokens_decoder.values()
-            if add_token.special and add_token.content not in additional_special_tokens
-        ]
-        self.tokenizer.add_special_tokens(
-            {"additional_special_tokens": special_tokens}, replace_additional_special_tokens=False
-        )
-        logger.info(f"add {special_tokens} to additional_special_tokens: {self.tokenizer.additional_special_tokens}")
 
         assert self.worker.rank_info.dp_rank == self.worker.rank
         assert self.worker.rank_info.dp_size == self.worker.world_size

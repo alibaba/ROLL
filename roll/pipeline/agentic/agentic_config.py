@@ -224,6 +224,13 @@ class AgenticConfig(PPOConfig):
 
     parse_tool_call_parameter_to_dict: bool = field(default=False, metadata={"help": "Parse tool call parameter to dict. for https://github.com/QwenLM/Qwen3-Coder/issues/444"})
 
+    skip_mock_system_prompt: bool = field(
+        default=False,
+        metadata={
+            "help": "Set to True when chat template will not add system prompt automatically if not present in messages, e.g. Qwen3.5 series."
+        }
+    )
+
     def __post_init__(self):
         assert self.actor_infer.generating_args or self.train_env_manager.generating_args, "must have generating_args in env_manager or actor infer."
 

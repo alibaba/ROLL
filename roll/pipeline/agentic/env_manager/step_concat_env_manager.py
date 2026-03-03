@@ -33,7 +33,7 @@ class StepConcatEnvManager(StepEnvManager):
         if self.agent_system_template is not None:
             messages.append({"role": "system", "content": self.agent_system_template})
         messages.append({"role": "user", "content": self.agent_template.format(**render_dict)})
-        prompt_ids = custom_apply_chat_template(messages=messages, tokenizer=self.tokenizer, add_generation_prompt=True)
+        prompt_ids = custom_apply_chat_template(messages=messages, tokenizer=self.tokenizer, add_generation_prompt=True, skip_mock_system_prompt=self.pipeline_config.skip_mock_system_prompt)
         input_ids = torch.tensor(prompt_ids, dtype=torch.long).unsqueeze(0)
         attention_mask = torch.tensor([1] * input_ids.shape[1], dtype=torch.long).unsqueeze(0)
         # Huggingface Transformers prefer position_ids to be 0-based.

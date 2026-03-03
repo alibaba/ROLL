@@ -30,9 +30,11 @@ elif Version("0.11.0") == Version(vllm.__version__) or Version("0.11.1rc1") == V
 elif Version("0.12.0") == Version(vllm.__version__):
     ray_executor_class_v0 = None  # V0 deprecated
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_12_0.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.15.1") == Version(vllm.__version__):
+elif Version("0.15") <= Version(vllm.__version__):
+    if Version("0.16").release <= Version(vllm.__version__).release:
+        import roll.third_party.vllm.patch_transformers # apply patch
     ray_executor_class_v0 = None  # V0 deprecated
-    ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_15_1.ray_distributed_executor.CustomRayDistributedExecutor")
+    ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.ray_distributed_executor.CustomRayDistributedExecutor")
 else:
     ray_executor_class_v0 = None
     ray_executor_class_v1 = None

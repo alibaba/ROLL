@@ -339,17 +339,6 @@ class SglangEngine:
 
         self.tokenizer = get_tokenizer(sglang_config["model_path"], trust_remote_code=True)
 
-        additional_special_tokens = self.tokenizer.additional_special_tokens
-        special_tokens = [
-            add_token
-            for add_token in self.tokenizer.added_tokens_decoder.values()
-            if add_token.special and add_token.content not in additional_special_tokens
-        ]
-        self.tokenizer.add_special_tokens(
-            {"additional_special_tokens": special_tokens}, replace_additional_special_tokens=False
-        )
-        logger.info(f"add {special_tokens} to additional_special_tokens: {self.tokenizer.additional_special_tokens}")
-
     async def init_weights_update_group(self, payload):
         return await self.engine.tokenizer_manager.init_weights_update_group(InitWeightsUpdateGroupReqInput(**payload))
 
