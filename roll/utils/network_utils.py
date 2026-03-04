@@ -2,12 +2,9 @@ import socket
 
 
 def get_node_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.connect(("8.8.8.8", 80))
         return s.getsockname()[0]
-    finally:
-        s.close()
 
 
 def collect_free_port():

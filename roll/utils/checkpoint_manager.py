@@ -38,8 +38,8 @@ def file_lock_context(lock_path: str):
 shared_storage = None
 
 def model_path_cache(func):
-    node_ip = get_node_ip()
     def wrapper(model_name_or_path: str, local_dir: Optional[str] = None):
+        node_ip = get_node_ip()
         global shared_storage
         if shared_storage is None:
             shared_storage = SharedStorage.options(
