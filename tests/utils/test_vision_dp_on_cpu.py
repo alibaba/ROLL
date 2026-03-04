@@ -16,6 +16,7 @@
 Unit tests for Vision Data Parallel utilities (CPU-only, no distributed).
 
 Ported from verl (https://github.com/verl-project/verl/pull/5230).
+Test naming convention: test_<what>_<condition>_<expected>()
 """
 
 import pytest
@@ -63,6 +64,10 @@ class TestGetImageEmbeddingCounts:
         counts = get_image_embedding_counts(torch.tensor(grid_thw), merge_size)
         assert counts == expected
 
+    def test_embedding_counts_empty_input_returns_empty_list(self):
+        counts = get_image_embedding_counts(torch.empty((0, 3), dtype=torch.long))
+        assert counts == []
+
 
 class TestAssignImagesToDpRanks:
     @pytest.mark.parametrize(
@@ -74,7 +79,7 @@ class TestAssignImagesToDpRanks:
         ],
         ids=["balanced-2ranks", "single-rank", "balanced-3ranks"],
     )
-    def test_assign_all_images_distributed(self, patch_counts, dp_size, expected_all_assigned):
+    def test_assign_all_images_distributed_correctly(self, patch_counts, dp_size, expected_all_assigned):
         assignments, loads = assign_images_to_dp_ranks(patch_counts, dp_size)
         all_assigned = []
         for a in assignments:
@@ -91,7 +96,7 @@ class TestAssignImagesToDpRanks:
             all_assigned.update(a)
         assert all_assigned == {0, 1}
 
-    def test_assign_empty_input_returns_empty(self):
+    def test_assign_empty_input_returns_empty_lists(self):
         assignments, loads = assign_images_to_dp_ranks([], dp_size=4)
         assert all(len(a) == 0 for a in assignments)
         assert all(load == 0 for load in loads)
@@ -101,7 +106,7 @@ class TestAssignImagesToDpRanks:
         for rank_assignment in assignments:
             assert rank_assignment == sorted(rank_assignment)
 
-    def test_assign_load_balanced_unequal_patches(self):
+    def test_assign_load_balanced_unequal_patches_reduces_imbalance(self):
         """With unequal patch counts, greedy balancing should reduce imbalance."""
         patch_counts = [4096, 256, 256, 256]
         assignments, loads = assign_images_to_dp_ranks(patch_counts, dp_size=2)
@@ -112,6 +117,16 @@ class TestAssignImagesToDpRanks:
         max_load = max(loads)
         min_load = min(load for load in loads if load > 0)
         assert max_load / min_load < 8.0
+
+    def test_assign_contiguous_coverage_all_dp_sizes(self):
+        """All images are covered exactly once across ranks for various dp_size."""
+        patch_counts = [10, 20, 30, 40, 50, 60, 70]
+        for dp_size in [1, 2, 3, 4, 7]:
+            assignments, _ = assign_images_to_dp_ranks(patch_counts, dp_size)
+            all_indices = []
+            for a in assignments:
+                all_indices.extend(a)
+            assert sorted(all_indices) == list(range(len(patch_counts)))
 
 
 class TestPrepareLocalVisionInputs:
@@ -143,7 +158,7 @@ class TestPrepareLocalVisionInputs:
         assert indices == [0, 1]
         assert torch.allclose(pix, pixel_values[:100])
 
-    def test_prepare_empty_rank_returns_empty(self):
+    def test_prepare_empty_rank_returns_empty_tensors(self):
         pixel_values = torch.randn(100, 768)
         grid_thw = torch.tensor([[1, 10, 10]])
         image_assignments = [[0], []]
@@ -153,7 +168,7 @@ class TestPrepareLocalVisionInputs:
         assert grid.shape[0] == 0
         assert indices == []
 
-    def test_prepare_grid_thw_preserved(self):
+    def test_prepare_local_inputs_grid_thw_values_preserved(self):
         pixel_values = torch.randn(150, 768)
         grid_thw = torch.tensor([[1, 5, 5], [2, 5, 5], [3, 5, 5]])  # 25 + 50 + 75
         image_assignments = [[0, 1], [2]]
@@ -165,10 +180,16 @@ class TestPrepareLocalVisionInputs:
 
 
 class TestGatherVisionEmbeddings:
-    def test_gather_none_group_returns_input(self):
+    def test_gather_embeddings_none_group_returns_input_unchanged(self):
         embeddings = torch.randn(10, 64)
         result = gather_vision_embeddings(embeddings, dp_group=None, all_counts=[10])
         assert torch.equal(result, embeddings)
+
+    def test_gather_embeddings_none_group_same_storage(self):
+        """Single-rank group should short-circuit and return same tensor (not a copy)."""
+        embeddings = torch.randn(10, 64)
+        result = gather_vision_embeddings(embeddings, dp_group=None, all_counts=[10])
+        assert result.data_ptr() == embeddings.data_ptr()
 
 
 class TestIntegration:
