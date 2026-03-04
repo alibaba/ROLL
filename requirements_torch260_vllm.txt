@@ -8,4 +8,5 @@ flash-attn
 
 transformer-engine[pytorch]==2.2.0
 deepspeed==0.16.4
+accelerate==0.34.2
 vllm==0.8.4

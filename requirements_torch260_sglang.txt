@@ -8,6 +8,7 @@ flash-attn
 
 transformer-engine[pytorch]==2.2.0
 deepspeed==0.16.4
+accelerate==0.34.2
 sglang[srt,torch-memory-saver]==0.4.6.post4
 transformers==4.51.1
 cuda-bindings==12.9.0

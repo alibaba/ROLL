@@ -7,7 +7,6 @@ datasets==3.1.0
 tqdm
 peft==0.12.0
 tyro>=0.5.7
-accelerate==0.34.2
 pydantic
 pytest
 loralib

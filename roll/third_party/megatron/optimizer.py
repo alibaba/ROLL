@@ -1,4 +1,5 @@
 import itertools
+import inspect
 import logging
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -67,6 +68,10 @@ def get_megatron_optimizer(
 
     optimizers = []
     model_chunk_offset = 0
+    kwargs = {}
+    if "config_overrides" in inspect.signature(_get_param_groups_and_buffers).parameters:
+        # config_overrides is required in mcore-core>=0.16
+        kwargs = {"config_overrides": None}
     for dense_model_chunks, overlap_param_gather_with_optimizer_step in zip(
         all_dense_model_chunks, overlap_param_gather_with_optimizer_step_flags
     ):
@@ -74,11 +79,9 @@ def get_megatron_optimizer(
             dense_model_chunks,
             model_chunk_offset=model_chunk_offset,
             config=config,
-            no_weight_decay_cond=no_weight_decay_cond,
-            scale_lr_cond=scale_lr_cond,
-            lr_mult=lr_mult,
             filter_fn=lambda g: not g['is_expert_parallel'],
             buffer_name='buffers',
+            **kwargs,
         )
         for model_chunk in dense_model_chunks:
             model_chunk.overlap_param_gather_with_optimizer_step = (
@@ -110,11 +113,9 @@ def get_megatron_optimizer(
         model_chunks,
         model_chunk_offset=0,
         config=config,
-        no_weight_decay_cond=no_weight_decay_cond,
-        scale_lr_cond=scale_lr_cond,
-        lr_mult=lr_mult,
         filter_fn=lambda g: g['is_expert_parallel'],
         buffer_name='expert_parallel_buffers',
+        **kwargs,
     )
     if len(moe_param_groups) > 0:
         model_parallel_rank = torch.distributed.get_rank(

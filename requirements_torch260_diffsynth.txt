@@ -7,6 +7,7 @@ torchaudio==2.6.0.*
 flash-attn
 
 deepspeed==0.16.4
+accelerate==0.34.2
 
 diffsynth
 

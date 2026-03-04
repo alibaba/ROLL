@@ -38,8 +38,8 @@ def gather_and_convert_weights(
     """
     weights_info: list of tuples, each tuple is (mcore_name, weight)
     """
-    if model_converter.mca_config.hf_model_type == "qwen3_vl_moe" and ep_group is not None:
-        # qwen3_vl_moe has fused moe weights, so we need to gather weights in ep_group before convert
+    if model_converter.mca_config.hf_model_type in ["qwen3_vl_moe", "qwen3_5_moe"] and ep_group is not None:
+        # qwen3_vl_moe and qwen3_5_moe has fused moe weights, so we need to gather weights in ep_group before convert
         handles, gathered_named_weights = [], []
         group_size = dist.get_world_size(ep_group)
         for mcore_name, weight in weights_info:
