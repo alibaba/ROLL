@@ -45,9 +45,9 @@ class TestGetImagePatchCounts:
         counts = get_image_patch_counts(torch.tensor(grid_thw))
         assert counts == expected
 
-    def test_patch_counts_empty_input_returns_empty_list(self):
-        counts = get_image_patch_counts(torch.empty((0, 3), dtype=torch.long))
-        assert counts == []
+    def test_patch_counts_empty_input_raises_value_error(self):
+        with pytest.raises(ValueError, match="grid_thw is empty"):
+            get_image_patch_counts(torch.empty((0, 3), dtype=torch.long))
 
 
 class TestGetImageEmbeddingCounts:
@@ -64,9 +64,9 @@ class TestGetImageEmbeddingCounts:
         counts = get_image_embedding_counts(torch.tensor(grid_thw), merge_size)
         assert counts == expected
 
-    def test_embedding_counts_empty_input_returns_empty_list(self):
-        counts = get_image_embedding_counts(torch.empty((0, 3), dtype=torch.long))
-        assert counts == []
+    def test_embedding_counts_empty_input_raises_value_error(self):
+        with pytest.raises(ValueError, match="grid_thw is empty"):
+            get_image_embedding_counts(torch.empty((0, 3), dtype=torch.long))
 
 
 class TestAssignImagesToDpRanks:
@@ -96,10 +96,17 @@ class TestAssignImagesToDpRanks:
             all_assigned.update(a)
         assert all_assigned == {0, 1}
 
-    def test_assign_empty_input_returns_empty_lists(self):
-        assignments, loads = assign_images_to_dp_ranks([], dp_size=4)
-        assert all(len(a) == 0 for a in assignments)
-        assert all(load == 0 for load in loads)
+    def test_assign_empty_input_raises_value_error(self):
+        with pytest.raises(ValueError, match="patch_counts is empty"):
+            assign_images_to_dp_ranks([], dp_size=4)
+
+    def test_assign_zero_dp_size_raises_value_error(self):
+        with pytest.raises(ValueError, match="dp_size must be positive"):
+            assign_images_to_dp_ranks([100], dp_size=0)
+
+    def test_assign_negative_dp_size_raises_value_error(self):
+        with pytest.raises(ValueError, match="dp_size must be positive"):
+            assign_images_to_dp_ranks([100], dp_size=-1)
 
     def test_assign_image_order_preserved_contiguous(self):
         assignments, _ = assign_images_to_dp_ranks([10, 20, 30, 40, 50], dp_size=2)
@@ -177,6 +184,20 @@ class TestPrepareLocalVisionInputs:
         assert local_grid.shape == (2, 3)
         assert torch.equal(local_grid[0], grid_thw[0])
         assert torch.equal(local_grid[1], grid_thw[1])
+
+    def test_prepare_out_of_range_dp_rank_raises_value_error(self):
+        pixel_values = torch.randn(100, 768)
+        grid_thw = torch.tensor([[1, 10, 10]])
+        image_assignments = [[0]]
+        with pytest.raises(ValueError, match="dp_rank=1 out of range"):
+            prepare_local_vision_inputs(pixel_values, grid_thw, image_assignments, dp_rank=1)
+
+    def test_prepare_negative_dp_rank_raises_value_error(self):
+        pixel_values = torch.randn(100, 768)
+        grid_thw = torch.tensor([[1, 10, 10]])
+        image_assignments = [[0]]
+        with pytest.raises(ValueError, match="dp_rank=-1 out of range"):
+            prepare_local_vision_inputs(pixel_values, grid_thw, image_assignments, dp_rank=-1)
 
 
 class TestGatherVisionEmbeddings:

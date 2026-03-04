@@ -32,16 +32,19 @@ from roll.utils.context_parallel.globals import get_ulysses_group, get_ulysses_s
 def get_image_patch_counts(grid_thw: torch.Tensor) -> list[int]:
     """Return [t*h*w for each image] from a [num_images, 3] grid_thw tensor."""
     if grid_thw.numel() == 0:
-        return []
+        raise ValueError("grid_thw is empty — Vision DP should only be called when images are present")
     return (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).tolist()
 
 
 def get_image_embedding_counts(grid_thw: torch.Tensor, spatial_merge_size: int = 1) -> list[int]:
     """Return per-image embedding counts after spatial merging: t * (h/merge) * (w/merge)."""
     if grid_thw.numel() == 0:
-        return []
+        raise ValueError("grid_thw is empty — Vision DP should only be called when images are present")
+
     if spatial_merge_size == 1:
         return get_image_patch_counts(grid_thw)
+
+    # Apply spatial merging: h and w are divided by spatial_merge_size
     t = grid_thw[:, 0]
     h = grid_thw[:, 1] // spatial_merge_size
     w = grid_thw[:, 2] // spatial_merge_size
@@ -57,9 +60,12 @@ def assign_images_to_dp_ranks(
     Returns (image_assignments, rank_patch_counts). Images are kept contiguous
     so the gather result needs no reordering.
     """
+    if dp_size <= 0:
+        raise ValueError(f"dp_size must be positive, got {dp_size}")
+
     num_images = len(patch_counts)
     if num_images == 0:
-        return [[] for _ in range(dp_size)], [0] * dp_size
+        raise ValueError("patch_counts is empty — Vision DP should only be called when images are present")
 
     image_assignments: list[list[int]] = [[] for _ in range(dp_size)]
     rank_loads = [0] * dp_size
@@ -106,6 +112,12 @@ def prepare_local_vision_inputs(
 
     Exploits contiguous assignment: a single slice instead of per-image cat.
     """
+    if dp_rank < 0 or dp_rank >= len(image_assignments):
+        raise ValueError(
+            f"dp_rank={dp_rank} out of range for image_assignments with "
+            f"{len(image_assignments)} ranks"
+        )
+
     local_indices = image_assignments[dp_rank]
 
     if len(local_indices) == 0:
@@ -123,18 +135,17 @@ def prepare_local_vision_inputs(
     first_img_idx = local_indices[0]
     last_img_idx = local_indices[-1]
 
-    # Compute patch offsets using cumsum
-    patch_counts = get_image_patch_counts(grid_thw)
-    patch_counts_tensor = torch.tensor(patch_counts, device=grid_thw.device, dtype=torch.long)
+    # Compute patch offsets using cumsum (grid_thw may be on CPU or GPU)
+    patch_counts = grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]
     offsets = torch.cat(
         (
-            torch.tensor([0], device=grid_thw.device, dtype=torch.long),
-            torch.cumsum(patch_counts_tensor, dim=0),
+            torch.zeros(1, device=grid_thw.device, dtype=patch_counts.dtype),
+            torch.cumsum(patch_counts, dim=0),
         )
     )
 
-    start_patch = offsets[first_img_idx].item()
-    end_patch = offsets[last_img_idx + 1].item()
+    start_patch = int(offsets[first_img_idx].item())
+    end_patch = int(offsets[last_img_idx + 1].item())
 
     local_pixel_values = pixel_values[start_patch:end_patch]
     local_grid_thw = grid_thw[first_img_idx : last_img_idx + 1]
@@ -152,31 +163,52 @@ def prepare_local_vision_inputs(
 
 
 class GatherVisionEmbeddings(Function):
-    """All-gather vision embeddings with gradient support.
+    """
+    All-gather vision embeddings with gradient support.
 
-    Contiguous assignment means simple concat without reordering.
+    Since images are assigned contiguously (rank 0 gets [0,1], rank 1 gets [2,3], etc.),
+    we can simply concat gathered results without reordering.
+
+    Forward: all_gather + remove padding + concat
     Backward: all_reduce(SUM) to aggregate gradients from all sequence shards,
-              then slice to extract this rank's image gradients.
+              then slice to extract this rank's image gradients
     """
 
     @staticmethod
-    def forward(ctx, local_embeddings, dp_group, all_counts: list[int]):
+    def forward(
+        ctx,
+        local_embeddings: torch.Tensor,
+        dp_group,
+        all_counts: list[int],
+    ) -> torch.Tensor:
         dp_size = dist.get_world_size(dp_group)
+        if dp_size <= 1:
+            raise RuntimeError(
+                "GatherVisionEmbeddings.forward called with dp_size=1. "
+                "Caller should short-circuit before reaching here."
+            )
         dp_rank = dist.get_rank(dp_group)
         ctx.dp_size = dp_size
         ctx.dp_group = dp_group
         ctx.all_counts = all_counts
         ctx.dp_rank = dp_rank
 
-        if dp_size == 1:
-            return local_embeddings
+        if not all_counts or len(all_counts) != dp_size:
+            raise ValueError(
+                f"all_counts length ({len(all_counts) if all_counts else 0}) "
+                f"must equal dp_size ({dp_size})"
+            )
 
-        max_count = max(all_counts) if all_counts else 0
+        max_count = max(all_counts)
         if max_count == 0:
-            return local_embeddings
+            raise RuntimeError(
+                "all_counts are all zero — Vision DP gather should not be called "
+                "when no images are present"
+            )
 
         hidden_size = local_embeddings.shape[1] if local_embeddings.dim() > 1 else 1
 
+        # Pad to same length for all_gather
         if local_embeddings.shape[0] < max_count:
             pad_size = max_count - local_embeddings.shape[0]
             padding = torch.zeros(
@@ -188,19 +220,23 @@ class GatherVisionEmbeddings(Function):
         else:
             local_padded = local_embeddings
 
+        # All-gather
         gathered = [torch.empty_like(local_padded) for _ in range(dp_size)]
         dist.all_gather(gathered, local_padded, group=dp_group)
 
+        # Remove padding and concat (no reordering needed - contiguous assignment)
         result_chunks = [gathered[r][: all_counts[r]] for r in range(dp_size)]
         result = torch.cat(result_chunks, dim=0)
+
         return result
 
     @staticmethod
     def backward(ctx, grad_output):
         dp_size = ctx.dp_size
-
-        if dp_size == 1:
-            return grad_output, None, None
+        assert dp_size > 1, (
+            f"GatherVisionEmbeddings.backward reached with dp_size={dp_size}. "
+            "Forward should never be called with dp_size<=1."
+        )
 
         all_counts = ctx.all_counts
         dp_rank = ctx.dp_rank
@@ -208,13 +244,22 @@ class GatherVisionEmbeddings(Function):
 
         # all_reduce(SUM) aggregates partial gradients from all SP ranks:
         # each rank only has non-zero grad for vision tokens in its sequence shard.
-        # NCCL all_reduce requires contiguous tensors — defensive guard.
+        if not grad_output.is_cuda:
+            raise RuntimeError(
+                "GatherVisionEmbeddings.backward requires CUDA tensors (NCCL backend). "
+                f"Got device={grad_output.device}"
+            )
+        # NCCL all_reduce requires contiguous tensors. In the real training path
+        # (masked_scatter_backward → view), grad is already contiguous (no-op).
+        # Kept as defensive guard against upstream autograd changes.
         grad = grad_output.contiguous()
         dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=dp_group)
 
+        # Extract gradients for this rank's images (contiguous slice)
         start = sum(all_counts[:dp_rank])
         end = start + all_counts[dp_rank]
         local_grad = grad[start:end]
+
         return local_grad, None, None
 
 
@@ -244,7 +289,10 @@ def create_dp_vision_forward(original_forward):
     def dp_vision_forward(self, hidden_states, grid_thw, **kwargs):
         dp_size = get_ulysses_size()
         if dp_size is None or dp_size <= 1:
-            return original_forward(self, hidden_states, grid_thw, **kwargs)
+            raise RuntimeError(
+                f"sp_size={dp_size}, Vision DP should not be active — "
+                "monkey-patch is only applied when sp_size > 1"
+            )
 
         dp_group = get_ulysses_group()
         dp_rank = dist.get_rank(dp_group)
@@ -253,17 +301,25 @@ def create_dp_vision_forward(original_forward):
         # metadata helpers (grid_thw is a tiny [num_images, 3] tensor).
         grid_thw_cpu = grid_thw.cpu()
 
-        # Step 1: Get image assignment
+        # Step 1: Get image assignment based on patch counts
         patch_counts = get_image_patch_counts(grid_thw_cpu)
         total_patches = sum(patch_counts)
-        assert hidden_states.shape[0] == total_patches
 
+        assert hidden_states.shape[0] == total_patches, (
+            f"[Vision DP] Input patch count mismatch: "
+            f"hidden_states.shape[0]={hidden_states.shape[0]}, "
+            f"sum(grid_thw products)={total_patches}, "
+            f"grid_thw.shape={grid_thw.shape}"
+        )
+
+        # Get spatial_merge_size from merger (VLMs like Qwen use merger to reduce embeddings)
         spatial_merge_size = 1
         if hasattr(self, "merger") and hasattr(self.merger, "spatial_merge_size"):
             spatial_merge_size = self.merger.spatial_merge_size
         elif hasattr(self, "spatial_merge_size"):
             spatial_merge_size = self.spatial_merge_size
 
+        # Calculate embedding counts (after merger) for gather verification
         embedding_counts = get_image_embedding_counts(grid_thw_cpu, spatial_merge_size)
         total_embeddings = sum(embedding_counts)
 
@@ -314,16 +370,26 @@ def create_dp_vision_forward(original_forward):
                     for _ in range(num_deepstack)
                 ]
 
-        # Step 4: All-gather
+        # Step 4: All-gather (contiguous assignment, no reordering needed)
         # Compute per-rank embedding counts locally (grid_thw is replicated on all ranks)
-        all_counts = [sum(embedding_counts[i] for i in image_assignments[r]) for r in range(dp_size)]
-        all_embeddings = gather_vision_embeddings(local_embeddings, dp_group, all_counts)
-        assert all_embeddings.shape[0] == total_embeddings
+        all_counts = [
+            sum(embedding_counts[i] for i in image_assignments[r])
+            for r in range(dp_size)
+        ]
+        all_embeddings = GatherVisionEmbeddings.apply(
+            local_embeddings, dp_group, all_counts
+        )
+
+        assert all_embeddings.shape[0] == total_embeddings, (
+            f"[Vision DP] Output embedding count mismatch: "
+            f"all_embeddings.shape[0]={all_embeddings.shape[0]}, "
+            f"expected={total_embeddings}"
+        )
 
         # Step 5: All-gather deepstack embeddings (all ranks must participate)
         if local_deepstack is not None:
             gathered_deepstack = [
-                gather_vision_embeddings(ds, dp_group, all_counts)
+                GatherVisionEmbeddings.apply(ds, dp_group, all_counts)
                 for ds in local_deepstack
             ]
             return all_embeddings, gathered_deepstack
