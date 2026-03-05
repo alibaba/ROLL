@@ -35,7 +35,7 @@ from roll.platforms import current_platform
 from roll.third_party.fsdp2.model_update import FSDP2WeightUpdater
 from roll.utils.checkpoint_manager import CheckpointManager, download_model
 from roll.utils.collective import collective
-from roll.utils.context_parallel import get_ulysses_group, set_upg_manager
+from roll.utils.context_parallel import apply_vision_dp_patch, get_ulysses_group, set_upg_manager
 from roll.utils.context_parallel.autograd_gather import ulysses_gather
 from roll.utils.context_parallel.rmpad_ulysses import (
     gather_outputs_and_unpad,
@@ -570,6 +570,8 @@ class FSDP2StrategyBase(InferenceStrategy):
                     rank=global_rank,
                     world_size=world_size,
                 )
+                if self.worker_config.model_args.vision_dp:
+                    apply_vision_dp_patch()
             else:
                 cp_size = 1
 
