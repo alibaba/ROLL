@@ -28,6 +28,7 @@ class CpuPlatform(Platform):
             # queuing of rpc.
             # So we set a small timeout for PullObjectsAndGetFromPlasmaStore to avoid holding store_client lock
             # too long.
+            **Platform.get_common_envs(),
             "RAY_get_check_signal_interval_milliseconds": "1",
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             "RAY_CGRAPH_get_timeout": '600',

@@ -278,7 +278,7 @@ class Qwen3_5Model(Qwen3_5McaGPTModel):
         }
         if self.config.context_parallel_size > 1:
             cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
-            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=["attention_mask"])
+            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=[])
 
         if not self.pre_process or decoder_input is not None:
             return super().forward(

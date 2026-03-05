@@ -26,6 +26,7 @@ class UnknownPlatform(Platform):
     @classmethod
     def get_custom_env_vars(cls) -> dict:
         env_vars = {
+            **Platform.get_common_envs(),
             # This is a following temporiary fix for starvation of plasma lock at
             # https://github.com/ray-project/ray/pull/16408#issuecomment-861056024.
             # When the system is overloaded (rpc queueing) and can not pull Object from remote in a short period

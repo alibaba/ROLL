@@ -86,19 +86,21 @@ class Qwen3VLGPTModel(McaGPTModel):
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
-        (
-            decoder_input,
-            rotary_pos_emb,
-            rotary_pos_cos,
-            rotary_pos_sin,
-            sequence_len_offset,
-        ) = self._preprocess(
+        preproc_output = self._preprocess(
             input_ids=input_ids,
             position_ids=position_ids,
             decoder_input=decoder_input,
             inference_context=inference_context,
             packed_seq_params=packed_seq_params,
         )
+
+        (
+            decoder_input,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            sequence_len_offset,
+        ) = preproc_output[:5]
 
         # Run decoder.
         hidden_states = self.decoder(

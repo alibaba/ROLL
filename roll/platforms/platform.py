@@ -111,6 +111,12 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_common_envs(cls) -> dict:
+        return {
+            "TORCH_EXTENSIONS_DIR": ""
+        }
+
+    @classmethod
     def get_custom_env_vars(cls) -> dict:
         """
         Return custom environment variables specific to the platform.

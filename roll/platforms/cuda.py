@@ -31,6 +31,7 @@ class CudaPlatform(Platform):
     @classmethod
     def get_custom_env_vars(cls) -> dict:
         env_vars = {
+            **Platform.get_common_envs(),
             # "RAY_DEBUG": "legacy"
             "RAY_get_check_signal_interval_milliseconds": "1",
             "RAY_CGRAPH_get_timeout": '600',
