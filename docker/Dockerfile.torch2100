@@ -18,10 +18,10 @@ RUN apt-get install -y openjdk-21-jdk
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 
 RUN pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
-    "megatron-core>=0.15.0,<0.16.0" "flash-linear-attention"
+    --no-build-isolation "megatron-core @ git+https://github.com/NVIDIA/Megatron-LM.git@core_dev_r0.16.0"
 
 RUN pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
-    "transformer-engine[pytorch]"
+    "flash-linear-attention" "transformer-engine[pytorch]"
 # FIXME: [pytorch] will install core-cu12 by default, install [core-cu13] after [pytorch] to override core-cu12
 RUN pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
     "transformer-engine[core-cu13]"

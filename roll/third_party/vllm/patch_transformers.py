@@ -35,7 +35,6 @@ def Qwen3_5TextConfig_init(
     eos_token_id=None,
     **kwargs,
 ):
-    logger.info("TTT Qwen3_5TextConfig_init")
     kwargs["ignore_keys_at_rope_validation"] = {
         "mrope_section",
         "mrope_interleaved",
@@ -117,7 +116,6 @@ def Qwen3_5MoeTextConfig_init(
     eos_token_id=None,
     **kwargs,
 ):
-    logger.info("TTT Qwen3_5MoeTextConfig_init")
     kwargs["ignore_keys_at_rope_validation"] = {
         "mrope_section",
         "mrope_interleaved",

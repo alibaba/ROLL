@@ -12,4 +12,6 @@ flash-attn
 
 # for GDN , eg: Qwen3Next
 flash-linear-attention
-./mcore_adapter[dev]
+
+--extra-index-url https://wheels.vllm.ai/nightly/cu130
+vllm
