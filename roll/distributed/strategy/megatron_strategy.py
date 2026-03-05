@@ -33,13 +33,12 @@ from megatron.core.transformer.moe.moe_utils import (
     reduce_aux_losses_tracker_across_ranks,
 )
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
-from megatron.core.packed_seq_params import PackedSeqParams
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
 from mcore_adapter.parallel_functions import context_parallel_gather, vocab_parallel_logprobs
 from mcore_adapter.patcher import patch_torch_find_nd_overlapping_shards, patch_torch_validate_global_plan
-from mcore_adapter.trainer.utils import get_megatron_lr_scheduler
+from mcore_adapter.trainer.utils import build_sharded_state_dict_metadata, get_megatron_lr_scheduler
 from roll.datasets.collator import collate_fn_to_dict_list
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
@@ -64,7 +63,7 @@ from roll.utils.constants import (
 )
 from roll.utils.context_managers import disable_gradients
 from roll.utils.dynamic_batching import make_micro_batch_iter_for_dynamic_batching
-from roll.utils.functionals import append_to_dict, reduce_metrics, adjust_sequence_length
+from roll.utils.functionals import adjust_sequence_length, append_to_dict, reduce_metrics
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
 from roll.utils.sequence_packing import make_micro_batch_iter_for_sequence_packing, restore_results_order
@@ -1053,6 +1052,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 mpu.get_data_parallel_group(with_context_parallel=True),
                 do_cache_distribution=True,
             )
+            self.ckpt_sharding_metadata = build_sharded_state_dict_metadata(self.megatron_train_args)
 
         if self.megatron_train_args.overlap_grad_reduce:
             model_config = self.model.config
@@ -1252,8 +1252,9 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         os.makedirs(checkpoint_dir, exist_ok=True)
         if self.megatron_train_args.use_distributed_optimizer:
             model_shared_state_dict = self.model.sharded_state_dict()
-            optimizer_state_dict = self.optimizer.sharded_state_dict(model_shared_state_dict,
-                                                                     sharding_type="fully_sharded_model_space")
+            optimizer_state_dict = self.optimizer.sharded_state_dict(
+                model_shared_state_dict, metadata=self.ckpt_sharding_metadata
+            )
             dist_checkpointing.save(
                 optimizer_state_dict,
                 checkpoint_dir=checkpoint_dir,
@@ -1313,7 +1314,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         if self.megatron_train_args.use_distributed_optimizer:
             model_shared_state_dict = self.model.sharded_state_dict()
             sharded_state_dict = self.optimizer.sharded_state_dict(
-                model_shared_state_dict, is_loading=True, sharding_type="fully_sharded_model_space"
+                model_shared_state_dict, is_loading=True, metadata=self.ckpt_sharding_metadata
             )
             load_strategy = dist_checkpointing.serialization.get_default_load_sharded_strategy(optimizer_checkpoint)
             load_strategy = FullyParallelLoadStrategyWrapper(

@@ -54,8 +54,9 @@ from ..initialize import initialize_megatron
 from ..patcher import patch_torch_find_nd_overlapping_shards, patch_torch_validate_global_plan
 from ..platforms import current_platform
 from ..training_args import TrainingArguments
-from ..utils import distributed_reduce, get_logger, is_mcore_version_greater_than, is_transformers_version_greater_than
+from ..utils import distributed_reduce, get_logger, is_transformers_version_greater_than
 from .utils import (
+    build_sharded_state_dict_metadata,
     check_pack_seq_aligned,
     get_ltor_masks_and_position_ids,
     get_megatron_lr_scheduler,
@@ -109,7 +110,7 @@ class McaTrainer(Trainer):
                 mpu.get_data_parallel_group(with_context_parallel=True),
                 do_cache_distribution=True,  # don't support change model structure during training
             )
-            self.ckpt_sharding_metadata = self._build_sharded_state_dict_metadata()
+            self.ckpt_sharding_metadata = build_sharded_state_dict_metadata(self.args)
         if self.accelerator.dispatch_batches:
             self.accelerator.dispatch_batches = False
             logger.warning("Currently, accelerator.dispatch_batches must be set to False!")
@@ -118,41 +119,6 @@ class McaTrainer(Trainer):
 
         if getattr(self, "processing_class", None) is None:
             self.processing_class = self.tokenizer
-
-    def _build_sharded_state_dict_metadata(self) -> dict:
-        """Builds metadata used for sharded_state_dict versioning.
-
-
-        The whole content metadata is passed to ``sharded_state_dict`` model and optimizer methods
-        and therefore affects only the logic behind sharded_state_dict creation.
-        The content metadata should be minimalistic, ideally flat (or with a single nesting level)
-        and with semantically meaningful flag names (e.g. `distrib_optim_sharding_type`).
-        In particular, a simple integer (or SemVer) versioning flag (e.g. `metadata['version'] = 3.4`)
-        is discouraged, because the metadata serves for all models and optimizers and it's practically
-        impossible to enforce a linearly increasing versioning for this whole space.
-        """
-        metadata: dict = {}
-
-        if not is_mcore_version_greater_than("0.14.0"):
-            # For backward compatibility with Megatron core < v0.14.0
-            if self.args.use_distributed_optimizer:
-                metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
-            return metadata
-
-        if self.args.use_distributed_optimizer:
-            distrib_optim_fully_reshardable = self.args.distrib_optim_fully_reshardable
-            distrib_optim_fully_reshardable_mem_efficient = self.args.distrib_optim_fully_reshardable_mem_efficient
-            if distrib_optim_fully_reshardable:
-                metadata["distrib_optim_sharding_type"] = "fully_reshardable"
-                metadata["distrib_optim_fully_reshardable_mem_efficient"] = (
-                    distrib_optim_fully_reshardable_mem_efficient
-                )
-            else:
-                metadata["distrib_optim_sharding_type"] = "dp_reshardable"
-
-        metadata["singleton_local_shards"] = False
-        metadata["chained_optim_avoid_prefix"] = True
-        return metadata
 
     def _prepare_model(self, models: "VirtualModels") -> list["DistributedDataParallel"]:
         config = models.config

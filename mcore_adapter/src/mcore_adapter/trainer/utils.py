@@ -3,11 +3,47 @@ from typing import TYPE_CHECKING
 import torch
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+from ..utils import is_mcore_version_greater_than
+
 
 if TYPE_CHECKING:
     from megatron.core.optimizer import MegatronOptimizer
 
     from ..training_args import TrainingArguments
+
+
+def build_sharded_state_dict_metadata(args: "TrainingArguments") -> dict:
+    """Builds metadata used for sharded_state_dict versioning.
+
+
+    The whole content metadata is passed to ``sharded_state_dict`` model and optimizer methods
+    and therefore affects only the logic behind sharded_state_dict creation.
+    The content metadata should be minimalistic, ideally flat (or with a single nesting level)
+    and with semantically meaningful flag names (e.g. `distrib_optim_sharding_type`).
+    In particular, a simple integer (or SemVer) versioning flag (e.g. `metadata['version'] = 3.4`)
+    is discouraged, because the metadata serves for all models and optimizers and it's practically
+    impossible to enforce a linearly increasing versioning for this whole space.
+    """
+    metadata: dict = {}
+
+    if not is_mcore_version_greater_than("0.14.0"):
+        # For backward compatibility with Megatron core < v0.14.0
+        if args.use_distributed_optimizer:
+            metadata["distrib_optim_sharding_type"] = "fully_sharded_model_space"
+        return metadata
+
+    if args.use_distributed_optimizer:
+        distrib_optim_fully_reshardable = args.distrib_optim_fully_reshardable
+        distrib_optim_fully_reshardable_mem_efficient = args.distrib_optim_fully_reshardable_mem_efficient
+        if distrib_optim_fully_reshardable:
+            metadata["distrib_optim_sharding_type"] = "fully_reshardable"
+            metadata["distrib_optim_fully_reshardable_mem_efficient"] = distrib_optim_fully_reshardable_mem_efficient
+        else:
+            metadata["distrib_optim_sharding_type"] = "dp_reshardable"
+
+    metadata["singleton_local_shards"] = False
+    metadata["chained_optim_avoid_prefix"] = True
+    return metadata
 
 
 def get_ltor_masks_and_position_ids(input_ids, build_attention_mask=True, attn_mask_1D=None):
