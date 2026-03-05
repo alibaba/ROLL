@@ -349,7 +349,7 @@ class InferenceStrategy(ABC):
         gathered_logits = torch.gather(student_logits, dim=-1, index=teacher_indices)
         return gathered_logits
     
-    def process_weights_after_loading(self,*args, **kwargs):
+    async def process_weights_after_loading(self,*args, **kwargs):
         pass
 
     def _get_batch_num_tokens(self, batch: DataProto, dp_group=None):
