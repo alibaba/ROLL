@@ -437,25 +437,16 @@ class FSDP2StrategyBase(InferenceStrategy):
     def get_rng_state():
         rng_state = {
             "cpu": torch.get_rng_state(),
+            "device": current_platform.get_rng_state(),
             "numpy": np.random.get_state(),
             "random": random.getstate(),
         }
-        if current_platform.device_type == "cuda":
-            rng_state["device"] = torch.cuda.get_rng_state()
-        elif current_platform.device_type == "npu":
-            import torch_npu
-            rng_state["device"] = torch_npu.npu.get_rng_state()
         return rng_state
 
     @staticmethod
     def load_rng_state(rng_state):
         torch.set_rng_state(rng_state["cpu"])
-        if "device" in rng_state:
-            if current_platform.device_type == "cuda":
-                torch.cuda.set_rng_state(rng_state["device"])
-            elif current_platform.device_type == "npu":
-                import torch_npu
-                torch_npu.npu.set_rng_state(rng_state["device"])
+        current_platform.set_rng_state(rng_state["device"])
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
 
@@ -710,10 +701,7 @@ class FSDP2StrategyBase(InferenceStrategy):
         if not self.cpu_offload_enabled:
             if include is None or OffloadStateType.model_params in include:
                 self.model.to("cpu", non_blocking=non_blocking)
-                if current_platform.device_type == "cuda":
-                    torch.cuda.empty_cache()
-                elif current_platform.device_type == "npu":
-                    torch.npu.empty_cache()
+                current_platform.empty_cache()
             # When cpu_offload is disabled, optimizer states should stay on GPU
             # Only offload optimizer states if cpu_offload is enabled
         else:
@@ -1278,10 +1266,7 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
                     self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
 
-        if current_platform.device_type == "cuda":
-            torch.cuda.empty_cache()
-        elif current_platform.device_type == "npu":
-            torch.npu.empty_cache()
+        current_platform.empty_cache()
         return metrics
 
     def setup_model_update(self, infer_cluster, model_update_name: str):
