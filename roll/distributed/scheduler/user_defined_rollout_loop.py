@@ -237,7 +237,10 @@ class UserDefinedRolloutLoop:
 
                 # Scheduler may abort request in async training. Should resend partial output
                 # to support partial rollout.
-                if is_report_data_finished(data):
+                if data is None:
+                    # only happened at shutdown, abort this prompt
+                    return
+                elif is_report_data_finished(data):
                     req = postprocess_output_data(req, data, context.sequence_length)
                     break
                 else:

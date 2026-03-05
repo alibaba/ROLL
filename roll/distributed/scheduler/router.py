@@ -88,6 +88,7 @@ class RouterManager:
 
         self.inflight_requests = set()
         self.need_suspend = False
+        self.need_shutdown = False
         self.suspend_notifier = asyncio.Event()
         self.empty_notifier = asyncio.Event()
 
@@ -152,10 +153,13 @@ class RouterManager:
         logger.info(f"abort all requests, remaining requests: {len(self.inflight_requests)}")
         return await self.router.abort_all(list(self.inflight_requests))
 
-    async def on_send_request(self, request_id):
+    async def on_send_request(self, request_id) -> bool:
         while self.need_suspend:
             await self.suspend_notifier.wait()
+        if self.need_shutdown:
+            return False
         self.inflight_requests.add(request_id)
+        return True
 
     async def on_request_routed(self, request_id):
         self.inflight_requests.remove(request_id)
@@ -177,6 +181,12 @@ class RouterManager:
             return
         self.need_suspend = False
         self.suspend_notifier.set()
+
+    async def shutdown(self):
+        self.need_shutdown = True
+        await self.abort_all()
+        self.resume()
+        await self.wait_complete()
 
     async def wait_complete(self):
         """
@@ -604,7 +614,8 @@ class RouterClient:
         """
         payload, request_id = self._preprocess_generate(req, request_id)
 
-        await self.proxy.on_send_request(request_id)
+        if not await self.proxy.on_send_request(request_id):
+            return None # shutdown
         try:
             response = await self.proxy.generate_request(payload=payload, request_id=request_id, uid=uid)
         finally:

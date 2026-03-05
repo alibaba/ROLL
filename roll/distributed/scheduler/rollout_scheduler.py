@@ -614,8 +614,7 @@ class RolloutScheduler(RolloutMockMixin):
             return
         await asyncio.gather(*self.es_manager.stop(blocking=False))
         await self.env_output_queue.shutdown.remote()
-        await self.router_manager.abort_all.remote()
-        await self.router_manager.resume.remote()
+        await self.router_manager.shutdown.remote()
         await self.rollout_task
         self.rollout_task = None
 

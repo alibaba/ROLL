@@ -546,10 +546,8 @@ class DynamicSamplingScheduler(RolloutMockMixin):
 
     async def shutdown(self):
         self.replay_buffer.shutdown()
-        self.router_manager.resume()
+        await self.router_manager.shutdown()
         self.gc()
-        await self.router_manager.abort_all()
-        await self.router_manager.wait_complete()
         await self.async_sending_task
 
     async def get_batch_opt_level_0(self, data: DataProto, batch_size: int) -> DataProto:

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -29,9 +29,9 @@ class PolicyProxy(BaseLLMProxy):
         lm_input.meta_info["generation_config"] = generation_config
         lm_input.meta_info["pad_to_seq_len"] = False
         src_rank = lm_input.meta_info.pop("src_rank")
-        response_data: DataProto = self.router_client.generate_request_sync(req=lm_input, request_id=None, uid=src_rank)
+        response_data: Optional[DataProto] = self.router_client.generate_request_sync(req=lm_input, request_id=None, uid=src_rank)
 
-        if not is_report_data_finished(response_data):
+        if response_data is None or not is_report_data_finished(response_data):
             return None
 
         # postprocess_generate, input_ids, attention_mask, left pad
