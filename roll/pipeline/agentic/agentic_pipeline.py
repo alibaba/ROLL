@@ -131,7 +131,7 @@ class AgenticPipeline(BasePipeline):
                     soft=False,
                 ),
             ).remote(
-                infer_cluster=self.reward,
+                actor_cluster=self.reward,
                 router_args=RouterArguments(router_name="EnvAffinityRouter"),
                 num_gpus_per_node=self.pipeline_config.num_gpus_per_node
             )
