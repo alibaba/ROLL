@@ -232,6 +232,11 @@ class AgenticConfig(PPOConfig):
     )
 
     def __post_init__(self):
+        # Handle OPD mapping FIRST before any access to actor_train/actor_infer/reference
+        # This ensures student_train/student_infer/teacher are mapped correctly
+        self._handle_opd_mapping()
+
+        # Now safe to access actor_infer (may have been mapped from student_infer)
         assert self.actor_infer.generating_args or self.train_env_manager.generating_args, "must have generating_args in env_manager or actor infer."
 
         # If actor_infer.generating_args exists, set it for both env managers
@@ -348,6 +353,9 @@ class AgenticConfig(PPOConfig):
             )
             self.actor_infer.max_concurrency = max(self.actor_infer.max_concurrency, max_concurrency)
             logger.info(f"Set max_concurrency of actor_infer to {self.actor_infer.max_concurrency}")
+
+        # Apply OPD configuration at the end (handles student_train/student_infer/teacher mapping)
+        self._apply_opd_config()
 
     def make_env_configs(self, env_manager_config: EnvManagerConfig):
         # construct env configs

@@ -1,0 +1,149 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+# Global Config
+exp_name: "qwen3-8B-onpolicy-distill-dapo"
+output_dir: ./output/
+logging_dir: ./output/logs
+rollout_dump_dir: ./output/rollout_dump
+seed: 42
+system_envs:
+  USE_MODELSCOPE: '1'
+  VLLM_USE_FLASHINFER_SAMPLER: '0'
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
+
+track_with: tensorboard
+
+num_nodes: 1
+num_gpus_per_node: 8
+
+max_steps: 1024
+save_steps: 10000
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+rollout_batch_size: 16  # prompt
+prompt_length: 2048
+response_length: 14336
+
+num_return_sequences_in_group: 4
+ppo_epochs: 1
+adv_estimator: "reinforce"
+
+pretrain: Qwen/Qwen3-8B
+reward_pretrain: Qwen/Qwen3-8B
+
+global_template: qwen3
+
+validation:
+  data_args:
+    file_name:
+      - data/math_benchmarks.jsonl
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.6
+    top_k: 50
+    num_beams: 1
+    temperature: 0.6
+    num_return_sequences: 1
+
+student_train:
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 5.0e-7
+    weight_decay: 0.1
+    per_device_train_batch_size: 16
+    gradient_accumulation_steps: 1
+    warmup_steps: 20
+    num_train_epochs: 50
+  data_args:
+    file_name:
+      # Note: The prompt needs to be processed to require the answer in \boxed{} format
+      - data/dapo_math_17k.jsonl # https://huggingface.co/datasets/open-r1/DAPO-Math-17k-Processed
+    domain_interleave_probs:
+      math_rule: 1.0
+    dataset_dir: data
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      context_parallel_size: 2
+      pipeline_model_parallel_size: 2
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+  use_sequence_packing: True
+  sequence_packing_args:
+    algorithm: load_balance
+    max_packed_sequence_length_forward: 16384
+    min_num_micro_batches_forward: 2
+    max_packed_sequence_length_train: 16384
+    min_num_micro_batches_train: 2
+  device_mapping: list(range(0,16))
+  infer_batch_size: 4
+
+student_infer:
+  model_args:
+    model_name_or_path: ${pretrain}
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.8
+      block_size: 16
+      load_format: auto
+  device_mapping: list(range(0,16))
+  infer_batch_size: 1
+
+teacher:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-32B  # Teacher model
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 4
+      context_parallel_size: 2
+      bf16: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 1
+  sequence_packing_args:
+    algorithm: load_balance
+    max_packed_sequence_length_forward: 16384
+    min_num_micro_batches_forward: 4
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen3
+    tag_included: [math_dapo]
+    world_size: 8
+    infer_batch_size: 1

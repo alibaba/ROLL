@@ -23,6 +23,7 @@ from roll.utils.functionals import (
     compute_gae_advantage_return,
     compute_clip_fraction,
     compute_reinforce_return,
+    compute_approx_kl,
 )
 
 logger = get_logger()
@@ -463,6 +464,7 @@ def agentic_compute_advantage(
     whiten_advantages=False,
     whiten_rewards=False,
     response_mask=None,
+    pipeline_config=None,
 ):
     if response_mask is None:
         response_mask = data.batch["response_mask"][:, 1:]
@@ -471,29 +473,55 @@ def agentic_compute_advantage(
         whiten_advantages = False
         logger.info("Warning: domain final_response_mask.sum() == 0! All masked_whiten will be skipped.")
 
-    token_level_rewards = data.batch["token_level_rewards"].float()
-    if whiten_rewards:
-        token_level_rewards = masked_whiten(values=token_level_rewards, mask=response_mask)
-    token_level_rewards = token_level_rewards * response_mask
-    data.batch["token_level_rewards"] = token_level_rewards
-    if adv_estimator == "gae":
-        values = data.batch["values"].float()
-        data.batch["values"] = values * response_mask
-        advantages, returns = compute_gae_advantage_return(
-            token_level_rewards=token_level_rewards, values=values, gamma=gamma, lambd=lambd
-        )
-    elif adv_estimator in ["reinforce", "grpo", "gigpo", "step_reinforce"]:
-        advantages, returns = compute_reinforce_return(
-            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
-        )
-    elif adv_estimator in ["agentic_reinforce"]:
-        advantages, returns = compute_agentic_reinforce_return(
-            token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd, mask=response_mask
-        )
-    else:
-        raise NotImplementedError
+    # Check OPD config
+    is_pure_opd = getattr(pipeline_config, "is_pure_opd", False) if pipeline_config else False
+    use_opd = getattr(pipeline_config, "use_opd", False) if pipeline_config else False
+    opd_kl_coef = getattr(pipeline_config, "opd_kl_coef", 1.0) if pipeline_config else 1.0
 
-    data.batch["raw_advantages"] = advantages
+    # Compute KL divergence for OPD modes
+    kld = None
+    if is_pure_opd or use_opd:
+        kld = compute_approx_kl(
+            log_probs=data.batch["old_log_probs"] if getattr(pipeline_config, "enable_old_logprobs_recompute", False) else data.batch["infer_logprobs"],
+            log_probs_base=data.batch["ref_log_probs"],
+            action_mask=response_mask,
+            kl_penalty=getattr(pipeline_config, "kl_penalty", "kl"),
+        )
+
+    # For pure OPD mode, advantage is directly -kld
+    if is_pure_opd:
+        advantages = -kld
+        returns = advantages
+        data.batch["raw_advantages"] = advantages
+    else:
+        token_level_rewards = data.batch["token_level_rewards"].float()
+        if whiten_rewards:
+            token_level_rewards = masked_whiten(values=token_level_rewards, mask=response_mask)
+        token_level_rewards = token_level_rewards * response_mask
+        data.batch["token_level_rewards"] = token_level_rewards
+        if adv_estimator == "gae":
+            values = data.batch["values"].float()
+            data.batch["values"] = values * response_mask
+            advantages, returns = compute_gae_advantage_return(
+                token_level_rewards=token_level_rewards, values=values, gamma=gamma, lambd=lambd
+            )
+        elif adv_estimator in ["reinforce", "grpo", "gigpo", "step_reinforce"]:
+            advantages, returns = compute_reinforce_return(
+                token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
+            )
+        elif adv_estimator in ["agentic_reinforce"]:
+            advantages, returns = compute_agentic_reinforce_return(
+                token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd, mask=response_mask
+            )
+        else:
+            raise NotImplementedError
+
+        data.batch["raw_advantages"] = advantages
+
+        # Apply mixed OPD mode
+        if use_opd:
+            advantages = advantages - opd_kl_coef * kld
+
     if whiten_advantages:
         # TODO whiten过程中是否要考虑response的长度？
         advantages = masked_whiten(values=advantages, mask=response_mask)

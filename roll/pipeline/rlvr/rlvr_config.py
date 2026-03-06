@@ -147,6 +147,11 @@ class RLVRConfig(PPOConfig):
     error_max_len_threshold: int = field(default=9999999999)
 
     def __post_init__(self):
+        # Handle OPD mapping FIRST before any access to actor_train/actor_infer/reference
+        # This ensures student_train/student_infer/teacher are mapped correctly
+        self._handle_opd_mapping()
+
+        # Now safe to access actor_infer (may have been mapped from student_infer)
         self.actor_infer.generating_args.num_return_sequences = self.num_return_sequences_in_group
         super().__post_init__()
 
@@ -223,6 +228,9 @@ class RLVRConfig(PPOConfig):
                 self.num_nodes = 1
             else:
                 self.num_nodes = (max_gpu_num + self.num_gpus_per_node - 1) // self.num_gpus_per_node
+
+        # Apply OPD configuration at the end (handles student_train/student_infer/teacher mapping)
+        self._apply_opd_config()
 
     def to_dict(self):
         return dataclasses.asdict(self)

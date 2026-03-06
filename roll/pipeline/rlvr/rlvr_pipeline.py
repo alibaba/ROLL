@@ -612,6 +612,7 @@ class RLVRPipeline(BasePipeline):
                             whiten_advantages=self.pipeline_config.whiten_advantages,
                             whiten_rewards=self.pipeline_config.whiten_rewards,
                             response_mask=final_response_mask,
+                            pipeline_config=self.pipeline_config,
                         )
                         domain_metrics = reduce_metrics(domain_batch.meta_info.pop("metrics", {}))
                         metrics_mgr.add_domain_metrics(domain, domain_metrics)

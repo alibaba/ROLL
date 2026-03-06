@@ -251,6 +251,11 @@ class WorkerConfig:
         self.resource_placement_groups: Optional[List[Dict]] = None
         self.checkpoint_config: Optional[Dict] = None
 
+        # Flag to indicate if this worker is configured (has GPU or model path)
+        has_gpu = bool(self.device_mapping)
+        has_model = self.model_args is not None and self.model_args.model_name_or_path is not None
+        self.is_configured: bool = has_gpu or has_model
+
         if hasattr(self, "model_args"):
             if self.model_args.dtype == "bf16":
                 self.training_args.bf16 = True

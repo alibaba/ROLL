@@ -459,6 +459,7 @@ class AgenticPipeline(BasePipeline):
                             advantage_clip=self.pipeline_config.advantage_clip,
                             whiten_advantages=self.pipeline_config.whiten_advantages,
                             whiten_rewards=self.pipeline_config.whiten_rewards,
+                            pipeline_config=self.pipeline_config,
                         )
                         metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
                     metrics["time/step_adv"] = timer.last

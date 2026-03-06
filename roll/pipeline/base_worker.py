@@ -25,7 +25,7 @@ from roll.platforms import current_platform
 from roll.utils.checkpoint_manager import download_model
 from roll.utils.context_managers import state_offload_manger, log_gpu_memory_usage
 from roll.utils.dynamic_batching import make_mini_batch_iter_for_dynamic_batching
-from roll.utils.functionals import agg_loss, append_to_dict, compute_approx_kl, masked_mean, postprocess_generate, reduce_metrics
+from roll.utils.functionals import agg_loss, append_to_dict, compute_approx_kl, flatten_sum, masked_mean, postprocess_generate, reduce_metrics
 from roll.utils.offload_nccl import reload_process_groups
 from roll.utils.offload_states import OffloadStateType
 
@@ -103,7 +103,18 @@ class ActorWorker(Worker):
                 append_to_dict(metrics, pg_metrics)
 
             metrics["actor/lr"] = self.strategy.scheduler.get_last_lr()[0]
-            metrics["actor/backward_steps"] = data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size
+            backward_steps = data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size
+            metrics["actor/backward_steps"] = backward_steps
+
+            # Divide @sum metrics by backward_steps to get average
+            for key in list(metrics.keys()):
+                if key.endswith("@sum"):
+                    if isinstance(metrics[key], list):
+                        total = flatten_sum(metrics[key])
+                        metrics[key] = total / backward_steps if backward_steps > 0 else total
+                    elif isinstance(metrics[key], (int, float)):
+                        metrics[key] = metrics[key] / backward_steps if backward_steps > 0 else metrics[key]
+
             data.to("cpu")
 
         self._logprobs_cache.clear()
