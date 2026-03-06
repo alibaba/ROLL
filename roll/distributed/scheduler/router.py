@@ -626,7 +626,8 @@ class RouterClient:
     def generate_request_sync(self, req: DataProto, request_id, uid):
         payload, request_id = self._preprocess_generate(req, request_id)
 
-        self.proxy.on_send_request_sync(request_id)
+        if not self.proxy.on_send_request_sync(request_id):
+            return None # shutdown
         try:
             response = self.proxy.generate_request_sync(payload=payload, request_id=request_id, uid=uid)
         finally:
