@@ -675,6 +675,9 @@ class PPOConfig(BaseConfig):
             logger.info(f"Pure OPD mode: mapping teacher to reference")
             self.reference = self.teacher
 
+            # Enable reference for OPD mode (needed for both pure and mixed mode)
+            self.enable_reference = True
+
         # ========== Mixed OPD mode ==========
         elif self.use_opd:
             # Validation: teacher must be configured, reference should NOT be configured
@@ -692,8 +695,8 @@ class PPOConfig(BaseConfig):
             self.reference = self.teacher
             # Note: actor_train and actor_infer are configured normally by user
 
-        # Enable reference for OPD mode (needed for both pure and mixed mode)
-        self.enable_reference = True
+            # Enable reference for OPD mode (needed for both pure and mixed mode)
+            self.enable_reference = True
 
     def set_max_steps(self, max_steps: int):
         actor_backward_batch_size = (
@@ -800,14 +803,12 @@ class PPOConfig(BaseConfig):
         This method handles both pure OPD mode (is_pure_opd=True)
         and mixed OPD mode (use_opd=True).
         """
-        # Set worker names for OPD mode (override default names for both modes)
-        logger.warning("Applying pure OPD mode parameter overrides")
-        self.reference.name = "teacher"
-
         # Pure OPD mode specific settings
         if self.is_pure_opd:
+            # Set worker names for OPD mode (override default names for both modes)
             self.actor_train.name = "student_train"
             self.actor_infer.name = "student_infer"
+            self.reference.name = "teacher"
 
             # gamma=0: OPD's token_level_rewards has KL penalty at every token
             # If gamma=1, compute_reinforce_return will accumulate KL values across entire sequence
@@ -828,4 +829,6 @@ class PPOConfig(BaseConfig):
 
         # Mixed OPD mode doesn't need parameter overrides
         elif self.use_opd:
+            # Set worker names for OPD mode (override default names for both modes)
+            self.reference.name = "teacher"
             logger.info(f"Mixed OPD mode configured: opd_kl_coef={self.opd_kl_coef}")

@@ -32,6 +32,11 @@ class StrategyArguments:
         metadata={"help": "Configuration dictionary for the strategy."},
     )
 
+    def __post_init__(self):
+        # Ensure strategy_config is always a dict, even when YAML sets it to null (~)
+        if self.strategy_config is None:
+            self.strategy_config = {}
+
 @dataclass
 class SequencePackingConfig:
     algorithm: str = field(
