@@ -2,10 +2,10 @@ import inspect
 import os
 import threading
 from typing import Any, List, Optional
-from packaging.version import Version
 
 import torch
 import torch.nn as nn
+from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoConfig,
@@ -225,8 +225,12 @@ def load_model(
         setattr(config, "router_aux_loss_coef", model_args.moe_aux_loss_coef)
         setattr(config, "output_router_logits", is_trainable)
     init_kwargs["low_cpu_mem_usage"] = not is_deepspeed_zero3_enabled() and not is_fsdp2_enabled()
-    if not is_deepspeed_zero3_enabled() and not is_fsdp_or_fsdp2_enabled():
+
+    # TODO: Shall we need the compute_dtype? Check the necessity.
+    if not is_deepspeed_zero3_enabled():
         init_kwargs["torch_dtype"] = model_args.compute_dtype
+
+    if not is_deepspeed_zero3_enabled() and not is_fsdp_or_fsdp2_enabled():
         if init_kwargs["low_cpu_mem_usage"]:  # device map requires low_cpu_mem_usage=True
             if "device_map" not in init_kwargs and model_args.device_map:
                 init_kwargs["device_map"] = model_args.device_map
@@ -235,11 +239,14 @@ def load_model(
     init_kwargs["pretrained_model_name_or_path"] = model_name_or_path
     # TODO: remove AutoModelForVision2Seq after deprecate torch260
     import transformers
+
     if Version("4.54.0") <= Version(transformers.__version__):
         from transformers import AutoModelForImageTextToText
+
         it2t_model_cls = AutoModelForImageTextToText
     else:
         from transformers import AutoModelForVision2Seq
+
         it2t_model_cls = AutoModelForVision2Seq
     if type(config) in it2t_model_cls._model_mapping.keys():  # assume built-in models
         model_class = it2t_model_cls  # image and video

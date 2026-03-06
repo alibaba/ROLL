@@ -1222,7 +1222,13 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
                 self._grad_accumulation_context() if not sync_boundary and not no_sync else contextlib.nullcontext()
             )
 
-            with sync_context:
+            with (
+                sync_context,
+                torch.autocast(
+                    device_type=current_platform.device_type,
+                    dtype=self.param_dtype,
+                ),
+            ):
                 logits = self._fsdp2_forward(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
