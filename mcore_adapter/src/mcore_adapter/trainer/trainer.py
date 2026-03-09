@@ -269,6 +269,14 @@ class McaTrainer(Trainer):
         loss_mask = loss_mask.view(-1).float()
         losses = torch.sum(losses.view(-1) * loss_mask)
         loss_mask = loss_mask.sum()
+        cp_size = self.model.config.context_parallel_size
+        if cp_size > 1:
+            # all-reduce loss for logging in context parallel
+            loss_info = torch.cat([losses.view(1), loss_mask.view(1)])
+            torch.distributed.all_reduce(
+                loss_info, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group()
+            )
+            losses, loss_mask = loss_info[0], loss_info[1]
         loss = losses.clone()  # clone to make sure loss is not a view
         local_num_tokens = loss_mask.clone().detach()
         if local_num_tokens == 0:
