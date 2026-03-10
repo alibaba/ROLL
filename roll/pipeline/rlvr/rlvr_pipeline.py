@@ -20,10 +20,13 @@ from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
 from roll.datasets.dataset import get_dataset
 from roll.distributed.executor.cluster import Cluster
+from roll.configs.base_config import RouterArguments
 from roll.distributed.scheduler.generate_scheduler import DynamicSamplingScheduler
+from roll.distributed.scheduler.router import RouterManager
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
+from roll.utils.constants import RAY_NAMESPACE
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
 from roll.utils.dynamic_batching import dynamic_batching_shard
@@ -215,7 +218,44 @@ class RLVRPipeline(BasePipeline):
             for key, worker_config in self.pipeline_config.rewards.items()
         }
         download_clusters.extend(self.rewards.values())
+
+        # Create reward model cluster (shared InferWorker + vLLM for LLM-as-judge)
+        self.reward_model_cluster = None
+        self.reward_model_scheduler = None
+        if (
+            self.pipeline_config.reward_model is not None
+            and self.pipeline_config.reward_model.device_mapping
+            and len(self.pipeline_config.reward_model.device_mapping) > 0
+        ):
+            self.reward_model_cluster = Cluster(
+                name=self.pipeline_config.reward_model.name,
+                worker_cls=self.pipeline_config.reward_model.worker_cls,
+                resource_manager=self.resource_manager,
+                worker_config=self.pipeline_config.reward_model,
+            )
+            download_clusters.append(self.reward_model_cluster)
+
         self.download_models(*download_clusters)
+
+        # Create RouterManager for reward model cluster (Ray named actor)
+        if self.reward_model_cluster:
+            self.reward_model_scheduler = ray.remote(RouterManager).options(
+                name=f"RewardModelScheduler-{self.pipeline_config.reward_model.name}",
+                get_if_exists=True,
+                namespace=RAY_NAMESPACE,
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=ray.get_runtime_context().get_node_id(),
+                    soft=False,
+                ),
+            ).remote(
+                actor_cluster=self.reward_model_cluster,
+                router_args=RouterArguments(router_name="PromptAffinityRouter"),
+                num_gpus_per_node=self.pipeline_config.num_gpus_per_node,
+            )
+            ray.get(self.reward_model_scheduler.initialize.remote())
+            logger.info(
+                f"Created reward model scheduler: RewardModelScheduler-{self.pipeline_config.reward_model.name}"
+            )
 
         domain_ratios = self.pipeline_config.actor_train.data_args.domain_interleave_probs
         self.generate_schedulers: Dict[str, DynamicSamplingScheduler] = {}
@@ -270,6 +310,8 @@ class RLVRPipeline(BasePipeline):
 
         refs = []
         refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
+        if self.reward_model_cluster:
+            refs.extend(self.reward_model_cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
 
         if self.use_ref_model:
@@ -407,6 +449,8 @@ class RLVRPipeline(BasePipeline):
         if self.pipeline_config.async_pipeline:
             for reward_cluster in self.rewards.values():
                 reward_cluster.load_states()
+            if self.reward_model_cluster:
+                self.reward_model_cluster.load_states()
 
         for global_step in range(self.pipeline_config.max_steps):
             if global_step <= self.state.step:
@@ -447,6 +491,8 @@ class RLVRPipeline(BasePipeline):
                 if not self.pipeline_config.async_pipeline:
                     for reward_cluster in self.rewards.values():
                         reward_cluster.load_states()
+                    if self.reward_model_cluster:
+                        self.reward_model_cluster.load_states()
 
                 if self.val_dataset and global_step % self.pipeline_config.eval_steps == 0:
                     with Timer(name="val_step", logger=None) as val_step_timer:
@@ -481,6 +527,8 @@ class RLVRPipeline(BasePipeline):
                         self.actor_infer.offload_states()
                         for reward_cluster in self.rewards.values():
                             reward_cluster.offload_states()
+                        if self.reward_model_cluster:
+                            self.reward_model_cluster.offload_states()
                 metrics_mgr.add_metric("time/step_generate", step_generate_timer.last)
 
                 batch = generate_output

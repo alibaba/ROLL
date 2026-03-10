@@ -106,6 +106,10 @@ class RLVRConfig(PPOConfig):
         default_factory=dict,
         metadata={"help": "Configuration for the multi domain rewards."}
     )
+    reward_model: Optional[WorkerConfig] = field(
+        default=None,
+        metadata={"help": "Configuration for the shared reward model cluster (InferWorker + vLLM)."}
+    )
 
     # PPO related
     difficulty_loss_weight: bool = field(default=False, metadata={"help": "Use difficulty_loss_weight"})
@@ -164,6 +168,8 @@ class RLVRConfig(PPOConfig):
             self.reference.worker_cls = "roll.pipeline.rlvr.actor_worker.ActorWorker"
         if self.critic.worker_cls is None:
             self.critic.worker_cls = "roll.pipeline.base_worker.CriticWorker"
+        if self.reward_model is not None and self.reward_model.worker_cls is None:
+            self.reward_model.worker_cls = "roll.pipeline.base_worker.InferWorker"
 
         if self.router_args is None:
             self.router_args = RouterArguments(router_name="PromptAffinityRouter", router_config=dict())
