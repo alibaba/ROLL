@@ -622,7 +622,7 @@ class CriticWorker(Worker):
             for batch_idx, data in tqdm(
                 enumerate(dataloader),
                 desc=f"{self.worker_name} train global step {global_step}",
-                total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size,
+                total=data.batch.batch_size[0] // backward_batch_size,
             ):
                 vf_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
                 append_to_dict(metrics, vf_metrics)
