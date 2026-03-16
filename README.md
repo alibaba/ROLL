@@ -156,6 +156,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 ---
 
 ## 🏆 Notable work based on ROLL
+- [RLix](https://github.com/rlops/rlix): RLix is an open-source control plane for concurrent reinforcement learning that time-shares GPUs across jobs to improve utilization without changing each pipeline’s on-policy or off-policy behavior.
 - [TurningPoint-GRPO](https://arxiv.org/abs/2602.06422): A GRPO framework for Flow Matching models in text-to-image generation that alleviates step-wise reward sparsity by modeling step-level incremental rewards and explicitly captures long-term effects via turning points detection, providing dense learning signals for each denoising action.
 - [STAgent](https://arxiv.org/abs/2512.24957): An agentic LLM specialized for spatio-temporal understanding and complex tasks like constrained POI discovery and itinerary planning, featuring hierarchical data curation with 1:10,000 filter ratio and cascaded training (seed SFT + difficulty-aware SFT + RL), achieving strong performance on TravelBench while preserving general capabilities.
 - [IPRO](https://arxiv.org/abs/2510.14255): A novel video diffusion framework using reinforcement learning to enhance identity preservation in human-centric I2V generation, optimizing diffusion models with face identity scorer and KL-divergence regularization.
