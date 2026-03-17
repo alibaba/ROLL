@@ -34,6 +34,7 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 
+
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
 from mcore_adapter.parallel_functions import context_parallel_gather, vocab_parallel_logprobs
@@ -71,6 +72,11 @@ from roll.utils.sequence_packing import make_micro_batch_iter_for_sequence_packi
 
 if TYPE_CHECKING:
     from mcore_adapter.models.model_factory import VirtualModels
+
+
+if is_peft_available():
+    from peft import PeftModel, get_peft_model_state_dict
+
 
 logger = get_logger()
 
@@ -1233,7 +1239,19 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         # save model and tokenizer
         if len(self.models_unwrapped) == 1:
-            self.models_unwrapped[0].save_pretrained(save_dir)
+            if is_peft_available() and isinstance(self.models_unwrapped[0], PeftModel):
+                for adapter_name, peft_config in self.models_unwrapped[0].peft_config.items():
+                    adapter_save_directory = os.path.join(save_dir, adapter_name)
+                    peft_config.save_pretrained(adapter_save_directory)
+                    peft_state_dict = get_peft_model_state_dict(
+                        self.models_unwrapped[0], self.models_unwrapped[0].state_dict_for_save_checkpoint(), adapter_name
+                    )
+                    self.models_unwrapped[0].base_model.model.save_pretrained(
+                        adapter_save_directory, state_dict={"model": peft_state_dict}
+                    )
+                self.models_unwrapped[0].config.save_pretrained(save_dir)
+            else:
+                self.models_unwrapped[0].save_pretrained(save_dir)
         else:
             state_dict = {f"model{i}": model.state_dict_for_save_checkpoint() for i, model in
                           enumerate(self.models_unwrapped)}
