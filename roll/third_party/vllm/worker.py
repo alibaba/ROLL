@@ -118,7 +118,7 @@ class WorkerBase:
         weights_and_handles = []
         for name, dtype, shape in zip(names, dtypes, shapes):
             target_dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
-            weight = torch.empty(shape, dtype=target_dtype, device=self.device)
+            weight = torch.empty(shape, dtype=target_dtype, device=current_platform.device_type)
             handle = collective.broadcast(tensor=weight, src_rank=0, group_name=group_name, async_op=True)
             weights_and_handles.append((name, weight, handle))
 

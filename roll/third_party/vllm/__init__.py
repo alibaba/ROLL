@@ -59,7 +59,8 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ""
     # torch.cuda may already init, explicitly disable expandable_segments
     # here (only matters when VLLM_USE_RAY_SPMD_WORKER=0)
-    current_platform.memory._set_allocator_settings("expandable_segments:False")
+    if not current_platform.is_npu():
+        current_platform.memory._set_allocator_settings("expandable_segments:False")
 
     os.environ["VLLM_CACHE_ROOT"] = os.path.join(get_default_cache_root(), "vllm", os.environ.get("WORKER_NAME", ""))
 
