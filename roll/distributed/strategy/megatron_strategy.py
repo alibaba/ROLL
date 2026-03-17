@@ -33,7 +33,7 @@ from megatron.core.transformer.moe.moe_utils import (
     reduce_aux_losses_tracker_across_ranks,
 )
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
-
+from transformers.utils import is_peft_available
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
