@@ -180,7 +180,7 @@ register_template(
         "layernorm_zero_centered_gamma": True,
         "hetereogenous_dist_checkpoint": True,
         "attention_output_gate": True,
-        "linear_attention_type": "gated_delta_net",
+        "experimental_attention_variant": "gated_delta_net",
     },
     weight_converters=[
         RenameConverOp(hf_names="lm_head.weight", mca_names="output_layer.weight"),
