@@ -109,7 +109,8 @@ def generate_by_proxy(
             messages,
             tokenize=True,
             add_generation_prompt=True,
-            enable_thinking=enable_thinking
+            enable_thinking=enable_thinking,
+            return_dict=False
         )
 
         # Create DataProto with tokenized input
