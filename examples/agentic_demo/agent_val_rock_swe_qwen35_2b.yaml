@@ -138,7 +138,7 @@ reference:
 
 reward_normalization:
   grouping: traj_group_id
-  method: mean
+  method: identity
 
 train_env_manager:
   max_env_num_per_worker: 1

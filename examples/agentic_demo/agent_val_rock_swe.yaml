@@ -127,8 +127,8 @@ reference:
   infer_batch_size: 1
 
 reward_normalization:
-  grouping: traj_group_id # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
-  method: mean
+  grouping: traj_group_id
+  method: identity
   # norm_mean_type: batch
   # norm_std_type: group
 
