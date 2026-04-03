@@ -24,7 +24,7 @@ checkpoint_config:
 num_gpus_per_node: 16
 
 
-max_steps: 200
+max_steps: 100
 save_steps: 100
 logging_steps: 1
 eval_steps: 10
