@@ -196,11 +196,11 @@ class ActorPGWorker(ActorWorker):
             "ppo_ratio_low_clipfrac": agg_loss(loss_mat=clipped_low,
                            loss_mask=final_response_mask,
                            loss_agg_mode='token-mean',
-                           batch_num_tokens=batch_num_tokens['final_response_mask'],).detach().item().detach().item(),
+                           batch_num_tokens=batch_num_tokens['final_response_mask'],).detach().item(),
             "ppo_ratio_clipfrac": agg_loss(loss_mat=clipped,
                            loss_mask=final_response_mask,
                            loss_agg_mode='token-mean',
-                           batch_num_tokens=batch_num_tokens['final_response_mask'],).detach().item().detach().item(),
+                           batch_num_tokens=batch_num_tokens['final_response_mask'],).detach().item(),
         })
 
         return loss

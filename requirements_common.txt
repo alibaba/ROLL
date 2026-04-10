@@ -24,6 +24,7 @@ sglang-router
 
 wandb
 swanlab
+trackio
 
 math-verify
 openai

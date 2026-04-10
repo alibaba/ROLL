@@ -202,7 +202,8 @@ class AgentNativeStepEnvManager(TrajEnvManager):
 
         prompt_ids = self.tokenizer.apply_chat_template(convert_list_content_str(messages, parse_tool_call_parameter_to_dict=self.pipeline_config.parse_tool_call_parameter_to_dict),
                                                         tools=self.tools,
-                                                        tokenize=True, add_generation_prompt=True, enable_thinking=False)
+                                                        tokenize=True, add_generation_prompt=True, enable_thinking=False,
+                                                        return_dict=False)
         input_ids = torch.tensor(prompt_ids, dtype=torch.long).unsqueeze(0)
         attention_mask = torch.tensor([1] * input_ids.shape[1], dtype=torch.long).unsqueeze(0)
         # Huggingface Transformers prefer position_ids to be 0-based.

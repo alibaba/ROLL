@@ -541,7 +541,7 @@ class RLVRPipeline(BasePipeline):
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                     if self.pipeline_config.enable_reference:
                         worker_config = self.pipeline_config.reference if self.use_ref_model else self.pipeline_config.actor_train
-                        worker = self.reference if self.use_ref_model else self.pipeline_config.actor_train
+                        worker = self.reference if self.use_ref_model else self.actor_train
                         if worker_config.use_dynamic_batching_in_infer:
                             batch, dynamic_batching_metrics = dynamic_batching_shard(
                                 batch,

@@ -8,7 +8,7 @@ export USE_MODELSCOPE=1
 
 # Config path
 CONFIG_PATH="qwen3-8B-onpolicy-distill-megatron"
-CONFIG_NAME="onpolicy_distill_test"
+CONFIG_NAME="onpolicy_distill_config"
 
 # Run pipeline
 python examples/start_onpolicy_distill_pipeline.py \
