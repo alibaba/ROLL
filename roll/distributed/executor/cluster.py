@@ -140,6 +140,9 @@ class Cluster:
             if "ROLL_LOG_DIR" in os.environ:
                 env_vars["ROLL_LOG_DIR"] = os.environ["ROLL_LOG_DIR"]
             env_vars.update(self.worker_config.system_envs)
+            if current_platform.is_npu():
+                env_vars["HCCL_HOST_SOCKET_PORT_RANGE"] = "auto"
+                env_vars["HCCL_NPU_SOCKET_PORT_RANGE"] = "auto"
 
             runtime_env = RuntimeEnv(env_vars=env_vars)
             self.worker_config.resource_placement_groups = pgs
