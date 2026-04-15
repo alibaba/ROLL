@@ -208,32 +208,75 @@ def _modify_tuple(t, index: int, modifier):
     return *t[:index], modifier(t[index]), *t[index + 1 :]
 
 
+_BUCKET_CACHE = {}
+_BUFFER_INDEX = 0
+
+
 def _bucket_named_tensors(named_tensors: list[tuple[str, torch.Tensor]]) -> tuple[torch.Tensor, list[dict]]:
-    if not named_tensors:
-        raise ValueError("Cannot create empty tensor bucket")
+    if current_platform.is_rocm():
+        global _BUFFER_INDEX
+        if not named_tensors:
+            raise ValueError("Cannot create empty tensor bucket")
 
-    tensors_meta = []
-    flattened_tensors = []
+        tensors_meta = []
+        
+        current_idx = 0
+        total_numel = sum(tensor.numel() * tensor.element_size() for _, tensor in named_tensors)
+        device = named_tensors[0][1].device
+        
+        # Double buffering to prevent overwriting the buffer before receiver finishes processing
+        _BUFFER_INDEX = (_BUFFER_INDEX + 1) % 2
+        cache_key = (device, _BUFFER_INDEX)
+        
+        if cache_key not in _BUCKET_CACHE or _BUCKET_CACHE[cache_key].numel() < total_numel:
+            _BUCKET_CACHE[cache_key] = torch.empty(total_numel, dtype=torch.int8, device=device)
+            
+        flattened_tensor = _BUCKET_CACHE[cache_key][:total_numel]
 
-    current_idx = 0
-    for i, (name, tensor) in enumerate(named_tensors):
-        flattened = tensor.flatten().view(torch.int8)
+        for name, tensor in named_tensors:
+            flattened = tensor.flatten().view(torch.int8)
+            numel = flattened.numel()
+            metadata = {
+                "name": name,
+                "shape": list(tensor.shape),
+                "dtype": tensor.dtype,
+                "start_idx": current_idx,
+                "end_idx": current_idx + numel,
+                "numel": numel,
+            }
+            tensors_meta.append(metadata)
+            flattened_tensor[current_idx:current_idx + numel].copy_(flattened)
+            current_idx += numel
 
-        numel = flattened.numel()
-        metadata = {
-            "name": name,
-            "shape": list(tensor.shape),  # Convert to list for serialization
-            "dtype": tensor.dtype,
-            "start_idx": current_idx,
-            "end_idx": current_idx + numel,
-            "numel": numel,
-        }
-        tensors_meta.append(metadata)
-        flattened_tensors.append(flattened)
-        current_idx += numel
+        torch.cuda.synchronize(device)
 
-    flattened_tensor = torch.cat(flattened_tensors, dim=0)
-    return flattened_tensor, tensors_meta
+        return flattened_tensor, tensors_meta
+    else:
+        if not named_tensors:
+            raise ValueError("Cannot create empty tensor bucket")
+
+        tensors_meta = []
+        flattened_tensors = []
+
+        current_idx = 0
+        for i, (name, tensor) in enumerate(named_tensors):
+            flattened = tensor.flatten().view(torch.int8)
+
+            numel = flattened.numel()
+            metadata = {
+                "name": name,
+                "shape": list(tensor.shape),  # Convert to list for serialization
+                "dtype": tensor.dtype,
+                "start_idx": current_idx,
+                "end_idx": current_idx + numel,
+                "numel": numel,
+            }
+            tensors_meta.append(metadata)
+            flattened_tensors.append(flattened)
+            current_idx += numel
+
+        flattened_tensor = torch.cat(flattened_tensors, dim=0)
+        return flattened_tensor, tensors_meta
 
 
 def named_tensors_from_bucket(bucket: "torch.Tensor", tensors_meta: list[dict]) -> list[tuple[str, torch.Tensor]]:
