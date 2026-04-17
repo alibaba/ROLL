@@ -6,6 +6,7 @@ defaults:
 
 exp_name: "atropos_gsm8k_reinforce_qwen25_3b"
 seed: 42
+max_steps: 120
 
 track_with: wandb
 tracker_kwargs:
@@ -17,6 +18,7 @@ tracker_kwargs:
 pretrain: Qwen/Qwen2.5-3B-Instruct
 sequence_length: 2048 
 rollout_batch_size: 8 
+max_steps: 120
 
 actor_train:
   training_args:

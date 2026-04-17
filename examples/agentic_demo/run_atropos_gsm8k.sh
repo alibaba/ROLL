@@ -15,5 +15,4 @@ echo "📊 Tracking on WandB: roll-atropos-integration"
 
 python examples/start_agentic_pipeline.py \
     --config_path agentic_demo \
-    --config_name atropos_gsm8k_reinforce_qwen25_3b \
-    max_steps=120
+    --config_name atropos_gsm8k_reinforce_qwen25_3b
