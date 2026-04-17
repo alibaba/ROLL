@@ -23,6 +23,11 @@ except Exception as e:
     logger.info(f"Failed to register openreward_env: {e}")
 
 try:
+    gem.register("atropos_env", entry_point="roll.pipeline.agentic.env.atropos:AtroposEnv")
+except Exception as e:
+    logger.info(f"Failed to register atropos_env: {e}")
+
+try:
     # add webshop-minimal to PYTHONPATH
     import os
     import sys
