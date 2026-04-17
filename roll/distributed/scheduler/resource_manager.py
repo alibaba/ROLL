@@ -25,7 +25,7 @@ class ResourceManager:
             node_gpu_num = int(resource.get(current_platform.ray_device_key, 0))
             if node_gpu_num >= num_gpus_per_node:
                 nodes_maybe_used.append(node)
-        nodes_maybe_used = sorted(nodes_maybe_used, key=lambda n: n["Resources"]["CPU"])
+        nodes_maybe_used = sorted(nodes_maybe_used, key=lambda n: n["Resources"].get("CPU") or n["Resources"].get("num_cpus", 0))
 
         ray_num_nodes = len(nodes_maybe_used)
         if num_nodes is None:
@@ -39,25 +39,50 @@ class ResourceManager:
 
         if self.gpu_per_node > 0:
             assert self.num_gpus <= available_gpu, f"num_gpus {self.num_gpus} > available_gpu {available_gpu}"
-            bundles = []
-            for i in range(self.num_nodes):
-                node = nodes_maybe_used[i]
-                node_cpu = int(node["Resources"]["CPU"])
-                bundles.append({current_platform.ray_device_key: self.gpu_per_node, "CPU": max(node_cpu / 2, 1)})
+            
+            # --- Defensive Resource Allocation (Support for Ray 2.0+ and Legacy) ---
+            try:
+                # 1. Attempt Modern Ray Style (num_cpus / num_gpus)
+                bundles = []
+                for i in range(self.num_nodes):
+                    node = nodes_maybe_used[i]
+                    node_cpu = int(node["Resources"].get("num_cpus") or node["Resources"].get("CPU", 0))
+                    bundles.append({"num_gpus": self.gpu_per_node, "num_cpus": max(node_cpu / 2, 1)})
+                
+                self.placement_groups = [ray.util.placement_group([bundle]) for bundle in bundles]
+                ray.get([pg.ready() for pg in self.placement_groups])
 
-            self.placement_groups = [ray.util.placement_group([bundle]) for bundle in bundles]
-            ray.get([pg.ready() for pg in self.placement_groups])
-            gpu_ranks = ray.get([
-                get_visible_gpus.options(
-                    placement_group=pg,
-                    **(
-                        {"num_gpus": self.gpu_per_node}
-                        if current_platform.ray_device_key == "GPU"
-                        else {"resources": {current_platform.ray_device_key: self.gpu_per_node}}
-                    )
-                ).remote(current_platform.device_control_env_var)
-                for pg in self.placement_groups
-            ])
+                gpu_ranks = ray.get([
+                    get_visible_gpus.options(
+                        placement_group=pg,
+                        num_gpus=self.gpu_per_node
+                    ).remote(current_platform.device_control_env_var)
+                    for pg in self.placement_groups
+                ])
+            except (ValueError, Exception) as e:
+                logger.warning(f"Modern Ray resource allocation failed, falling back to legacy style. Error: {e}")
+                
+                # 2. Fallback to Legacy Style (CPU / GPU)
+                bundles = []
+                for i in range(self.num_nodes):
+                    node = nodes_maybe_used[i]
+                    node_cpu = int(node["Resources"].get("CPU") or node["Resources"].get("num_cpus", 0))
+                    bundles.append({current_platform.ray_device_key: self.gpu_per_node, "CPU": max(node_cpu / 2, 1)})
+
+                self.placement_groups = [ray.util.placement_group([bundle]) for bundle in bundles]
+                ray.get([pg.ready() for pg in self.placement_groups])
+
+                gpu_ranks = ray.get([
+                    get_visible_gpus.options(
+                        placement_group=pg,
+                        **(
+                            {"num_gpus": self.gpu_per_node}
+                            if current_platform.ray_device_key == "GPU"
+                            else {"resources": {current_platform.ray_device_key: self.gpu_per_node}}
+                        )
+                    ).remote(current_platform.device_control_env_var)
+                    for pg in self.placement_groups
+                ])
             print(f"gpu ranks: {gpu_ranks}")
             self.node_ranks = ray.get(
                 [get_node_rank.options(placement_group=pg).remote() for pg in self.placement_groups])
