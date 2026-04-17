@@ -7,6 +7,7 @@ defaults:
 exp_name: "atropos_gsm8k_reinforce_qwen25_3b"
 seed: 42
 max_steps: 120
+eval_steps: 0 # Skip evaluation to save time; focused on training curve
 
 track_with: wandb
 tracker_kwargs:
@@ -18,6 +19,7 @@ tracker_kwargs:
 pretrain: Qwen/Qwen2.5-3B-Instruct
 sequence_length: 2048 
 rollout_batch_size: 8 
+val_batch_size: 1
 
 actor_train:
   training_args:
@@ -74,8 +76,8 @@ train_env_manager:
   num_groups_partition: [1]
 
 val_env_manager:
-  max_env_num_per_worker: 0
-  num_env_groups: 0
+  max_env_num_per_worker: 1
+  num_env_groups: 1
   group_size: 1
-  tags: []
-  num_groups_partition: []
+  tags: [AtroposGSM8KTrain]
+  num_groups_partition: [1]
