@@ -1,5 +1,5 @@
 # Atropos + GSM8K + STEP_REINFORCE
-# Optimized for generating clean training curves with low noise for PR validation.
+# Optimized for generating clean training curves for PR validation.
 
 defaults:
   - ../config/deepspeed_zero2@_here_
@@ -38,6 +38,17 @@ actor_infer:
     stop_strings: ["</think>", "\n\n"]
     include_stop_str_in_output: true
 
+# --- RL Configs (Standard REINFORCE) ---
+advantage_clip: 0.2
+ppo_epochs: 1
+adv_estimator: "step_reinforce"
+batch_adjust_mode: "random_sample"
+step_reward_gamma: 1.0
+init_kl_coef: 0.0
+whiten_advantages: true
+entropy_loss_coef: 0
+max_grad_norm: 1.0
+
 # --- Atropos Execution Bridge Config ---
 max_actions_per_traj: 4 
 env_manager_cls: roll.pipeline.agentic.env_manager.agent_native_env_manager.AgentNativeStepEnvManager
@@ -56,5 +67,15 @@ custom_envs:
         max_token_length: 512
 
 train_env_manager:
-  tags: [AtroposGSM8KTrain]
+  max_env_num_per_worker: 1
+  num_env_groups: 1
   group_size: 1
+  tags: [AtroposGSM8KTrain]
+  num_groups_partition: [1]
+
+val_env_manager:
+  max_env_num_per_worker: 0
+  num_env_groups: 0
+  group_size: 1
+  tags: []
+  num_groups_partition: []
