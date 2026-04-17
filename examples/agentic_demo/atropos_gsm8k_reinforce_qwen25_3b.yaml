@@ -18,7 +18,6 @@ tracker_kwargs:
 pretrain: Qwen/Qwen2.5-3B-Instruct
 sequence_length: 2048 
 rollout_batch_size: 8 
-max_steps: 120
 
 actor_train:
   training_args:
