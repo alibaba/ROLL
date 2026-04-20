@@ -19,8 +19,10 @@ vLLM >= 0.7.3
 # Clone the repository and install
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL
-pip install -r requirements.txt # Or follow your specific installation steps
-# For development, consider: pip install -e .
+# Install with specific PyTorch version and inference engine, e.g.:
+pip install -e ".[torch260-vllm]"  # PyTorch 2.6.0 + vLLM
+# Other available extras: torch260-sglang, torch280-vllm, torch280-sglang, torch260-diffsynth, local-debug, gem
+# For basic install: pip install -e .
 ```
 
 For AMD users, please ensure you meet the following prerequisites:
@@ -33,7 +35,7 @@ vLLM >= 0.8.4
 # Clone the repository and install
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL
-pip install -r requirements.txt # Or follow your specific installation steps
+pip install -e ".[torch260-vllm]"  # Or choose other extras based on your environment
 ```
 We highly suggest to use pre-built Docker images from [Image Addresses](https://alibaba.github.io/ROLL/docs/QuickStart/image_address) instead of installation from Custom Environment for ROCm users.
 

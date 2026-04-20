@@ -77,7 +77,7 @@ Wan2_2 相关参数如下：
 
 ## 环境配置
 ```
-pip install -r requirements_torch260_diffsynth.txt
+pip install -e ".[torch260-diffsynth]"
 ```
 
 ## 参考示例

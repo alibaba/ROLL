@@ -1,3 +1,133 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roll"
+version = "0.1.0"
+description = "ROLL: Reinforcement Learning Optimization for Large-Scale Learning"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "ray[default,cgraph]==2.48.0",
+    "numpy<2.0a0,>=1.25",
+    "tensordict",
+    "sympy",
+    "modelscope",
+    "datasets==3.3.0",
+    "tqdm",
+    "peft==0.12.0",
+    "tyro>=0.5.7",
+    "pydantic",
+    "pytest",
+    "loralib",
+    "einops",
+    "isort",
+    "jsonlines",
+    "deprecated",
+    "trl==0.9.6",
+    "dacite",
+    "codetiming",
+    "more_itertools",
+    "pybase64",
+    "sglang-router",
+    "wandb",
+    "swanlab",
+    "math-verify",
+    "openai",
+    "langdetect",
+    "nltk>=3.8",
+    "gym",
+    "gymnasium[toy-text]",
+    "gym_sokoban",
+    "hydra-core",
+    "omegaconf",
+    "latex2sympy2==1.5.4",
+    "latex2sympy2_extended==1.10.1",
+    "antlr4-python3-runtime==4.9.3",
+    "mcore_adapter @ git+https://github.com/alibaba/roll.git#subdirectory=mcore_adapter",
+    "hatchling",
+    "editables",
+]
+
+[project.optional-dependencies]
+gem = [
+    "gem-llm @ git+https://github.com/axon-rl/gem.git@v0.0.4#egg=gem-llm@v0.0.4",
+    "mcp",
+]
+vision = [
+    "pycocotools",
+]
+torch280-sglang = [
+    "torch==2.8.0.*",
+    "torchvision==0.23.0.*",
+    "torchaudio==2.8.0.*",
+    "deepspeed==0.16.4",
+    "accelerate==0.34.2",
+    "transformers>=4.56.1",
+    "sglang[srt,torch-memory-saver]==0.5.2",
+    "flash-linear-attention",
+]
+torch280-vllm = [
+    "torch==2.8.0.*",
+    "torchvision==0.23.0.*",
+    "torchaudio==2.8.0.*",
+    "transformers>=4.56.1",
+    "deepspeed==0.16.4",
+    "accelerate==0.34.2",
+    "flash-attn",
+    "vllm==0.10.2",
+    "flash-linear-attention",
+]
+torch260-sglang = [
+    "torch==2.6.0.*",
+    "torchvision==0.21.0.*",
+    "torchaudio==2.6.0.*",
+    "flash-attn",
+    "transformer-engine[pytorch]==2.2.0",
+    "deepspeed==0.16.4",
+    "accelerate==0.34.2",
+    "sglang[srt,torch-memory-saver]==0.4.6.post4",
+    "transformers==4.51.1",
+    "cuda-bindings==12.9.0",
+]
+torch260-vllm = [
+    "torch==2.6.0.*",
+    "torchvision==0.21.0.*",
+    "torchaudio==2.6.0.*",
+    "flash-attn",
+    "transformer-engine[pytorch]==2.2.0",
+    "deepspeed==0.16.4",
+    "accelerate==0.34.2",
+    "vllm==0.8.4",
+]
+torch260-diffsynth = [
+    "torch==2.6.0.*",
+    "torchvision==0.21.0.*",
+    "torchaudio==2.6.0.*",
+    "flash-attn",
+    "deepspeed==0.16.4",
+    "accelerate==0.34.2",
+    "diffsynth",
+    "transformers==4.52.4",
+    "decord",
+    "pyext",
+    "pycocotools",
+    "scikit-image",
+    "diffusers==0.31.0",
+    "onnx",
+    "onnx2torch",
+]
+local-debug = [
+    "py-cpuinfo",
+    "deepspeed==0.16.4",
+    "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+include = ["roll*"]
+
 [tool.black]
 line-length = 119
 target-version = ['py310']

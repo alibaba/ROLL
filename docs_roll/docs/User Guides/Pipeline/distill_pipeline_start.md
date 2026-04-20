@@ -205,7 +205,7 @@ bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
 * Ensure all necessary dependencies are installed:
 
   ```bash
-  pip install -r requirements.txt
+  pip install -e .
   ```
 
 * Verify that all model paths in the configuration are accessible.

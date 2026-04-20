@@ -79,7 +79,7 @@ The following parameters related to Wan2_2 are as follows:
 
 ## Setup environments
 ```
-pip install -r requirements_torch260_diffsynth.txt
+pip install -e ".[torch260-diffsynth]"
 ```
 
 ## Reference Example

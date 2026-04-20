@@ -214,11 +214,11 @@ rlvr流水线使用JSON格式的数据文件。不同领域需要特定字段：
   "source": "codeforeces",
   "difficulty": "0",
   "prompt": "你是一位专业的Python程序员。你将收到一个问题（问题描述）并生成一个正确的Python程序，该程序符合描述并能通过所有测试。\\n\\n### 问题：编写一个函数，接收一个不同整数的数组并返回所有可能的排列（任意顺序）。每个排列应表示为一个整数数组。该函数应能高效处理不同长度的数组。\\n\\n### 格式：你将使用以下起始代码编写问题的解决方案，并将代码包含在分隔符内。\\n```python\\ndef permute(nums):\\n```\\n\\n### 答案：（使用提供的格式和反引号）",
-  "messages": "[{\"role\": \"user\", \"content\": \"你是一位专业的Python程序员。你将收到一个问题（问题描述）并生成一个正确的Python程序，该程序符合描述并能通过所有测试。 \\n\\n### 问题：编写一个函数，接收一个不同整数的数组并返回所有可能的排列（任意顺序）。每个排列应表示为一个整数数组。该函数应能高效处理不同长度的数组。\\n\\n### 格式：你将使用以下起始代码编写问题的解决方案，并将代码包含在分隔符内。\\n```python\\ndef permute(nums):\\n```\\n\\n### 答案：（使用提供的格式和反引号）\"}]",
-  "ground_truth": "[\"def permute(nums):\\n    \\\"\\\"\\\"\\n    给定一个不同整数的数组，返回所有可能的排列。\\n    每个排列是一个整数数组。\\n    \\\"\\\"\\\"\\n    def backtrack(start, end):\\n        if start == end:\\n            permutations.append(nums[:])\\n        for i in range(start, end):\\n            nums[start], nums[i] = nums[i], nums[start]\\n            backtrack(start + 1, end)\\n            nums[start], nums[i] = nums[i], nums[start]\\n\\n    permutations = []\\n    backtrack(0, len(nums))\\n    return permutations\"]",
+  "messages": "[{\"role\": \"user\", \"content\": \"你是一位专业的Python程序员。你将收到一个问题（问题描述）并生成一个正确的Python程序，该程序符合描述并能通过所有测试。 \n\n### 问题：编写一个函数，接收一个不同整数的数组并返回所有可能的排列（任意顺序）。每个排列应表示为一个整数数组。该函数应能高效处理不同长度的数组。\n\n### 格式：你将使用以下起始代码编写问题的解决方案，并将代码包含在分隔符内。\n```python\ndef permute(nums):\n```\n\n### 答案：（使用提供的格式和反引号）\"}]",
+  "ground_truth": "[\"def permute(nums):\n    \\\"\\\"\\\"\n    给定一个不同整数的数组，返回所有可能的排列。\n    每个排列是一个整数数组。\n    \\\"\\\"\\\"\n    def backtrack(start, end):\n        if start == end:\n            permutations.append(nums[:])\n        for i in range(start, end):\n            nums[start], nums[i] = nums[i], nums[start]\n            backtrack(start + 1, end)\n            nums[start], nums[i] = nums[i], nums[start]\n\n    permutations = []\n    backtrack(0, len(nums))\n    return permutations\"]",
   "case_type": "pytest",
   "test_case_function": " ",
-  "test_cases": "[{\"assert_code\": \"\\n\\n\\ndef test_permute_single_element():\\n    assert permute([1]) == [[1]]\\n\\ndef test_permute_two_elements():\\n    result = permute([1, 2])\\n    expected = [[1, 2], [2, 1]]\\n    assert sorted(result) == sorted(expected)\\n\\ndef test_permute_three_elements():\\n    result = permute([1, 2, 3])\\n    expected = [[1, 2, 3], [1, 3, 2], [2, 1, 3], [2, 3, 1], [3, 1, 2], [3, 2, 1]]\\n    assert sorted(result) == sorted(expected)\\n\\ndef test_permute_four_elements():\\n    result = permute([1, 2, 3, 4])\\n    expected = [\\n        [1, 2, 3, 4], [1, 2, 4, 3], [1, 3, 2, 4], [1, 3, 4, 2], [1, 4, 2, 3], [1, 4, 3, 2],\\n        [2, 1, 3, 4], [2, 1, 4, 3], [2, 3, 1, 4], [2, 3, 4, 1], [2, 4, 1, 3], [2, 4, 3, 1],\\n        [3, 1, 2, 4], [3, 1, 4, 2], [3, 2, 1, 4], [3, 2, 4, 1], [3, 4, 1, 2], [3, 4, 2, 1],\\n        [4, 1, 2, 3], [4, 1, 3, 2], [4, 2, 1, 3], [4, 2, 3, 1], [4, 3, 1, 2], [4, 3, 2, 1]\\n    ]\\n    assert sorted(result) == sorted(expected)\"}]",
+  "test_cases": "[{\"assert_code\": \"\n\n\ndef test_permute_single_element():\n    assert permute([1]) == [[1]]\n\ndef test_permute_two_elements():\n    result = permute([1, 2])\n    expected = [[1, 2], [2, 1]]\n    assert sorted(result) == sorted(expected)\n\ndef test_permute_three_elements():\n    result = permute([1, 2, 3])\n    expected = [[1, 2, 3], [1, 3, 2], [2, 1, 3], [2, 3, 1], [3, 1, 2], [3, 2, 1]]\n    assert sorted(result) == sorted(expected)\n\ndef test_permute_four_elements():\n    result = permute([1, 2, 3, 4])\n    expected = [\n        [1, 2, 3, 4], [1, 2, 4, 3], [1, 3, 2, 4], [1, 3, 4, 2], [1, 4, 2, 3], [1, 4, 3, 2],\n        [2, 1, 3, 4], [2, 1, 4, 3], [2, 3, 1, 4], [2, 3, 4, 1], [2, 4, 1, 3], [2, 4, 3, 1],\n        [3, 1, 2, 4], [3, 1, 4, 2], [3, 2, 1, 4], [3, 2, 4, 1], [3, 4, 1, 2], [3, 4, 2, 1],\n        [4, 1, 2, 3], [4, 1, 3, 2], [4, 2, 1, 3], [4, 2, 3, 1], [4, 3, 1, 2], [4, 3, 2, 1]\n    ]\n    assert sorted(result) == sorted(expected)\"}]",
   "tag": "KodCode"
 }
 ```
@@ -313,7 +313,7 @@ bash examples/qwen2.5-7B-rlvr_megatron/run_rlvr_pipeline.sh
 * 确保安装了所有必要的依赖：
 
   ```bash
-  pip install -r requirements.txt
+  pip install -e .
   ```
 
 * 验证配置中的所有模型路径是否可访问。

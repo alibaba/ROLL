@@ -200,7 +200,7 @@ bash bash examples/qwen2.5-3B-dpo_megatron/run_dpo_pipeline.sh
 * Ensure all necessary dependencies are installed:
 
   ```bash
-  pip install -r requirements.txt
+  pip install -e .
   ```
 
 * Verify that all model paths in the configuration are accessible.

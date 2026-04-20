@@ -52,7 +52,7 @@ Before you begin, ensure you have the following:
 2. **Python Dependencies** – Install all necessary Python dependencies, typically via the requirements file:
 
    ```bash
-   pip install -r requirements.txt   # Or a specific file like requirements_torch260.txt
+   pip install -e .   # Or with specific extras like pip install -e ".[torch260-vllm]"
    ```
 
    Ensure any specific dependencies for your chosen agentic environments or models are also met.

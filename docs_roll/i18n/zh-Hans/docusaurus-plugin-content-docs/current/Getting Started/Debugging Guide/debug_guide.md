@@ -62,7 +62,7 @@ conda activate python310_torch260_em
 2. 安装依赖：
 ```bash
 pip3 install torch torchvision torchaudio py-cpuinfo
-pip install -r requirements_em_local_debug.txt
+pip install -e ".[local-debug]"
 ```
 
 3. 运行测试脚本：
