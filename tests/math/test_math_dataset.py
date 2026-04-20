@@ -8,8 +8,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
 
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-dataset_path = "/home/weixun.wwx/Numina_hardrule_1212_lv2.json"
-dataset = load_dataset("json", data_files=dataset_path)["train"]
+dataset = load_dataset("PrimeIntellect/NuminaMath-QwQ-CoT-5M",split='train')
 
 
 # 加上format，然后转ids的func

@@ -6,7 +6,7 @@ import ray
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from cuda_mem.utils import log_gpu_memory_usage
+from .utils import log_gpu_memory_usage
 
 
 @ray.remote(num_gpus=1)

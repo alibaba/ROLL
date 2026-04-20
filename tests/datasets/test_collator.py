@@ -5,7 +5,7 @@ from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
 
 
 def test_data_collator_with_padding_for_padded_keys():
-    tokenizer = AutoTokenizer.from_pretrained("/Users/pan/Downloads/huggingface/gpt2-imdb", padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained("lvwerra/gpt2-imdb", padding_side="left")
 
     tokenizer.pad_token_id = tokenizer.eos_token_id
 

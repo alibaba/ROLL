@@ -10,6 +10,7 @@ python tests/agentic/env_manager/test_traj_env_manager.py
 """
 import threading
 
+import pytest
 import ray
 
 from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
@@ -21,9 +22,15 @@ from roll.pipeline.agentic.env_manager.traj_env_manager import TrajEnvManager
 from roll.pipeline.agentic.env_manager.vl_traj_env_manager import VLTrajEnvManager
 from tests.agentic.env_manager.config_load_utils import make_pipeline_config
 
+@pytest.fixture(scope="function")
+def ray_init():
+    """Initialize Ray for each test function and shutdown after."""
+    ray.init(log_to_driver=True, ignore_reinit_error=True)
+    yield
+    ray.shutdown()
 
-def test_debug_traj_env_manager():
-    ray.init(log_to_driver=True)
+
+def test_debug_traj_env_manager(ray_init):
     current_step = 0
 
     config_path = ""
@@ -61,8 +68,7 @@ def test_debug_traj_env_manager():
     env_manager.stop()
 
 
-def test_debug_vl_traj_env_manager():
-    ray.init(log_to_driver=True)
+def test_debug_vl_traj_env_manager(ray_init):
     current_step = 0
 
     config_path = ""
@@ -103,8 +109,7 @@ def test_debug_vl_traj_env_manager():
     env_manager.stop()
 
 
-def test_debug_step_env_manager():
-    ray.init(log_to_driver=True)
+def test_debug_step_env_manager(ray_init):
     current_step = 0
 
     config_path = ""

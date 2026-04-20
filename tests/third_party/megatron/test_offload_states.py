@@ -36,7 +36,7 @@ from roll.third_party.megatron.optimizer import get_megatron_optimizer
 
 class McaModelCreator:
 
-    def __init__(self, optimizer_type, model_name="/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"):
+    def __init__(self, optimizer_type, model_name="Qwen/Qwen2.5-0.5B-Instruct"):
         self.model_name = model_name
         if optimizer_type is None:
             self.megatron_train_args = TrainingArguments(
