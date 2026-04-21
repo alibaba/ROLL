@@ -20,7 +20,7 @@ class AtroposExecutionBridge(APIServer):
     It provides the action from ROLL and collects the environment's reaction 
     for the next step.
     """
-    def __init__(self, action: str, history: List[Dict[str, Any]], debug: bool = False):
+    def __init__(self, action: str, history: List[Dict[str, Any]], debug: bool = False, reward_config: Dict = None):
         # We don't need a real config for this mock
         super().__init__(APIServerConfig(model_name="mock", base_url="mock", api_key="x"))
         self.action = action
@@ -100,7 +100,7 @@ async def execute_controlled_rollout(
     item: Any,
     action: str,
     history: List[Dict[str, Any]],
-    debug: bool = False
+    debug: bool = False, reward_config: Dict = None
 ) -> Tuple[Union[str, List[Dict[str, Any]]], float, bool, Dict[str, Any]]:
     """
     Executes a controlled segment of an Atropos trajectory.
@@ -122,14 +122,41 @@ async def execute_controlled_rollout(
         # 2. Trigger Atropos environment logic
         result, _ = await env.collect_trajectories(item)
         
-        # 3. Trajectory finished naturally
-        reward = 0.0
+        # 3. Trajectory finished naturally — extract Atropos math score
+        atropos_reward = 0.0
         if result and isinstance(result, (dict, ScoredDataGroup)) and "scores" in result:
             if len(result["scores"]) > 0:
-                reward = result["scores"][0]
-        
+                atropos_reward = float(result["scores"][0])
+
+        # 4. Compute Universal Bridge Reward
+        if atropos_reward > 0:
+            reward = atropos_reward
+        else:
+            format_bonus = 0.0
+            
+            # Default to reasoning tags if no config (backward compatibility)
+            markers = [
+                {"marker": "<think>", "reward": 0.2},
+                {"marker": "\\boxed{", "reward": 0.3},
+            ]
+            
+            # Override with YAML config if provided
+            length_bounty_max = 0.2
+            if reward_config:
+                markers = reward_config.get("format_markers", markers)
+                length_bounty_max = reward_config.get("length_bounty_max", length_bounty_max)
+
+            # Check markers
+            for bonus_item in markers:
+                if bonus_item["marker"] in action:
+                    format_bonus += bonus_item["reward"]
+            
+            # Continuous Length component (CRITICAL for GRPO variance)
+            length_bonus = min(len(action) / 1000.0, length_bounty_max)
+            reward = -1.0 + format_bonus + length_bonus
+
         if debug:
-            logger.info(f"[AtroposBridge] Rollout complete (Traj End). Reward: {reward}")
+            logger.info(f"[AtroposBridge] Rollout complete (Traj End). Atropos: {atropos_reward}, Final: {reward}")
             
         return "", reward, True, {"result": result}
         
