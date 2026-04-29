@@ -1,3 +1,4 @@
+from concurrent import futures
 import json
 from functools import wraps
 from typing import Optional, Dict, Any
@@ -77,9 +78,9 @@ class TensorBoardTracker(BaseTracker):
                 self.config[k] = str(self.config[k])
         self.writer.add_hparams(hparam_dict=self.config, metric_dict={})
         self.writer.flush()
+        self.executor = futures.ThreadPoolExecutor(max_workers=1)
 
-    @strip_at_tag_in_log
-    def log(self, values: dict, step: Optional[int], **kwargs):
+    def _write(self, values: dict, step: Optional[int], **kwargs):
         for k, v in values.items():
             if isinstance(v, (int, float)):
                 self.writer.add_scalar(k, v, global_step=step, **kwargs)
@@ -89,7 +90,12 @@ class TensorBoardTracker(BaseTracker):
                 self.writer.add_scalars(k, v, global_step=step, **kwargs)
         self.writer.flush()
 
+    @strip_at_tag_in_log
+    def log(self, values: dict, step: Optional[int], **kwargs):
+        self.executor.submit(self._write, values, step, **kwargs)
+
     def finish(self):
+        self.executor.shutdown(wait=True)
         self.writer.close()
 
 
