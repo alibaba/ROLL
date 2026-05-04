@@ -156,6 +156,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 ---
 
 ## 🏆 Notable work based on ROLL
+- [Freshness-Aware-PER](https://arxiv.org/abs/2604.16918): A freshness-aware prioritized experience replay framework for LLM/VLM reinforcement learning, combining reward magnitude with exponential age decay (`reward_fresh` priority) and asynchronous full-buffer refresh, providing fresher and higher-signal off-policy samples for both step- and trajectory-level agentic RL. [code](https://github.com/Vision-CAIR/Freshness-Aware-PER)
 - [ComplementaryRL](https://arxiv.org/abs/2603.17621): Complementary RL is a learning framework that enables agents to effectively learn from experience through the seamless co-evolution of an experience extractor and a policy actor within the RL optimization loop.
 - [RLix](https://github.com/rlops/rlix): RLix is an RL job manager that lets more RL jobs run concurrently with less waiting by sharing GPU capacity across jobs, while preserving each pipeline’s training behavior and improving GPU utilization.
 - [TurningPoint-GRPO](https://arxiv.org/abs/2602.06422): A GRPO framework for Flow Matching models in text-to-image generation that alleviates step-wise reward sparsity by modeling step-level incremental rewards and explicitly captures long-term effects via turning points detection, providing dense learning signals for each denoising action.
