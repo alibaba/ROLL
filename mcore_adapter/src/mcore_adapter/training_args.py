@@ -4,6 +4,7 @@ from typing import Literal, Optional, Union
 
 try:
     # NPU patch
+    import flashinfer
     import mindspeed.megatron_adaptor
 except ImportError:
     pass
