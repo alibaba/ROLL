@@ -1,3 +1,5 @@
+from dataclasses import asdict
+
 import ray
 import torch.distributed as dist
 from deepspeed.runtime.zero import GatheredParameters
@@ -29,9 +31,22 @@ def _gather_weights(is_zero3, named_params):
         return [(n, p.data) for n, p in named_params]
 
 
-def gather_deepspeed_weights(model, ds_config, buffer_size):
+def _get_deepspeed_named_params(model, ds_config, is_lora=False):
+    if not is_lora:
+        return [(name, param) for name, param in model.named_parameters()]
+
+    if not ds_config.is_zero3():
+        return [(name, param) for name, param in get_peft_model_state_dict(model).items()]
+
+    adapter_name = "default"
+    state_dict = model.state_dict()
+    lora_state_dict = {k: state_dict[k] for k in state_dict if ("lora_" in k and adapter_name in k)}
+    return [(name.replace(f".{adapter_name}", ""), model.get_parameter(name)) for name in lora_state_dict]
+
+
+def gather_deepspeed_weights(model, ds_config, buffer_size, is_lora=False):
     is_zero3 = ds_config.is_zero3()
-    named_params = [(name, param) for name, param in model.named_parameters()]
+    named_params = _get_deepspeed_named_params(model, ds_config, is_lora=is_lora)
 
     waiting_params, waiting_params_size = [], 0
     for name, param in named_params:
@@ -150,7 +165,7 @@ class DeepSpeedWeightUpdater:
     def _colocated_model_update(self):
         refs = []
         for named_weights in gather_deepspeed_weights(
-            self.model, self.ds_config, buffer_size=self._model_update_buffer_size
+            self.model, self.ds_config, buffer_size=self._model_update_buffer_size, is_lora=self.is_lora
         ):
             serialized_tensors = serialize_named_weights(
                 named_weights, infer_strategy=self.infer_worker_config.strategy_args.strategy_name
@@ -167,11 +182,16 @@ class DeepSpeedWeightUpdater:
                 ray.get(refs)
                 refs = []
             if co_infer_rank == 0 and self._co_infer_worker is not None:
-                refs.append(self._co_infer_worker.update_parameter_in_bucket.remote(infer_parallel_tensors))
+                refs.append(
+                    self._co_infer_worker.update_parameter_in_bucket.remote(
+                        infer_parallel_tensors, is_lora=self.is_lora
+                    )
+                )
             if self._broadcast_workers:
                 refs.extend(self._broadcast_to_infer_workers(named_weights))
         if refs:
             ray.get(refs)
+        self._add_lora_to_infer_workers()
         return {}
 
     def _broadcast_to_infer_workers(self, named_weights) -> list[ray.ObjectRef]:
@@ -183,6 +203,7 @@ class DeepSpeedWeightUpdater:
                 names=[n for n, _ in named_weights],
                 dtypes=[w.dtype for _, w in named_weights],
                 shapes=[w.shape for _, w in named_weights],
+                is_lora=self.is_lora,
             )
             for worker in self._broadcast_workers
         ]
@@ -198,8 +219,17 @@ class DeepSpeedWeightUpdater:
     def _separated_model_update(self):
         logger.info(f"start broadcast model update {self.model_update_group_name}")
         for named_weights in gather_deepspeed_weights(
-            self.model, self.ds_config, buffer_size=self._model_update_buffer_size
+            self.model, self.ds_config, buffer_size=self._model_update_buffer_size, is_lora=self.is_lora
         ):
             refs = self._broadcast_to_infer_workers(named_weights)
             ray.get(refs)
+        self._add_lora_to_infer_workers()
         return {}
+
+    def _add_lora_to_infer_workers(self):
+        if dist.get_rank() != 0 or not self.is_lora:
+            return
+        peft_config = self.model.peft_config.get("default", None)
+        ray.get(
+            [worker.add_lora.remote(peft_config=asdict(peft_config)) for worker in self.model_update_infer_workers]
+        )

@@ -473,12 +473,12 @@ class DynamicSamplingScheduler(RolloutMockMixin):
 
         self.dataset = dataset
         self.indices = list(range(len(dataset)))
-        if state is not None and state.get("dataset_iter_count", 0) > 0:
-            for _ in range(state["dataset_iter_count"]):
-                self.get_next_dataset_item()
         self.dataset_epoch = 0
         self.dataset_iter = None
         self.dataset_iter_count = 0
+        if state is not None and state.get("dataset_iter_count", 0) > 0:
+            for _ in range(state["dataset_iter_count"]):
+                self.get_next_dataset_item()
 
         self.collect_fn_cls = collect_fn_cls
         self.collect_fn_kwargs = collect_fn_kwargs
