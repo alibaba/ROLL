@@ -289,7 +289,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         },
     )
     transformer_impl: Literal["local", "transformer_engine"] = field(
-        default="transformer_engine",
+        default="local",
         metadata={
             "help": "Which Transformer implementation to use.",
             "choices": ["local", "transformer_engine"],

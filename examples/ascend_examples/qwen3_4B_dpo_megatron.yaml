@@ -96,8 +96,5 @@ reference:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
-      additional_configs:
-        mindspeed_args:
-          attention_mask_type: general
   device_mapping: list(range(2,4))
   infer_batch_size: 16

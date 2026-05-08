@@ -44,6 +44,17 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _replace_with_rmsnorm(submodules, attr_name):
+    if hasattr(submodules, attr_name):
+        norm = getattr(submodules, attr_name)
+        if isinstance(norm, type):
+            norm_name = norm.__name__
+        else:
+            norm_name = norm.__class__.__name__
+        if norm_name in ("TENorm", "FusedLayerNorm") or not norm_name.endswith("RMSNorm"):
+            setattr(submodules, attr_name, RMSNorm)
+
+
 class VirtualModels:
     # a wrapper for model list to support virtual pipeline model parallel
     def __init__(self, cls, config: "McaModelConfig", *args, **kwargs):
@@ -369,8 +380,9 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 transformer_block_spec.layer_norm = RMSNorm
             for transformer_layer_spec in transformer_block_spec.layer_specs:
                 if not use_te and config.normalization == "RMSNorm":
-                    transformer_layer_spec.submodules.input_layernorm = RMSNorm
-                    transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
+                    if not transformer_layer_spec.submodules.input_layernorm.__class__.__name__.endswith("RMSNorm"):
+                        transformer_layer_spec.submodules.input_layernorm = RMSNorm
+                        transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
                 if getattr(transformer_layer_spec.submodules.mlp.submodules, "shared_experts", None):
                     transformer_layer_spec.submodules.mlp.submodules.shared_experts.params["gate"] = (
                         config.moe_use_shared_expert_gate
@@ -382,11 +394,21 @@ class McaGPTModel(GPTModel, PretrainedModel):
             )
         else:
             module_spec = get_gpt_layer_local_spec(
-                config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
+                config.num_moe_experts,
+                config.moe_grouped_gemm,
+                qk_layernorm=config.qk_layernorm,
+                normalization=config.normalization,
             )
-            if config.normalization == "RMSNorm":
-                module_spec.submodules.input_layernorm = RMSNorm
-                module_spec.submodules.pre_mlp_layernorm = RMSNorm
+            # Fix: mindspeed may have patched norm modules to TENorm (requires TE)
+            # Replace any TENorm/FusedLayerNorm with RMSNorm if using RMSNorm normalization
+            if not use_te and config.normalization == "RMSNorm":
+                module_spec.layer_norm = RMSNorm
+                _replace_with_rmsnorm(module_spec.submodules, "input_layernorm")
+                _replace_with_rmsnorm(module_spec.submodules, "pre_mlp_layernorm")
+                self_attn = module_spec.submodules.self_attention
+                if hasattr(self_attn, "submodules"):
+                    _replace_with_rmsnorm(self_attn.submodules, "q_layernorm")
+                    _replace_with_rmsnorm(self_attn.submodules, "k_layernorm")
             return module_spec
 
     def _get_mtp_block_spec(self, config: Optional["McaModelConfig"] = None, vp_stage: Optional[int] = None):
