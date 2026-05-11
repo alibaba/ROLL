@@ -454,6 +454,7 @@ class MegatronWeightUpdater:
                 refs.append(
                     self._co_infer_worker.update_parameter_in_bucket.remote(infer_parallel_tensors, is_lora=is_lora)
                 )
+            dist.barrier()
             if self._broadcast_workers:
                 refs.extend(self._broadcast_to_infer_workers(hf_named_weights))
 

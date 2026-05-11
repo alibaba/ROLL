@@ -13,7 +13,7 @@ Atlas 900 A3 PODc
 ### Basic Environment Setup
 
 | Software | Version |
-| -------- |---------|
+| -------- | ------- |
 | Python   | 3.11    |
 | CANN     | 8.5.1   |
 
