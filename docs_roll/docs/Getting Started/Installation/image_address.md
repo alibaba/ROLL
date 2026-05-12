@@ -9,5 +9,7 @@ We provide pre-built Docker images for a quick start (Links will be updated):
 
 For AMD GPU users, We provided pre-built Docker images for a quick start as well:
 * `torch2.8.0 + vLLM0.10.0`: hub.docker.com/r/rlsys/roll_opensource
+* `torch2.10.0 + vLLM0.17.1`: amdagi/roll_env_rocm721:latest
+We also provided Dockerfiles under 'docker/' for AMD users as an alternatively plan.
 
 You can also find [Dockerfiles](https://github.com/StephenRi/ROLL/tree/feature/fix-ref-for-docs/docker) under the `docker/` directory to build your own images.
