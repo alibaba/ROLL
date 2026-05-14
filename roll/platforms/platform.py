@@ -1,9 +1,156 @@
-import torch
+import ctypes
+import ctypes.util
 import os
+from threading import Lock
+
+import torch
 
 from ..utils.logging import get_logger
 
 logger = get_logger()
+_device_memory_used_fallback_warned = set()
+_device_memory_used_compat_warned = set()
+_nvml_compat_lib = None
+_nvml_compat_lib_name = None
+_nvml_compat_lib_lock = Lock()
+
+
+class _NvmlMemoryInfo(ctypes.Structure):
+    _fields_ = [
+        ("total", ctypes.c_ulonglong),
+        ("free", ctypes.c_ulonglong),
+        ("used", ctypes.c_ulonglong),
+    ]
+
+
+def _nvml_compatible_library_candidates():
+    candidates = []
+
+    env_library = os.environ.get("ROLL_NVML_COMPAT_LIB")
+    if env_library:
+        candidates.append(env_library)
+
+    for library_name in (
+        ctypes.util.find_library("nvidia-ml"),
+        "libnvidia-ml.so.1",
+        ctypes.util.find_library("ixml"),
+        "libixml.so",
+    ):
+        if library_name and library_name not in candidates:
+            candidates.append(library_name)
+
+    return candidates
+
+
+def _load_nvml_compatible_library():
+    global _nvml_compat_lib, _nvml_compat_lib_name
+
+    if _nvml_compat_lib is not None:
+        return _nvml_compat_lib, _nvml_compat_lib_name
+
+    with _nvml_compat_lib_lock:
+        if _nvml_compat_lib is not None:
+            return _nvml_compat_lib, _nvml_compat_lib_name
+
+        errors = []
+        for library_name in _nvml_compatible_library_candidates():
+            try:
+                library = ctypes.CDLL(library_name)
+            except OSError as exc:
+                errors.append(f"{library_name}: {exc}")
+                continue
+
+            init_fn = getattr(library, "nvmlInit_v2", None) or getattr(library, "nvmlInit", None)
+            if init_fn is None:
+                errors.append(f"{library_name}: missing nvmlInit_v2/nvmlInit")
+                continue
+
+            init_fn.restype = ctypes.c_int
+            ret = init_fn()
+            if ret != 0:
+                error_string = _nvml_error_string(library, ret)
+                errors.append(f"{library_name}: nvmlInit failed with {ret} ({error_string})")
+                continue
+
+            _nvml_compat_lib = library
+            _nvml_compat_lib_name = library_name
+            return _nvml_compat_lib, _nvml_compat_lib_name
+
+        error_msg = "; ".join(errors) if errors else "no candidate libraries"
+        raise RuntimeError(f"failed to load a NVML-compatible library: {error_msg}")
+
+
+def _nvml_error_string(library, retcode: int) -> str:
+    error_fn = getattr(library, "nvmlErrorString", None)
+    if error_fn is None:
+        return "unknown"
+
+    error_fn.argtypes = [ctypes.c_int]
+    error_fn.restype = ctypes.c_char_p
+    try:
+        value = error_fn(retcode)
+    except Exception:
+        return "unknown"
+
+    if not value:
+        return "unknown"
+
+    try:
+        return value.decode("utf-8", errors="replace")
+    except Exception:
+        return str(value)
+
+
+def _map_visible_device_index(device: int, env_var: str) -> int:
+    visible_devices = os.environ.get(env_var, "")
+    if not visible_devices:
+        return device
+
+    parts = [part.strip() for part in visible_devices.split(",") if part.strip()]
+    if not parts or device < 0 or device >= len(parts):
+        return device
+
+    try:
+        return int(parts[device])
+    except ValueError:
+        return device
+
+
+def _nvml_compatible_device_memory_used(device: int, env_var: str) -> tuple[int, str]:
+    library, library_name = _load_nvml_compatible_library()
+    physical_device = _map_visible_device_index(device, env_var)
+
+    handle = ctypes.c_void_p()
+    get_handle = getattr(library, "nvmlDeviceGetHandleByIndex_v2", None) or getattr(
+        library, "nvmlDeviceGetHandleByIndex", None
+    )
+    if get_handle is None:
+        raise RuntimeError(f"{library_name} does not export nvmlDeviceGetHandleByIndex")
+
+    get_handle.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+    get_handle.restype = ctypes.c_int
+    ret = get_handle(physical_device, ctypes.byref(handle))
+    if ret != 0:
+        raise RuntimeError(
+            f"{library_name} nvmlDeviceGetHandleByIndex({physical_device}) failed with {ret} "
+            f"({_nvml_error_string(library, ret)})"
+        )
+
+    memory_info = _NvmlMemoryInfo()
+    get_memory_info = getattr(library, "nvmlDeviceGetMemoryInfo", None)
+    if get_memory_info is None:
+        raise RuntimeError(f"{library_name} does not export nvmlDeviceGetMemoryInfo")
+
+    get_memory_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(_NvmlMemoryInfo)]
+    get_memory_info.restype = ctypes.c_int
+    ret = get_memory_info(handle, ctypes.byref(memory_info))
+    if ret != 0:
+        raise RuntimeError(
+            f"{library_name} nvmlDeviceGetMemoryInfo({physical_device}) failed with {ret} "
+            f"({_nvml_error_string(library, ret)})"
+        )
+
+    return int(memory_info.used), library_name
 
 
 class Platform:
@@ -88,6 +235,104 @@ class Platform:
         else:
             logger.warning("Current platform %s does not have '%s' attribute.", self.device_type, key)
             return None
+
+    @classmethod
+    def device_memory_used(cls, device=None) -> int:
+        device_module = getattr(torch, cls.device_type, None)
+        if device_module is None:
+            logger.warning("Current platform %s does not expose torch.%s.", cls.device_name, cls.device_type)
+            return 0
+
+        if device is None:
+            try:
+                device_count = device_module.device_count()
+                device = device_module.current_device() if device_count > 0 else 0
+            except Exception:
+                device = 0
+
+        try:
+            return int(device_module.device_memory_used(device))
+        except Exception as exc:
+            compat_used = cls._nvml_compatible_device_memory_used(device=device, primary_exc=exc)
+            if compat_used is not None:
+                return compat_used
+            return cls._fallback_device_memory_used(device_module=device_module, device=device, primary_exc=exc)
+
+    @classmethod
+    def _nvml_compatible_device_memory_used(cls, device: int, primary_exc: Exception):
+        if cls.device_type != "cuda":
+            return None
+
+        try:
+            used, library_name = _nvml_compatible_device_memory_used(device, cls.device_control_env_var)
+        except Exception:
+            return None
+
+        warning_key = (cls.device_name, library_name)
+        if warning_key not in _device_memory_used_compat_warned:
+            _device_memory_used_compat_warned.add(warning_key)
+            logger.warning(
+                "torch.%s.device_memory_used is unavailable on platform %s (device %s, error: %s). "
+                "Using NVML-compatible library %s instead.",
+                cls.device_type,
+                cls.device_name,
+                device,
+                primary_exc,
+                library_name,
+            )
+
+        return used
+
+    @classmethod
+    def _fallback_device_memory_used(cls, device_module, device: int, primary_exc: Exception) -> int:
+        fallback_candidates = (
+            ("mem_get_info", lambda: _mem_get_info_used(device_module, device)),
+            ("memory_reserved", lambda: int(device_module.memory_reserved(device))),
+            ("memory_allocated", lambda: int(device_module.memory_allocated(device))),
+        )
+
+        errors = []
+        for fallback_name, fallback_fn in fallback_candidates:
+            if not hasattr(device_module, fallback_name):
+                continue
+            try:
+                value = fallback_fn()
+            except Exception as fallback_exc:
+                errors.append(f"{fallback_name}: {fallback_exc}")
+                continue
+
+            cls._warn_device_memory_used_fallback_once(
+                device=device,
+                fallback_name=fallback_name,
+                primary_exc=primary_exc,
+            )
+            return value
+
+        logger.warning(
+            "Failed to query device memory usage for platform %s on device %s. Primary error: %s. "
+            "Fallback errors: %s",
+            cls.device_name,
+            device,
+            primary_exc,
+            "; ".join(errors) if errors else "none",
+        )
+        raise primary_exc
+
+    @classmethod
+    def _warn_device_memory_used_fallback_once(cls, device: int, fallback_name: str, primary_exc: Exception) -> None:
+        warning_key = (cls.device_name, fallback_name)
+        if warning_key in _device_memory_used_fallback_warned:
+            return
+
+        _device_memory_used_fallback_warned.add(warning_key)
+        logger.warning(
+            "device_memory_used is unavailable on platform %s (device %s, error: %s). "
+            "Falling back to torch.%s.",
+            cls.device_name,
+            device,
+            primary_exc,
+            fallback_name,
+        )
 
     @classmethod
     def is_cuda(cls) -> bool:
@@ -201,3 +446,8 @@ class Platform:
                                 provide framework- and hardware-specific Ulysses patching.
         """
         raise NotImplementedError
+
+
+def _mem_get_info_used(device_module, device: int) -> int:
+    free, total = device_module.mem_get_info(device)
+    return int(total - free)

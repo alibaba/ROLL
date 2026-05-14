@@ -14,6 +14,37 @@ from megatron.core.utils import log_single_rank
 logger = logging.getLogger(__name__)
 
 
+def _build_param_groups_and_buffers_kwargs(
+    *,
+    model_chunk_offset: int,
+    config: OptimizerConfig,
+    no_weight_decay_cond: Optional[Callable],
+    scale_lr_cond: Optional[Callable],
+    lr_mult: float,
+    filter_fn: Callable,
+    buffer_name: str,
+) -> Dict:
+    signature = inspect.signature(_get_param_groups_and_buffers).parameters
+    kwargs = {
+        "model_chunk_offset": model_chunk_offset,
+        "config": config,
+        "filter_fn": filter_fn,
+        "buffer_name": buffer_name,
+    }
+    if "no_weight_decay_cond" in signature:
+        kwargs["no_weight_decay_cond"] = no_weight_decay_cond
+    if "scale_lr_cond" in signature:
+        kwargs["scale_lr_cond"] = scale_lr_cond
+    if "lr_mult" in signature:
+        kwargs["lr_mult"] = lr_mult
+    if "default_skip_embedding_weight_decay" in signature:
+        kwargs["default_skip_embedding_weight_decay"] = False
+    if "config_overrides" in signature:
+        # config_overrides is required in some newer mcore versions.
+        kwargs["config_overrides"] = None
+    return kwargs
+
+
 def get_megatron_optimizer(
     config: OptimizerConfig,
     model_chunks: List[MegatronModule],
@@ -68,19 +99,20 @@ def get_megatron_optimizer(
 
     optimizers = []
     model_chunk_offset = 0
-    kwargs = {}
-    if "config_overrides" in inspect.signature(_get_param_groups_and_buffers).parameters:
-        # config_overrides is required in mcore-core>=0.16
-        kwargs = {"config_overrides": None}
     for dense_model_chunks, overlap_param_gather_with_optimizer_step in zip(
         all_dense_model_chunks, overlap_param_gather_with_optimizer_step_flags
     ):
-        param_groups, buffers = _get_param_groups_and_buffers(
-            dense_model_chunks,
+        kwargs = _build_param_groups_and_buffers_kwargs(
             model_chunk_offset=model_chunk_offset,
             config=config,
+            no_weight_decay_cond=no_weight_decay_cond,
+            scale_lr_cond=scale_lr_cond,
+            lr_mult=lr_mult,
             filter_fn=lambda g: not g['is_expert_parallel'],
             buffer_name='buffers',
+        )
+        param_groups, buffers = _get_param_groups_and_buffers(
+            dense_model_chunks,
             **kwargs,
         )
         for model_chunk in dense_model_chunks:
@@ -109,13 +141,18 @@ def get_megatron_optimizer(
             setattr(optimizers[-1], "model_chunks", dense_model_chunks)
         model_chunk_offset += 1
 
-    moe_param_groups, moe_buffers = _get_param_groups_and_buffers(
-        model_chunks,
+    moe_kwargs = _build_param_groups_and_buffers_kwargs(
         model_chunk_offset=0,
         config=config,
+        no_weight_decay_cond=no_weight_decay_cond,
+        scale_lr_cond=scale_lr_cond,
+        lr_mult=lr_mult,
         filter_fn=lambda g: g['is_expert_parallel'],
         buffer_name='expert_parallel_buffers',
-        **kwargs,
+    )
+    moe_param_groups, moe_buffers = _get_param_groups_and_buffers(
+        model_chunks,
+        **moe_kwargs,
     )
     if len(moe_param_groups) > 0:
         model_parallel_rank = torch.distributed.get_rank(

@@ -37,7 +37,7 @@ checkpoint_config:
   type: file_system
   output_dir: ./output/render
 
-num_gpus_per_node: 1
+num_gpus_per_node: 2
 
 max_steps: 100
 save_steps: 10000
@@ -107,10 +107,10 @@ actor_infer:
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.8
+      gpu_memory_utilization: 0.6
       block_size: 16
       load_format: auto
-  device_mapping: list(range(0,1))
+  device_mapping: list(range(1,2))
   infer_batch_size: 1
 
 reference:

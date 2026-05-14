@@ -320,7 +320,12 @@ class BaseConfig(ScheduleConfig):
         os.environ.update(self.system_envs)
 
         from ..platforms import current_platform
-        self.num_gpus_per_node = current_platform.device_count()
+        available_gpus_per_node = current_platform.device_count()
+        if available_gpus_per_node > 0:
+            assert self.num_gpus_per_node <= available_gpus_per_node, (
+                f"num_gpus_per_node={self.num_gpus_per_node} exceeds visible devices on this node "
+                f"({available_gpus_per_node})."
+            )
 
         if hasattr(self, 'actor_train') and isinstance(self.actor_train, WorkerConfig):
             self.actor_train.system_envs.update({k: v for k, v in self.system_envs.items() if k not in self.actor_train.system_envs})

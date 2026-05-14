@@ -16,6 +16,7 @@ gem.register("sokoban_sandbox", entry_point="roll.pipeline.agentic.env.sandbox:S
 gem.register("sokoban_native_env", entry_point="roll.pipeline.agentic.env.sokoban.native_env:SokobanNativeEnv")
 gem.register("deepeyes", entry_point="roll.pipeline.agentic.env.deepeyes:DeepEyesEnv")
 gem.register("rock_tb_native_env", entry_point="roll.pipeline.agentic.env.sandbox.rock_tb_native_env:RockTBNativeEnv")
+gem.register("cli", entry_point="roll.pipeline.agentic.env.cli:CliEnv")
 
 try:
     gem.register("openreward_env", entry_point="roll.pipeline.agentic.env.openreward:OpenRewardEnv")

@@ -1,8 +1,10 @@
 import os
+from types import SimpleNamespace
 
 from ray.runtime_env import RuntimeEnv
 
 os.environ["RAY_DEDUP_LOGS"] = "0"
+import pytest
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -89,6 +91,28 @@ def test_resource_manager_num_gpus_per_worker_gt_1():
         refs.append(actor.say_hello.remote())
     res = ray.get(refs)
     print(res)
+
+
+def test_resource_manager_reports_missing_ray_gpu_resources(monkeypatch):
+    monkeypatch.setattr(
+        "roll.distributed.scheduler.resource_manager.ray.available_resources",
+        lambda: {"CPU": 8.0},
+    )
+    monkeypatch.setattr(
+        "roll.distributed.scheduler.resource_manager.ray.nodes",
+        lambda: [{"Alive": True, "Resources": {"CPU": 8.0}}],
+    )
+    monkeypatch.setattr(
+        "roll.distributed.scheduler.resource_manager.current_platform",
+        SimpleNamespace(ray_device_key="GPU", device_type="cuda", device_name="Iluvatar"),
+    )
+    monkeypatch.setattr(
+        "roll.distributed.scheduler.resource_manager.torch",
+        SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 16)),
+    )
+
+    with pytest.raises(AssertionError, match="Ray reports 0 GPU resources"):
+        ResourceManager(num_gpus_per_node=1, num_nodes=1)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
+from types import SimpleNamespace
+
 import ray
 
-from roll.distributed.scheduler.initialize import init
+from roll.distributed.scheduler.initialize import _get_ray_start_resource_args, init
 
 
 @ray.remote
@@ -31,6 +33,26 @@ def test_ray_cluster_func():
 
     print(hello_msg1)
     print(hello_msg2)
+
+
+def test_get_ray_start_resource_args_for_gpu(monkeypatch):
+    fake_platform = SimpleNamespace(device_type="cuda", ray_device_key="GPU")
+    fake_torch = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 4))
+
+    monkeypatch.setattr("roll.distributed.scheduler.initialize.current_platform", fake_platform)
+    monkeypatch.setattr("roll.distributed.scheduler.initialize.torch", fake_torch)
+
+    assert _get_ray_start_resource_args() == " --num-gpus=4"
+
+
+def test_get_ray_start_resource_args_for_custom_accelerator(monkeypatch):
+    fake_platform = SimpleNamespace(device_type="npu", ray_device_key="NPU")
+    fake_torch = SimpleNamespace(npu=SimpleNamespace(device_count=lambda: 8))
+
+    monkeypatch.setattr("roll.distributed.scheduler.initialize.current_platform", fake_platform)
+    monkeypatch.setattr("roll.distributed.scheduler.initialize.torch", fake_torch)
+
+    assert _get_ray_start_resource_args() == """ --resources='{"NPU": 8}'"""
 
 
 if __name__ == "__main__":

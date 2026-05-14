@@ -113,6 +113,18 @@ class VllmStrategy(InferenceStrategy):
             os.environ["VLLM_PORT"] = str(vllm_port)
 
         self.model = await create_async_llm(resource_placement_groups=self.worker_config.resource_placement_groups, **vllm_config)
+        self.sleep_mode_enabled = bool(getattr(self.model, "roll_sleep_mode_enabled", False))
+        if self.sleep_level > 0 and not self.sleep_mode_enabled:
+            logger.warning(
+                "vLLM sleep/offload is disabled because the allocator backend is unavailable. "
+                "actor_infer will stay resident on GPU."
+            )
+            if getattr(self.worker.pipeline_config, "is_actor_infer_colocated", False):
+                logger.warning(
+                    "actor_infer overlaps with training/reference GPUs while vLLM sleep/offload is unavailable. "
+                    "This colocated layout can easily OOM on non-standard accelerator stacks; prefer disjoint "
+                    "device_mapping for actor_train/reference and actor_infer."
+                )
 
 
         if Version("0.15.0") <= Version(vllm.__version__):
@@ -325,6 +337,10 @@ class VllmStrategy(InferenceStrategy):
 
     async def offload_states(self, include=None, non_blocking=False):
         await self.model.reset_prefix_cache()
+        if not getattr(self, "sleep_mode_enabled", False):
+            gc.collect()
+            current_platform.empty_cache()
+            return
         if include is None or OffloadStateType.model_params in include:
             if self.is_model_in_gpu and self.worker.pipeline_config.is_actor_infer_colocated:
                 await self.model.offload_states(self.sleep_level)

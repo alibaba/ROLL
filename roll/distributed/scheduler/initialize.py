@@ -1,9 +1,11 @@
+import json
 import os
 import subprocess
 import sys
 import time
 
 import ray
+import torch
 
 from roll.distributed.scheduler.driver_utils import (
     get_driver_rank,
@@ -24,6 +26,30 @@ from roll.platforms import current_platform
 logger = get_logger()
 
 
+def _get_ray_start_resource_args() -> str:
+    ray_device_key = getattr(current_platform, "ray_device_key", "")
+    if ray_device_key in ("", "CPU"):
+        return ""
+
+    device_module = getattr(torch, current_platform.device_type, None)
+    device_count_fn = getattr(device_module, "device_count", None)
+    if not callable(device_count_fn):
+        logger.warning(
+            "Current platform %s does not expose a usable device_count() method. Ray will rely on auto-detection.",
+            current_platform.device_type,
+        )
+        return ""
+
+    device_count = device_count_fn()
+    if device_count <= 0:
+        return ""
+
+    if ray_device_key == "GPU":
+        return f" --num-gpus={device_count}"
+
+    return f" --resources='{json.dumps({ray_device_key: device_count})}'"
+
+
 def start_ray_cluster():
     rank = get_driver_rank()
     world_size = get_driver_world_size()
@@ -36,12 +62,19 @@ def start_ray_cluster():
         logger.info("Ray cluster already initialized")
         return False
 
+    resource_args = _get_ray_start_resource_args()
     if rank == 0:
-        cmd = f"ray start --head --port={master_port} --node-name={node_name} --dashboard-port={dashboard_port}"
+        cmd = (
+            f"ray start --head --port={master_port} --node-name={node_name} "
+            f"--dashboard-port={dashboard_port}{resource_args}"
+        )
     else:
         # fix: 处理大规模下可能会出现的head/worker node创建顺序不一致问题
         time.sleep(5)
-        cmd = f"ray start --address={master_addr}:{master_port} --node-name={node_name} --dashboard-port={dashboard_port}"
+        cmd = (
+            f"ray start --address={master_addr}:{master_port} --node-name={node_name} "
+            f"--dashboard-port={dashboard_port}{resource_args}"
+        )
 
     logger.info(f"Starting ray cluster: {cmd}")
     ret = subprocess.run(cmd, shell=True, capture_output=True)

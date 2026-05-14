@@ -3,6 +3,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 
 import ray
+import torch
 from ray.util.placement_group import PlacementGroup
 
 from roll.platforms import current_platform
@@ -31,8 +32,24 @@ class ResourceManager:
         if num_nodes is None:
             num_nodes = ray_num_nodes
 
-        assert num_nodes <= ray_num_nodes, (f"The Ray clusters(ray_num_nodes: {ray_num_nodes}) cannot meet the "
-                                            f"required number of nodes (`num_nodes`{num_nodes}).")
+        device_module = getattr(torch, current_platform.device_type, None)
+        device_count_fn = getattr(device_module, "device_count", None)
+        visible_device_count = device_count_fn() if callable(device_count_fn) else 0
+        accelerator_hint = ""
+        if current_platform.ray_device_key != "CPU" and visible_device_count > 0 and available_gpu == 0:
+            accelerator_hint = (
+                f" torch sees {visible_device_count} {current_platform.device_name} device(s) on this node, "
+                f"but Ray reports 0 {current_platform.ray_device_key} resources. "
+                f"This usually means the existing Ray cluster was started without explicitly registering accelerator "
+                f"resources. Stop the current Ray cluster and restart it with explicit resources, for example "
+                f"`ray stop` then `ray start --head --num-gpus={visible_device_count}`."
+            )
+
+        assert num_nodes <= ray_num_nodes, (
+            f"The Ray clusters(ray_num_nodes: {ray_num_nodes}) cannot meet the required number of nodes "
+            f"(`num_nodes`{num_nodes}). required per-node {current_platform.ray_device_key} >= {num_gpus_per_node}, "
+            f"ray.available_resources()={available_resources}.{accelerator_hint}"
+        )
         self.num_nodes = num_nodes
         self.gpu_per_node = num_gpus_per_node
         self.num_gpus = self.gpu_per_node * self.num_nodes

@@ -75,13 +75,13 @@ actor_train:
   strategy_args:
     strategy_name: megatron_train
     strategy_config:
-      tensor_model_parallel_size: 1
+      tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       context_parallel_size: 1
       use_distributed_optimizer: false
       recompute_granularity: full
-  device_mapping: list(range(2,3))
+  device_mapping: list(range(2,4))
   infer_batch_size: 1
 actor_infer:
   model_args:
@@ -105,8 +105,8 @@ actor_infer:
       gpu_memory_utilization: 0.8
       block_size: 16
       load_format: auto
-      tensor_parallel_size: 1
-  device_mapping: list(range(1,2))
+      tensor_parallel_size: 2
+  device_mapping: list(range(0,2))
 
 reference:
   model_args:
@@ -123,7 +123,7 @@ reference:
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       context_parallel_size: 1
-  device_mapping: list(range(2,3))
+  device_mapping: list(range(4,5))
   infer_batch_size: 1
 
 reward_normalization:
@@ -181,7 +181,7 @@ agent_config_common:
     custom_install_cmd: "wget --retry-connrefused --tries=10 --waitretry=2 -O ~/iflow-cli.tgz 'http://cloud.iflow.cn/iflow-cli/iflow-ai-iflow-cli-for-roll-0-4-4-v5.tgz' && npm i -g ~/iflow-cli.tgz"
   env:
     IFLOW_apiKey: "test"
-    IFLOW_baseUrl: "http://localhost:8080/v1"
+    IFLOW_baseUrl: "http://10.31.10.33:8080/v1"
     IFLOW_modelName: "ROME"
     IFLOW_searchApiKey: "88888888"
     IFLOW_selectedAuthType: "openai-compatible"
@@ -200,11 +200,11 @@ custom_envs:
     agent_system_template: "agent_system_template placeholder"
     agent_template: "agent_template placeholder"
     env_config:
-      dataset_name: /ROLL/data/swe_bench_verified_example.jsonl
+      dataset_name: /data1/lxzs_workspace/ROLL/data/swe_bench_verified_example.jsonl
       tools: ~
       max_steps: ${max_actions_per_traj}
       mode: "train"
-      sandbox_base_url: http://localhost:8080 # change to your own service address if needed
+      sandbox_base_url: http://10.31.10.33:8080 # change to your own service address if needed
       user_id: "xxx"
       experiment_id: "test_tb_native"
       test_files: ["/terminal-bench-datasets/datasets/swebench-verified"]
@@ -217,11 +217,11 @@ custom_envs:
     agent_system_template: "agent_system_template placeholder"
     agent_template: "agent_template placeholder"
     env_config:
-      dataset_name: /ROLL/data/swe_bench_verified_example.jsonl
+      dataset_name: /data1/lxzs_workspace/ROLL/data/swe_bench_verified_example.jsonl
       tools: ~
       max_steps: ${max_actions_per_traj}
       mode: "val"
-      sandbox_base_url: http://localhost:8080 # change to your own service address if needed
+      sandbox_base_url: http://10.31.10.33:8080 # change to your own service address if needed
       user_id: "xxx"
       experiment_id: "test_tb_native"
       test_files: ["/terminal-bench-datasets/datasets/swebench-verified"]

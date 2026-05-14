@@ -7,9 +7,9 @@ from typing import Iterable, Tuple
 
 import torch
 import vllm
-from packaging.version import Version
 
 from roll.platforms import current_platform
+from roll.third_party.vllm.versioning import load_process_weights_after_loading_utils, uses_vllm_0_11_adapter
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
@@ -144,10 +144,8 @@ class WorkerBase:
         self.load_weights([(name, weight) for name, weight in named_params])
 
     def process_weights_after_loading(self):
-        if (Version("0.11.0") == Version(vllm.__version__) or
-                Version("0.11.1rc1") == Version(vllm.__version__) or
-                Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__)):
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading,set_default_torch_dtype
+        if uses_vllm_0_11_adapter(vllm.__version__):
+            process_weights_after_loading, set_default_torch_dtype = load_process_weights_after_loading_utils()
             device_config = self.device_config
             load_config = self.vllm_config.load_config
             load_device = (device_config.device if load_config.device is None else load_config.device)
