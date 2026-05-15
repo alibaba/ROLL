@@ -394,21 +394,20 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
             )
         else:
-            if current_platform.is_npu():
-                module_spec = get_gpt_layer_local_spec(
-                    config.num_moe_experts,
-                    config.moe_grouped_gemm,
-                    qk_layernorm=config.qk_layernorm,
-                    normalization=config.normalization,
-                )
-            else:
-                module_spec = get_gpt_layer_local_spec(
-                    config.num_moe_experts,
-                    config.moe_grouped_gemm,
-                    qk_layernorm=config.qk_layernorm,
-                )
-            if not use_te and config.normalization == "RMSNorm":
-                if current_platform.is_npu():
+            is_npu = current_platform.is_npu()
+            extra_kwargs = {}
+            if is_npu:
+                extra_kwargs["normalization"] = config.normalization
+
+            module_spec = get_gpt_layer_local_spec(
+                config.num_moe_experts,
+                config.moe_grouped_gemm,
+                qk_layernorm=config.qk_layernorm,
+                **extra_kwargs,
+            )
+
+            if config.normalization == "RMSNorm":
+                if is_npu:
                     module_spec.layer_norm = RMSNorm
                     _replace_with_rmsnorm(module_spec.submodules, "input_layernorm")
                     _replace_with_rmsnorm(module_spec.submodules, "pre_mlp_layernorm")
