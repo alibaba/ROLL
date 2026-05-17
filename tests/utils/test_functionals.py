@@ -4,7 +4,12 @@ import numpy as np
 import pytest
 import torch
 
-from roll.utils.functionals import traverse_obj, divide_by_chunk_size, pad_to_length
+from roll.utils.functionals import (
+    agg_loss,
+    divide_by_chunk_size,
+    pad_to_length,
+    traverse_obj,
+)
 
 
 def visitor(obj: object, path: Tuple):
@@ -22,6 +27,7 @@ def test_traverse_obj():
                 "nested_key1": torch.tensor([[1, 2], [3, 4]]),
                 "nested_key2": [torch.tensor(5), np.array([6, 7])],
             }
+
     class CustomObject:
         def __init__(self):
             self.attr1 = torch.tensor([1, 2, 3])
@@ -53,6 +59,25 @@ def test_pad_to_length():
 
     padded_tensor = pad_to_length(tensor, length, pad_value, dim=-1)
     print(padded_tensor)
+
+
+def test_agg_loss_token_mean_masks_loss_numerator_and_gradients():
+    loss_mat = torch.tensor([[1.0, 100.0], [1.0, -50.0]], requires_grad=True)
+    loss_mask = torch.tensor([[1, 0], [1, 0]])
+
+    loss = agg_loss(
+        loss_mat=loss_mat,
+        loss_mask=loss_mask,
+        loss_agg_mode="token-mean",
+        batch_num_tokens=int(loss_mask.sum().item()),
+    )
+    loss.backward()
+
+    assert loss.item() == pytest.approx(1.0)
+    torch.testing.assert_close(
+        loss_mat.grad,
+        torch.tensor([[0.5, 0.0], [0.5, 0.0]]),
+    )
 
 
 if __name__ == "__main__":
