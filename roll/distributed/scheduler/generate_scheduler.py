@@ -567,7 +567,16 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             request_data: DataProto = DataProto.from_single_dict(collect_data, meta_info=data.meta_info)
             request_data.batch["prompt_id"] = torch.arange(request_data.batch.batch_size[0], device=request_data.batch.device)
 
-            gen_batch = request_data.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
+            generate_non_tensor_batch_keys = []
+            if "multi_modal_data" in request_data.non_tensor_batch:
+                generate_non_tensor_batch_keys.append("multi_modal_data")
+
+            gen_batch = request_data.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=generate_non_tensor_batch_keys,
+            )
+            for key in generate_non_tensor_batch_keys:
+                request_data.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
             gen_batch.meta_info = request_data.meta_info
             num_return_sequences = generation_config["num_return_sequences"]
             request_data = request_data.repeat(repeat_times=num_return_sequences)
