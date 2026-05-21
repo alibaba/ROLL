@@ -151,6 +151,10 @@ const config = {
             title: 'More',
             items: [
               {
+                label: 'Join Us',
+                to: '/careers',
+              },
+              {
                 label: 'GitHub',
                 href: 'https://github.com/alibaba/ROLL',
               },
