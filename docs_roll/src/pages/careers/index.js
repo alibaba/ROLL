@@ -100,6 +100,37 @@ const projects = [
   },
 ];
 
+const roles = [
+  {
+    title: '智能引擎-大模型训练基础架构研发工程师/高级专家-AI Infra',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=1038409&shareCode=tGPVe1DNf9wWpBko553DpI2T4ahZiLrF_NJ7Z_hxUZA%3D',
+  },
+  {
+    title: '智能引擎-PostTrain框架研发工程师-AI Infra',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=7000016304&shareCode=tGPVe1DNf9wWpBko553DpJi3TFsCjh4syQbtlZp2ujn1yKstq7Sb04s0EC1mY7nf',
+  },
+  {
+    title: '智能引擎-大模型平台研发工程师-强化学习环境',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=100006780014&shareCode=tGPVe1DNf9wWpBko553DpJ3MpTthGYz2ZWV1vShHgx5LHcAG3PQ6rOPZqoRgRIHS',
+  },
+  {
+    title: '智能引擎-多模态大模型推理系统工程师/专家',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=100008580001&shareCode=tGPVe1DNf9wWpBko553DpPENMYSNUyq0L83cQSorzKz4ErFkTMgXh2GL08llVATX',
+  },
+  {
+    title: '智能引擎-高级引擎研发工程师',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=100008580002&shareCode=tGPVe1DNf9wWpBko553DpPENMYSNUyq0L83cQSorzKz%2F_VZfQZv3vM5M5gH1pG4K',
+  },
+  {
+    title: '智能引擎算法平台-训练系统优化高级工程师/专家',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=100008380018&shareCode=tGPVe1DNf9wWpBko553DpKiiMXauM8eAqNmmf_E5AzytA5zLiSVCl54eJZ4QmnGA',
+  },
+  {
+    title: '智能引擎-机器学习系统工程师',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=100008460012&shareCode=tGPVe1DNf9wWpBko553DpNTPm%2Fiu5lvdKCHPRUEo1fUXrexro24t6i77UdIPkYZ2',
+  },
+];
+
 const copy = {
   zh: {
     title: '阿里巴巴智能引擎算法平台团队',
@@ -116,6 +147,10 @@ const copy = {
     publicationsTitle: '代表性论文',
     openSourceTag: '开源项目',
     openSourceTitle: '开源训练框架与系统',
+    rolesTag: '投递入口',
+    rolesTitle: '开放岗位',
+    rolesDesc: '点击岗位名称或投递按钮进入阿里人才页面。',
+    rolesAction: '投递',
   },
   en: {
     title: 'Alibaba Intelligent Engine Algorithm Platform Team',
@@ -132,6 +167,10 @@ const copy = {
     publicationsTitle: 'Selected Publications',
     openSourceTag: 'Open Source',
     openSourceTitle: 'Open Source Frameworks',
+    rolesTag: 'Application',
+    rolesTitle: 'Open Roles',
+    rolesDesc: 'Select a role or use the apply button to open the Alibaba Talent application page.',
+    rolesAction: 'Apply',
   },
 };
 
@@ -212,6 +251,24 @@ export default function Careers() {
                     GitHub
                   </a>
                 </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className={styles.section}>
+          <div className={styles.sectionTag}>{text.rolesTag}</div>
+          <h2>{text.rolesTitle}</h2>
+          <p className={styles.sectionDesc}>{text.rolesDesc}</p>
+          <div className={styles.roleList}>
+            {roles.map((role) => (
+              <article className={styles.roleRow} key={role.title}>
+                <a className={styles.roleTitle} href={role.href} target="_blank" rel="noreferrer">
+                  {role.title}
+                </a>
+                <a className={styles.roleAction} href={role.href} target="_blank" rel="noreferrer">
+                  {text.rolesAction}
+                </a>
               </article>
             ))}
           </div>
