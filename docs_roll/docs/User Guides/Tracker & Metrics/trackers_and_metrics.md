@@ -51,9 +51,6 @@ trackio_max_traces_per_step: 32
 tracker_kwargs:
   project: roll-experiments
   name: experiment_name
-  tags:
-    - roll
-    - rl
 
 # Using Stdout
 track_with: stdout

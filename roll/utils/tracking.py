@@ -188,7 +188,7 @@ class TrackioTracker(BaseTracker):
         group = kwargs.pop("group", None)
         space_id = kwargs.pop("space_id", None)
         dataset_id = kwargs.pop("dataset_id", None)
-        tags = kwargs.pop("tags", None)
+        kwargs.pop("tags", None)
 
         auto_log_gpu = kwargs.pop("auto_log_gpu", True)
         gpu_log_interval = kwargs.pop("gpu_log_interval", 2)
@@ -208,7 +208,6 @@ class TrackioTracker(BaseTracker):
             config=config,
             space_id=space_id,
             dataset_id=dataset_id,
-            tags=tags,
             auto_log_gpu=auto_log_gpu,
             gpu_log_interval=gpu_log_interval,
         )
