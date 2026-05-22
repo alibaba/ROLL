@@ -114,11 +114,15 @@ class BaseConfig(ScheduleConfig):
     )
     track_with: str = field(
         default="tensorboard",
-        metadata={"help": "The type of tracker to be used for tracking, one of ['wandb', 'tensorboard', 'stdout', 'swanlab']."}
+        metadata={"help": "The type of tracker to be used for tracking, one of ['wandb', 'tensorboard', 'stdout', 'swanlab', 'trackio']."}
     )
     tracker_kwargs: dict = field(
         default_factory=dict,
         metadata={"help": "Additional keyword arguments to pass to the Tracker class."}
+    )
+    trackio_max_traces_per_step: int = field(
+        default=32,
+        metadata={"help": "Maximum rollout traces to log to Trackio per step. Set to 0 to disable trace logging."},
     )
     max_steps: int = field(
         default=500,

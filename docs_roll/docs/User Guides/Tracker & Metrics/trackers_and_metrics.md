@@ -9,7 +9,8 @@ The ROLL framework currently supports the following trackers:
 1. **TensorBoard** - Visualization tool developed by Google
 2. **Weights & Biases (WandB)** - Powerful machine learning experiment tracking platform
 3. **SwanLab** - Next-generation AI experiment tracking tool
-4. **Stdout** - Direct output to standard output
+4. **Trackio** - Local-first experiment tracking library from Hugging Face
+5. **Stdout** - Direct output to standard output
 
 ## Configuring Trackers
 
@@ -44,9 +45,21 @@ tracker_kwargs:
     - tag1
     - tag2
 
+# Using Trackio
+track_with: trackio
+trackio_max_traces_per_step: 32
+tracker_kwargs:
+  project: roll-experiments
+  name: experiment_name
+  tags:
+    - roll
+    - rl
+
 # Using Stdout
 track_with: stdout
 ```
+
+When `track_with: trackio` is enabled, ROLL logs rollout generations as Trackio traces in addition to scalar metrics. RLVR rollouts are logged under `rollout/rlvr`, and agentic trajectories are logged under `train/agentic_rollouts`. Use `trackio_max_traces_per_step` to cap the number of traces recorded per logging step, or set it to `0` to disable trace logging.
 
 ## SwanLab Usage Details
 
