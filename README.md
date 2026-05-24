@@ -43,7 +43,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 | 📣   Updates                                                                                                                                                                                                                                                                                                                                                        |
 |:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **[03/06/2026]** 🎉 We support Qwen3.5 [Dense](examples/qwen3.5-35BA3-rlvr_megatron/rlvr_megatron_80GB.yaml) and [MoE](examples/qwen3.5-35BA3-rlvr_megatron/rlvr_megatron_80GB.yaml) series models and [on-policy distill](docs_roll/i18n/zh-Hans/docusaurus-plugin-content-docs/current/User Guides/Pipeline/on_policy_distill_pipeline_start.md). Welcome to use! |
+| **[03/06/2026]** 🎉 We support Qwen3.5 [Dense](examples/qwen3.5-35BA3-rlvr_megatron/rlvr_megatron_80GB.yaml) and [MoE](examples/qwen3.5-35BA3-rlvr_megatron/rlvr_megatron_80GB.yaml) series models and [on-policy distill](docs_roll/i18n/zh-Hans/docusaurus-plugin-content-docs/current/User%20Guides/Pipeline/on_policy_distill_pipeline_start.md). Welcome to use! |
 | **[02/03/2026]** 🎉 We released FSDP2 Strategy, Megatron with LoRA, GPU partial overlapping, Qwen3-Omni supports and other features. For more details, please refer to the release notes. Welcome to use!                                                                                                                                                           |
 | **[01/01/2026]** 🎉 Our [Let It Flow: Agentic Crafting on Rock and Roll](https://arxiv.org/abs/2512.24873) report released! Introducing ALE ecosystem and ROME, an open-source agentic model with novel IPA algorithm.                                                                                                                                              |
 | **[11/08/2025]** 🎉 Our [ROCK: Reinforcement Open Construction Kit](https://github.com/alibaba/ROCK) released, Explore the new capabilities!.                                                                                                                                                                                                                       |
@@ -107,7 +107,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [RewardFL](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/Reward_FL)
 
 #### Backend
-[DeepSeed](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/deepspeed)  
+[DeepSpeed](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/deepspeed)  
 [Megatron](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/megatron)   
 [vLLM](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/vllm)  
 [SGLang](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/sglang)
@@ -134,7 +134,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
     *   Environment-level **asynchronous parallel rollout**.
     *   Supports **asynchronous training**.
     *   Multi-turn interaction rollout supports **local debugging**, improving multi-turn interaction business development efficiency.
-    *   Supports **TrajectoryWise (StartPO)** and **StepWise (GiGPO)** training paradigms.
+    *   Supports **TrajectoryWise (StarPO)** and **StepWise (GiGPO)** training paradigms.
 *   **Algorithm-Friendly:** Provides flexible and rich RL strategy configurations by default.
     *   Over 20 rich reinforcement learning strategy options, such as reward normalization, reward clipping, various advantage estimation methods, etc.
     *   Out-of-the-box support for reinforcement learning algorithms, such as **PPO, GRPO, Reinforce++, TOPR, RAFT++, GSPO**, etc.
@@ -156,6 +156,9 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 ---
 
 ## 🏆 Notable work based on ROLL
+- [Freshness-Aware-PER](https://arxiv.org/abs/2604.16918): A freshness-aware prioritized experience replay framework for LLM/VLM reinforcement learning, combining reward magnitude with exponential age decay (`reward_fresh` priority) and asynchronous full-buffer refresh, providing fresher and higher-signal off-policy samples for both step- and trajectory-level agentic RL. [code](https://github.com/Vision-CAIR/Freshness-Aware-PER)
+- [ComplementaryRL](https://arxiv.org/abs/2603.17621): Complementary RL is a learning framework that enables agents to effectively learn from experience through the seamless co-evolution of an experience extractor and a policy actor within the RL optimization loop.
+- [RLix](https://github.com/rlops/rlix): RLix is an RL job manager that lets more RL jobs run concurrently with less waiting by sharing GPU capacity across jobs, while preserving each pipeline’s training behavior and improving GPU utilization.
 - [TurningPoint-GRPO](https://arxiv.org/abs/2602.06422): A GRPO framework for Flow Matching models in text-to-image generation that alleviates step-wise reward sparsity by modeling step-level incremental rewards and explicitly captures long-term effects via turning points detection, providing dense learning signals for each denoising action.
 - [STAgent](https://arxiv.org/abs/2512.24957): An agentic LLM specialized for spatio-temporal understanding and complex tasks like constrained POI discovery and itinerary planning, featuring hierarchical data curation with 1:10,000 filter ratio and cascaded training (seed SFT + difficulty-aware SFT + RL), achieving strong performance on TravelBench while preserving general capabilities.
 - [IPRO](https://arxiv.org/abs/2510.14255): A novel video diffusion framework using reinforcement learning to enhance identity preservation in human-centric I2V generation, optimizing diffusion models with face identity scorer and KL-divergence regularization.

@@ -8,7 +8,7 @@ class CustomAsyncLLMEngine(AsyncLLMEngine):
         self.engine.model_executor.collective_rpc(method="load_states")
 
     async def offload_states(self, level):
-        self.reset_prefix_cache()
+        await self.reset_prefix_cache()
         self.engine.model_executor.collective_rpc(method="offload_states", args=(level,))
 
     async def setup_collective_group(self, *args, **kwargs):
@@ -24,4 +24,4 @@ class CustomAsyncLLMEngine(AsyncLLMEngine):
         self.engine.model_executor.collective_rpc(method="custom_add_lora", args=args, kwargs=kwargs)
 
     async def process_weights_after_loading(self):
-        await self.engine.model_executor.collective_rpc(method="process_weights_after_loading")
+        self.engine.model_executor.collective_rpc(method="process_weights_after_loading")

@@ -1,4 +1,5 @@
 from typing import Optional, Union, Dict, List, Any
+import asyncio
 import json
 import re
 import torch
@@ -7,6 +8,8 @@ import time
 import traceback
 import numpy as np
 from functools import partial
+import uuid
+import ray
 import tensordict
 from tensordict import TensorDict
 from roll.configs.worker_config import WorkerConfig
@@ -17,15 +20,22 @@ from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_tokenizer_provider, default_reward_model_provider
 from roll.platforms import current_platform
+from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.logging import get_logger
 from roll.utils.context_managers import state_offload_manger
 from roll.utils.prompt import *
 from roll.datasets.chat_template import get_chat_template
+from roll.distributed.scheduler.router import RouterManager
 
 
 class LLMJudgeRewardWorker(Worker):
     """
     Reward Worker that uses LLM-as-judge to compute rewards.
+
+    Supports three judge_model_type modes:
+      - "api": calls an external OpenAI-compatible API
+      - "inference": runs a local model via InferenceStrategy (GPU)
+      - "cluster": delegates to a shared reward model cluster via Ray RequestScheduler (CPU-only)
     """
 
     def __init__(self, worker_config: WorkerConfig):
@@ -35,7 +45,7 @@ class LLMJudgeRewardWorker(Worker):
         self.tokenizer = None
         self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
 
-        # LLM judge相关配置
+        # LLM judge config
         self.judge_prompt = self.worker_config.judge_prompt if hasattr(self.worker_config, "judge_prompt") else None
         self.judge_prompt = prompt_maps.get(self.judge_prompt, None)
         self.judge_model_type = (
@@ -47,28 +57,54 @@ class LLMJudgeRewardWorker(Worker):
         self.judge_api_url = self.worker_config.judge_api_url if hasattr(self.worker_config, "judge_api_url") else None
         self.judge_api_key = self.worker_config.judge_api_key if hasattr(self.worker_config, "judge_api_key") else None
 
+        # Cluster mode state (populated in _initialize_cluster_mode)
+        self.reward_tokenizer = None
+        self.chat_template_func = None
+        self.reward_scheduler = None
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):
         super().initialize(pipeline_config)
         self.actor_tokenizer = default_tokenizer_provider(pipeline_config.actor_train.model_args)
         if self.judge_model_type == "api":
-            self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
-            print(f"{self.worker_name} initialized with API model")
-
+            self._initialize_api_mode()
         elif self.judge_model_type == "inference":
-            async_strategy = self.worker_config.strategy_args.strategy_name in ["vllm", "sglang"]
-            if self.worker_config.strategy_args.strategy_name == "sglang":  # not weight sync, need backup weights
-                self.worker_config.strategy_args.strategy_config["enable_weights_cpu_backup"] = True
-            if self.worker_config.strategy_args.strategy_name == "vllm":
-                self.worker_config.strategy_args.strategy_config["sleep_level"] = 1
-            self.strategy = create_strategy(worker=self, sync_wrapper=async_strategy)
-            self.strategy.initialize(model_provider=default_reward_model_provider)
-            self.tokenizer = self.strategy.tokenizer
-            print(f"{self.worker_name} initialized with inference model")
-            self.strategy.offload_states()
-            current_platform.init()
+            self._initialize_inference_mode()
+        elif self.judge_model_type == "cluster":
+            self._initialize_cluster_mode(pipeline_config)
         else:
-            raise ValueError(f"Unsupported model type: {self.judge_model_type}")
+            raise ValueError(f"Unsupported judge_model_type: {self.judge_model_type}")
+
+    def _initialize_api_mode(self):
+        self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
+        print(f"{self.worker_name} initialized with API model")
+
+    def _initialize_inference_mode(self):
+        async_strategy = self.worker_config.strategy_args.strategy_name in ["vllm", "sglang"]
+        if self.worker_config.strategy_args.strategy_name == "sglang":  # not weight sync, need backup weights
+            self.worker_config.strategy_args.strategy_config["enable_weights_cpu_backup"] = True
+        if self.worker_config.strategy_args.strategy_name == "vllm":
+            self.worker_config.strategy_args.strategy_config["sleep_level"] = 1
+        self.strategy = create_strategy(worker=self, sync_wrapper=async_strategy)
+        self.strategy.initialize(model_provider=default_reward_model_provider)
+        self.tokenizer = self.strategy.tokenizer
+        print(f"{self.worker_name} initialized with inference model")
+        self.strategy.offload_states()
+        current_platform.init()
+
+    def _initialize_cluster_mode(self, pipeline_config):
+        if pipeline_config.reward_model is None:
+            raise ValueError(
+                "judge_model_type='cluster' requires pipeline_config.reward_model to be configured"
+            )
+        self.reward_tokenizer = default_tokenizer_provider(pipeline_config.reward_model.model_args)
+        template_name = pipeline_config.reward_model.data_args.template
+        self.chat_template_func = get_chat_template(template_name, self.reward_tokenizer)
+
+        scheduler_name = f"RewardModelScheduler-{pipeline_config.reward_model.name}"
+        reward_scheduler = ray.get_actor(scheduler_name, namespace=RAY_NAMESPACE)
+        self.reward_scheduler = RouterManager.create_client_sync(reward_scheduler)
+        self.logger.info(f"{self.worker_name} initialized, connected to scheduler: {scheduler_name}")
 
     def _call_api_model(self, messages: Dict, retry_times=3) -> str:
         from openai import OpenAI
@@ -135,52 +171,42 @@ class LLMJudgeRewardWorker(Worker):
         self.logger.info(f"judge model inference output: {str(output)}")
         return output.strip()
 
-    def _extract_score(self, response: str) -> float:
-        try:
-            match = re.search("Score: ([0-9.]+)", response)
-            if match:
-                score = float(match.group(1))
-                normalized_score = score / 10
-                return normalized_score
-            else:
-                self.logger.warning(f"Could not extract score from response: {response}")
-                return 0.5
-        except Exception as e:
-            self.logger.error(f"Error extracting score: {e}")
-            return 0.5
+    def _parse_score(self, response: str) -> float:
+        """Parse score from judge response. Supports 'Score: X' format and yes/no."""
+        response_lower = response.lower().strip()
 
-    def _extract_score_v2(self, response: str) -> float:
-        response = response.lower()
-        try:
-            if "yes" in response:
-                return 1
-            elif "no" in response:
-                return 0
-            else:
-                self.logger.warning(f"Could not extract score from response: {response}")
-                return 0
-        except Exception as e:
-            self.logger.error(f"Error extracting score: {e}")
-            return 0
+        # Try "Score: X" format first
+        match = re.search(r"Score:\s*([0-9.]+)", response, re.IGNORECASE)
+        if match:
+            score = float(match.group(1))
+            # Normalize to [0, 1] if score > 1
+            if score > 1.0:
+                score = score / 10.0
+            return min(max(score, 0.0), 1.0)
+
+        # Try yes/no format
+        if "yes" in response_lower:
+            return 1.0
+        if "no" in response_lower:
+            return 0.0
+
+        self.logger.warning(f"Could not parse score from judge response: {response[:200]}")
+        return 0.0
 
     def _format_judge_prompt(self, prompt: str, response: str, reference: str = None) -> str:
         if "user\n" in prompt:
             prompt = prompt.split("user\n")[-1].strip()
         if not self.judge_prompt:
-            formatted_prompt = f"""
-            You are an expert judge evaluating the quality of a response to a given prompt.
-            
-            Prompt: {prompt}
-            
-            Response: {response}
-            
-            Reference: {reference}
-            
-            Please evaluate the response on a scale from 0 to 10.
-            Consider factors such as correctness, completeness, clarity, and relevance to the prompt.
-            Your evaluation should be a single number between 0 and 10.
-            Note output your score in the following format: Score: your score.
-            """
+            formatted_prompt = (
+                f"You are an expert judge evaluating the quality of a response to a given prompt.\n\n"
+                f"Prompt: {prompt}\n\n"
+                f"Response: {response}\n\n"
+                f"Reference: {reference}\n\n"
+                f"Please evaluate the response on a scale from 0 to 10.\n"
+                f"Consider factors such as correctness, completeness, clarity, and relevance to the prompt.\n"
+                f"Your evaluation should be a single number between 0 and 10.\n"
+                f"Note output your score in the following format: Score: your score."
+            )
         else:
             formatted_prompt = self.judge_prompt.format(question=prompt, response=response, reference=reference)
         messages = [{"role": "user", "content": formatted_prompt}]
@@ -196,7 +222,7 @@ class LLMJudgeRewardWorker(Worker):
         else:
             raise ValueError(f"Unsupported model type: {self.judge_model_type}")
 
-        score = self._extract_score_v2(llm_response)
+        score = self._parse_score(llm_response)
         info = {
             "prompt_id": prompt_id,
             "score": score,
@@ -207,6 +233,100 @@ class LLMJudgeRewardWorker(Worker):
             "llm_response": llm_response,
         }
         return score, info
+
+    def _tokenize_single(self, messages: List[Dict]) -> DataProto:
+        """Tokenize a single judge prompt into a DataProto for RequestScheduler (cluster mode)."""
+        text = self.chat_template_func(messages)
+        tokenized = self.reward_tokenizer(text, return_tensors="pt")
+        input_ids = tokenized["input_ids"]
+        attention_mask = tokenized["attention_mask"]
+        position_ids = torch.arange(input_ids.shape[1]).unsqueeze(0)
+
+        data = DataProto(
+            batch=TensorDict(
+                {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                },
+                batch_size=input_ids.shape[0],
+            )
+        )
+        return data
+
+    def _compute_rewards_cluster(self, data: DataProto, metrics: Dict) -> DataProto:
+        """Compute rewards via the shared reward model cluster (concurrent async requests)."""
+        prompts_text = self.actor_tokenizer.batch_decode(data.batch["prompts"], skip_special_tokens=True)
+        responses_text = self.actor_tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=True)
+
+        ground_truths = data.non_tensor_batch.get("ground_truth", [None] * len(prompts_text))
+        prompt_ids = data.non_tensor_batch.get("id", [str(i) for i in range(len(prompts_text))])
+
+        # Prepare generation config for judge model
+        generation_config = self.worker_config.generating_args.to_dict()
+
+        # Format judge prompts, tokenize, and send concurrent async requests
+        async def generate_all():
+            tasks = []
+            for i, (prompt, response, reference) in enumerate(zip(prompts_text, responses_text, ground_truths)):
+                messages = self._format_judge_prompt(prompt, response, reference)
+                single_data = self._tokenize_single(messages)
+                single_data.meta_info = {
+                    "src_rank": self.rank_info.rank,
+                    "pad_to_seq_len": False,
+                    "generation_config": generation_config,
+                }
+                request_id = f"reward_{self.rank_info.rank}_{uuid.uuid4().hex[:8]}_{i}"
+
+                # Use RouterClient's async method for concurrent processing
+                task = self.reward_scheduler.generate_request(
+                    req=single_data, request_id=request_id, uid=self.rank_info.rank
+                )
+                tasks.append(task)
+
+            # Gather all results concurrently
+            return await asyncio.gather(*tasks)
+
+        # Run async tasks in sync context
+        results = asyncio.run(generate_all())
+
+        # Parse scores from judge responses
+        scores = []
+        for i, result in enumerate(results):
+            if result is None:
+                self.logger.warning(f"Sample {prompt_ids[i]}: judge request returned None, scoring 0.0")
+                scores.append(0.0)
+                continue
+
+            judge_text = self.reward_tokenizer.batch_decode(result.meta_info["output_token_ids"], skip_special_tokens=True)[0]
+            score = self._parse_score(judge_text)
+            scores.append(score)
+
+            self.logger.info(
+                json.dumps(
+                    {
+                        "prompt_id": prompt_ids[i],
+                        "score": score,
+                        "judge_response": judge_text[:500],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        # Return reward DataProto
+        scores_tensor = torch.tensor(scores, dtype=torch.float16)
+        token_level_rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float16)
+
+        output = DataProto.from_dict(
+            tensors={
+                "token_level_rewards": token_level_rewards,
+                "response_level_rewards": scores_tensor,
+                "scores": scores_tensor,
+            }
+        )
+        output.meta_info = {"metrics": metrics}
+        self.logger.info(f"Computed rewards for {len(scores)} samples via reward model cluster")
+        return output
 
     @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, clear_cache=False)
     def compute_rewards(self, data: DataProto):
@@ -222,6 +342,8 @@ class LLMJudgeRewardWorker(Worker):
                 is_offload_states=is_offload_states,
             ):
                 return self._compute_rewards_impl(data, metrics)
+        elif self.judge_model_type == "cluster":
+            return self._compute_rewards_cluster(data, metrics)
         else:
             return self._compute_rewards_impl(data, metrics)
 

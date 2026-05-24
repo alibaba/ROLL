@@ -39,6 +39,7 @@ class ResourceManager:
 
         if self.gpu_per_node > 0:
             assert self.num_gpus <= available_gpu, f"num_gpus {self.num_gpus} > available_gpu {available_gpu}"
+            
             bundles = []
             for i in range(self.num_nodes):
                 node = nodes_maybe_used[i]
@@ -47,6 +48,7 @@ class ResourceManager:
 
             self.placement_groups = [ray.util.placement_group([bundle]) for bundle in bundles]
             ray.get([pg.ready() for pg in self.placement_groups])
+
             gpu_ranks = ray.get([
                 get_visible_gpus.options(
                     placement_group=pg,

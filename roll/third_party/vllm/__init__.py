@@ -10,6 +10,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.envs import get_default_cache_root
 from vllm.usage.usage_lib import UsageContext
 
+from roll.platforms import current_platform
 import roll.third_party.vllm.fp8 as fp8
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
@@ -58,7 +59,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ""
     # torch.cuda may already init, explicitly disable expandable_segments
     # here (only matters when VLLM_USE_RAY_SPMD_WORKER=0)
-    torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+    current_platform.memory._set_allocator_settings("expandable_segments:False")
 
     os.environ["VLLM_CACHE_ROOT"] = os.path.join(get_default_cache_root(), "vllm", os.environ.get("WORKER_NAME", ""))
 

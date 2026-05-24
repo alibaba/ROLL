@@ -27,6 +27,10 @@
     "message": "GitHub",
     "description": "The label of footer link with label=GitHub linking to https://github.com/alibaba/ROLL"
   },
+  "link.item.label.Join Us": {
+    "message": "加入我们",
+    "description": "The label of footer link with label=Join Us linking to /careers"
+  },
   "copyright": {
     "message": "Copyright © 2025 Alibaba.",
     "description": "The footer copyright"

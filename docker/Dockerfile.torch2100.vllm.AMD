@@ -1,0 +1,10 @@
+FROM rocm/pytorch:rocm7.2_ubuntu22.04_py3.11_pytorch_release_2.10.0
+
+# Install exactly the missing pip packages from ee1e14724282
+COPY requirements_torch_2100_vllm_amd.txt /tmp/requirements_torch_2100_vllm_amd.txt
+RUN pip3 install -r /tmp/requirements_torch_2100_vllm_amd.txt
+
+# Direct installation from the newly uploaded GitHub release wheel
+RUN pip3 install https://github.com/aaab8b/roll_amd_dependencies/releases/download/v0.1/vllm-0.17.1.dev0.gb31e9326a.d20260511.rocm720-cp311-cp311-linux_x86_64.whl
+
+RUN git clone https://github.com/alibaba/ROLL

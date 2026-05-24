@@ -8,6 +8,7 @@ from torch.distributed.tensor import DTensor
 
 from roll.configs.base_config import PPOConfig
 from roll.configs.worker_config import is_actor_infer_overlapping_with_any_cluster
+from roll.platforms import current_platform
 from roll.utils.collective import collective
 from roll.utils.logging import get_logger
 from roll.utils.network_utils import collect_free_port, get_node_ip
@@ -220,8 +221,9 @@ class FSDP2WeightUpdater:
                 infer_parallel_tensors = [serialized_tensors]  # tensors for each infer parallel rank
                 if infer_parallel_size > 1:
                     infer_parallel_tensors = [None] * infer_parallel_size if co_infer_rank == 0 else None
+                    global_dst_rank = dist.get_global_rank(self._infer_parallel_cpu_group, 0)
                     dist.gather_object(
-                        send_obj, infer_parallel_tensors, group_dst=0, group=self._infer_parallel_cpu_group
+                        serialized_tensors, infer_parallel_tensors, group_dst=global_dst_rank, group=self._infer_parallel_cpu_group
                     )
             if refs:
                 ray.get(refs)
@@ -295,7 +297,16 @@ class FSDP2WeightUpdater:
             for worker in self._broadcast_workers
         ]
         handles = []
+        # Keep references to tensors moved to device to prevent premature deallocation
+        device_tensors = []
+
         for _, weight in named_weights:
+            # Ensure weight is on the correct device (e.g. NPU) if using HCCL/NCCL
+            if weight.device.type == "cpu" and current_platform.device_type != "cpu":
+                weight_device = weight.to(current_platform.device_type)
+                device_tensors.append(weight_device)
+                weight = weight_device
+
             handles.append(
                 collective.broadcast(tensor=weight, src_rank=0, group_name=self.model_update_group_name, async_op=True)
             )

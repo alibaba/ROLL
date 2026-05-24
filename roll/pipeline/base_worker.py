@@ -501,7 +501,7 @@ class InferWorker(Worker):
         global_step = data.meta_info.get("global_step", 0)
         self.logger.info(f"{self.worker_name} generate global step {global_step}")
 
-        data = data.to("cuda")
+        data = data.to(current_platform.device_type)
         data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
 
         output = await self.strategy.generate(batch=data, generation_config=generation_config)

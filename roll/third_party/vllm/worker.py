@@ -144,6 +144,15 @@ class WorkerBase:
         self.load_weights([(name, weight) for name, weight in named_params])
 
     def process_weights_after_loading(self):
+        if Version(vllm.__version__) >= Version("0.11.1"):
+            from vllm.model_executor.model_loader.utils import process_weights_after_loading
+            from vllm.utils.torch_utils import set_default_torch_dtype
+            device_config = self.device_config
+            load_config = self.vllm_config.load_config
+            load_device = (device_config.device if load_config.device is None else load_config.device)
+            target_device = torch.device(load_device)
+            with set_default_torch_dtype(self.model_config.dtype):
+                process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
         if (Version("0.11.0") == Version(vllm.__version__) or
                 Version("0.11.1rc1") == Version(vllm.__version__) or
                 Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__)):

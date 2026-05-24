@@ -22,6 +22,7 @@ export default function Navbar() {
   const isChinese = currentLocale !== 'en';
   const isHomePage = location.pathname === '/ROLL/' || location.pathname === '/ROLL/zh-Hans/';
   const targetPath = isChinese ? '/ROLL/zh-Hans/' : '/ROLL/'
+  const isCareersPage = location.pathname.startsWith(`${targetPath}careers`);
 
   return (
     <ConfigProvider theme={{ algorithm: colorMode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm }}>
@@ -55,7 +56,10 @@ export default function Navbar() {
             <Button className={clsx(styles.btn, isHomePage && location.hash === '#research' ? styles.primary : '')} href={`${targetPath}#research`} type="text">
               <Translate>Research Community</Translate>
             </Button>
-            <Button className={clsx(styles.btn, !isHomePage ? styles.primary : '')} type="text" href={`${targetPath}docs/Overview`}>
+            <Button className={clsx(styles.btn, isCareersPage ? styles.primary : '')} href={`${targetPath}careers`} type="text">
+              <Translate>Join Us</Translate>
+            </Button>
+            <Button className={clsx(styles.btn, !isHomePage && !isCareersPage ? styles.primary : '')} type="text" href={`${targetPath}docs/Overview`}>
               <Translate>API Docs</Translate>
             </Button>
             <Button className={styles.btn} href='https://github.com/alibaba/ROLL' type="text">Github<ExportOutlined /></Button>

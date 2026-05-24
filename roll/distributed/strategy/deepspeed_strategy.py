@@ -538,6 +538,8 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             if getattr(self, "processor", None):
                 self.processor.save_pretrained(save_dir)
             # save tokenizer
+        # DeepSpeedEngine.load_checkpoint method doesn't take an is_last_step argument
+        kwargs.pop("is_last_step", None)
         self.model.save_checkpoint(save_dir, tag=tag, **kwargs)
 
         if self.worker_config.checkpoint_config.get("async_upload", True) and not is_last_step:

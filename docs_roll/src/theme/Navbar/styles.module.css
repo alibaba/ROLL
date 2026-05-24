@@ -16,13 +16,15 @@
     color: (--home-sub-title-color);
   }
   .btn, .primary {
-    font-size: 16px;
+    font-size: 15px;
     font-weight: normal;
     line-height: 24px;
     display: flex;
     align-items: center;
     letter-spacing: normal;
     color: var(--home-nav-default-color);
+    padding: 4px 8px;
+    white-space: nowrap;
   }
   .btn:hover {
     text-decoration: none;
@@ -37,6 +39,47 @@
     &:hover {
       color: var(--ifm-color-primary) !important;
       border-color: var(--ifm-color-primary) !important;
+    }
+  }
+
+  @media (max-width: 1180px) {
+    .subTitle {
+      display: none;
+    }
+    .title {
+      font-size: 22px;
+    }
+    .btn, .primary {
+      font-size: 14px;
+      padding: 4px 6px;
+    }
+  }
+
+  @media (max-width: 996px) {
+    .btn, .primary {
+      display: none;
+    }
+    .language {
+      margin-left: 0;
+      padding: 4px 8px;
+    }
+    :global(.DocSearch-Button) {
+      width: 42px;
+      margin-left: 4px;
+      padding: 0;
+    }
+    :global(.DocSearch-Button-Placeholder) {
+      display: none;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .logoWrap {
+      max-width: 210px;
+      overflow: hidden;
+    }
+    .language {
+      display: none;
     }
   }
 }

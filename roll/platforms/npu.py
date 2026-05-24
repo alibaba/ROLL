@@ -80,6 +80,6 @@ class NpuPlatform(Platform):
         return
 
     @classmethod
-    def device_memory_used(cls) -> None:
+    def device_memory_used(cls) -> int:
         free, total = torch.npu.mem_get_info()
         return total - free

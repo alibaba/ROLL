@@ -146,7 +146,7 @@ class MultipleChoiceBoxedRuleRewardWorker(Worker):
 
         token_level_rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float16)
         scores = torch.tensor(scores, dtype=torch.float16)
-        response_level_rewards = torch.zeros_like(scores, dtype=torch.float16)
+        response_level_rewards = scores
         # 5) 将这些张量打包进同一个字典
         # TODO: 不同的reward worker的output是否需要统一output，或者有没有自适应的办法，避免在新增监控量时每个worker都需要修改
         output_tensors = {

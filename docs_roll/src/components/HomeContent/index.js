@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Button, Image, Divider, Col, Row, Collapse, Modal, ConfigProvider, theme } from 'antd';
-import { GithubOutlined, WechatOutlined, XOutlined } from '@ant-design/icons';
+import { GithubOutlined, UsergroupAddOutlined, WechatOutlined, XOutlined } from '@ant-design/icons';
 import clsx from 'clsx';
 import { useColorMode } from '@docusaurus/theme-common';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
@@ -61,9 +61,20 @@ export default () => {
   const [researchRef, researchVisible] = useIntersectionObserver();
 
   useEffect(() => {
-    fetch('/ROLL/stats.json').then(res => res.json()).then(data => {
-      setTodayStat(data[today]);
-    })
+    fetch('/ROLL/stats.json')
+      .then(res => {
+        const contentType = res.headers.get('content-type') || '';
+        if (!res.ok || !contentType.includes('application/json')) {
+          return {};
+        }
+        return res.json();
+      })
+      .then(data => {
+        setTodayStat(data[today] || {});
+      })
+      .catch(() => {
+        setTodayStat({});
+      })
   }, []);
 
   return <ConfigProvider theme={{ algorithm: colorMode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm }}>
@@ -328,6 +339,11 @@ export default () => {
                 <Button target='_blank' href="https://x.com/FutureLab2025" icon={<XOutlined />} className={styles.github} variant='outlined'>
                   <Translate>
                     Follow us on X
+                  </Translate>
+                </Button>
+                <Button href={`${targetPath}careers`} icon={<UsergroupAddOutlined />} className={styles.github} variant='outlined'>
+                  <Translate>
+                    Join Us
                   </Translate>
                 </Button>
               </div>
