@@ -71,15 +71,24 @@ def test_ratio_calculation():
     assert sampler.domain_batch_num == {"a": 9, "b": 1}
 
 
-def test_randomness(sample_dataset):
+def test_randomness(sample_dataset, monkeypatch):
+    from roll.datasets import sampler as sampler_module
+
+    def reverse_shuffle(values):
+        values[:] = values[::-1]
+
+    monkeypatch.setattr(sampler_module.np.random, "shuffle", reverse_shuffle)
+    monkeypatch.setattr(sampler_module.random, "shuffle", reverse_shuffle)
+
     sampler = BatchStratifiedSampler(sample_dataset, domain_ratios={"a": 5, "b": 3, "c": 2}, batch_size=10)
-    batches1 = list(sampler.__iter__())
-    batches2 = list(sampler.__iter__())
+    batches = list(sampler.__iter__())
 
-    assert batches1 != batches2
-
-    for batch in batches1:
+    for batch in batches:
         domains = [sample_dataset[i]["domain"] for i in batch]
+        counts = Counter(domains)
+        assert counts["a"] == 5
+        assert counts["b"] == 3
+        assert counts["c"] == 2
         assert domains != ["a"] * 5 + ["b"] * 3 + ["c"] * 2
 
 

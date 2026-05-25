@@ -1,18 +1,11 @@
+import asyncio
+import importlib
+import sys
+from types import ModuleType
+from unittest.mock import MagicMock, Mock, patch
+
 import pytest
 import torch
-import sys
-from unittest.mock import Mock, patch, MagicMock
-
-# Mock vllm modules before importing
-mock_vllm = Mock()
-mock_vllm.__version__ = "0.8.4"
-sys.modules['vllm'] = mock_vllm
-sys.modules['vllm.sampling_params'] = Mock()
-sys.modules['vllm.beam_search'] = Mock()
-sys.modules['vllm.lora'] = Mock()
-sys.modules['vllm.lora.request'] = Mock()
-sys.modules['vllm.utils'] = Mock()
-sys.modules['roll.third_party.vllm'] = Mock()
 
 # Create mock classes
 class MockRequestOutput:
@@ -53,20 +46,64 @@ class MockLoRARequest:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-# Set up the mocks
-sys.modules['vllm'].RequestOutput = MockRequestOutput
-sys.modules['vllm'].SamplingParams = MockSamplingParams
-sys.modules['vllm.sampling_params'].RequestOutputKind = Mock()
-sys.modules['vllm.sampling_params'].BeamSearchParams = MockBeamSearchParams
-sys.modules['vllm.beam_search'].BeamSearchOutput = MockBeamSearchOutput
-sys.modules['vllm.beam_search'].BeamSearchSequence = MockBeamSearchSequence
-sys.modules['vllm.lora.request'].LoRARequest = MockLoRARequest
-sys.modules['vllm.utils'].random_uuid = Mock(return_value="test_uuid")
+class MockTokensPrompt(dict):
+    pass
 
-# Now import the actual modules
+
 from roll.distributed.scheduler.protocol import DataProto
-from roll.distributed.strategy.vllm_strategy import VllmStrategy
-from roll.distributed.executor.worker import Worker
+
+
+def _install_mock_vllm_modules(monkeypatch):
+    mock_vllm = ModuleType("vllm")
+    mock_vllm.__path__ = []
+    mock_vllm.__version__ = "0.8.4"
+    mock_vllm.RequestOutput = MockRequestOutput
+    mock_vllm.SamplingParams = MockSamplingParams
+
+    sampling_params = ModuleType("vllm.sampling_params")
+    sampling_params.RequestOutputKind = Mock()
+    sampling_params.BeamSearchParams = MockBeamSearchParams
+
+    beam_search = ModuleType("vllm.beam_search")
+    beam_search.BeamSearchOutput = MockBeamSearchOutput
+    beam_search.BeamSearchSequence = MockBeamSearchSequence
+
+    lora = ModuleType("vllm.lora")
+    lora.__path__ = []
+    lora_request = ModuleType("vllm.lora.request")
+    lora_request.LoRARequest = MockLoRARequest
+
+    inputs = ModuleType("vllm.inputs")
+    inputs.__path__ = []
+    inputs_data = ModuleType("vllm.inputs.data")
+    inputs_data.TokensPrompt = MockTokensPrompt
+
+    utils = ModuleType("vllm.utils")
+    utils.random_uuid = Mock(return_value="test_uuid")
+
+    monkeypatch.setitem(sys.modules, "vllm", mock_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", sampling_params)
+    monkeypatch.setitem(sys.modules, "vllm.beam_search", beam_search)
+    monkeypatch.setitem(sys.modules, "vllm.lora", lora)
+    monkeypatch.setitem(sys.modules, "vllm.lora.request", lora_request)
+    monkeypatch.setitem(sys.modules, "vllm.inputs", inputs)
+    monkeypatch.setitem(sys.modules, "vllm.inputs.data", inputs_data)
+    monkeypatch.setitem(sys.modules, "vllm.utils", utils)
+    monkeypatch.setitem(sys.modules, "roll.third_party.vllm", Mock())
+
+
+@pytest.fixture
+def vllm_strategy_module(monkeypatch):
+    module_name = "roll.distributed.strategy.vllm_strategy"
+    original_module = sys.modules.pop(module_name, None)
+    _install_mock_vllm_modules(monkeypatch)
+    module = importlib.import_module(module_name)
+    try:
+        yield module
+    finally:
+        sys.modules.pop(module_name, None)
+        if original_module is not None:
+            sys.modules[module_name] = original_module
 
 
 class TestVllmStrategyBeamSearch:
@@ -75,7 +112,7 @@ class TestVllmStrategyBeamSearch:
     @pytest.fixture
     def mock_worker(self):
         """Create a mock worker for testing."""
-        worker = Mock(spec=Worker)
+        worker = Mock()
         worker.pipeline_config = Mock()
         worker.pipeline_config.seed = 42
         worker.worker_config = Mock()
@@ -94,9 +131,9 @@ class TestVllmStrategyBeamSearch:
         return worker
 
     @pytest.fixture
-    def vllm_strategy(self, mock_worker):
+    def vllm_strategy(self, vllm_strategy_module, mock_worker):
         """Create VllmStrategy instance for testing."""
-        strategy = VllmStrategy(mock_worker)
+        strategy = vllm_strategy_module.VllmStrategy(mock_worker)
 
         # Mock the model and tokenizer
         strategy.model = Mock()
@@ -146,47 +183,40 @@ class TestVllmStrategyBeamSearch:
     def test_generate_with_beam_search_success(self, vllm_strategy, sample_batch):
         """Test successful beam search generation."""
         generation_config = {"num_beams": 3, "max_new_tokens": 50}
-
-        # Create mock beam search outputs
         beam_width = 3
         batch_size = 2
 
-        beam_search_outputs = []
-        for batch_idx in range(batch_size):
-            sequences = []
+        # Mock beam_search as an async generator that yields RequestOutput-like objects
+        # _generate_with_beam_search accesses .outputs[].token_ids, not .sequences[]
+        async def mock_beam_search(prompt, request_id, params):
+            output = MagicMock()
+            output.outputs = []
             for beam_idx in range(beam_width):
-                # Include prompt + generated tokens
-                prompt_length = 10
-                generated_tokens = [100 + beam_idx, 200 + beam_idx, 300 + beam_idx]
-                full_tokens = list(range(prompt_length)) + generated_tokens
+                completion = MagicMock()
+                completion.token_ids = [100 + beam_idx, 200 + beam_idx, 300 + beam_idx]
+                output.outputs.append(completion)
+            yield output
 
-                sequence = MockBeamSearchSequence(
-                    tokens=full_tokens,
-                    logprobs=[],
-                    cum_logprob=-1.0 * beam_idx
-                )
-                sequences.append(sequence)
-
-            output = MockBeamSearchOutput(sequences=sequences)
-            beam_search_outputs.append(output)
-
-        # Mock the beam_search method
-        vllm_strategy.model.beam_search = Mock(return_value=beam_search_outputs)
+        vllm_strategy.model.beam_search = Mock(side_effect=mock_beam_search)
 
         # Mock breakpoint to avoid actual debugging
         with patch('builtins.breakpoint'):
-            result = vllm_strategy.generate(sample_batch, generation_config)
+            result = asyncio.run(
+                vllm_strategy.generate(sample_batch, generation_config)
+            )
 
-        # Verify beam_search was called
-        vllm_strategy.model.beam_search.assert_called_once()
+        # beam_search is called once per prompt via asyncio.gather
+        assert vllm_strategy.model.beam_search.call_count == batch_size
 
-        # Check result shape
+        # Check result shape: (batch_size * beam_width, prompt_len + max_output_len)
         assert result.shape[0] == batch_size * beam_width  # 2 * 3 = 6
-        assert result.shape[1] >= 13  # prompt_length + generated_tokens
+        assert result.shape[1] >= 13  # prompt_length (10) + generated_tokens (3)
 
     def test_generate_with_beam_search_multimodal(self, vllm_strategy):
         """Test beam search generation with multimodal data."""
         generation_config = {"num_beams": 2, "max_new_tokens": 30}
+        beam_width = 2
+        batch_size = 2
 
         # Create multimodal batch
         multimodal_data = [
@@ -207,36 +237,32 @@ class TestVllmStrategyBeamSearch:
         })
         batch.non_tensor_batch["multi_modal_data"] = multimodal_data
 
-        # Create mock beam search outputs
-        beam_search_outputs = []
-        for batch_idx in range(2):
-            sequences = []
-            for beam_idx in range(2):
-                prompt_length = 5
-                generated_tokens = [100 + beam_idx, 200 + beam_idx]
-                full_tokens = multimodal_data[batch_idx]["prompt_token_ids"] + generated_tokens
+        # Mock beam_search as an async generator that yields RequestOutput-like objects
+        async def mock_beam_search(prompt, request_id, params):
+            output = MagicMock()
+            output.outputs = []
+            for beam_idx in range(beam_width):
+                completion = MagicMock()
+                completion.token_ids = [100 + beam_idx, 200 + beam_idx]
+                output.outputs.append(completion)
+            yield output
 
-                sequence = MockBeamSearchSequence(
-                    tokens=full_tokens,
-                    logprobs=[],
-                    cum_logprob=-1.0 * beam_idx
-                )
-                sequences.append(sequence)
-
-            output = MockBeamSearchOutput(sequences=sequences)
-            beam_search_outputs.append(output)
-
-        # Mock the beam_search method
-        vllm_strategy.model.beam_search = Mock(return_value=beam_search_outputs)
+        vllm_strategy.model.beam_search = Mock(side_effect=mock_beam_search)
 
         # Mock breakpoint to avoid actual debugging
         with patch('builtins.breakpoint'):
-            result = vllm_strategy.generate(batch, generation_config)
+            result = asyncio.run(
+                vllm_strategy.generate(batch, generation_config)
+            )
 
-        # Verify beam_search was called with correct prompts
-        vllm_strategy.model.beam_search.assert_called_once()
-        call_args = vllm_strategy.model.beam_search.call_args
-        assert call_args[1]['prompts'] == multimodal_data
+        # beam_search is called once per prompt via asyncio.gather
+        assert vllm_strategy.model.beam_search.call_count == batch_size
 
-        # Check result shape
-        assert result.shape[0] == 4  # batch_size * beam_width
+        # Verify each multimodal prompt was passed to beam_search
+        calls = vllm_strategy.model.beam_search.call_args_list
+        actual_prompts = [call[1]['prompt'] for call in calls]
+        for prompt in multimodal_data:
+            assert prompt in actual_prompts
+
+        # Check result shape: (batch_size * beam_width, ...)
+        assert result.shape[0] == batch_size * beam_width  # 2 * 2 = 4

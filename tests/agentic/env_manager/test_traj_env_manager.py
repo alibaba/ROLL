@@ -8,8 +8,10 @@ pip install -r requirements_em_local_debug.txt
 
 python tests/agentic/env_manager/test_traj_env_manager.py
 """
+import os
 import threading
 
+import pytest
 import ray
 
 from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
@@ -22,6 +24,26 @@ from roll.pipeline.agentic.env_manager.vl_traj_env_manager import VLTrajEnvManag
 from tests.agentic.env_manager.config_load_utils import make_pipeline_config
 
 
+_RUN_ENV_MANAGER_DEBUG_TESTS = os.getenv("ROLL_RUN_AGENTIC_ENV_MANAGER_DEBUG_TESTS") == "1"
+skip_env_manager_debug = pytest.mark.skipif(
+    not _RUN_ENV_MANAGER_DEBUG_TESTS,
+    reason="agentic env-manager debug tests require model assets and are opt-in",
+)
+
+
+def _configure_model_download(pipeline_config):
+    model_download_type = os.getenv("MODEL_DOWNLOAD_TYPE", "MODELSCOPE")
+    pipeline_config.model_download_type = model_download_type
+    os.environ["MODEL_DOWNLOAD_TYPE"] = model_download_type
+    if model_download_type == "MODELSCOPE":
+        pytest.importorskip(
+            "modelscope.hub.snapshot_download",
+            reason="MODELSCOPE model download requires `modelscope`",
+        )
+
+
+@pytest.mark.skip_on_npu
+@skip_env_manager_debug
 def test_debug_traj_env_manager():
     ray.init(log_to_driver=True)
     current_step = 0
@@ -31,7 +53,7 @@ def test_debug_traj_env_manager():
 
     pipeline_config: AgenticConfig = make_pipeline_config(config_path, config_name, AgenticConfig)
 
-    pipeline_config.model_download_type = "MODELSCOPE"
+    _configure_model_download(pipeline_config)
     pipeline_config.async_generation_ratio = 2
 
     worker_config = pipeline_config.train_env_manager
@@ -61,6 +83,8 @@ def test_debug_traj_env_manager():
     env_manager.stop()
 
 
+@pytest.mark.skip_on_npu
+@skip_env_manager_debug
 def test_debug_vl_traj_env_manager():
     ray.init(log_to_driver=True)
     current_step = 0
@@ -69,7 +93,7 @@ def test_debug_vl_traj_env_manager():
     config_name = "vl_traj_env_manager_debug"
 
     pipeline_config: AgenticConfig = make_pipeline_config(config_path, config_name, AgenticConfig)
-    pipeline_config.model_download_type = "MODELSCOPE"
+    _configure_model_download(pipeline_config)
     pipeline_config.async_generation_ratio = 2
     worker_config = pipeline_config.train_env_manager
     tokenizer = default_tokenizer_provider(model_args=worker_config.model_args)
@@ -103,6 +127,8 @@ def test_debug_vl_traj_env_manager():
     env_manager.stop()
 
 
+@pytest.mark.skip_on_npu
+@skip_env_manager_debug
 def test_debug_step_env_manager():
     ray.init(log_to_driver=True)
     current_step = 0
@@ -112,7 +138,7 @@ def test_debug_step_env_manager():
 
     pipeline_config: AgenticConfig = make_pipeline_config(config_path, config_name, AgenticConfig)
 
-    pipeline_config.model_download_type = "MODELSCOPE"
+    _configure_model_download(pipeline_config)
     pipeline_config.async_generation_ratio = 2
 
     worker_config = pipeline_config.train_env_manager

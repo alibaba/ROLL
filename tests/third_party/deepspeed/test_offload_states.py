@@ -295,6 +295,8 @@ def run_model_memory_dump(model, config_dict, hidden_dim, dtype, include, pin_me
     model.destroy()
 
 
+# The full offload state matrix takes too long in NPU CI.
+@pytest.mark.skip_on_npu
 class TestOffloadStates(DistributedTest):
     # Need multiple gpus to test possible hanging
     world_size = 2

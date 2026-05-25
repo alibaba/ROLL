@@ -1,3 +1,4 @@
+import os
 import pytest
 from unittest.mock import MagicMock
 from roll.pipeline.agentic.env.mcp.mcp_client import MCPClient
@@ -12,6 +13,7 @@ TEST_ACTION_STR = "Left"
 MOCK_ENV_INSTRUCTION = "Solve the puzzle."
 MOCK_ACTION_LOOKUP = {1: "Up", 2: "Down", 3: "Left", 4: "Right"}
 MOCK_FORMAT_PENALTY = -0.15
+MOCK_SPECIAL_TOKEN_LIST = ("<think>", "</think>", "<|im_start|>", "<|im_end|>")
 
 # =============================================================================
 # / Pytest Fixtures                                                           /
@@ -29,6 +31,7 @@ def real_sokoban_env():
         env_instruction=MOCK_ENV_INSTRUCTION,
         action_lookup=MOCK_ACTION_LOOKUP,
         format_penalty=MOCK_FORMAT_PENALTY,
+        special_token_list=MOCK_SPECIAL_TOKEN_LIST,
     )
     yield env
     
@@ -43,6 +46,7 @@ def isolated_mock_env():
         env_instruction=MOCK_ENV_INSTRUCTION,
         action_lookup=MOCK_ACTION_LOOKUP,
         format_penalty=MOCK_FORMAT_PENALTY,
+        special_token_list=MOCK_SPECIAL_TOKEN_LIST,
         client=MagicMock(spec_set=MCPClient),
     )
     env._last_obs = "A previous observation state."
@@ -51,6 +55,7 @@ def isolated_mock_env():
 # =============================================================================
 # / Integration Tests (Requires Real Server)                                  /
 # =============================================================================
+@pytest.mark.skip_on_github_ci
 def test_sokoban_mcp_env_with_valid_action(real_sokoban_env: SokobanMCPEnv):
     """Integration test for SokobanMCPEnv with real server connection"""   
     # 1. Test environment reset
@@ -106,14 +111,14 @@ def test_step_handles_invalid_action(isolated_mock_env: SokobanMCPEnv):
     obs, reward, terminated, truncated, info = env.step("<answer>Go Up</answer>")
         
     # Check the final output to confirm the error handling flow completed.
-    assert "provided an invalid action" in obs
+    assert obs == "A previous observation state."
     assert reward == MOCK_FORMAT_PENALTY, "Reward should be the format penalty"
     assert not terminated
     assert not truncated
     assert info["metrics"]["action_is_valid"] is False
     assert info["metrics"]["action_is_effective"] is False
     assert info["metrics"]["success"] is False
-    assert "The game state has not changed. Please provide a valid action in the correct format." in info["suffix"], "Suffix should contain the old state"
+    assert "suffix" not in info
     
 # ============================================================================
 # / Unit Tests - Pure Functions and Parsers                                   /

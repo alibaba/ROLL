@@ -3,6 +3,9 @@ import pytest
 
 from roll.utils.taskgroups import TaskGroup
 
+pytestmark = pytest.mark.asyncio
+
+
 async def test_base():
     async def foo(result, index):
         result[index] = 2333

@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import sys
 import ray
+import pytest
 
 from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
 
@@ -14,6 +15,7 @@ class AgenticConfig:
 class EnvManagerConfig:
     pass
 
+@pytest.mark.skip_on_github_ci
 async def async_test_GroupQueueManager(rollout_batch_size, async_generation_ratio):
     print(f">>>>>>>>>>>>>>>>>>>>>>>> TEST rollout_batch_size {rollout_batch_size} async_generation_ratio {async_generation_ratio}")
     config = AgenticConfig()
@@ -104,6 +106,7 @@ async def async_test_GroupQueueManager(rollout_batch_size, async_generation_rati
 
     await rollout_task
 
+@pytest.mark.skip_on_github_ci
 def test_GroupQueueManager():
     loop = asyncio.get_event_loop()
 

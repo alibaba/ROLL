@@ -1,10 +1,9 @@
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import torch
-import torch.distributed as dist
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -14,20 +13,20 @@ from roll.distributed.scheduler.initialize import init
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_processor_provider, get_extra_data_provider
 from roll.pipeline.base_pipeline import BasePipeline
-from roll.pipeline.base_worker import ActorWorker, InferWorker
+from roll.pipeline.base_worker import ActorWorker
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.utils.logging import get_logger
+from tests.distributed.strategy.log_probs.test_fsdp_log_probs import (
+    _data_files_exist,
+    _make_synthetic_vlm_dataset,
+    _reset_model_download_cache_actor,
+    _run_pipeline_and_cleanup,
+    _skip_if_cluster_insufficient,
+    _skip_if_local_model_unavailable,
+)
 from tests.distributed.strategy.make_baseline_config import make_baseline_config
 
 logger = get_logger()
-
-
-def _as_list(x: Union[str, List[str], None]) -> List[str]:
-    if x is None:
-        return []
-    if isinstance(x, str):
-        return [x]
-    return list(x)
 
 
 def get_timer_stats():
@@ -58,7 +57,7 @@ def get_memory_stats():
     }
 
 
-class TestFSDPVLMLogProbsPipeline(BasePipeline):
+class FSDPVLMLogProbsPipeline(BasePipeline):
     """
     VLM logprob precision test with performance statistics:
     - use VLM processor + DataCollatorWithPaddingForMM (same data path as RLVRVLMPipeline)
@@ -106,6 +105,7 @@ class TestFSDPVLMLogProbsPipeline(BasePipeline):
                 self.pipeline_config.actor_train.model_args.model_name_or_path,
                 processor=self.processor,
             ),
+            image_key="images",
             max_length=self.pipeline_config.prompt_length,
             padding="max_length",
         )
@@ -139,23 +139,11 @@ class TestFSDPVLMLogProbsPipeline(BasePipeline):
 
     def _build_dataset_or_skip(self):
         data_args = self.pipeline_config.actor_train.data_args
-        file_names = _as_list(getattr(data_args, "file_name", None))
+        if _data_files_exist(data_args):
+            from roll.pipeline.rlvr.rlvr_vlm_pipeline import encode_function, get_vlm_dataset
 
-        if file_names and all(os.path.exists(p) for p in file_names):
-            import datasets
-
-            from roll.pipeline.rlvr.rlvr_math_vlm_pipeline import encode_function, get_dataset
-
-            features = datasets.Features(
-                {
-                    "image": datasets.Sequence(feature=datasets.Image(decode=True)),
-                    "prompt": datasets.Value("string"),
-                    "ground_truth": datasets.Value("string"),
-                    "image_flag": datasets.Value("bool"),
-                    "tag": datasets.Value("string"),
-                }
-            )
-            return get_dataset(data_args, encode_function, self.processor, features)
+            return get_vlm_dataset(data_args, encode_function, self.processor)
+        return _make_synthetic_vlm_dataset(self.processor, size=self.pipeline_config.rollout_batch_size)
 
     @torch.no_grad()
     def run(self):
@@ -173,7 +161,11 @@ class TestFSDPVLMLogProbsPipeline(BasePipeline):
             logger.info(f"vlm logprob pipeline step {global_step} start...")
 
             batch: DataProto = DataProto.from_single_dict(batch_dict)
-            batch.meta_info = {"global_step": global_step, "_broadcast_non_tensor_batch": True}
+            batch.meta_info = {
+                "global_step": global_step,
+                "_broadcast_non_tensor_batch": True,
+                "loss_mask_keys": ["response_mask"],
+            }
             batch.batch["response_mask"] = batch.batch["attention_mask"].clone()
 
             # Get initial memory stats
@@ -280,9 +272,12 @@ class TestFSDPVLMLogProbsPipeline(BasePipeline):
 def test_fsdp_vlm_log_probs_cp2_with_perf():
     """Test VLM logprobs with CP2 and comprehensive performance statistics."""
     init()
+    _reset_model_download_cache_actor()
     config = make_baseline_config(config_path="./log_probs", config_name="log_probs_fsdp_vlm_cp2_config")
-    pipeline = TestFSDPVLMLogProbsPipeline(config)
-    results = pipeline.run()
+    _skip_if_cluster_insufficient(config, "test_fsdp_vlm_log_probs_cp2_with_perf")
+    _skip_if_local_model_unavailable(config, "test_fsdp_vlm_log_probs_cp2_with_perf")
+    pipeline = FSDPVLMLogProbsPipeline(config)
+    results = _run_pipeline_and_cleanup(pipeline)
 
     output_file = "test_fsdp_vlm_log_probs_cp2_with_perf.json"
     with open(output_file, "w", encoding="utf-8") as f:

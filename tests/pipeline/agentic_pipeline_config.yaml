@@ -40,24 +40,25 @@ system_envs:
 #    - agentic
 #    - debug
 
-num_gpus_per_node: 8
+num_gpus_per_node: 2
+partial_gpu_mode: false
 
-max_steps: 1024
+max_steps: 1
 save_steps: 10000
 logging_steps: 1
-eval_steps: 10
+eval_steps: 1
 resume_from_checkpoint: false
 
-rollout_batch_size: 32
-val_batch_size: 32
-sequence_length: 8192
+rollout_batch_size: 1
+val_batch_size: 1
+sequence_length: 512
 
 reward_clip: 20
 advantage_clip: 10.0
 ppo_epochs: 1
 adv_estimator: "reinforce"
 init_kl_coef: 0.0
-whiten_advantages: true
+whiten_advantages: false
 entropy_loss_coef: 0
 
 pretrain: Qwen/Qwen2.5-0.5B-Instruct
@@ -65,49 +66,56 @@ reward_pretrain: Qwen/Qwen2.5-0.5B-Instruct
 
 actor_train:
   model_args:
-    attn_implementation: fa2
+    attn_implementation: sdpa
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 2
-    gradient_accumulation_steps: 2
-    warmup_steps: 10
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 1
+    warmup_steps: 0
   data_args:
     template: qwen2_5
   strategy_args:
     strategy_name: deepspeed_train
     strategy_config: ${deepspeed_zero2}
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(0,1))
   infer_batch_size: 1
 
 actor_infer:
   model_args:
     dtype: bf16
   generating_args:
-    max_new_tokens: 128 # single-turn response length
-    top_p: 0.99
-    top_k: 100
+    max_new_tokens: 4 # single-turn response length
+    top_p: 1.0
+    top_k: -1
     num_beams: 1
-    temperature: 0.99
+    temperature: 0.0
     num_return_sequences: 1
   data_args:
     template: qwen2_5
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.8
+      gpu_memory_utilization: 0.35
       block_size: 16
       load_format: auto
-      enable_prefix_caching: true
-  device_mapping: list(range(0,8))
+      enable_prefix_caching: false
+      enforce_eager: true
+      max_model_len: 512
+      max_num_batched_tokens: 512
+      max_num_seqs: 1
+      tensor_parallel_size: 1
+      distributed_executor_backend: ray
+      disable_custom_all_reduce: true
+  device_mapping: list(range(1,2))
   infer_batch_size: 1
 
 reference:
   model_args:
-    attn_implementation: fa2
+    attn_implementation: sdpa
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~
@@ -116,7 +124,7 @@ reference:
   strategy_args:
     strategy_name: hf_infer
     strategy_config: ~
-  device_mapping: list(range(0,8))
+  device_mapping: list(range(0,1))
   infer_batch_size: 1
 
 
@@ -124,7 +132,7 @@ enable_response_mask: True
 action_sep: "||"
 use_turn_scores: False # important to GAE when applying token-level rewards to token-level advantages. If False, will take the sum of scores as the reward for the last turn.
 enable_think: False # False -> no think RL
-max_actions_per_traj: 10
+max_actions_per_traj: 1
 reward_normalization:
   grouping: tags # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
   method: identity # asym_clip / identity / mean_std
@@ -132,38 +140,52 @@ reward_normalization:
 custom_envs:
   SimpleSokoban:
     env_type: sokoban
-    max_actions_per_traj: ${max_actions_per_traj} # used in environment state manager to control the actual max actions executed per trajectory
-    max_steps_per_traj: ${max_actions_per_traj}
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: 16
+    agent_system_template: ${agent_system_template}
+    agent_template: ${agent_template}
     env_instruction: "You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets. When you are right next to a box, you can push it by moving in the same direction. You cannot push a box through a wall, and you cannot pull a box. The answer must be one of action in a turn, format is <answer>Right</answer>"
-    max_tokens: 100 # used to curate llm prompt "max words", not used for rollout
     env_config: # keys should be a subset of SokobanConfig
+      action_pattern: ${action_pattern}
       dim_x: 10
       dim_y: 10
       num_boxes: 1
-      max_steps: 100
+      max_steps: 1
   FrozenLake:
     env_type: frozen_lake
-    max_actions_per_traj: ${max_actions_per_traj}
-    max_steps_per_traj: ${max_actions_per_traj}
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: 16
+    agent_system_template: ${agent_system_template}
+    agent_template: ${agent_template}
     env_instruction: "You are solving the FrozenLake puzzle. Forbid the whole and go to the target. You may move to the unintended direction due to the slippery ice. The answer must be one of action in a turn, format is <answer>Right</answer>"
-    max_tokens: 100
     env_config:
+      action_pattern: ${action_pattern}
+      max_steps: ${max_actions_per_traj}
+      format_penalty: -0.001
       size: 4
       is_slippery: false
 
+action_pattern: "<answer>(.*?)</answer>"
+agent_system_template: You're a helpful assistant. You are a good game player.
+agent_template: |
+  Observation:
+  {observation}
+  Use format '<answer>Right</answer>'. You have {actions_left} actions left.
+  Decide the next action:
+
 train_env_manager:
   format_penalty: -0.001
-  num_env_groups: 2
+  num_env_groups: 1
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
   max_env_num_per_worker: 1
   tags: [ "FrozenLake" ]
-  num_groups_partition: [ 2 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  num_groups_partition: [ 1 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 val_env_manager:
-  num_env_groups: 2
+  num_env_groups: 1
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
   max_env_num_per_worker: 1
-  tags: [ "SimpleSokoban", "FrozenLake"]
-  num_groups_partition: [ 2, 2 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  tags: [ "FrozenLake"]
+  num_groups_partition: [ 1 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation

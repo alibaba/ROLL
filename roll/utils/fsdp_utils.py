@@ -137,10 +137,16 @@ def apply_fsdp2(model, fsdp_kwargs, config, is_lora=False):
         default_transformer_cls_names_to_wrap,
     )
 
-    if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
+    if fsdp_transformer_layer_cls_to_wrap is None:
+        fsdp_transformer_layer_cls_to_wrap = []
+    elif isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+    else:
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
 
-    assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
+    assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and all(
+        layer_cls is not None for layer_cls in fsdp_transformer_layer_cls_to_wrap
+    )
 
     wrap_embeddings = bool(config.get("wrap_policy", {}).get("wrap_embeddings", False))
     wrap_lm_output = bool(config.get("wrap_policy", {}).get("wrap_lm_output", False))

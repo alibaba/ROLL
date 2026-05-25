@@ -23,17 +23,17 @@ def test_preprocess_dataset_with_real_data():
     # ===== 2. 创建DistillConfig对象 =====
     local_or_mirror_model_path = "Qwen/Qwen2.5-0.5B-Instruct"
 
-    student_cfg = WorkerConfig(data_args=DataArguments(preprocessing_num_workers=16))
+    student_cfg = WorkerConfig(data_args=DataArguments(preprocessing_num_workers=1))
     student_cfg.model_args.model_name_or_path = local_or_mirror_model_path
 
-    teacher_cfg = WorkerConfig(data_args=DataArguments(preprocessing_num_workers=16))
+    teacher_cfg = WorkerConfig(data_args=DataArguments(preprocessing_num_workers=1))
     teacher_cfg.model_args.model_name_or_path = local_or_mirror_model_path
 
     pipeline_config = DistillConfig(
         student=student_cfg,
         teacher=teacher_cfg,
-        query_key="question_zh",
-        response_key="answer_zh",
+        question_key="question_zh",
+        answer_key="answer_zh",
         distill_on_prompt=True,
         sequence_length=256
     )

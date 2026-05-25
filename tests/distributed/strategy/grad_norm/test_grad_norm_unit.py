@@ -2,6 +2,15 @@ import pytest
 import torch
 import torch.nn as nn
 
+from roll.platforms import current_platform
+
+
+def _has_accelerator() -> bool:
+    if current_platform.device_type == "cpu":
+        return False
+    is_available = getattr(current_platform, "is_available", None)
+    return callable(is_available) and bool(is_available())
+
 
 class TestGradientNormBasic:
     """Basic unit tests for gradient norm computation."""
@@ -119,18 +128,19 @@ class TestGradientNormBasic:
             clipped_norm, torch.tensor(max_norm), rtol=1e-5, atol=1e-5
         ), f"Clipped norm {clipped_norm:.6f} != max_norm {max_norm}"
 
-    @pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="CUDA not available"
-    )
-    def test_grad_norm_cuda(self):
-        """Test gradient norm computation on CUDA."""
+    @pytest.mark.skipif(not _has_accelerator(), reason="accelerator not available")
+    def test_grad_norm_accelerator(self):
+        """Test gradient norm computation on the active accelerator."""
 
-        device = torch.device("cuda")
+        device = torch.device(current_platform.device_type)
 
         class SimpleModel(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.linear = nn.Linear(10, 5, bias=True)
+
+            def forward(self, x):
+                return self.linear(x)
 
         model = SimpleModel().to(device)
 
