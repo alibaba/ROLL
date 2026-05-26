@@ -88,15 +88,26 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
             runtime_env = RuntimeEnv(env_vars=env_vars)
             assert current_platform.ray_device_key == "GPU" or "NPU"
             # NV+AMD GPUs, and Intel XPUs
-            worker = ray.remote(
-                num_cpus=0,
-                num_gpus={current_platform.ray_device_key: 0.01},
-                runtime_env=runtime_env,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                ),
-                **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(rpc_rank=rank)
+            if current_platform.ray_device_key == "GPU":
+                worker = ray.remote(
+                    num_cpus=0,
+                    num_gpus=0.01,
+                    runtime_env=runtime_env,
+                    scheduling_strategy=PlacementGroupSchedulingStrategy(
+                        placement_group=pg,
+                    ),
+                    **ray_remote_kwargs,
+                )(RayWorkerWrapper).remote(rpc_rank=rank)
+            else:
+                worker = ray.remote(
+                    num_cpus=0,
+                    resources={current_platform.ray_device_key: 0.01},
+                    runtime_env=runtime_env,
+                    scheduling_strategy=PlacementGroupSchedulingStrategy(
+                        placement_group=pg,
+                    ),
+                    **ray_remote_kwargs,
+                )(RayWorkerWrapper).remote(rpc_rank=rank)
             worker_metadata.append(RayWorkerMetaData(worker=worker, created_rank=rank))
 
         worker_ips = ray.get(

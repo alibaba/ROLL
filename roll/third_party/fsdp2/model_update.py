@@ -223,7 +223,7 @@ class FSDP2WeightUpdater:
                     infer_parallel_tensors = [None] * infer_parallel_size if co_infer_rank == 0 else None
                     global_dst_rank = dist.get_global_rank(self._infer_parallel_cpu_group, 0)
                     dist.gather_object(
-                        serialized_tensors, infer_parallel_tensors, group_dst=global_dst_rank, group=self._infer_parallel_cpu_group
+                        serialized_tensors, infer_parallel_tensors, dst=global_dst_rank, group=self._infer_parallel_cpu_group
                     )
             if refs:
                 ray.get(refs)

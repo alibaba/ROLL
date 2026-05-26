@@ -58,8 +58,8 @@ add_token_level_kl: false
 
 whiten_advantages: true
 
-pretrain: /home/l00691321/models/Qwen3-30B-A3B
-reward_pretrain: /home/l00691321/models/Qwen3-30B-A3B
+pretrain: Qwen/Qwen3-30B-A3B
+reward_pretrain: Qwen/Qwen3-30B-A3B
 
 actor_train:
   model_args:
