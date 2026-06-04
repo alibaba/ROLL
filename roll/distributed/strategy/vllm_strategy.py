@@ -14,7 +14,7 @@ import vllm
 from vllm import RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind, BeamSearchParams
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.utils import random_uuid
 
 from roll.distributed.executor.worker import Worker

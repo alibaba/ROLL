@@ -7,7 +7,15 @@ from ray.runtime_env import RuntimeEnv
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vllm.v1.executor.ray_executor import RayDistributedExecutor, RayWorkerMetaData
-from vllm.v1.executor.ray_utils import RayWorkerWrapper
+try:
+    from vllm.v1.executor.ray_utils import (
+        RayWorkerWrapper,
+        WORKER_SPECIFIC_ENV_VARS,
+    )
+except ImportError:
+    from vllm.v1.executor.ray_utils import RayWorkerWrapper
+
+    WORKER_SPECIFIC_ENV_VARS = RayDistributedExecutor.WORKER_SPECIFIC_ENV_VARS
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
@@ -177,7 +185,7 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
-            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
             additional_vars=set(current_platform.additional_env_vars),
             destination="workers",
         )
