@@ -349,7 +349,7 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 * Ensure all necessary dependencies are installed:
 
   ```bash
-  pip install -r requirements.txt
+  pip install -e .
   ```
 
 * Verify that all model paths in the configuration are accessible.

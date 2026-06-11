@@ -218,7 +218,7 @@ bash examples/qwen2.5-0.5B-agentic/run_agentic_pipeline_frozen_lake.sh
 * Ensure all necessary dependencies are installed, it's recommended to start from [image launch](../../Getting%20Started/Installation/installation.md):
 
   ```bash
-  pip install -r requirements.txt
+  pip install -e .
   ```
 
 * Confirm all model paths in the configuration are accessible.

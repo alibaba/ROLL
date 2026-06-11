@@ -229,7 +229,7 @@ bash examples/qwen2.5-7B-sft_megatron/run_sft_pipeline.sh
 ### 步骤2：准备环境和依赖
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 并确保：

@@ -191,7 +191,7 @@ bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
 * 确保已安装所有必要依赖：
 
   ```bash
-  pip install -r requirements.txt
+  pip install -e .
   ```
 
 * 确认配置中所有模型路径均可访问。

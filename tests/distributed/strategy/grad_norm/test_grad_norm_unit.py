@@ -131,6 +131,8 @@ class TestGradientNormBasic:
             def __init__(self):
                 super().__init__()
                 self.linear = nn.Linear(10, 5, bias=True)
+            def forward(self, x):
+                return self.linear(x)
 
         model = SimpleModel().to(device)
 

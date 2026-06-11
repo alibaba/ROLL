@@ -228,7 +228,7 @@ Key items to check:
 ### Step 2: Prepare Environment and Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 Also ensure:

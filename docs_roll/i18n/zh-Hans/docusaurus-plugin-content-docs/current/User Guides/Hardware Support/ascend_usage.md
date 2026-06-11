@@ -77,7 +77,7 @@ pip install vllm-ascend==0.13.0
 ```
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL
-pip install -r requirements_common.txt
+pip install -e .
 pip install deepspeed==0.16.4
 cd ..
 ```

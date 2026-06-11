@@ -30,9 +30,9 @@ nvidia-smi
 # 4. Clone the project code
 git clone https://github.com/alibaba/ROLL.git
 
-# 5. Install project dependencies (choose the requirements file corresponding to your image)
+# 5. Install project dependencies (choose the extras corresponding to your environment)
 cd ROLL
-pip install -r requirements_torch260_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/
+pip install -e ".[torch260-vllm]" -i https://mirrors.aliyun.com/pypi/simple/
 ```
 
 ## Pipeline Execution

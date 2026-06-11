@@ -19,6 +19,8 @@ vLLM >= 0.7.3
 # 克隆仓库并安装
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL
-pip install -r requirements.txt # 或按照您的特定安装步骤
-# 对于开发，可以考虑使用：pip install -e .
+# 安装指定 PyTorch 版本和推理引擎，例如：
+pip install -e ".[torch260-vllm]"  # PyTorch 2.6.0 + vLLM
+# 其他可选项：torch260-sglang, torch280-vllm, torch280-sglang, torch260-diffsynth, local-debug, gem
+# 基础安装：pip install -e .
 ```

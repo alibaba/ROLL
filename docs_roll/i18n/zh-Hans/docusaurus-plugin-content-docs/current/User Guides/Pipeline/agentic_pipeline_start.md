@@ -214,7 +214,7 @@ bash examples/qwen2.5-0.5B-agentic/run_agentic_pipeline_frozen_lake.sh
 * 确保已安装所有必要依赖，建议从[镜像启动](../../Getting%20Started/Installation/installation.md)：
 
   ```bash
-  pip install -r requirements.txt
+  pip install -e .
   ```
 
 * 确认配置中所有模型路径均可访问。

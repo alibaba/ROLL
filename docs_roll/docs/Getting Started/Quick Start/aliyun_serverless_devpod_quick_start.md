@@ -35,7 +35,7 @@ git clone https://github.com/alibaba/ROLL.git
 
 # 2. Install project dependencies
 cd ROLL
-pip install -r requirements_torch260_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/  
+pip install -e ".[torch260-vllm]" -i https://mirrors.aliyun.com/pypi/simple/  
 ```
 
 ### Run a Pipeline Example

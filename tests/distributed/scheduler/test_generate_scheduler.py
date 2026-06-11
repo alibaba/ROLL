@@ -11,7 +11,6 @@ import pytest
 from roll.distributed.scheduler.generate_scheduler import (
     DynamicSamplingScheduler,
     RolloutContext,
-    LoadBalancer,
     ExperienceItem,
 )
 import roll.distributed.scheduler.user_defined_rollout_loop as udrl
@@ -26,9 +25,12 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
-
+@pytest.mark.skip(reason="LoadBalancer class has been removed from the codebase")
 async def test_load_balancer():
-    load_balancer = LoadBalancer(mp_rank_zero={0:0, 1:0, 2:0, 3:0}, max_running_requests=2)
+    # LoadBalancer class no longer exists
+    # Original test code preserved for reference:
+    # load_balancer = LoadBalancer(mp_rank_zero={0:0, 1:0, 2:0, 3:0}, max_running_requests=2)
+    pytest.skip("LoadBalancer class removed")
 
     leases = []
     for i in range(8):

@@ -358,7 +358,7 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 * 确保安装了所有必要的依赖：
 
   ```bash
-  pip install -r requirements.txt
+  pip install -e .
   ```
 
 * 验证配置中的所有模型路径是否可访问。

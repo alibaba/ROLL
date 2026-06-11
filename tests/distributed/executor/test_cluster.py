@@ -9,7 +9,12 @@ from roll.distributed.executor.cluster import Cluster
 from roll.distributed.executor.worker import Worker, RankInfo
 from roll.distributed.scheduler.decorator import register, Dispatch
 from roll.distributed.scheduler.resource_manager import ResourceManager
-
+@pytest.fixture(scope="function")
+def ray_init():
+    """Initialize Ray for each test function and shutdown after."""
+    ray.init(log_to_driver=True, ignore_reinit_error=True)
+    yield
+    ray.shutdown()
 
 @ray.remote
 class TestWorker(Worker):
@@ -60,10 +65,10 @@ class TestDPWorker(Worker):
         return res
 
 
-def test_cluster_run():
+def test_cluster_run(ray_init):
     ray.init(log_to_driver=True)
 
-    resource_manager = ResourceManager()
+    resource_manager = ResourceManager(num_gpus_per_node=8, num_nodes=1)
 
     test_worker_config = WorkerConfig(name="test_worker", world_size=2)
     test_cluster: Any = Cluster(
@@ -78,10 +83,10 @@ def test_cluster_run():
     assert res == [1, 2]
 
 
-def test_cluster_dp_mp_compute():
+def test_cluster_dp_mp_compute(ray_init):
     ray.init(log_to_driver=True)
 
-    resource_manager = ResourceManager()
+    resource_manager = ResourceManager(num_gpus_per_node=8, num_nodes=1)
 
     test_worker_config = WorkerConfig(name="test_worker", world_size=8)
     test_cluster: Any = Cluster(

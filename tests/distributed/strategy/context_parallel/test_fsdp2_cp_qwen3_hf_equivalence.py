@@ -153,7 +153,7 @@ def test_fsdp2_cp_qwen3_hf_logits_equivalence():
     world_size = 2
     port = _find_free_port()
     model_id = os.environ.get(
-        "ROLL_TEST_QWEN3_MODEL_ID", "/home/dilixiati.dlxtmhte/.cache/openlm/hub/14ffd5928d24731fd670f04c645a5928"
+        "ROLL_TEST_QWEN3_MODEL_ID", "Qwen/Qwen3-4B-Instruct-2507"
     )
     mp.spawn(
         _worker_qwen3_hf_equivalence,
