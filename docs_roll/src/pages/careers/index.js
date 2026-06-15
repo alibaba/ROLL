@@ -129,6 +129,10 @@ const roles = [
     title: '智能引擎-机器学习系统工程师',
     href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=100008460012&shareCode=tGPVe1DNf9wWpBko553DpNTPm%2Fiu5lvdKCHPRUEo1fUXrexro24t6i77UdIPkYZ2',
   },
+  {
+    title: '智能引擎-大模型平台研发工程师-Agent Infra',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh&positionId=100018640014&spm=a1z8x.8270853.0.0.454b6c5ck9LKl0',
+  },
 ];
 
 const copy = {
