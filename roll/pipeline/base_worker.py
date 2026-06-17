@@ -619,12 +619,12 @@ class CriticWorker(Worker):
                 dataloader_kwargs={"shuffle": True},
             )
 
-            for batch_idx, data in tqdm(
+            for batch_idx, mini_batch in tqdm(
                 enumerate(dataloader),
                 desc=f"{self.worker_name} train global step {global_step}",
                 total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size,
             ):
-                vf_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
+                vf_metrics = self.strategy.train_step(batch=mini_batch, loss_func=self.loss_func)
                 append_to_dict(metrics, vf_metrics)
 
             data.to("cpu")
