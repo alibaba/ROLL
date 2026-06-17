@@ -13,6 +13,39 @@ from .utils import get_logger
 logger = get_logger(__name__)
 
 
+def _patch_megatron_for_npu():
+    if not current_platform.is_npu():
+        return
+
+    import torch_npu  # noqa: F401
+
+    import megatron.core.tensor_parallel.random as meg_random
+
+    if not hasattr(meg_random, "_npu_patched"):
+        meg_random.initialize_rng_tracker()
+
+        def patched_set(new_state, device=-1, graph_safe=False):
+            torch.npu.set_rng_state(new_state)
+            return
+
+        def patched_get(device="npu", clone=False, graph_safe=False):
+            return torch.npu.get_rng_state()
+
+        meg_random._set_cuda_rng_state = patched_set
+        meg_random._get_cuda_rng_state = patched_get
+
+        rng_state = torch.npu.get_rng_state()
+        meg_random._CUDA_RNG_STATE_TRACKER.states_["model-parallel-rng"] = rng_state
+        meg_random._CUDA_RNG_STATE_TRACKER.states_["data-parallel-rng"] = rng_state
+
+        meg_random._npu_patched = True
+
+    if not hasattr(torch.cuda, "_npu_patched"):
+        _original_cuda_current_device = torch.cuda.current_device
+        torch.cuda.current_device = lambda: torch.npu.current_device()
+        torch.cuda._npu_patched = True
+
+
 def is_distribute_initialized():
     return mpu.model_parallel_is_initialized()
 
@@ -29,7 +62,9 @@ def _set_random_seed(seed_):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if current_platform.device_count() > 0:
+        if current_platform.is_npu():
+            _patch_megatron_for_npu()
+        elif current_platform.is_cuda() and current_platform.device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(seed)
     else:
         raise ValueError("Seed ({}) should be a positive integer.".format(seed))

@@ -422,6 +422,13 @@ class MegatronInferStrategy(InferenceStrategy):
         else:
             input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
             attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
+            
+            if hasattr(torch, "npu") and torch.npu.is_available() and attention_mask is not None:
+                attention_mask = attention_mask.bool()
+                B, S = attention_mask.shape
+                attention_mask = attention_mask[:, None, None, :]   # [B,1,1,S]
+                attention_mask = attention_mask.expand(B, 1, S, S)        # [B,1,S,S]
+            
             if labels is not None:
                 labels = self._get_feature_on_this_cp_rank(labels, "labels")
         position_ids = None
@@ -1131,6 +1138,24 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         # 只有step的时候需要load optimizer states
         self.load_states(include=[OffloadStateType.optimizer_states])
+
+        # Ensure FP32 main params are on the correct device (they may be on CPU after
+        # the offload/reload cycle on certain platforms like Ascend NPU).
+        if current_platform.is_npu():
+            optimizers = (
+                self.optimizer.chained_optimizers
+                if hasattr(self.optimizer, 'chained_optimizers')
+                else [self.optimizer]
+            )
+            expected_device = torch.device(
+                f'{current_platform.device_type}:{current_platform.current_device()}'
+            )
+            for opt in optimizers:
+                for param_groups_attr in ('shard_fp32_from_float16_groups', 'shard_fp32_groups'):
+                    for group in getattr(opt, param_groups_attr, []):
+                        for param in group:
+                            if param.device != expected_device:
+                                param.data = param.data.to(expected_device, non_blocking=False)
 
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
         if is_offload_optimizer_states_in_train_step:

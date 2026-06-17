@@ -69,9 +69,15 @@ def get_megatron_optimizer(
     optimizers = []
     model_chunk_offset = 0
     kwargs = {}
-    if "config_overrides" in inspect.signature(_get_param_groups_and_buffers).parameters:
+    _param_groups_sig = inspect.signature(_get_param_groups_and_buffers).parameters
+    if "config_overrides" in _param_groups_sig:
         # config_overrides is required in mcore-core>=0.16
-        kwargs = {"config_overrides": None}
+        kwargs["config_overrides"] = None
+    if "no_weight_decay_cond" in _param_groups_sig:
+        # no_weight_decay_cond, scale_lr_cond, lr_mult are required in newer mcore versions
+        kwargs["no_weight_decay_cond"] = no_weight_decay_cond
+        kwargs["scale_lr_cond"] = scale_lr_cond
+        kwargs["lr_mult"] = lr_mult
     for dense_model_chunks, overlap_param_gather_with_optimizer_step in zip(
         all_dense_model_chunks, overlap_param_gather_with_optimizer_step_flags
     ):
