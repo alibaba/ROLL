@@ -277,6 +277,8 @@ def load_model(
         freeze_model(model, model_args)
     else:
         model = setup_lora_training(config, model, model_args, is_trainable)
+        if not model_args.disable_gradient_checkpointing and hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
 
     if add_valuehead:
         from trl import AutoModelForCausalLMWithValueHead
@@ -710,8 +712,6 @@ def get_extra_data_provider(model_name_or_path: str, processor=None):
     if isinstance(model_type, str) and (("qwen2" in model_type) or (model_type in ("qwen3_vl", "qwen3_vl_moe"))):
         import types
 
-        from transformers import BatchFeature  # help define a object to accesss attr
-
         def _call_get_rope_index(fn, input_ids: torch.LongTensor, **candidate_kwargs):
             sig = inspect.signature(fn)
             params = sig.parameters
@@ -745,17 +745,13 @@ def get_extra_data_provider(model_name_or_path: str, processor=None):
                 "<|vision_start|>"
             )
 
-        dummy_self = BatchFeature(
-            {
-                "config": BatchFeature(
-                    {
-                        "vision_config": BatchFeature(vc),
-                        "image_token_id": image_token_id,
-                        "video_token_id": video_token_id,
-                        "vision_start_token_id": vision_start_token_id,
-                    }
-                )
-            }
+        dummy_self = types.SimpleNamespace(
+            config=types.SimpleNamespace(
+                vision_config=types.SimpleNamespace(**vc),
+                image_token_id=image_token_id,
+                video_token_id=video_token_id,
+                vision_start_token_id=vision_start_token_id,
+            )
         )
 
         is_tf_ge_4_52 = is_transformers_version_greater_than("4.52.0")
@@ -771,6 +767,9 @@ def get_extra_data_provider(model_name_or_path: str, processor=None):
         elif model_type in ("qwen3_vl", "qwen3_vl_moe"):
             from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
+            dummy_self.get_vision_position_ids = types.MethodType(
+                Qwen3VLModel.get_vision_position_ids, dummy_self
+            )
             get_rope_index = types.MethodType(Qwen3VLModel.get_rope_index, dummy_self)
         else:
             if is_tf_ge_4_52:
@@ -787,8 +786,15 @@ def get_extra_data_provider(model_name_or_path: str, processor=None):
             image_grid_thw: Optional[torch.LongTensor] = None,
             video_grid_thw: Optional[torch.LongTensor] = None,
             attention_mask: Optional[torch.Tensor] = None,
+            mm_token_type_ids: Optional[torch.Tensor] = None,
             second_per_grid_ts: Optional[torch.Tensor] = None,
         ):
+            if model_type in ("qwen3_vl", "qwen3_vl_moe") and mm_token_type_ids is None:
+                mm_token_type_ids = torch.zeros_like(input_ids)
+                if image_token_id is not None:
+                    mm_token_type_ids = torch.where(input_ids == image_token_id, 1, mm_token_type_ids)
+                if video_token_id is not None:
+                    mm_token_type_ids = torch.where(input_ids == video_token_id, 2, mm_token_type_ids)
             # Keep kwargs to be resilient to HF signature changes between versions/models.
             out = _call_get_rope_index(
                 get_rope_index,
@@ -797,6 +803,7 @@ def get_extra_data_provider(model_name_or_path: str, processor=None):
                 video_grid_thw=video_grid_thw,
                 second_per_grid_ts=second_per_grid_ts,
                 attention_mask=attention_mask,
+                mm_token_type_ids=mm_token_type_ids,
             )
             rope_index = out[0]
             # PumpkinComment:

@@ -138,6 +138,7 @@ class DataCollatorWithPaddingForMM:
         # model_inputs for hf/deepspeed: input_id, attention_mask, pixel_values, image_grid_thw
         padded_features = defaultdict(list)
         un_padded_features = defaultdict(list)
+        mm_token_type_id_features = []
         mm_feature_keys = set()
         for feature in features:
             # cannot process as batch directly though processor output as batch
@@ -165,6 +166,8 @@ class DataCollatorWithPaddingForMM:
                     model_inputs.pop(key)
             for key in filter(lambda k: k in model_inputs, self.padded_keys):
                 padded_features[key].append(model_inputs.pop(key)[0])
+            if "mm_token_type_ids" in model_inputs:
+                mm_token_type_id_features.append(torch.as_tensor(model_inputs.pop("mm_token_type_ids")[0]))
             # mm feature fileds can be different because of mixed data
             mm_feature_keys = mm_feature_keys.union(model_inputs.keys())
             # to tensors except padded_keys which would be converted after padding
@@ -208,6 +211,22 @@ class DataCollatorWithPaddingForMM:
             return_tensors=self.return_tensors,
         )
         batch.update(un_padded_features)
+        if mm_token_type_id_features:
+            target_len = batch["input_ids"].shape[-1]
+            padded_mm_token_type_ids = []
+            for token_type_ids in mm_token_type_id_features:
+                pad_len = target_len - token_type_ids.shape[-1]
+                if pad_len < 0:
+                    raise ValueError(
+                        f"mm_token_type_ids length {token_type_ids.shape[-1]} exceeds padded input length {target_len}"
+                    )
+                pad = torch.zeros(pad_len, dtype=token_type_ids.dtype, device=token_type_ids.device)
+                if self.tokenizer.padding_side == "left":
+                    token_type_ids = torch.cat([pad, token_type_ids], dim=-1)
+                else:
+                    token_type_ids = torch.cat([token_type_ids, pad], dim=-1)
+                padded_mm_token_type_ids.append(token_type_ids)
+            batch["mm_token_type_ids"] = torch.stack(padded_mm_token_type_ids, dim=0)
 
         # other custom data fields: mainly for specific position_ids currently
         # position_ids for qwen2-vl is optional and make sure it is a 3D tensor
@@ -226,6 +245,7 @@ class DataCollatorWithPaddingForMM:
                     kwargs[key] = fun_params[key].default
             extra_data = self.extra_data_provider(**kwargs)
             batch.update(extra_data)
+            batch.pop("mm_token_type_ids", None)
 
         # each field should be a tensor or np.array(val=list_data, dtype=object)
         # to be stored in DataProto
