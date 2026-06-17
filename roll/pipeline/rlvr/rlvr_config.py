@@ -17,6 +17,35 @@ class DatasetFilterConfig:
     max_difficulty: Optional[float] = None
     num_samples: int = 0
 
+
+@dataclass
+class VLMFilterConfig:
+    """Configuration for filtering overlong prompts in VLM pipeline.
+
+    Similar to verl's RLHFDataset config options.
+    """
+    enable: bool = field(
+        default=True,
+        metadata={"help": "Whether to filter out samples exceeding max_prompt_length."}
+    )
+    num_workers: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of workers for parallel filtering. Defaults to max(1, cpu_count // 4)."}
+    )
+    prompt_key: str = field(
+        default="prompt",
+        metadata={"help": "Key for the prompt text in the dataset."}
+    )
+    image_key: str = field(
+        default="images",
+        metadata={"help": "Key for the images in the dataset."}
+    )
+    image_flag_key: str = field(
+        default="image_flag",
+        metadata={"help": "Key for the image flag indicating valid images."}
+    )
+
+
 @dataclass
 class RewardFilterConfig:
     type: Literal["no_filter", "mean_filter", "std_filter"] = field(
@@ -87,6 +116,10 @@ class RLVRConfig(PPOConfig):
     dataset_filter: DatasetFilterConfig = field(
         default_factory=DatasetFilterConfig,
         metadata={"help": "Configuration for filtering dataset by source and difficulty"},
+    )
+    vlm_filter: VLMFilterConfig = field(
+        default_factory=VLMFilterConfig,
+        metadata={"help": "Configuration for filtering overlong prompts in VLM pipeline"},
     )
     num_return_sequences_in_group: int = field(
         default=1,
