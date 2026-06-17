@@ -36,7 +36,7 @@ def get_optimizer_grouped_parameters(
             "weight_decay": 0.0,
         },
     ]
-    return optimizer_grouped_parameters
+    return [group for group in optimizer_grouped_parameters if group["params"]]
 
 
 def _z3_params_to_fetch(param_list):

@@ -20,6 +20,10 @@ class DataArguments:
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
+    cache_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to cache preprocessed datasets."},
+    )
     file_name: Optional[Union[List[str], str]] = field(
         default=None,
         metadata={"help": "The name of file path name for train. Conflicts with `--dataset_name`"},

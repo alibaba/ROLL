@@ -1,5 +1,6 @@
 import copy
 import json
+import math
 import os
 import uuid
 from functools import partial
@@ -224,22 +225,31 @@ class RLVRVLMPipeline(BasePipeline):
         dataset = get_vlm_dataset(
             self.pipeline_config.actor_train.data_args, encode_function, self.processor, get_eval=False
         )
-        # update domain field, DynamicSamplingScheduler requires
-        dataset = dataset.map(
-            partial(update_dataset_domain, self.pipeline_config.tag_2_domain),
-            num_proc=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
-            desc="update_dataset_domain",
-            load_from_cache_file=False,
-        )
-
+        # Avoid rewriting large multimodal Arrow columns when a run has a single domain.
+        # Re-mapping PIL image columns can overflow pyarrow's regular array offsets.
+        domains = list(self.pipeline_config.actor_train.data_args.domain_interleave_probs.keys())
         self.domain_datasets: Dict[str, datasets.Dataset] = {}
-        for domain in self.pipeline_config.actor_train.data_args.domain_interleave_probs.keys():
-            self.domain_datasets[domain] = dataset.filter(
-                lambda example, dom: example["domain"] == dom,
+        if len(domains) == 1:
+            domain = domains[0]
+            if "domain" not in dataset.column_names:
+                dataset = dataset.add_column("domain", [domain] * len(dataset))
+            self.domain_datasets[domain] = dataset
+        else:
+            # update domain field, DynamicSamplingScheduler requires
+            dataset = dataset.map(
+                partial(update_dataset_domain, self.pipeline_config.tag_2_domain),
                 num_proc=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
-                fn_kwargs={"dom": domain},
+                desc="update_dataset_domain",
+                load_from_cache_file=False,
             )
-            assert len(self.domain_datasets[domain]) > 0, f"domain dataset {domain} has no data"
+
+            for domain in domains:
+                self.domain_datasets[domain] = dataset.filter(
+                    lambda example, dom: example["domain"] == dom,
+                    num_proc=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
+                    fn_kwargs={"dom": domain},
+                )
+                assert len(self.domain_datasets[domain]) > 0, f"domain dataset {domain} has no data"
 
         self.val_dataset = None
         if self.pipeline_config.validation and self.pipeline_config.validation.data_args:
@@ -259,6 +269,17 @@ class RLVRVLMPipeline(BasePipeline):
             kl_horizon=self.pipeline_config.kl_horizon,
         )
 
+        if self.pipeline_config.max_steps <= 0:
+            num_train_epochs = self.pipeline_config.actor_train.training_args.num_train_epochs
+            dataset_size = sum(len(domain_dataset) for domain_dataset in self.domain_datasets.values())
+            inferred_max_steps = math.ceil(num_train_epochs * dataset_size / self.pipeline_config.rollout_batch_size)
+            logger.info(
+                "infer pipeline max_steps from dataset: "
+                f"num_train_epochs={num_train_epochs}, dataset_size={dataset_size}, "
+                f"rollout_batch_size={self.pipeline_config.rollout_batch_size}, "
+                f"max_steps={inferred_max_steps}"
+            )
+            self.pipeline_config.max_steps = inferred_max_steps
         assert self.pipeline_config.max_steps > 0, "max_steps must be greater than 0"
         self.pipeline_config.set_max_steps(max_steps=self.pipeline_config.max_steps)
 
