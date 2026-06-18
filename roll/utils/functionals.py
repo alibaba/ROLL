@@ -8,7 +8,8 @@ if TYPE_CHECKING:
 import enum
 import traceback
 import heapq
-from typing import Dict, List, Optional, Tuple, Union
+import math
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -460,9 +461,11 @@ def pad_to_length(tensor: torch.Tensor, length, pad_value, dim=-1):
     else:
         pad_size = list(tensor.shape)
         pad_size[dim] = length - tensor.size(dim)
-        return torch.cat(
-            [tensor, pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device)], dim=dim
-        )
+        # Use torch.full to strictly honor tensor.dtype. `pad_value * torch.ones(..., dtype=bool)`
+        # would type-promote a bool mask to int64, causing TransferQueue dtype mismatch when
+        # some samples need padding and others don't.
+        pad_block = torch.full(pad_size, pad_value, dtype=tensor.dtype, device=tensor.device)
+        return torch.cat([tensor, pad_block], dim=dim)
 
 
 def concatenate_input_and_output(input_ids, output_ids, num_return_sequences):
@@ -770,6 +773,315 @@ def apply_kl_penalty(data: "DataProto", kl_ctrl: AdaptiveKLController, kl_penalt
     return data, metrics
 
 
+def build_domain_to_teacher_names(
+    domain_values: np.ndarray,
+    domain_2_tag: Dict[str, set],
+    tag_to_teacher: Dict[str, List[str]],
+    all_tag_teachers: List[str],
+) -> Dict[str, List[str]]:
+    """Build mapping from domain -> list of teacher names that should handle it.
+
+    Args:
+        domain_values: Array of domain strings for each sample in the batch.
+        domain_2_tag: Mapping from domain -> set of tags.
+        tag_to_teacher: Mapping from tag -> list of teacher names.
+        all_tag_teachers: Teacher names that handle all tags (empty tag_included).
+
+    Returns:
+        Dict mapping domain -> list of teacher names responsible for that domain.
+    """
+    domain_to_teacher_names: Dict[str, List[str]] = {}
+    for domain in set(domain_values):
+        teachers_for_domain = list(all_tag_teachers)
+        tags = domain_2_tag.get(domain, {domain})
+        for tag in tags:
+            teachers_for_domain.extend(tag_to_teacher.get(tag, []))
+        domain_to_teacher_names[domain] = list(set(teachers_for_domain))
+    return domain_to_teacher_names
+
+
+def build_domain_routing_context(
+    batch: "DataProto",
+    pipeline_config,
+    domain_key: str = "domain",
+) -> Tuple[Optional[Dict[str, List[str]]], Optional[np.ndarray]]:
+    """Build domain routing context from batch and pipeline config.
+
+    Returns:
+        (domain_to_teacher_names, domain_values) — both None if no routing needed.
+    """
+    if not pipeline_config.needs_teacher_routing:
+        return None, None
+    domain_2_tag = getattr(pipeline_config, "domain_2_tag", None) or {}
+    domain_values = batch.non_tensor_batch.get(domain_key, None)
+    if domain_values is None:
+        domain_values = np.array(["default"] * batch.batch.batch_size[0])
+    domain_to_teacher_names = build_domain_to_teacher_names(
+        domain_values=domain_values,
+        domain_2_tag=domain_2_tag,
+        tag_to_teacher=pipeline_config.tag_to_teacher_names,
+        all_tag_teachers=pipeline_config.teacher_names_for_all_tags,
+    )
+    return domain_to_teacher_names, domain_values
+
+
+def extract_real_results_from_routed(
+    ref_result: "DataProto",
+    sub_batch: "DataProto",
+    name: str,
+) -> "DataProto":
+    """Extract real (non-padded) samples from ref_result in original order.
+
+    Must be called INSIDE the compute_log_probs closure, where the final
+    sub_batch (after batch_balance and dynamic_batching_shard reordering)
+    is available. The tracking fields _position_idx and _is_real_sample
+    in sub_batch have been reordered along with the data, so they correctly
+    identify real samples and their original positions.
+
+    After extraction, cleans up the tracking fields from sub_batch.
+
+    Args:
+        ref_result: DataProto from compute_log_probs, containing ref_log_probs_{name}.
+        sub_batch: The final sub_batch (after all reorders inside the closure).
+        name: Teacher name (used as key in ref_result).
+
+    Returns:
+        ref_result with ref_log_probs_{name} containing only real samples
+        in the original (pre-reorder) order.
+    """
+    if "_is_real_sample" not in sub_batch.batch:
+        return ref_result
+
+    is_real = sub_batch.batch["_is_real_sample"]
+    position_idx = sub_batch.batch["_position_idx"]
+
+    # Select real results (in whatever order sub_batch is currently in)
+    real_results_reordered = ref_result.batch[f"ref_log_probs_{name}"][is_real]
+    real_positions = position_idx[is_real]
+
+    # Sort by original position to restore the original order
+    sort_order = torch.argsort(real_positions)
+    real_ref_log_probs = real_results_reordered[sort_order]
+
+    # Clean up tracking fields
+    sub_batch.batch.pop("_position_idx", None)
+    sub_batch.batch.pop("_is_real_sample", None)
+
+    # Update ref_result to contain only real results in original order
+    ref_result.batch[f"ref_log_probs_{name}"] = real_ref_log_probs
+    return ref_result
+
+
+def merge_ref_log_probs_compat(
+    batch: "DataProto",
+    references: Dict[str, object],
+    is_routing: bool,
+) -> None:
+    """Set backward-compat ``ref_log_probs`` from per-teacher results.
+
+    In routing mode, merge per-teacher ref_log_probs so each sample gets
+    the value from the teacher that was responsible for it.
+    In non-routing mode, just use the first teacher's result.
+    """
+    if is_routing:
+        ref_log_probs_compat = torch.zeros_like(
+            batch.batch["response_mask"][:, 1:], dtype=torch.float32
+        )
+        filled = torch.zeros(
+            batch.batch.batch_size[0], dtype=torch.bool, device=batch.batch.device
+        )
+        for tname in references:
+            mask_key = f"ref_log_probs_{tname}_mask"
+            if mask_key in batch.batch:
+                teacher_mask = batch.batch[mask_key]
+                fill_mask = teacher_mask & ~filled
+                ref_log_probs_compat[fill_mask] = batch.batch[f"ref_log_probs_{tname}"][fill_mask]
+                filled |= fill_mask
+            else:
+                # Teacher without mask computed for all samples
+                ref_log_probs_compat = batch.batch[f"ref_log_probs_{tname}"].clone()
+                break
+        batch.batch["ref_log_probs"] = ref_log_probs_compat
+    else:
+        first_name = list(references.keys())[0]
+        batch.batch["ref_log_probs"] = batch.batch[f"ref_log_probs_{first_name}"]
+
+
+def clusters_have_disjoint_devices(clusters: Union[Dict[str, object], List[object]]) -> bool:
+    """Check if all clusters have non-overlapping device_mapping.
+
+    Args:
+        clusters: A dict of name->Cluster or a list of Cluster objects.
+            Each cluster must have ``worker_config.device_mapping``.
+
+    Returns:
+        True if no two clusters share any device index.
+    """
+    items = clusters.values() if isinstance(clusters, dict) else clusters
+    seen_devices: set = set()
+    for cluster in items:
+        devices = set(cluster.worker_config.device_mapping or [])
+        if devices & seen_devices:
+            return False
+        seen_devices |= devices
+    return True
+
+
+def compute_ref_log_probs_with_routing(
+    batch: "DataProto",
+    references: Dict[str, object],
+    pipeline_config,
+    domain_to_teacher_names: Optional[Dict[str, List[str]]] = None,
+    domain_values: Optional[np.ndarray] = None,
+    metrics_fn: Optional[Callable[[dict], None]] = None,
+) -> "DataProto":
+    """Compute ref_log_probs for each teacher, with optional tag-based routing.
+
+    Handles the full pipeline internally: batch_balance, dynamic_batching_shard,
+    compute_log_probs, rename, reduce_metrics, and extract_real_results_from_routed.
+
+    When ``domain_to_teacher_names`` is None (non-routing mode), every teacher
+    processes all samples.  When provided, only samples whose domain maps to a
+    teacher are sent to that teacher (routing mode).
+
+    When multiple teachers have non-overlapping device_mapping, their forward
+    passes are launched in parallel using threads to reduce wall time.
+
+    Args:
+        batch: The full DataProto batch.
+        references: Dict mapping teacher name -> Cluster object.
+        pipeline_config: Pipeline config.
+        domain_to_teacher_names: Mapping from domain -> list of teacher names.
+            None means non-routing (all samples to all teachers).
+        domain_values: Array of domain strings for each sample.
+            None means non-routing.
+        metrics_fn: Callable that receives flat metric dicts (e.g. ``metrics_mgr.add_metrics``
+            or ``dict.update``).
+
+    Returns:
+        The batch with ref_log_probs_{name}, ref_log_probs_{name}_mask, and
+        backward-compat ref_log_probs set.
+    """
+    from roll.distributed.scheduler.protocol import DataProto, pad_dataproto_to_divisor  # noqa: F811
+    from roll.utils.dynamic_batching import dynamic_batching_shard
+
+    is_routing = domain_to_teacher_names is not None
+    parallel = (
+        len(references) > 1
+        and clusters_have_disjoint_devices(references)
+    )
+
+    teacher_tasks: Dict[str, Tuple] = {}
+
+    for name, ref_cluster in references.items():
+        if is_routing:
+            responsible_domains = [
+                domain for domain, teachers in domain_to_teacher_names.items()
+                if name in teachers
+            ]
+
+            if not responsible_domains or len(domain_values) == 0:
+                batch.batch[f"ref_log_probs_{name}"] = torch.zeros_like(
+                    batch.batch["response_mask"][:, 1:], dtype=torch.float32
+                )
+                batch.batch[f"ref_log_probs_{name}_mask"] = torch.zeros(
+                    batch.batch.batch_size[0], dtype=torch.bool
+                )
+                continue
+
+            domain_mask = torch.tensor(
+                [d in responsible_domains for d in domain_values],
+                device=batch.batch.device,
+            )
+
+            if domain_mask.sum() == 0:
+                batch.batch[f"ref_log_probs_{name}"] = torch.zeros_like(
+                    batch.batch["response_mask"][:, 1:], dtype=torch.float32
+                )
+                batch.batch[f"ref_log_probs_{name}_mask"] = torch.zeros(
+                    batch.batch.batch_size[0], dtype=torch.bool
+                )
+                continue
+        else:
+            domain_mask = torch.ones(batch.batch.batch_size[0], dtype=torch.bool, device=batch.batch.device)
+
+        sub_batch = batch.select_idxs(domain_mask)
+        sub_batch.meta_info = dict(batch.meta_info)
+        num_real = sub_batch.batch.batch_size[0]
+
+        sub_batch.batch["_position_idx"] = torch.arange(num_real, device=sub_batch.batch.device)
+        sub_batch.batch["_is_real_sample"] = torch.ones(num_real, dtype=torch.bool, device=sub_batch.batch.device)
+
+        dp_size = ref_cluster.dp_size
+        if dp_size > 0:
+            sub_batch, pad_size = pad_dataproto_to_divisor(sub_batch, dp_size)
+            if pad_size > 0:
+                sub_batch.batch["_is_real_sample"][-pad_size:] = False
+
+        teacher_tasks[name] = (ref_cluster, sub_batch, domain_mask)
+
+    def _run_teacher(name: str, ref_cluster, sub_batch) -> Tuple["DataProto", List[dict]]:
+        """Run a single teacher's forward pass. Returns (result, collected_metrics).
+
+        Metrics are collected locally to avoid thread-safety issues when running
+        multiple teachers in parallel threads.
+        """
+        collected_metrics: List[dict] = []
+        worker_config = ref_cluster.worker_config
+        assert len(sub_batch) % ref_cluster.dp_size == 0, \
+            f"sub_batch size {len(sub_batch)} not divisible by dp_size {ref_cluster.dp_size}"
+        batch_balance(sub_batch, dp_size=ref_cluster.dp_size, minibatch_size=len(sub_batch))
+        if worker_config.use_dynamic_batching_in_infer:
+            sub_batch, db_metrics = dynamic_batching_shard(
+                sub_batch,
+                ref_cluster.dp_size,
+                worker_config.max_tokens_per_microbatch_in_infer,
+                worker_config.sequence_length_round_in_infer,
+                worker_config.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
+                worker_config.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
+                f"reference-{name}/compute_log_probs",
+            )
+            collected_metrics.append(db_metrics)
+        refs = ref_cluster.compute_log_probs(sub_batch, blocking=False)
+        ref_result = DataProto.materialize_concat(data_refs=refs)
+        ref_result.rename(old_keys="log_probs", new_keys=f"ref_log_probs_{name}")
+        collected_metrics.append(reduce_metrics(ref_result.meta_info.pop("metrics", {})))
+        ref_result = extract_real_results_from_routed(ref_result, sub_batch, name)
+        return ref_result, collected_metrics
+
+    def _scatter_result(name: str, ref_result: "DataProto", domain_mask: torch.Tensor) -> None:
+        real_ref_log_probs = ref_result.batch[f"ref_log_probs_{name}"]
+        full_ref_log_probs = torch.zeros_like(
+            batch.batch["response_mask"][:, 1:], dtype=torch.float32
+        )
+        full_ref_log_probs[domain_mask] = real_ref_log_probs
+        batch.batch[f"ref_log_probs_{name}"] = full_ref_log_probs
+        batch.batch[f"ref_log_probs_{name}_mask"] = domain_mask
+
+    if parallel and teacher_tasks:
+        from concurrent.futures import ThreadPoolExecutor
+        futures = {}
+        with ThreadPoolExecutor(max_workers=len(teacher_tasks)) as executor:
+            for name, (ref_cluster, sub_batch, _) in teacher_tasks.items():
+                futures[name] = executor.submit(_run_teacher, name, ref_cluster, sub_batch)
+            for name, future in futures.items():
+                ref_result, collected_metrics = future.result()
+                _scatter_result(name, ref_result, teacher_tasks[name][2])
+                if metrics_fn:
+                    for m in collected_metrics:
+                        metrics_fn(m)
+    else:
+        for name, (ref_cluster, sub_batch, domain_mask) in teacher_tasks.items():
+            ref_result, collected_metrics = _run_teacher(name, ref_cluster, sub_batch)
+            _scatter_result(name, ref_result, domain_mask)
+            if metrics_fn:
+                for m in collected_metrics:
+                    metrics_fn(m)
+
+    merge_ref_log_probs_compat(batch, references, is_routing)
+    return batch
+
+
 @torch.no_grad()
 def compute_advantage(
     data: "DataProto",
@@ -792,21 +1104,49 @@ def compute_advantage(
     # Check OPD config
     is_pure_opd = getattr(pipeline_config, "is_pure_opd", False) if pipeline_config else False
     use_opd = getattr(pipeline_config, "use_opd", False) if pipeline_config else False
-    opd_kl_coef = getattr(pipeline_config, "opd_kl_coef", 1.0) if pipeline_config else 1.0
+    reference_configs = getattr(pipeline_config, "reference_configs", {"default": None}) if pipeline_config else {"default": None}
 
-    # Compute KL divergence for OPD modes
-    kld = None
     if is_pure_opd or use_opd:
-        kld = compute_approx_kl(
-            log_probs=data.batch["old_log_probs"] if getattr(pipeline_config, "enable_old_logprobs_recompute", False) else data.batch["infer_logprobs"],
-            log_probs_base=data.batch["ref_log_probs"],
-            action_mask=response_mask,
-            kl_penalty=getattr(pipeline_config, "kl_penalty", "kl"),
-        )
+        log_probs_key = "old_log_probs" if getattr(pipeline_config, "enable_old_logprobs_recompute", False) else "infer_logprobs"
+        kl_penalty = getattr(pipeline_config, "kl_penalty", "kl")
+        total_weighted_kld = torch.zeros_like(response_mask, dtype=torch.float32)
+        for name, ref_cfg in reference_configs.items():
+            ref_key = f"ref_log_probs_{name}"
+            mask_key = f"ref_log_probs_{name}_mask"
 
-    # For pure OPD mode, advantage is directly -kld
+            # Check if this teacher has a routing mask (set by pipeline when needs_teacher_routing)
+            if mask_key in data.batch:
+                teacher_mask = data.batch[mask_key]  # (batch_size,), bool
+            else:
+                # No mask = this teacher handles all tags (backward compatible)
+                teacher_mask = None
+
+            kl_coef_i = ref_cfg.opd_kl_coef if (ref_cfg and ref_cfg.opd_kl_coef is not None) else 1.0
+
+            if teacher_mask is not None and teacher_mask.sum() < teacher_mask.numel():
+                # Only compute KL on routed subset to avoid meaningless computation against zeros
+                subset_idx = teacher_mask.nonzero(as_tuple=True)[0]
+                kld_subset = compute_approx_kl(
+                    log_probs=data.batch[log_probs_key][subset_idx],
+                    log_probs_base=data.batch[ref_key][subset_idx],
+                    action_mask=response_mask[subset_idx],
+                    kl_penalty=kl_penalty,
+                )
+                kld_i = torch.zeros_like(response_mask, dtype=torch.float32)
+                kld_i[subset_idx] = kld_subset
+                total_weighted_kld += kl_coef_i * kld_i
+            else:
+                kld_i = compute_approx_kl(
+                    log_probs=data.batch[log_probs_key],
+                    log_probs_base=data.batch[ref_key],
+                    action_mask=response_mask,
+                    kl_penalty=kl_penalty,
+                )
+                total_weighted_kld += kl_coef_i * kld_i
+
+    # For pure OPD mode, advantage is directly -total_weighted_kld
     if is_pure_opd:
-        advantages = -kld
+        advantages = -total_weighted_kld
         returns = advantages
         data.batch["raw_advantages"] = advantages
     else:
@@ -830,9 +1170,9 @@ def compute_advantage(
 
         data.batch["raw_advantages"] = advantages
 
-        # Apply mixed OPD mode
+        # Apply mixed OPD mode: advantages = rl_advantages - total_weighted_kld
         if use_opd:
-            advantages = advantages - opd_kl_coef * kld
+            advantages = advantages - total_weighted_kld
 
     if whiten_advantages:
         # TODO whiten过程中是否要考虑response的长度？
@@ -857,6 +1197,7 @@ def postprocess_generate(
     pad_token_id,
     fill_eos_token=False,
     output_logprobs: Optional[list[list[float]]] = None,
+    routed_experts: Optional[list[torch.Tensor]]=None,
     pad_to_seq_len=True,
 ) -> "DataProto":
     from roll.distributed.scheduler.protocol import DataProto
@@ -911,11 +1252,28 @@ def postprocess_generate(
     assert attention_mask.any(dim=1).all(), f"has all 0 attention_mask, {attention_mask} {input_ids}"
     first_one = attention_mask.float().argmax(dim=1)
     new_response_mask = torch.zeros_like(attention_mask)  # response mask for cat input_ids
+
+    new_routed_experts = None
+    expert_dtype = None
+    if routed_experts is not None:
+        _, layer_num, topk = routed_experts[0].size()
+        # Select minimal dtype based on actual max expert index to reduce data size.
+        max_expert_idx = max(int(re.max().item()) for re in routed_experts)
+        from roll.third_party.megatron.router_replay_utils import get_routed_experts_dtype
+        expert_dtype = get_routed_experts_dtype(max_expert_idx)
+        new_routed_experts = (
+            torch.zeros(
+                [output_batch_size, sequence_length, layer_num, topk],
+                dtype=expert_dtype,
+            )
+        )
+
     logprobs = (
         torch.zeros([output_batch_size, sequence_length - 1], dtype=torch.float32)
         if output_logprobs is not None
         else None
     )
+
     for i in range(output_batch_size):
         shift = first_one[i].item()
         if shift > 0:
@@ -932,6 +1290,12 @@ def postprocess_generate(
             logprobs[i][prompt_len - 1 : valid_length - 1] = torch.tensor(
                 output_logprobs[i][:response_length], dtype=logprobs.dtype
             )
+        if new_routed_experts is not None:
+            # new_routed_experts[i, :valid_length - 1] = routed_experts[i]
+            routed_experts_len = routed_experts[i].size(0)
+            if routed_experts_len != (valid_length - 1):
+                logger.info(f"Warning: {routed_experts_len=} != {(valid_length - 1)=}.")
+            new_routed_experts[i, :routed_experts_len] = routed_experts[i].to(expert_dtype)
         if position_ids.dim() == 3 and shift > 0:
             # shift as output to convert to right padding
             # NOTE: left shift without clear right might lead to unclean values
@@ -941,7 +1305,6 @@ def postprocess_generate(
             # like Qwen2-vl, since extra image_token would be left which might
             # cause error: Image features and image tokens do not match
             output_position_ids[i, ..., :-shift] = output_position_ids[i, ..., shift:].clone()
-            # only clean in VLM(qwen2-vl) to make no effect on LLM
         if shift > 0 and prompt_length > valid_length:
             output[i, -shift:] = pad_token_id
 
@@ -969,6 +1332,8 @@ def postprocess_generate(
         batch["prompt_id"] = prompt_id
     if logprobs is not None:
         batch["infer_logprobs"] = logprobs
+    if new_routed_experts is not None:
+        batch["routed_experts"] = new_routed_experts
     return DataProto(batch=batch)
 
 
@@ -1329,4 +1694,5 @@ def batch_balance(batch: DataProto, dp_size, minibatch_size, logging_prefix="glo
     metrics = {}
     metrics.update(global_balance_stats)
     return metrics
+
 

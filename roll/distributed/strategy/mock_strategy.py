@@ -3,7 +3,6 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import List, Optional, Callable, Dict, Tuple
 
-import deepspeed
 import torch
 import torch.distributed as dist
 from accelerate import cpu_offload_with_hook

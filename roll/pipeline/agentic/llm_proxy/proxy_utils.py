@@ -83,7 +83,8 @@ def generate_by_proxy(
         lm_input_texts = tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
-            tokenize=False
+            tokenize=False, 
+            return_dict=False
         )
 
         # Build feature dict

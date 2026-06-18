@@ -180,6 +180,7 @@ class DistillPipeline(BasePipeline):
         dataset = datasets.load_dataset('json', data_files=dataset_paths)['train']
         
         val_dataset = None
+        self.val_dataloader = None
         if self.pipeline_config.validation and self.pipeline_config.validation.data_args:
             val_dataset_paths = self.pipeline_config.validation.data_args.file_name
             if not val_dataset_paths:

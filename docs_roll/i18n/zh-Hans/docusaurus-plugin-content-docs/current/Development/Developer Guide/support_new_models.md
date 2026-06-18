@@ -12,7 +12,7 @@ sidebar_position: 3
 | 阶段 | 选择 ≥ 1 个后端 |
 | --- | --- |
 | 推理 | `vllm`, `sglang` |
-| 训练 | `DeepSpeed`, `Megatron` |
+| 训练 | `FSDP2`, `Megatron` |
 
 ---
 
@@ -30,7 +30,7 @@ sidebar_position: 3
 
 ## 2. 训练策略
 
-### 2.1 `DeepSpeed`
+### 2.1 `FSDP2`
 
 1.  模型需支持通过以下代码加载：
     ```python
@@ -41,8 +41,8 @@ sidebar_position: 3
 3.  在 `roll/models/model_providers.py` 中注册模型。
 
 完成以上步骤后，您可以：
--   使用 `deepspeed_train` 策略来训练 `actor_train` worker，以及
--   使用 `hf_infer` 或 `deepspeed_infer` 策略在 `reference` worker。
+-   使用 `fsdp2_train` 策略来训练 `actor_train` worker，以及
+-   使用 `hf_infer` 或 `fsdp2_infer` 策略在 `reference` worker。
 
 ### 2.2 `Megatron`
 

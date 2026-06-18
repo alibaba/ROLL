@@ -13,6 +13,7 @@ from ...parallel_functions import encoder_sequence_parallel_gather, encoder_smal
 from ..auto.modeling_auto import register_model
 from ..model_factory import McaGPTModel
 from ..model_utils import ModuleUtilsMixin
+from ..sequence_packing_mixin import MultimodalEmbeddingMixin
 from .config_qwen3_vl import Qwen3VLConfig
 from .rope_utils import Qwen3VLMultimodalRotaryEmbedding, get_rope_index
 from .transformer_block import Qwen3VLTransformerBlock
@@ -139,7 +140,7 @@ class Qwen3VLGPTModel(McaGPTModel):
 
 
 @register_model("qwen3_vl")
-class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
+class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin, MultimodalEmbeddingMixin):
     config_class = Qwen3VLConfig
 
     def __init__(self, config: "Qwen3VLConfig", **kwargs):
@@ -158,7 +159,9 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
                 Qwen3VLVisionConfig(**config.vision_config),
                 attn_implementation="sdpa",
                 torch_dtype=self.config.params_dtype,
-            ).to(torch.cuda.current_device())
+            )
+            if not config.init_model_with_meta_device:
+                self.vision_model = self.vision_model.to(torch.cuda.current_device())
             # TODO: use_reentrant=True might cause error by twice forward/backward when
             # training images and videos simultaneously, https://github.com/pytorch/pytorch/issues/81296
             if config.recompute_granularity == "full" and self.training:
@@ -191,11 +194,18 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
         pixel_values: "torch.Tensor",
         grid_thw: "torch.LongTensor",
         input_ranges: List[List[int]],
-        media_token_id: int,
+        media_token_id: int
     ):
         """
-        inputs_embeds: [s, b, h] or [s/tp, b, h] when sequence parallel
-        ranges: sequence range
+        Construct inputs_embeds with vision embeddings replacing media tokens.
+
+        Args:
+            input_ids: [b, s] original input_ids (full sequence, used for image_mask)
+            inputs_embeds: [s, b, h] or [s/tp/cp, b, h] when sequence/context parallel
+            pixel_values: flattened pixel values for vision model
+            grid_thw: grid dimensions for each image/video
+            input_ranges: sequence ranges for the current rank (CP+SP sliced)
+            media_token_id: token id for the media placeholder
         """
         image_mask = input_ids == media_token_id
         image_indices = torch.full_like(image_mask, -1, dtype=torch.long)
@@ -220,23 +230,39 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
         image_embeds = self.gather_encoder_outputs(image_embeds, split_plan, image_output_lengths)
         image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
-        image_mask = torch.cat([image_mask[:, start:end] for start, end in input_ranges], dim=1)
-        selected_indices = torch.cat([image_indices[:, start:end] for start, end in input_ranges], dim=1)
-        selected_indices = selected_indices[selected_indices != -1]
-
         deepstack_image_embeds = [
             self.gather_encoder_outputs(deepstack_image_embed, split_plan, image_output_lengths)
             for deepstack_image_embed in deepstack_image_embeds
         ]
-        for i, deepstack_image_embed in enumerate(deepstack_image_embeds):
-            deepstack_image_embeds[i] = deepstack_image_embed[selected_indices]
 
-        inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
-        selected_mask = image_mask.unsqueeze(-1).expand_as(inputs_embeds)
-        inputs_embeds = inputs_embeds.masked_scatter(selected_mask, image_embeds[selected_indices])
-        inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
-
-        return inputs_embeds, image_mask, deepstack_image_embeds
+        # If True, inputs_embeds is the full sequence (not CP/SP sliced) and masked_scatter operates on the
+        # full sequence. Used in sequence packing mode where CP+packing is done after construct_inputs_embeds.
+        full_sequence_output = input_ranges is None
+        if full_sequence_output:
+            # In packing mode: inputs_embeds is the full sequence (not sliced).
+            # Use the full image_mask for masked_scatter so dimensions match.
+            all_selected_indices = image_indices[image_mask]
+            inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
+            full_selected_mask = image_mask.unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(full_selected_mask, image_embeds[all_selected_indices])
+            inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
+            # Return full-sequence image_mask and all deepstack embeds (not
+            # sliced). The caller will do CP+packing on visual_pos_masks and
+            # then re-select deepstack embeds from the packed mask.
+            return inputs_embeds, image_mask, deepstack_image_embeds
+        else:
+            # Normal mode: inputs_embeds is already CP+SP sliced.
+            # Slice image_mask and indices by input_ranges.
+            sliced_image_mask = torch.cat([image_mask[:, start:end] for start, end in input_ranges], dim=1)
+            sliced_indices = torch.cat([image_indices[:, start:end] for start, end in input_ranges], dim=1)
+            selected_indices = sliced_indices[sliced_indices != -1]
+            for i, deepstack_image_embed in enumerate(deepstack_image_embeds):
+                deepstack_image_embeds[i] = deepstack_image_embed[selected_indices]
+            inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
+            selected_mask = sliced_image_mask.unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(selected_mask, image_embeds[selected_indices])
+            inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
+            return inputs_embeds, sliced_image_mask, deepstack_image_embeds
 
     def build_encoder_inputs(
         self,
@@ -321,43 +347,71 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
         return encoder_small_batch_size_gather(output_features)
 
     def get_batch_on_this_cp_rank(self, batch, dim3_keys: List[str] = ["attention_mask"]):
-        # VLM need to view all input_ids and media features
-        loss_needed_items = {
-            "labels": batch.pop("labels", None),
-        }
-        loss_needed_items = super().get_batch_on_this_cp_rank(loss_needed_items, dim3_keys=dim3_keys)
-        batch.update(loss_needed_items)
+        # VLM forward() handles input_ids and attention_mask splitting internally
+        skipped = {}
+        for key in ("input_ids", "attention_mask"):
+            if key in batch:
+                skipped[key] = batch.pop(key)
+        batch = super().get_batch_on_this_cp_rank(batch, dim3_keys=dim3_keys)
+        batch.update(skipped)
         return batch
 
-    def get_input_ranges(self, total_seqlen):
-        # context parallel 的计算有问题
-        slice_rank, slice_size = 0, 1
-        if self.config.sequence_parallel:
-            slice_rank = mpu.get_tensor_model_parallel_rank()
-            slice_size = mpu.get_tensor_model_parallel_world_size()
 
-        def get_sequence_range(start, end, rank, size):
-            return start + (end - start) * rank // size, start + (end - start) * (rank + 1) // size
+    def merge_deepstack_embeds(self, image_mask, deepstack_image_embeds, video_mask, deepstack_video_embeds):
+        visual_pos_masks = None
+        deepstack_visual_embeds = None
+        if image_mask is not None and video_mask is not None:
+            # aggregate visual_pos_masks and deepstack_visual_embeds
+            visual_pos_masks = image_mask | video_mask
+            deepstack_visual_embeds = []
+            image_mask_joint = image_mask[visual_pos_masks]
+            video_mask_joint = video_mask[visual_pos_masks]
+            for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
+                embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1]).to(img_embed.device)
+                embed_joint[image_mask_joint, :] = img_embed
+                embed_joint[video_mask_joint, :] = vid_embed
+                deepstack_visual_embeds.append(embed_joint)
+        elif image_mask is not None:
+            visual_pos_masks = image_mask
+            deepstack_visual_embeds = deepstack_image_embeds
+        elif video_mask is not None:
+            visual_pos_masks = video_mask
+            deepstack_visual_embeds = deepstack_video_embeds
+        return visual_pos_masks, deepstack_visual_embeds
 
-        if self.config.context_parallel_size <= 1:
-            return [list(get_sequence_range(0, total_seqlen, slice_rank, slice_size))]
-        cp_rank = mpu.get_context_parallel_rank()
-        cp_size = mpu.get_context_parallel_world_size()
-        left_start = (total_seqlen // cp_size // 2) * cp_rank
-        left_end = (total_seqlen // cp_size // 2) * (cp_rank + 1)
-        right_start = total_seqlen - left_end
-        right_end = total_seqlen - left_start
-        slice_len = (left_end - left_start + right_end - right_start) // slice_size
-        start = left_start + slice_len * slice_rank
-        end = start + slice_len
-        if start >= left_end:
-            start = start - left_end + right_start
-            end = start + slice_len
-            return [[start, end]]
-        if end <= left_end:
-            return [[start, end]]
-        end = end - left_end + right_start
-        return [[start, left_end], [right_start, end]]
+    def construct_multimodal_inputs(
+        self,
+        input_ids,
+        inputs_embeds,
+        inputs_ranges,
+        *,
+        pixel_values=None,
+        pixel_values_videos=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        force_vit_image=False,
+        force_vit_video=False,
+        **kwargs,
+    ):
+        image_pos_masks = video_pos_masks = deepstack_image_embeds = deepstack_video_embeds = None
+        if pixel_values is not None:
+            inputs_embeds, image_pos_masks, deepstack_image_embeds = self.construct_inputs_embeds(
+                input_ids, inputs_embeds, pixel_values, image_grid_thw,
+                inputs_ranges, self.config.image_token_id
+            )
+        elif force_vit_image:
+            inputs_embeds, image_pos_masks, deepstack_image_embeds = self._handle_missing_visual(inputs_embeds)
+        if pixel_values_videos is not None:
+            inputs_embeds, video_pos_masks, deepstack_video_embeds = self.construct_inputs_embeds(
+                input_ids, inputs_embeds, pixel_values_videos, video_grid_thw,
+                inputs_ranges, self.config.video_token_id
+            )
+        elif force_vit_video:
+            inputs_embeds, video_pos_masks, deepstack_video_embeds = self._handle_missing_visual(inputs_embeds)
+        visual_pos_masks, deepstack_visual_embeds = self.merge_deepstack_embeds(
+            image_pos_masks, deepstack_image_embeds, video_pos_masks, deepstack_video_embeds
+        )
+        return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
 
     def forward(
         self,
@@ -374,54 +428,38 @@ class Qwen3VLModel(Qwen3VLGPTModel, ModuleUtilsMixin):
     ) -> "torch.Tensor":
         force_vit_image = kwargs.pop("force_vit_image", False)
         force_vit_video = kwargs.pop("force_vit_video", False)
+
         if position_ids is None and input_ids is not None:
             position_ids, _ = get_rope_index(self.config, input_ids, image_grid_thw, video_grid_thw)
 
-        cp_batch = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
-        if self.config.context_parallel_size > 1:
-            cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
-            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=[])
+        packed_seq_params = kwargs.get("packed_seq_params", None)
 
-        if not self.pre_process or (pixel_values is None and pixel_values_videos is None) or decoder_input is not None:
+        state = self.prepare_packing_state(
+            input_ids, position_ids, attention_mask, packed_seq_params,
+        )
+
+        if not self.pre_process or decoder_input is not None:
             return super().forward(
-                decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
+                decoder_input=decoder_input, labels=labels,
+                position_ids=state.position_ids,
+                **state.cp_batch, **kwargs
             )
 
-        inputs_ranges = self.get_input_ranges(input_ids.shape[1])
+        result = self.build_multimodal_embeddings(
+            input_ids, attention_mask, packed_seq_params, state,
+            multimodal_kwargs=dict(
+                pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
+                image_grid_thw=image_grid_thw, video_grid_thw=video_grid_thw,
+                force_vit_image=force_vit_image, force_vit_video=force_vit_video,
+            ),
+        )
 
-        inputs_embeds = self.embedding(input_ids=cp_batch["input_ids"], position_ids=None)
-        if pixel_values is not None:
-            # get deepstack emb
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.construct_inputs_embeds(
-                input_ids,
-                inputs_embeds,
-                pixel_values,
-                image_grid_thw,
-                inputs_ranges,
-                self.config.image_token_id,
-            )
-        elif force_vit_image:
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._handle_missing_visual(inputs_embeds)
-        if pixel_values_videos is not None:
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.construct_inputs_embeds(
-                input_ids,
-                inputs_embeds,
-                pixel_values_videos,
-                video_grid_thw,
-                inputs_ranges,
-                self.config.video_token_id,
-            )
-        elif force_vit_video:
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._handle_missing_visual(inputs_embeds)
         return super().forward(
-            decoder_input=inputs_embeds,
+            decoder_input=result.inputs_embeds,
             labels=labels,
-            position_ids=position_ids,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-            **cp_batch,
+            position_ids=result.position_ids,
+            visual_pos_masks=result.visual_pos_masks,
+            deepstack_visual_embeds=result.deepstack_visual_embeds,
+            **result.cp_batch,
             **kwargs,
         )

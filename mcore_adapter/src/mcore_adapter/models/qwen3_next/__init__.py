@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 import torch
 
+from ..converter.convert_utils import StackedTensors
 from ..converter.dist_converter import (
     default_dist_config,
     gdn_dist_config,
@@ -12,24 +13,17 @@ from ..converter.dist_converter import (
 from ..converter.template import (
     ConverOp,
     CopyConverOp,
+    DropConverOp,
     GatedQKVConverOp,
     GDNConv1dConverOp,
     RenameConverOp,
     StackConverOp,
     Template,
+    ZeroCenteredRMSNormConverOp,
     register_template,
 )
 from .config_qwen3_next import Qwen3NextConfig
 from .modeling_qwen3_next import Qwen3NextModel
-
-
-@dataclass
-class DropConverOp(ConverOp):
-    def _hf_to_mca(self, weights):
-        return []
-
-    def _mca_to_hf(self, weights):
-        return []
 
 
 @dataclass
@@ -63,39 +57,19 @@ class NextGDNConverOp(ConverOp):
         )
         b, a = torch.split(ba_reshaped, [num_v_heads // num_qk_heads, num_v_heads // num_qk_heads], dim=1)
         q, k, v, z, b, a = [weight.reshape(-1, hidden_size) for weight in [q, k, v, z, b, a]]
-        in_proj_weight = torch.cat([q, k, v, z, b, a], dim=0).reshape(-1, hidden_size)
-        return in_proj_weight
+        return StackedTensors(tensors=[q, k, v, z, b, a], dim=0)
 
     def _mca_to_hf(self, weights):
-        in_proj_weight = weights[0]
+        assert len(weights) == 1
+        assert isinstance(weights[0], StackedTensors)
+        q, k, v, z, b, a = weights[0].tensors
         hidden_size = self.mca_config.hidden_size
-        qk_head_dim = self.mca_config.linear_key_head_dim
-        v_head_dim = self.mca_config.linear_value_head_dim
         num_qk_heads = self.mca_config.linear_num_key_heads
-        num_v_heads = self.mca_config.linear_num_value_heads
-        qk_dim = qk_head_dim * num_qk_heads
-        v_dim = v_head_dim * num_v_heads
 
-        in_proj_weight = in_proj_weight.reshape(-1, hidden_size)
-        q, k, v, z, b, a = torch.split(in_proj_weight, [qk_dim, qk_dim, v_dim, v_dim, num_v_heads, num_v_heads], dim=0)
         q, k, v, z, b, a = [weight.reshape(num_qk_heads, -1, hidden_size) for weight in [q, k, v, z, b, a]]
         qkvz_weight = torch.cat([q, k, v, z], dim=1).reshape(-1, hidden_size)
         ba_weight = torch.cat([b, a], dim=1).reshape(-1, hidden_size)
         return [qkvz_weight, ba_weight]
-
-
-@dataclass
-class ZeroCenteredRMSNormConverOp(ConverOp):
-    def __post_init__(self):
-        super().__post_init__()
-        assert len(self.hf_names) == 1, f"ZeroCenteredRMSNormConverOp only support one name {self.hf_names}"
-        assert len(self.mca_names) == 1, f"ZeroCenteredRMSNormConverOp only support one name {self.mca_names}"
-
-    def _hf_to_mca(self, weights):
-        return weights[0].clone() - 1
-
-    def _mca_to_hf(self, weights):
-        return weights[0].clone() + 1
 
 
 register_dist_config(
@@ -198,7 +172,7 @@ register_template(
         "layernorm_zero_centered_gamma": True,
         "hetereogenous_dist_checkpoint": True,
         "attention_output_gate": True,
-        "experimental_attention_variant": "gated_delta_net",
+        "linear_attention_type": "gated_delta_net",
     },
     weight_converters=[
         RenameConverOp(hf_names="lm_head.weight", mca_names="output_layer.weight"),

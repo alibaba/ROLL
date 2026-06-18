@@ -7,7 +7,11 @@ from transformers.modeling_outputs import TokenClassifierOutput
 from trl import PreTrainedModelWrapper
 
 
-def value_head_load_state_dict(self: PreTrainedModelWrapper, state_dict: Dict[str, Any], strict=False) -> None:
+def value_head_load_state_dict(self: PreTrainedModelWrapper, state_dict: Dict[str, Any], strict=False, **kwargs) -> None:
+    # When called from PyTorch's set_model_state_dict (FSDP2 path), state_dict keys use
+    # standard nn.Module FQN format (e.g. 'pretrained_model.model.layers.0...').
+    # We remap keys to match each sub-module's expected format, then load separately.
+    # **kwargs must be forwarded to propagate 'assign' from PyTorch's _load_model_state_dict.
     for name in list(state_dict.keys()):
         if name.startswith("v_head."):
             state_dict[name] = state_dict.pop(name)
@@ -15,15 +19,15 @@ def value_head_load_state_dict(self: PreTrainedModelWrapper, state_dict: Dict[st
             state_dict[name.replace("pretrained_model.", "")] = state_dict.pop(name)
     pretrained_model = getattr(self, "pretrained_model", None)
     if pretrained_model is not None:
-        pretrained_model.load_state_dict(state_dict, strict=False)
+        pretrained_model.load_state_dict(state_dict, strict=False, **kwargs)
         v_head: nn.Module = getattr(self, "v_head", None)
         if v_head is not None:
             for k in list(state_dict.keys()):
                 if "v_head." in k:
                     state_dict[k.replace("v_head.", "")] = state_dict.pop(k)
-            v_head.load_state_dict(state_dict, strict=False)
+            v_head.load_state_dict(state_dict, strict=False, **kwargs)
     else:
-        self.load_state_dict(state_dict, strict=False)
+        self.load_state_dict(state_dict, strict=False, **kwargs)
 
 
 def token_classifier_forward(

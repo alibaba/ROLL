@@ -4,7 +4,6 @@ torchaudio
 
 # mac
 py-cpuinfo
-deepspeed==0.16.4
 ray<=2.46.0,>=2.40.0
 numpy<2.0a0,>=1.25
 tensordict

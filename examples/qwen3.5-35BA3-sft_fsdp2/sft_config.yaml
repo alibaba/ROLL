@@ -1,0 +1,69 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen3-30BA3B-sft-config"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output_sft
+system_envs:
+  USE_MODELSCOPE: '1'
+
+num_gpus_per_node: 8
+
+save_steps: 100
+logging_steps: 1
+eval_steps: 100
+resume_from_checkpoint: false
+
+sequence_length: 2048
+
+pretrain: Qwen/Qwen3.5-35B-A3B
+
+# sft related 
+# system_key: system_prompt # use the default system prompt in the tokenizer tmplate if not provided
+prompt_key: instruction
+query_key: input
+response_key: output
+
+# validation:
+#   data_args:
+#     file_name: ./data/code_alpaca_500.json
+#     template: qwen2_5
+
+sft_train:
+  model_args:
+    dtype: bf16
+    ulysses_size: 1
+    disable_gradient_checkpointing: true
+  training_args:
+    num_train_epochs: 1
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 1
+    learning_rate: 5.0e-6
+  data_args:
+    file_name: ./data/code_alpaca_20k.json # https://huggingface.co/datasets/sahil2801/CodeAlpaca-20k
+    template: qwen2_5
+    preprocessing_num_workers: 4
+  strategy_args:
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 8
+      moe_use_grouped_mm: true
+      param_dtype: bf16
+      reduce_dtype: bf16
+      offload_policy: false
+      apply_expert_patch: false
+      apply_tiled_mlp: false
+      reshard_after_forward: true
+      wrap_policy:
+        wrap_embeddings: true
+        wrap_lm_output: true
+        transformer_layer_cls_to_wrap:
+          - Qwen3_5MoeAttention
+          - Qwen3_5MoeGatedDeltaNet
+          - Qwen3_5MoeSparseMoeBlock
+  use_sequence_packing: True
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2

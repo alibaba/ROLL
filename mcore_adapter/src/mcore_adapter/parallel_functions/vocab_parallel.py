@@ -4,7 +4,15 @@ import torch
 import torch.distributed as dist
 from megatron.core import mpu
 
-from ..utils import divide
+from ..utils import divide, get_logger
+
+try:
+    from .fused_logprobs import logprobs_fwd, logprobs_bwd
+    FUSED_KERNEL_AVAILABLE = True
+except ImportError:
+    FUSED_KERNEL_AVAILABLE = False
+
+logger = get_logger(__name__)
 
 
 class VocabUtility:
@@ -70,46 +78,94 @@ class _VocabParallelHelper:
 
 class _VocabParallelLogProbs(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, vocab_parallel_logits: "torch.Tensor", target: "torch.Tensor"):
-        vocab_parallel_logits = vocab_parallel_logits.float()
-        logits_max = torch.max(vocab_parallel_logits, dim=-1)[0]
+    def forward(ctx, vocab_parallel_logits: "torch.Tensor", target: "torch.Tensor", use_fused_kernel: bool = True):
 
-        dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=mpu.get_tensor_model_parallel_group())
+        # Only use fused kernel when TP=1 and use_fused_kernel is True
+        if use_fused_kernel:
+            # Check if we can use fused kernel (only for TP=1)
+            tp_world_size = mpu.get_tensor_model_parallel_world_size()
+            if tp_world_size != 1 or not FUSED_KERNEL_AVAILABLE:
+                logger.warning(f"Disable use_fused_kernel because {tp_world_size=} and {FUSED_KERNEL_AVAILABLE=}.")
+                use_fused_kernel = False
 
-        (
-            target_mask,
-            masked_target_1d,
-            predicted_logits,
-            sum_exp_logits,
-            exp_logits,
-        ) = _VocabParallelHelper.calculate_predicted_logits(vocab_parallel_logits, target, logits_max)
+        if use_fused_kernel:
+            # Use fused kernel for TP=1
+            # Convert 3D input [B, S, D] to 2D [B*S, D]
+            vocab_parallel_logits_2d = vocab_parallel_logits.view(-1, vocab_parallel_logits.shape[-1])
+            target_1d = target.view(-1)
 
-        dist.all_reduce(sum_exp_logits, op=dist.ReduceOp.SUM, group=mpu.get_tensor_model_parallel_group())
-        dist.all_reduce(predicted_logits, op=dist.ReduceOp.SUM, group=mpu.get_tensor_model_parallel_group())
+            # Call fused kernel
+            logprobs, x_max, x_sum_exp = logprobs_fwd(vocab_parallel_logits_2d, target_1d)
 
-        predicted_logprobs = predicted_logits - torch.log(sum_exp_logits)
+            # Convert output back to original shape
+            if vocab_parallel_logits.dim() == 3:
+                batch_size, seq_len, vocab_size = vocab_parallel_logits.shape
+                logprobs = logprobs.view(batch_size, seq_len)
 
-        # Save for backward
-        ctx.save_for_backward(exp_logits, target_mask, sum_exp_logits, masked_target_1d)
+            # Save for backward
+            ctx.save_for_backward(vocab_parallel_logits, target_1d, x_max, x_sum_exp)
+            ctx.use_fused = True
 
-        return predicted_logprobs
+            return logprobs
+        else:
+            # Use original torch implementation for TP>1
+            vocab_parallel_logits = vocab_parallel_logits.float()
+            logits_max = torch.max(vocab_parallel_logits, dim=-1)[0]
+
+            dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=mpu.get_tensor_model_parallel_group())
+
+            (
+                target_mask,
+                masked_target_1d,
+                predicted_logits,
+                sum_exp_logits,
+                exp_logits,
+            ) = _VocabParallelHelper.calculate_predicted_logits(vocab_parallel_logits, target, logits_max)
+
+            dist.all_reduce(sum_exp_logits, op=dist.ReduceOp.SUM, group=mpu.get_tensor_model_parallel_group())
+            dist.all_reduce(predicted_logits, op=dist.ReduceOp.SUM, group=mpu.get_tensor_model_parallel_group())
+
+            predicted_logprobs = predicted_logits - torch.log(sum_exp_logits)
+
+            # Save for backward
+            ctx.save_for_backward(exp_logits, target_mask, sum_exp_logits, masked_target_1d)
+            ctx.use_fused = False
+
+            return predicted_logprobs
 
     @staticmethod
     def backward(ctx, grad_output: "torch.Tensor"):
-        exp_logits, target_mask, sum_exp_logits, masked_target_1d = ctx.saved_tensors
+        use_fused = ctx.use_fused
 
-        exp_logits.div_(sum_exp_logits.unsqueeze(dim=-1))
-        exp_logits.neg_()
-        grad_input = exp_logits
-        grad_2d = grad_input.view(-1, grad_input.size()[-1])
-        arange_1d = torch.arange(start=0, end=grad_2d.size()[0], device=grad_input.device)
-        grad_2d[arange_1d, masked_target_1d] += 1 - target_mask.view(-1).float()
-        grad_input.mul_(grad_output.unsqueeze(dim=-1))
+        if use_fused:
+            # Use fused kernel backward
+            vocab_parallel_logits, target_1d, x_max, x_sum_exp = ctx.saved_tensors
 
-        return grad_input, None
+            vocab_parallel_logits_2d = vocab_parallel_logits.view(-1, vocab_parallel_logits.shape[-1])
+
+            # Call fused backward
+            grad_input_2d = logprobs_bwd(vocab_parallel_logits_2d, target_1d, grad_output.view(-1), x_max, x_sum_exp)
+
+            # Convert gradient back to original shape
+            grad_input = grad_input_2d.view(vocab_parallel_logits.shape)
+
+            return grad_input, None, None
+        else:
+            # Use original torch backward
+            exp_logits, target_mask, sum_exp_logits, masked_target_1d = ctx.saved_tensors
+
+            exp_logits.div_(sum_exp_logits.unsqueeze(dim=-1))
+            exp_logits.neg_()
+            grad_input = exp_logits
+            grad_2d = grad_input.view(-1, grad_input.size()[-1])
+            arange_1d = torch.arange(start=0, end=grad_2d.size()[0], device=grad_input.device)
+            grad_2d[arange_1d, masked_target_1d] += 1 - target_mask.view(-1).float()
+            grad_input.mul_(grad_output.unsqueeze(dim=-1))
+
+            return grad_input, None, None
 
 
-def vocab_parallel_logprobs(vocab_parallel_logits, target) -> "torch.Tensor":
+def vocab_parallel_logprobs(vocab_parallel_logits, target, use_fused_kernel: bool = True) -> "torch.Tensor":
     """
     Get logprobs when logits are split across tensor parallel ranks
 
@@ -118,12 +174,15 @@ def vocab_parallel_logprobs(vocab_parallel_logits, target) -> "torch.Tensor":
                                dimension is [batch_size, sequence_length, vocab_size/num_parallel_ranks]
 
         target: correct vocab ids of dimension [batch_size, sequence_length]
+
+        use_fused_kernel: whether to use fused kernel (only works for TP=1)
+
     Returns:
         logprobs: logprobs of dimension [batch_size, sequence_length]
 
     (It's fine to change the order of sequence_length and batch_size in dimension)
     """
-    return _VocabParallelLogProbs.apply(vocab_parallel_logits, target)
+    return _VocabParallelLogProbs.apply(vocab_parallel_logits, target, use_fused_kernel)
 
 
 def vocab_parallel_target_rank(vocab_parallel_logits: "torch.Tensor", target: "torch.Tensor") -> "torch.Tensor":

@@ -2,6 +2,7 @@ import os
 import pathlib
 from typing import Dict, List
 
+import dataclasses
 import torch
 import vllm
 from packaging.version import Version
@@ -46,6 +47,10 @@ logger.info(f"Using vllm version {vllm.__version__}")
 
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     kwargs["enable_sleep_mode"] = True
+    if "attention_config" not in kwargs and "attention_config" in {
+        f.name: f for f in dataclasses.fields(AsyncEngineArgs)
+    }:  # vllm<=0.12.0 not has attention_config in AsyncEngineArgs
+        kwargs["attention_config"] = {"backend": "FLASH_ATTN"}
 
     if "worker_extension_cls" not in kwargs:
         # VLLM_USE_V1 is deprecated in vllm>=0.11.1
@@ -78,7 +83,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     # VLLM_USE_V1 may be modified inside create_engine_config
     vllm_config = engine_args.create_engine_config(UsageContext.ENGINE_CONTEXT)
 
-    fp8.update_quant_config(vllm_config)
+    fp8.update_quant_config(config=kwargs, vllm_config=vllm_config)
 
     # change parallel_config.placement_group for CustomRayDistributedExecutor
     parallel_config = vllm_config.parallel_config

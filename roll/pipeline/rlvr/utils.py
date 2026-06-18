@@ -55,7 +55,7 @@ DUMPING_FUNC = [
 def dump_rollout_to_specific_path(path: str, global_step: int, data: DataProto, tokenizer):
     if not path:
         return
-    write_data = copy.deepcopy(data.non_tensor_batch)
+    write_data = {k: copy.deepcopy(v) for k, v in data.non_tensor_batch.items()}
     responses = tokenizer.batch_decode(data.batch['responses'], skip_special_tokens=True)
     data_cnt = len(responses)
     write_data['responses'] = responses

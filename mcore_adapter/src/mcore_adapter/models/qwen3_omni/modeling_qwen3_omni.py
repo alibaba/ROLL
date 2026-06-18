@@ -15,13 +15,13 @@ class Qwen3OmniMoeModel(Qwen3VLModel):
 
     def __init__(self, config: "Qwen3OmniMoeConfig", **kwargs):
         from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
-            Qwen3OmniMoeAudioEncoderConfig,
             Qwen3OmniMoeVisionEncoderConfig,
+            Qwen3OmniMoeAudioEncoderConfig,
         )
         from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+            Qwen3OmniMoeVisionEncoder,
             Qwen3OmniMoeAudioEncoder,
             Qwen3OmniMoePreTrainedModelForConditionalGeneration,
-            Qwen3OmniMoeVisionEncoder,
             _get_feat_extract_output_lengths,
         )
 
@@ -39,14 +39,18 @@ class Qwen3OmniMoeModel(Qwen3VLModel):
                 Qwen3OmniMoeAudioEncoderConfig(**config.audio_config),
                 attn_implementation="sdpa",
                 torch_dtype=self.config.params_dtype,
-            ).to(torch.cuda.current_device())
+            )
+            if not config.init_model_with_meta_device:
+                self.audio_model = self.audio_model.to(torch.cuda.current_device())
             for param in self.audio_model.parameters():
                 setattr(param, "sequence_parallel", config.sequence_parallel)
             self.vision_model = Qwen3OmniMoeVisionEncoder._from_config(
                 Qwen3OmniMoeVisionEncoderConfig(**config.vision_config),
                 attn_implementation="sdpa",
                 torch_dtype=self.config.params_dtype,
-            ).to(torch.cuda.current_device())
+            )
+            if not config.init_model_with_meta_device:
+                self.vision_model = self.vision_model.to(torch.cuda.current_device())
             # TODO: use_reentrant=True might cause error by twice forward/backward when
             # training images and videos simultaneously, https://github.com/pytorch/pytorch/issues/81296
             if config.recompute_granularity == "full" and self.training:
@@ -68,11 +72,14 @@ class Qwen3OmniMoeModel(Qwen3VLModel):
                 self.talker = Qwen3OmniMoeTalkerForConditionalGeneration._from_config(
                     Qwen3OmniMoeTalkerConfig(**config.talker_config),
                     torch_dtype=self.config.params_dtype,
-                ).to(torch.cuda.current_device())
+                )
                 self.code2wav = Qwen3OmniMoeCode2Wav._from_config(
                     Qwen3OmniMoeCode2WavConfig(**config.code2wav_config),
                     torch_dtype=self.config.params_dtype,
-                ).to(torch.cuda.current_device())
+                )
+                if not config.init_model_with_meta_device:
+                    self.talker = self.talker.to(torch.cuda.current_device())
+                    self.code2wav = self.code2wav.to(torch.cuda.current_device())
 
         # construct get_rope_index needed method and attrs
         self.get_rope_index = types.MethodType(
@@ -105,14 +112,9 @@ class Qwen3OmniMoeModel(Qwen3VLModel):
         inputs_embeds: [s, b, h] or [s/tp, b, h] when sequence parallel
         ranges: sequence range
         """
-        visual_pos_masks, deepstack_visual_embeds = None, None
-        # TODO: same as qwen3-vl, only support images or videos since no deepstack_visual_embeds merge process currently
-        # maybe merge images and videos first to run vision_model and get deepstack_visual_embeds for images and videos simultaneously
-        assert pixel_values is None or pixel_values_videos is None, (
-            "inputs with both images and videos are not supported temporarily"
-        )
+        image_pos_masks = video_pos_masks = deepstack_image_embeds = deepstack_video_embeds = None
         if pixel_values is not None:
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = super().construct_inputs_embeds(
+            inputs_embeds, image_pos_masks, deepstack_image_embeds = super().construct_inputs_embeds(
                 input_ids,
                 inputs_embeds,
                 pixel_values,
@@ -120,8 +122,8 @@ class Qwen3OmniMoeModel(Qwen3VLModel):
                 input_ranges,
                 image_token_id,
             )
-        elif pixel_values_videos is not None:
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = super().construct_inputs_embeds(
+        if pixel_values_videos is not None:
+            inputs_embeds, video_pos_masks, deepstack_video_embeds = super().construct_inputs_embeds(
                 input_ids,
                 inputs_embeds,
                 pixel_values_videos,
@@ -129,101 +131,96 @@ class Qwen3OmniMoeModel(Qwen3VLModel):
                 input_ranges,
                 video_token_id,
             )
+        visual_pos_masks, deepstack_visual_embeds = self.merge_deepstack_embeds(
+            image_pos_masks, deepstack_image_embeds, video_pos_masks, deepstack_video_embeds
+        )
 
         if input_features is None:
             return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
 
         # for audio input embeds
+        # Follow the same pattern as image/video: build global mask & indices, use
+        # build_encoder_inputs / gather_encoder_outputs for load-balanced encoder
+        # execution across SP/CP ranks, then masked_scatter into inputs_embeds.
+
         # (bs, freqs, frames) -> (total_frames, freqs)
         input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()]
-        # TODO: audio can be treated as chunks of frames with chunk_size for sp/cp actually,
-        # chunk_size = 100 * (self.n_window_infer // (self.n_window * 2))
-        # temporarily only split audios instead of chunks to simplify which may cause duplicated calculation for same audio
-        # maybe scatter chunks to sp/cp group for load balance furthermore
-        feat_mask = input_ids == audio_token_id
-        feat_culens = feature_lens.cumsum(dim=0, dtype=torch.int32).tolist()  # use list
-        feat_embeds_culens = self._get_feat_extract_output_lengths(feature_lens).cumsum(dim=0, dtype=torch.int32)
-        required_feat = []  # features to vision tower
-        required_feat_lens = []  # feature lengths to vision tower
-        valid_feat_embeds_nums = []  # indicate the ranges of needed feature embeds
-        added_feat_indexes = []  # feature indexes included in input_ranges
-        for i in range(feat_mask.shape[0]):
-            for inputs_start, inputs_end in input_ranges:
-                # same as qwen-vl, get features included in a sub-range corresponding to each sample
-                valid_feat_embeds_start = feat_mask[:i].sum().item()
-                valid_feat_embeds_start += feat_mask[i, :inputs_start].sum().item()
-                embeds_num = feat_mask[i, inputs_start:inputs_end].sum().item()
-                valid_feat_embeds_end = valid_feat_embeds_start + embeds_num
-                used_embeds_culen_start = 0  # embeds seqlens before this sub-range
-                new_embeds_culen_start = 0  # embeds seqlens new added in this sub-range, new_embeds_seqlen_start >= used_embeds_seqlen_start
-                added_culen_before_used = 0  # embeds seqlens in before sub-ranges of input_ranges
-                embed_culen_end = feat_embeds_culens[-1]
-                for feat_index, feat_embeds_culen in enumerate(feat_embeds_culens):
-                    if valid_feat_embeds_start < feat_embeds_culen:  # included in current sub-range
-                        if feat_index not in added_feat_indexes:
-                            # included in current sub-range and have not been added before, add it
-                            required_feat_lens.append(feature_lens[feat_index])
-                            # maybe extend together at last, while mapping from embeds length to feature length is not direct
-                            required_feat.append(
-                                input_features[
-                                    (0 if feat_index == 0 else feat_culens[feat_index - 1]) : feat_culens[feat_index]
-                                ]
-                            )
-                            added_feat_indexes.append(feat_index)
-                        else:
-                            # included in current sub-range but have been added by previous sub-range of this sample, skip it
-                            new_embeds_culen_start = feat_embeds_culen
-                    else:  # not included in current sub-range
-                        used_embeds_culen_start = feat_embeds_culen
-                        new_embeds_culen_start = feat_embeds_culen
-                        if feat_index in added_feat_indexes:  # included in before sub-ranges of input_ranges
-                            before_culen = 0 if feat_index == 0 else feat_embeds_culens[feat_index - 1].item()
-                            added_culen_before_used += feat_embeds_culen - before_culen
-                    if valid_feat_embeds_end <= feat_embeds_culen:
-                        embed_culen_end = feat_embeds_culen
-                        break
 
-                # embeds offset in range for this sub-range: offset_in_range = offset_in_start_feat + emb_len_of_pre_subranges
-                embeds_needed_start = valid_feat_embeds_start - used_embeds_culen_start + added_culen_before_used
-                embeds_needed_end = valid_feat_embeds_end - used_embeds_culen_start + added_culen_before_used
-                if embeds_needed_start < embeds_needed_end:
-                    valid_feat_embeds_nums.append((embeds_needed_start, embeds_needed_end))
+        audio_mask = input_ids == audio_token_id
+        audio_indices = torch.full_like(audio_mask, -1, dtype=torch.long)
+        audio_indices[audio_mask] = torch.arange(audio_mask.sum(), device=audio_indices.device)
 
-        if len(valid_feat_embeds_nums) == 0:
-            # should we use dummy feature input to handle this, _handle_missing_visual is used in qwen-vl
-            return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
+        # audio_input_lengths: raw feature frame counts per audio segment
+        audio_input_lengths = feature_lens.tolist()
+        # audio_output_lengths: embedding token counts per audio segment after encoder
+        audio_output_lengths = self._get_feat_extract_output_lengths(feature_lens).tolist()
 
-        required_feat = torch.cat(required_feat, dim=0)
-        required_feat_lens = torch.stack(required_feat_lens, dim=0)
+        split_plan, input_features_split, feature_lens_split, _ = self.build_encoder_inputs(
+            audio_input_lengths, input_features, feature_lens, None
+        )
+
         feat_model_dtype = self.audio_model.layers[0].fc1.weight.dtype
-        required_feat = required_feat.type(feat_model_dtype)
-        # convert to (freqs, total_frames) for input_features to use audio_tower from hf
-        required_feat = required_feat.permute(1, 0)
-        feat_embeds = self.audio_model(required_feat, required_feat_lens)
-        feat_embeds = feat_embeds.last_hidden_state.to(inputs_embeds.device, inputs_embeds.dtype)
-        feat_mask = torch.cat(
-            [feat_mask[:, inputs_start:inputs_end] for inputs_start, inputs_end in input_ranges], dim=1
-        )
-        needed_feat_embeds_num = feat_mask.sum().item()
-        needed_feat_embeds = torch.zeros(
-            [needed_feat_embeds_num] + list(feat_embeds.shape[1:]),
-            dtype=inputs_embeds.dtype,
-            device=inputs_embeds.device,
-        )
+        input_features_split = input_features_split.type(feat_model_dtype)
+        # convert to (freqs, total_frames) for audio_tower from hf
+        input_features_split = input_features_split.permute(1, 0)
+        audio_outputs = self.audio_model(input_features_split, feature_lens_split)
+        audio_embeds = audio_outputs.last_hidden_state
 
-        added_num = 0
-        for start, end in valid_feat_embeds_nums:
-            embeds_num = end - start
-            needed_feat_embeds[added_num : added_num + embeds_num] = feat_embeds[start:end]
-            added_num += embeds_num
-        assert added_num == needed_feat_embeds_num
+        audio_embeds = self.gather_encoder_outputs(audio_embeds, split_plan, audio_output_lengths)
+        audio_embeds = audio_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
-        inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
-        feat_mask = feat_mask.unsqueeze(-1).expand_as(inputs_embeds)
-        inputs_embeds = inputs_embeds.masked_scatter(feat_mask, needed_feat_embeds)
-        inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
+        full_sequence_output = input_ranges is None
+        if full_sequence_output:
+            # Packing mode: inputs_embeds is the full sequence.
+            # Use the full audio_mask for masked_scatter.
+            all_selected_indices = audio_indices[audio_mask]
+            inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
+            full_selected_mask = audio_mask.unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(full_selected_mask, audio_embeds[all_selected_indices])
+            inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
+        else:
+            # Normal mode: slice mask & indices to current rank's input_ranges
+            audio_mask = torch.cat([audio_mask[:, start:end] for start, end in input_ranges], dim=1)
+            selected_indices = torch.cat([audio_indices[:, start:end] for start, end in input_ranges], dim=1)
+            selected_indices = selected_indices[selected_indices != -1]
+
+            inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
+            selected_mask = audio_mask.unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(selected_mask, audio_embeds[selected_indices])
+            inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
 
         return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
+
+    def construct_multimodal_inputs(
+        self,
+        input_ids,
+        inputs_embeds,
+        inputs_ranges,
+        *,
+        pixel_values=None,
+        pixel_values_videos=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        input_features=None,
+        feature_lens=None,
+        feature_attention_mask=None,
+        **kwargs,
+    ):
+        return self.construct_inputs_embeds(
+            input_ids,
+            inputs_embeds,
+            pixel_values,
+            image_grid_thw,
+            pixel_values_videos,
+            video_grid_thw,
+            input_features,
+            feature_lens,
+            feature_attention_mask,
+            inputs_ranges,
+            self.config.image_token_id,
+            self.config.video_token_id,
+            self.config.audio_token_id,
+        )
 
     def forward(
         self,
@@ -242,8 +239,10 @@ class Qwen3OmniMoeModel(Qwen3VLModel):
         feature_attention_mask: Optional["torch.Tensor"] = None,
         **kwargs,
     ) -> "torch.Tensor":
-        force_vit_image = kwargs.pop("force_vit_image", False)
-        force_vit_video = kwargs.pop("force_vit_video", False)
+        kwargs.pop("force_vit_image", None)
+        kwargs.pop("force_vit_video", None)
+        packed_seq_params = kwargs.get("packed_seq_params", None)
+
         feature_lens = None
         if position_ids is None and input_ids is not None:
             if feature_attention_mask is not None:
@@ -258,48 +257,33 @@ class Qwen3OmniMoeModel(Qwen3VLModel):
                 second_per_grids=video_second_per_grid,
             )
 
-        cp_batch = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
-        if self.config.context_parallel_size > 1:
-            cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
-            cp_batch = super(Qwen3VLModel, self).get_batch_on_this_cp_rank(cp_batch, dim3_keys=[])
+        state = self.prepare_packing_state(
+            input_ids, position_ids, attention_mask, packed_seq_params,
+        )
 
         if not self.pre_process or decoder_input is not None:
             return super(Qwen3VLModel, self).forward(
-                decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
+                decoder_input=decoder_input, labels=labels,
+                position_ids=state.position_ids,
+                **state.cp_batch, **kwargs
             )
 
-        inputs_ranges = self.get_input_ranges(input_ids.shape[1])
-
-        inputs_embeds = self.embedding(input_ids=cp_batch["input_ids"], position_ids=None)
-
-        if pixel_values is not None or pixel_values_videos is not None:
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.construct_inputs_embeds(
-                input_ids,
-                inputs_embeds,
-                pixel_values,
-                image_grid_thw,
-                pixel_values_videos,
-                video_grid_thw,
-                input_features,
-                feature_lens,
-                feature_attention_mask,
-                inputs_ranges,
-                self.config.image_token_id,
-                self.config.video_token_id,
-                self.config.audio_token_id,
-            )
-        elif force_vit_image or force_vit_video:
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._handle_missing_visual(inputs_embeds)
+        result = self.build_multimodal_embeddings(
+            input_ids, attention_mask, packed_seq_params, state,
+            multimodal_kwargs=dict(
+                pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
+                image_grid_thw=image_grid_thw, video_grid_thw=video_grid_thw,
+                input_features=input_features, feature_lens=feature_lens,
+                feature_attention_mask=feature_attention_mask,
+            ),
+        )
 
         return super(Qwen3VLModel, self).forward(
-            decoder_input=inputs_embeds,
+            decoder_input=result.inputs_embeds,
             labels=labels,
-            position_ids=position_ids,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-            **cp_batch,
+            position_ids=result.position_ids,
+            visual_pos_masks=result.visual_pos_masks,
+            deepstack_visual_embeds=result.deepstack_visual_embeds,
+            **result.cp_batch,
             **kwargs,
         )

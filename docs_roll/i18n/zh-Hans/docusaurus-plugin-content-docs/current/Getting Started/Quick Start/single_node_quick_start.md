@@ -68,7 +68,7 @@ actor_train.model_args.dtype: fp16
 actor_infer.model_args.dtype: fp16
 reference.model_args.dtype: fp16
 
-# 大模型训练框架从 DeepSpeed 切换到 Megatron-LM，参数可以批量发送，运行速度更快
+# 大模型训练框架从 FSDP2 切换到 Megatron-LM，参数可以批量发送，运行速度更快
 strategy_name: megatron_train
 strategy_config:
   tensor_model_parallel_size: 1

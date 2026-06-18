@@ -302,7 +302,7 @@ class InferenceStrategy(ABC):
         else:
             raise ValueError(f"Unsupported reduction: {reduction}. Use 'mean', 'sum', or 'none'.")
 
-    # Both megatron and deepspeed can output language loss directly.
+    # Both megatron and fsdp2 can output language loss directly.
     # This op is mainly for computing context-parallel loss.
     def op_compute_language_loss(self, losses: torch.Tensor, labels: torch.Tensor, batch_num_tokens: int):
         loss_mask = (labels != IGNORE_INDEX).float()
@@ -441,71 +441,6 @@ class TrainStrategy(InferenceStrategy):
 
     def setup_collective_group(self, model_update_name, comm_plan, backend=None, mode="sender"):
         self._setup_collective_group_impl(model_update_name, comm_plan, backend, mode=mode)
-
-
-    def setup_p2p_collective_group(self, model_update_name, comm_plan, backend="nccl"):
-        (intra_rank, info), = comm_plan.items()
-        collective.init_collective_group(
-            info["world_size"],
-            intra_rank,
-            backend=backend,
-            group_name=info["group_name"],
-            master_addr=info["master_addr"],
-            master_port=info["master_port"],
-            global_ranks=info["global_ranks"]
-        )
-        # 可选：warm-up
-        collective.allreduce(torch.zeros(1).cuda(), group_name=info["group_name"])
-        # 保存元数据
-        if model_update_name not in self.model_update_comm_plan:
-            self.model_update_comm_plan[model_update_name] = {}
-        self.model_update_comm_plan[model_update_name][info["group_name"]] = {
-            "rank": intra_rank,
-            "world_size": info["world_size"],
-            "group_name": info["group_name"],
-            "comm_plan": comm_plan,
-        }
-
-    def model_update_set_write_done_handle(self,):
-        """
-        Set the write synchronization event required for reading and writing shared memory
-        """
-        if not hasattr(self, "_events_inited"):
-            # Sender -> Receiver：Write complete
-            self._write_done_event = torch.cuda.Event(interprocess=True)
-            self._write_done_handle = self._write_done_event.ipc_handle()
-            # Sender <- Receiver：Read complete
-            self._read_done_event_remote = None
-            self._events_inited = True
-
-    def model_update_set_read_done_handle(self, read_done_handles):
-        """
-        Set the read synchronization event required for reading and writing shared memory
-        """
-        logger.warning(f"[Rank {dist.get_rank()}] model_update_set_read_done_handle called")
-        read_done_handle = None
-
-        for p2p_tgt_device in self.p2p_tgt_devices:
-            worker_rank = p2p_tgt_device['rank']
-            local_rank = p2p_tgt_device['device']['rank']
-            for read_done_handle_full_dict in read_done_handles:
-                if worker_rank in read_done_handle_full_dict:
-                    read_done_handle_list = read_done_handle_full_dict[worker_rank]
-                    for read_done_handle_dict in read_done_handle_list:
-                        if local_rank in read_done_handle_dict:
-                            read_done_handle = read_done_handle_dict[local_rank]
-
-        if not hasattr(self, "_read_done_event_remote"):
-            if read_done_handle is not None:
-                logger.warning(f"[Rank {dist.get_rank()}] Creating _read_done_event_remote from handle")
-                self._read_done_event_remote = torch.cuda.Event.from_ipc_handle(
-                    device=torch.cuda.current_device(),
-                    handle=read_done_handle
-                )
-            else:
-                logger.warning(
-                    f"[Rank {dist.get_rank()}] No read_done_handle found, setting _read_done_event_remote=None")
-                self._read_done_event_remote = None
 
     def train_step(
         self,

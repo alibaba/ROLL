@@ -236,6 +236,20 @@ class AgenticConfig(PPOConfig):
         # This ensures student_train/student_infer/teacher are mapped correctly
         self._handle_opd_mapping()
 
+        # OPD mode: build tag_2_domain/domain_2_tag from teacher tag_included for routing
+        if self.is_pure_opd or self.use_opd:
+            self.tag_2_domain = {}
+            self.domain_2_tag = {}
+            for name, ref_cfg in self._reference_configs.items():
+                for tag in ref_cfg.tag_included:
+                    if tag not in self.tag_2_domain:
+                        self.tag_2_domain[tag] = tag
+                        if tag not in self.domain_2_tag:
+                            self.domain_2_tag[tag] = {tag}
+        else:
+            self.tag_2_domain = {}
+            self.domain_2_tag = {}
+
         # Now safe to access actor_infer (may have been mapped from student_infer)
         assert self.actor_infer.generating_args or self.train_env_manager.generating_args, "must have generating_args in env_manager or actor infer."
 
@@ -269,6 +283,11 @@ class AgenticConfig(PPOConfig):
             self.reference.worker_cls = "roll.pipeline.base_worker.ActorWorker"
         if self.critic.worker_cls is None:
             self.critic.worker_cls = "roll.pipeline.base_worker.CriticWorker"
+        # Multi-teacher: set worker_cls for each _reference_configs entry
+        if hasattr(self, '_reference_configs'):
+            for ref_cfg in self._reference_configs.values():
+                if ref_cfg.worker_cls is None:
+                    ref_cfg.worker_cls = "roll.pipeline.base_worker.ActorWorker"
         if self.reward:
             if self.reward.worker_cls is None:
                 self.reward.worker_cls = "roll.pipeline.base_worker.InferWorker"

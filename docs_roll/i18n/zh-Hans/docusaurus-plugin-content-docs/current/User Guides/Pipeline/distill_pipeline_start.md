@@ -101,7 +101,7 @@
      * `max_grad_norm`：梯度裁剪阈值
      * ...
    * **分布式策略**（`strategy_args`）
-     * `strategy_name`：使用的分布式策略（如 `megatron_train`、`deepspeed_infer`）
+     * `strategy_name`：使用的分布式策略（如 `megatron_train`、`megatron_infer`）
      * 策略特定参数：如 `tp_size`（张量并行规模）、`pp_size`（Pipeline并行规模）
      * `gpu_memory_utilization`：GPU 内存利用率（特定于 vLLM）
    * **设备映射**（`device_mapping`）

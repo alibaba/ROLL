@@ -24,7 +24,9 @@ from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 from roll.pipeline.distill.logits_transfer_group import LogitsTransferGroup
 
-from roll.pipeline.rlvr.rlvr_vlm_pipeline import process_images, get_extra_data_provider
+from roll.models.model_providers import get_extra_data_provider
+from roll.datasets.vlm_dataset_utils import process_images
+
 
 logger = get_logger()
 

@@ -3,9 +3,10 @@ from typing import Optional, Tuple
 import torch
 from megatron.core import parallel_state
 from megatron.core.models.common.embeddings.rope_utils import (
+    _apply_rotary_pos_emb_bshd,
     get_pos_emb_on_this_cp_rank,
 )
-from torch import nn
+from torch import Tensor, nn
 
 from .config_qwen3_vl import Qwen3VLConfig
 
@@ -53,6 +54,10 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
         self.cp_group = (
             cp_group if cp_group is not None else parallel_state.get_context_parallel_group(check_initialized=False)
         )
+        # When True, position_ids are already CP-zigzag-split and packed into
+        # THD format (matching mbridge's preprocess_packed_seqs). We skip
+        # additional CP slicing here to avoid double-slicing.
+        self.is_thd_format = False
 
     def apply_interleaved_mrope(self, freqs, mrope_section):
         """Apply interleaved MRoPE to 3D rotary embeddings.
@@ -104,53 +109,74 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
 
         # shape (seq_length, bs, 1, 2 * dim)
         emb = emb[..., None, :].transpose(0, 1).contiguous()
-        if cp_group is None:
-            cp_group = self.cp_group
-        if cp_group is not None and cp_group.size() > 1:
-            # slice rotary_pos_emb along sequence dimension and select the parition of the current
-            # CP rank
-            emb = get_pos_emb_on_this_cp_rank(emb, 0, cp_group)
+        if not self.is_thd_format:
+            if cp_group is None:
+                cp_group = self.cp_group
+            if cp_group is not None and cp_group.size() > 1:
+                # slice rotary_pos_emb along sequence dimension and select the parition of the
+                # current CP rank. Skipped in THD format because position_ids are already
+                # CP+SP sliced and packed.
+                emb = get_pos_emb_on_this_cp_rank(emb, 0, cp_group)
         return emb
 
 
-# def apply_rotary_pos_emb_thd_absolute(
-#     t: torch.Tensor, cu_seqlens: torch.Tensor, freqs: torch.Tensor, rotary_interleaved: bool = False
-# ) -> torch.Tensor:
-#     """A baseline implementation of applying RoPE for `thd` format.
+def _apply_rotary_pos_emb_thd_absolute(
+    t: Tensor, cu_seqlens: Tensor, freqs: Tensor, rotary_interleaved: bool = False
+) -> Tensor:
+    """Apply RoPE for THD format without additional CP slicing.
 
-#     Args:
-#         t (Tensor): Input tensor T is of shape [t, h, d]
-#         cu_seqlens(Tensor):  Cumulative sum of sequence lengths in a batch for `t`,
-#         with shape [b + 1] and dtype torch.int32.
-#         freqs (Tensor): Rotary Positional embedding tensor freq is of shape [max_s, 1, 1, d]
+    In Qwen3-VL sequence packing, the freqs are already generated from
+    CP-zigzag-split and packed position_ids (matching mbridge's
+    preprocess_packed_seqs). We must NOT apply any additional CP zigzag
+    slicing (which the standard Megatron ``_apply_rotary_pos_emb_thd``
+    would do). Instead we simply treat the packed tensor as
+    ``[total_tokens, 1, hidden]`` and delegate to the regular BSHD kernel.
 
-#     Returns:
-#         Tensor: Shape [t, h, d]. The input tensor after applying RoPE.
-#     """
-#     return _apply_rotary_pos_emb_bshd(t[:, None], freqs, rotary_interleaved=rotary_interleaved).squeeze(1)
+    Args:
+        t: Input tensor of shape ``[total_tokens, num_heads, head_dim]``.
+        cu_seqlens: Cumulative sequence lengths (unused, kept for API compat).
+        freqs: Rotary frequencies of shape ``[total_tokens, 1, 1, 2*rot_dim]``.
+        rotary_interleaved: Whether to use interleaved layout.
+
+    Returns:
+        Tensor of shape ``[total_tokens, num_heads, head_dim]``.
+    """
+    return _apply_rotary_pos_emb_bshd(
+        t[:, None], freqs, rotary_interleaved=rotary_interleaved
+    ).squeeze(1)
 
 
-# def apply_rotary_pos_emb_absolute(
-#     t: torch.Tensor,
-#     freqs: torch.Tensor,
-#     config: Qwen3VLConfig,
-#     cu_seqlens: Optional[torch.Tensor] = None,
-# ):
-#     """
-#     Reroute to the appropriate apply_rotary_pos_emb function depending on
-#     bshd (conventional) / thd (packed seq) format
+def apply_rotary_pos_emb_absolute(
+    t: Tensor,
+    freqs: Tensor,
+    config: Qwen3VLConfig,
+    cu_seqlens: Optional[Tensor] = None,
+    **kwargs,
+) -> Tensor:
+    """Apply rotary position embedding for Qwen3-VL.
 
-#     In Qwen3-VL, the shape of freqs is (seq_length, bs, 1, 2 * dim) instead of [max_seqlen, 1, 1, 2 * dim]
-#     """
-#     assert not config.apply_rope_fusion
+    Routes to BSHD or THD-absolute implementation depending on whether
+    ``cu_seqlens`` is provided.  Unlike the standard Megatron
+    ``apply_rotary_pos_emb``, the THD path here does **not** perform any
+    additional CP-related frequency slicing because the frequencies are
+    already computed from CP-zigzag-split and packed position_ids (matching
+    mbridge's preprocess_packed_seqs).
 
-#     if cu_seqlens is None:
-#         result = _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=config.rotary_interleaved)
-#     else:
-#         result = apply_rotary_pos_emb_thd_absolute(t, cu_seqlens, freqs, rotary_interleaved=config.rotary_interleaved)
+    In Qwen3-VL the shape of *freqs* is ``(seq_length, bs, 1, 2*dim)`` instead
+    of the standard ``[max_seqlen, 1, 1, 2*dim]``.
 
-#     return result
-
+    Args:
+        t: Query or key tensor.
+        freqs: Rotary frequency tensor.
+        config: Qwen3VL transformer config.
+        cu_seqlens: Cumulative sequence lengths for THD format (or ``None``).
+        **kwargs: Ignored (absorbs ``mscale``, ``cp_group`` from caller).
+    """
+    if cu_seqlens is None:
+        return _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=config.rotary_interleaved)
+    return _apply_rotary_pos_emb_thd_absolute(
+        t, cu_seqlens, freqs, rotary_interleaved=config.rotary_interleaved
+    )
 
 # copy from transformers==4.57.0
 def get_rope_index(

@@ -69,9 +69,14 @@ def compute_train_infer_correction(
     infer_log_probs: torch.Tensor,        # [B, T]
     global_valid_samples: Optional[int] = None,  # Number of valid sequences
     global_valid_tokens: Optional[int] = None,   # Total number of valid tokens
-    apply_filters: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float]]:
-    """Compute importance sampling weights and apply optional filters based on train-infer divergence."""
+    """Compute importance sampling weights and filters based on train-infer divergence.
+
+    Metrics are always recorded for monitoring. The `enabled` flags in config control
+    whether the corrections are actually applied:
+    - `is_weight.enabled`: controls whether IS weight is computed (vs. all ones)
+    - `filters[i].enabled`: controls whether each filter is applied
+    """
     metrics: Dict[str, float] = {}
 
     base_mask = response_mask.long()
@@ -87,6 +92,21 @@ def compute_train_infer_correction(
     )
     ratio = stats["ratio"]
     diff = stats["diff"]
+
+    # Always record ratio and diff metrics at all granularities for monitoring
+    for agg in ["token", "geometric", "sequence", "segment"]:
+        metrics[f"actor/train_infer_ratio_{agg}_mean@sum"] = agg_loss(
+            loss_mat=ratio[agg],
+            loss_mask=base_mask,
+            loss_agg_mode="seq-mean-token-mean",
+            global_valid_samples=global_valid_samples,
+        ).detach().item()
+        metrics[f"actor/train_infer_diff_{agg}_mean@sum"] = agg_loss(
+            loss_mat=diff[agg],
+            loss_mask=base_mask,
+            loss_agg_mode="seq-mean-token-mean",
+            global_valid_samples=global_valid_samples,
+        ).detach().item()
 
     # 1) Importance Sampling (IS) Weight Handling
     if cfg.is_weight.enabled:
@@ -109,67 +129,43 @@ def compute_train_infer_correction(
 
     # 2) Apply Filters (if enabled)
     filter_mask = torch.ones_like(base_mask)
-    recorded_val_metrics = set()  # Avoid duplicate metric logging for the same granularity
 
-    if apply_filters:
-        for i, f in enumerate(cfg.filters):
-            if not f.enabled:
-                continue
+    for i, f in enumerate(cfg.filters):
+        if not f.enabled:
+            continue
 
-            agg = f.agg_type
+        agg = f.agg_type
 
-            # --- Ratio-based Filter ---
-            if f.ratio_enabled:
-                m_ratio = (ratio[agg] >= f.ratio_low).float() * (ratio[agg] <= f.ratio_high).float()
+        # --- Ratio-based Filter ---
+        if f.ratio_enabled:
+            m_ratio = (ratio[agg] >= f.ratio_low).float() * (ratio[agg] <= f.ratio_high).float()
 
-                # Log pass rate of this filter over currently active tokens
-                metrics[f"actor/train_infer_{agg}_ratio_mask_mean@sum"] = agg_loss(
-                    loss_mat=m_ratio,
-                    loss_mask=base_mask,
-                    loss_agg_mode='token-mean',
-                    batch_num_tokens=global_valid_tokens,
-                ).detach().item()
+            # Log pass rate of this filter over currently active tokens
+            metrics[f"actor/train_infer_{agg}_ratio_mask_mean@sum"] = agg_loss(
+                loss_mat=m_ratio,
+                loss_mask=base_mask,
+                loss_agg_mode='token-mean',
+                batch_num_tokens=global_valid_tokens,
+            ).detach().item()
 
-                # Log mean value of the ratio at this granularity (for monitoring)
-                val_key = f"actor/train_infer_ratio_{agg}_mean@sum"
-                if val_key not in recorded_val_metrics:
-                    metrics[val_key] = agg_loss(
-                        loss_mat=ratio[agg],
-                        loss_mask=base_mask,
-                        loss_agg_mode="seq-mean-token-mean",
-                        global_valid_samples=global_valid_samples,
-                    ).detach().item()
-                    recorded_val_metrics.add(val_key)
+            filter_mask = filter_mask * m_ratio
 
-                filter_mask = filter_mask * m_ratio
+        # --- Difference-based Filter ---
+        if f.diff_enabled:
+            m_diff = (diff[agg] >= f.diff_low).float() * (diff[agg] <= f.diff_high).float()
 
-            # --- Difference-based Filter ---
-            if f.diff_enabled:
-                m_diff = (diff[agg] >= f.diff_low).float() * (diff[agg] <= f.diff_high).float()
+            # Log pass rate of this filter
+            metrics[f"actor/train_infer_{agg}_diff_mask_mean@sum"] = agg_loss(
+                loss_mat=m_diff,
+                loss_mask=base_mask,
+                loss_agg_mode='token-mean',
+                batch_num_tokens=global_valid_tokens,
+            ).detach().item()
 
-                # Log pass rate of this filter
-                metrics[f"actor/train_infer_{agg}_diff_mask_mean"] = agg_loss(
-                    loss_mat=m_diff,
-                    loss_mask=base_mask,
-                    loss_agg_mode='token-mean',
-                    batch_num_tokens=global_valid_tokens,
-                ).detach().item()
-
-                # Log mean value of the difference at this granularity
-                val_key = f"actor/train_infer_diff_{agg}_mean@sum"
-                if val_key not in recorded_val_metrics:
-                    metrics[val_key] = agg_loss(
-                        loss_mat=diff[agg],
-                        loss_mask=base_mask,
-                        loss_agg_mode="seq-mean-token-mean",
-                        global_valid_samples=global_valid_samples,
-                    ).detach().item()
-                    recorded_val_metrics.add(val_key)
-
-                filter_mask = filter_mask * m_diff
+            filter_mask = filter_mask * m_diff
 
     # 3) Final overall pass rate after all filters
-    if apply_filters and cfg.filters:
+    if cfg.filters:
         metrics["actor/train_infer_final_mask_mean"] = masked_mean(
             base_mask*filter_mask.float(), base_mask
         ).detach().item()
@@ -188,6 +184,11 @@ def apply_train_infer_correction_to_batch(
     This function is designed for pipeline-level usage where masks are in their
     original shape [B, T]. It handles slicing internally and updates the original
     masks with the computed filter mask.
+
+    Metrics are always recorded for monitoring. The `enabled` flags in config control
+    whether corrections are applied:
+    - `is_weight.enabled`: controls whether IS weight is computed (vs. all ones)
+    - `filters[i].enabled`: controls whether each filter is applied
 
     Args:
         pipeline_config: Pipeline configuration containing train_infer_correction config
@@ -231,7 +232,6 @@ def apply_train_infer_correction_to_batch(
         infer_log_probs=infer_lp,
         global_valid_samples=None,   # Will be inferred from stat_mask
         global_valid_tokens=None,    # Will be inferred from stat_mask
-        apply_filters=True,
     )
 
     # Set train_infer_is_weight

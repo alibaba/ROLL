@@ -51,28 +51,21 @@ def gather_and_convert_weights(
             gathered_named_weights.append((mcore_name, gathered_weights))
             handles.append(dist.all_gather(gathered_weights, weight, group=ep_group, async_op=True))
 
-        def extract_suffix_number(s):
-            import re
-
-            match = re.search(r"\d+$", s)
-            return match.group() if match else None
-
         hf_named_weights = []
         for handle, (mcore_name, weights) in zip(handles, gathered_named_weights):
             if handle is not None:
                 handle.wait()
-            local_moe_index = extract_suffix_number(mcore_name)
             for ep_rank, weight in enumerate(weights):
-                global_moe_index = model_converter.dist_converter.num_layers_for_expert * ep_rank + int(
-                    local_moe_index
-                )
-                name = mcore_name[: -len(local_moe_index)] + str(global_moe_index)
+                # Temporarily set EP rank so the converter computes the correct global expert index
+                saved_ep_rank = model_converter.dist_converter.expert_model_parallel_rank
+                model_converter.dist_converter.expert_model_parallel_rank = ep_rank
                 converted_weights = (
                     model_converter.convert_to_hf(
-                        {name: [weight]}, layer_index_preprocessed=True, moe_index_preprocessed=True, **kwargs
+                        {mcore_name: [weight]}, layer_index_preprocessed=True, **kwargs
                     )
                     or {}
                 )
+                model_converter.dist_converter.expert_model_parallel_rank = saved_ep_rank
                 hf_named_weights.extend([(name, weight) for name, weight in converted_weights.items()])
 
         return hf_named_weights
@@ -438,13 +431,16 @@ class MegatronWeightUpdater:
         for hf_named_weights in gather_all_hf_weights(
             self.models_unwrapped, buffer_size=self._model_update_buffer_size, weights_meta=self._weights_meta
         ):
+            if not hf_named_weights:
+                continue
             if self._co_infer_worker is not None:
                 serialized_tensors = serialize_named_weights(
                     hf_named_weights, infer_strategy=self.infer_worker_config.strategy_args.strategy_name
                 )
                 infer_parallel_tensors = [None] * infer_parallel_size if co_infer_rank == 0 else None
+                global_dst_rank = dist.get_global_rank(self._infer_parallel_cpu_group, 0)
                 dist.gather_object(
-                    serialized_tensors, infer_parallel_tensors, group_dst=0, group=self._infer_parallel_cpu_group
+                    serialized_tensors, infer_parallel_tensors, global_dst_rank, group=self._infer_parallel_cpu_group
                 )
 
             if refs:
@@ -467,14 +463,14 @@ class MegatronWeightUpdater:
         return {}
 
     def _separated_model_update(self):
-        if not mpu.get_expert_data_parallel_rank() == 0:
-            return {}
 
         logger.info(f"start broadcast model update {self.model_update_name}")
         for hf_named_weights in gather_pp_stage_hf_weights(
             self.models_unwrapped, buffer_size=self._model_update_buffer_size
         ):
             if not self._broadcast_workers:
+                continue
+            if mpu.get_expert_data_parallel_rank() != 0:
                 continue
             while not ray.get(self._model_update_locker.acquire.remote()):
                 time.sleep(0.1)

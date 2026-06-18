@@ -4,3 +4,4 @@ from roll.pipeline.rlvr.rewards.general_val_rule_reward_worker import GeneralVal
 from roll.pipeline.rlvr.rewards.ifeval_rule_reward_worker import GeneralRuleRewardWorker
 from roll.pipeline.rlvr.rewards.llm_judge_reward_worker import LLMJudgeRewardWorker
 from roll.pipeline.rlvr.rewards.math_rule_reward_worker import MathRuleRewardWorker
+from roll.pipeline.rlvr.rewards.remote_reward_system_worker import RemoteRewardSystemWorker

@@ -52,6 +52,10 @@ class DistributingParallelArguments:
         default=None,
         metadata={"help": "Degree of expert model parallelism."},
     )
+    expert_tensor_parallel_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Degree of expert tensor parallelism, default to 1, avoid override by tp_size"}
+    )
     account_for_embedding_in_pipeline_split: Optional[bool] = field(
         default=None,
         metadata={
@@ -133,6 +137,15 @@ class DistributingParallelArguments:
         default=False,
         metadata={"help": "Use fused RoPE kernel."},
     )
+    cross_entropy_loss_fusion: bool = field(
+        default=False,
+        metadata={
+            "help": "Use fused CUDA kernels for softmax-based computations (logprobs and entropy). "
+            "These kernels leverage cluster block and online softmax techniques for better performance "
+            "on large vocabularies. Only effective when TP=1. Set to False to fall back to the "
+            "standard PyTorch implementation for debugging or compatibility."
+        },
+    )
     # moe
     moe_layer_recompute: bool = field(
         default=False,
@@ -186,6 +199,13 @@ class DistributingParallelArguments:
             " Without this, the shared epxerts execute after the routed experts."
         },
     )
+    moe_enable_routing_replay: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable RouterReplay for MoE routing, which allows recording and replaying routing "
+            "decisions to ensure consistent expert assignment across inference and training."
+        },
+    )
     moe_router_dtype: Optional[str] = field(
         default=None,
         metadata={
@@ -194,7 +214,10 @@ class DistributingParallelArguments:
         },
     )
     # mtp
-    mtp_num_layers: Optional[int] = field(default=None, metadata={"help": "The number of mtp layers."})
+    mtp_num_layers: Optional[int] = field(
+        default=0,
+        metadata={"help": "The number of mtp layers. Default to 0 to disable mtp."},
+    )
     # train options
     calculate_per_token_loss: bool = field(
         default=False,
@@ -208,6 +231,20 @@ class DistributingParallelArguments:
         metadata={
             "help": "Which Transformer implementation to use.",
             "choices": ["local", "transformer_engine"],
+        },
+    )
+    cuda_graph_impl: Optional[Literal["local", "transformer_engine"]] = field(
+        default=None,
+        metadata={
+            "help": "Determines the CUDA graph capture implementation.",
+            "choices": ["local", "transformer_engine"],
+        },
+    )
+    cuda_graph_scope: str = field(
+        default="full",
+        metadata={
+            "help": "Determines the CUDA graphs capturing scope."
+                    "Default to full for backward compatibility."
         },
     )
     fp8_recipe: Optional[str] = field(
@@ -229,7 +266,7 @@ class DistributingParallelArguments:
             "help": "FP8 format to use. Supported formats: 'e4m3', 'hybrid'. Do not change if unsure",
         },
     )
-    additional_configs: Optional[Union[dict, str]] = field(
+    additional_configs: Optional[Union[str, dict]] = field(
         default_factory=dict,
         metadata={
             "help": "Dictionary or Path to a JSON file containing additional configuration parameters for the model.",
@@ -247,6 +284,10 @@ class DistributingParallelArguments:
 
         if self.recompute_modules is not None and isinstance(self.recompute_modules, str):
             self.recompute_modules = self.recompute_modules.split(",")
+
+        logger.info(f"cuda_graph_scope before processing: {self.cuda_graph_scope}, type: {type(self.cuda_graph_scope)}")
+        if self.cuda_graph_scope is not None and isinstance(self.cuda_graph_scope, str):
+            self.cuda_graph_scope = self.cuda_graph_scope.split(",")
 
         if self.variable_seq_lengths and self.moe_token_dispatcher_type in ["allgather"]:
             raise ValueError(
@@ -287,7 +328,7 @@ class MegatronArguments(DistributingParallelArguments):
         metadata={"help": "Use distributed optimizer."},
     )
     distrib_optim_fully_reshardable: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Whether optimizer states are fully reshardable."},
     )
     distrib_optim_fully_reshardable_mem_efficient: bool = field(
@@ -336,10 +377,23 @@ class MegatronArguments(DistributingParallelArguments):
 
     save_hf_model: bool = field(default=False, metadata={"help": "Save model as hf format."})
     save_merged_model: bool = field(default=False, metadata={"help": "Save merged model weights in LoRA training."})
+    ckpt_format: Literal["legacy", "torch_dist"] = field(
+        default="legacy",
+        metadata={
+            "help": "Checkpoint format to use. "
+            "`legacy` using `torch.save/load` directly, "
+            "`torch_dist` is a megatron built-in distributed checkpointing format"
+        },
+    )
 
     sequence_packing: bool = field(
         default=False,
         metadata={"help": "Enable sequence packing without cross-attention."},
+    )
+
+    compile_warmup: bool = field(
+        default=False,
+        metadata={"help": "Enable compile warmup before training."},
     )
 
     def __post_init__(self):
@@ -349,6 +403,10 @@ class MegatronArguments(DistributingParallelArguments):
             assert self.overlap_grad_reduce, (
                 "--overlap_grad_reduce should be turned on when using --overlap_param_gather"
             )
+        if self.expert_tensor_parallel_size is not None and self.expert_tensor_parallel_size != self.tensor_model_parallel_size:
+            logger.info(f"Set ckpt_format to `torch_dist` when etp_size[{self.expert_tensor_parallel_size}]"
+                        f"is not equal to tp_size[{self.tensor_model_parallel_size}]")
+            self.ckpt_format = "torch_dist"
 
     @classmethod
     def from_json_file(cls, json_file_path) -> "MegatronArguments":

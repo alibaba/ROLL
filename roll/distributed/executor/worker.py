@@ -18,6 +18,7 @@ from roll.utils.logging import get_logger
 from roll.utils.network_utils import collect_free_port, get_node_ip
 from roll.utils.offload_states import OffloadStateType
 from roll.utils.offload_nccl import monkey_patch_torch_dist
+from roll.utils.telemetry import init_telemetry
 
 from roll.platforms import current_platform
 
@@ -108,6 +109,16 @@ class Worker:
             if success:
                 return master_port
         raise RuntimeError(f"Can not allocate unique MASTER_PORT on {master_addr}.")
+
+    @staticmethod
+    def is_port_available(port: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("", port))
+                return True
+        except OSError:
+            return False
+
     def get_master_addr_and_port(self):
         return self.master_addr, self.master_port
 
@@ -127,6 +138,14 @@ class Worker:
 
     def initialize(self, pipeline_config, *args, **kwargs):
         self.pipeline_config = pipeline_config
+
+        # Initialize OpenTelemetry tracing on the worker actor
+        if os.environ.get("ROLL_OTEL_ENABLED") == "1":
+            init_telemetry(
+                service_name=self.cluster_name,
+                otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                instance_id=self.worker_name,
+            )
 
         model_name = self.worker_config.model_args.model_name_or_path
         if model_name:
@@ -170,12 +189,6 @@ class Worker:
         else:
             self.logger.warning("worker has not strategy")
 
-    def setup_p2p_collective_group(self, *args, **kwargs):
-        if getattr(self, "strategy", None) is not None:
-            self.strategy.setup_p2p_collective_group(*args, **kwargs)
-        else:
-            self.logger.warning("worker does not have a strategy")
-
     def start_model_update(self, *args, **kwargs):
         metrics = {}
         if getattr(self, "strategy", None) is not None:
@@ -193,12 +206,6 @@ class Worker:
 
         output = DataProto(meta_info={"metrics": metrics})
         return output
-
-    def model_update_set_read_done_handle(self, *args, **kwargs):
-        if getattr(self, "strategy", None) is not None:
-            self.strategy.model_update_set_read_done_handle(*args, **kwargs)
-        else:
-            self.logger.warning("worker has not strategy")
 
     def update_parameter_in_bucket(self, *args, **kwargs):
         if getattr(self, "strategy", None) is not None:

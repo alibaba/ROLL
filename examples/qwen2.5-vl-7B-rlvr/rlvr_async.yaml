@@ -1,8 +1,3 @@
-defaults:
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
 hydra:
   run:
     dir: .
@@ -43,6 +38,8 @@ validation:
      - /data/oss_bucket_0/yuzhao/data/One-RL-to-See-Them-All/Orsta-Data-47k/test/test_math_megabench_237.parquet
      - /data/oss_bucket_0/yuzhao/data/One-RL-to-See-Them-All/Orsta-Data-47k/test/test_detection_coco_test_multi_2000.parquet
    dataset_dir: ./
+   preprocessing_num_workers: 32
+   image_max_pixels: 1048576  # 1024 * 1024
  generating_args:
    max_new_tokens: ${response_length}
    top_p: 0.99
@@ -77,6 +74,7 @@ actor_train:
     dataset_dir: ./
     messages: prompt
     preprocessing_num_workers: 32
+    image_max_pixels: 1048576  # 1024 * 1024
   strategy_args:
     strategy_name: megatron_train
     strategy_config:

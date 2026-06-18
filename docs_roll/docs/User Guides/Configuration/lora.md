@@ -15,7 +15,7 @@ In the ROLL framework, LoRA fine-tuning can be configured by setting relevant pa
 
 ### Configuration Example
 
-The following is a typical LoRA configuration example (from `examples/qwen2.5-7B-rlvr_megatron/rlvl_lora_zero3.yaml`):
+The following is a typical LoRA configuration example (from `examples/qwen2.5-7B-rlvr_megatron/rlvr_lora_fsdp2.yaml`):
 
 ```yaml
 # LoRA global configuration
@@ -40,8 +40,13 @@ actor_train:
     warmup_steps: 20
     num_train_epochs: 50
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      offload_policy: false
   device_mapping: list(range(0,16))
   infer_batch_size: 4
 
@@ -93,15 +98,16 @@ actor_infer:
 
 ## LoRA Compatibility with Training Backends
 
-Currently, LoRA fine-tuning only supports the DeepSpeed training backend:
+Currently, LoRA fine-tuning supports the FSDP2 and Megatron training backend. The difference of LoRA related configuration between them only exists in `lora_target` as following:
 
-```yaml
-actor_train:
-  strategy_args:
-    strategy_name: deepspeed_train  # LoRA only supports deepspeed_train
-```
+ - FSDP2 can use `o_proj,q_proj,k_proj,v_proj` as `lora_target`. This is because FSDP2 provides optimization features that integrate well with LoRA.
+ - Megatron can use `all-linear` including `linear_qkv,linear_proj,linear_fc1,linear_fc2` where:
+   - `linear_qkv` stands for `q_proj,k_proj,v_proj` in HF
+   - `linear_proj` stands for `o_proj` in HF
+   - `linear_fc1` stands for `gate_proj,up_proj` in HF
+   - `linear_fc2` stands for `down_proj` in HF
 
-This is because DeepSpeed provides optimization features that integrate well with LoRA.
+Additionally, vision model weights (vit), vpp and tp+ep ([doc](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/megatron)) are not supported when using megatron backend for LoRA fine-tuning.
 
 ## Performance Optimization Recommendations
 
@@ -119,7 +125,7 @@ This is because DeepSpeed provides optimization features that integrate well wit
 
 ## Notes
 
-1. LoRA fine-tuning currently only supports the DeepSpeed training backend
+1. LoRA fine-tuning supports the FSDP2 and Megatron training backend
 2. Ensure the model supports LoRA fine-tuning
 3. Pay attention to compatibility with LoRA when using gradient checkpointing
 4. LoRA fine-tuning performance may differ from full parameter fine-tuning and needs to be evaluated according to specific tasks

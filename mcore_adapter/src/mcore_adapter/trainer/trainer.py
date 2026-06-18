@@ -996,7 +996,46 @@ class McaTrainer(Trainer):
                 logs["grad_norm"] = grad_norm.detach().item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             logs["learning_rate"] = self._get_learning_rate()
             logs.update(moe_losses)
-            logs.update(mtp_losses)
+            # MTP layers only exist on PP last stage, so mtp_losses is only populated there.
+            # Broadcast mtp_losses to all PP ranks so rank 0 (PP first stage) can log them.
+            if mpu.get_pipeline_model_parallel_world_size() > 1:
+                is_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
+                # First, broadcast the number of mtp_losses entries and their keys from last stage
+                num_keys = torch.tensor(len(mtp_losses), device=self.args.device, dtype=torch.long)
+                torch.distributed.broadcast(
+                    num_keys,
+                    src=mpu.get_pipeline_model_parallel_last_rank(),
+                    group=mpu.get_pipeline_model_parallel_group(),
+                )
+                if num_keys.item() > 0:
+                    if is_last_stage:
+                        keys_list = list(mtp_losses.keys())
+                    else:
+                        keys_list = None
+                    # Broadcast keys via object broadcast
+                    keys_broadcast = [keys_list]
+                    torch.distributed.broadcast_object_list(
+                        keys_broadcast,
+                        src=mpu.get_pipeline_model_parallel_last_rank(),
+                        group=mpu.get_pipeline_model_parallel_group(),
+                    )
+                    keys_list = keys_broadcast[0]
+                    # Broadcast each value tensor
+                    for key in keys_list:
+                        if is_last_stage:
+                            val = mtp_losses[key]
+                            if not isinstance(val, torch.Tensor):
+                                val = torch.tensor(val, device=self.args.device)
+                        else:
+                            val = torch.tensor(0.0, device=self.args.device)
+                        torch.distributed.broadcast(
+                            val,
+                            src=mpu.get_pipeline_model_parallel_last_rank(),
+                            group=mpu.get_pipeline_model_parallel_group(),
+                        )
+                        mtp_losses[key] = val
+            for k, v in mtp_losses.items():
+                logs[k] = v.detach().item() if isinstance(v, torch.Tensor) else v
             if metrics_tensors is not None and len(self.metrics_keys) > 1:  # metrics except loss
                 metrics = self.gather_metrics(metrics_tensors)
                 metrics.pop("loss", None)
@@ -1093,7 +1132,7 @@ class McaTrainer(Trainer):
     def save_model(self, output_dir: str = None, _internal_call: bool = False):
         output_dir = output_dir or self.args.output_dir
         if not (self.args.save_only_model and self.args.save_hf_model):
-            self.model.save_pretrained(output_dir, save_merged_model=self.args.save_merged_model)
+            self.model.save_pretrained(output_dir, save_merged_model=self.args.save_merged_model, ckpt_format=self.args.ckpt_format)
         if self.args.save_hf_model:
             self.model.save_pretrained_as_hf(output_dir)
         if self.args.should_save:

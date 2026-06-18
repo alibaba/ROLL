@@ -9,9 +9,21 @@ from typing import Optional
 import httpcore
 import httpx
 from gem import Env
-from rock.actions import CreateBashSessionRequest
-from rock.sdk.sandbox.client import Sandbox
-from rock.sdk.sandbox.config import SandboxConfig
+
+try:
+    from rock.sdk.sandbox.client import Sandbox
+    from rock.sdk.sandbox.config import SandboxConfig
+except ImportError:
+    print("ROCK SDK not available. Make sure it's installed.")
+    pass
+try:
+    from rock.actions import CreateBashSessionRequest
+except ImportError:
+    print("rl-rock is not available, try import from rock-rl(old-version)")
+    try:
+        from rock.sdk.sandbox.request import CreateBashSessionRequest
+    except ImportError:
+        print("rock-rl is still not available.  Make sure it's installed. ")
 
 from roll.utils.logging import get_logger
 

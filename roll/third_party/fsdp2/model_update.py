@@ -3,6 +3,8 @@ from dataclasses import asdict
 
 import ray
 import torch
+import transformers
+from packaging import version
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
@@ -13,6 +15,7 @@ from roll.utils.collective import collective
 from roll.utils.logging import get_logger
 from roll.utils.network_utils import collect_free_port, get_node_ip
 from roll.utils.send_recv_utils import serialize_named_weights
+from roll.third_party.fsdp2.qwen3_moe_patch import _iter_convert_fsdps_moe_weights
 
 logger = get_logger()
 
@@ -21,6 +24,11 @@ def gather_fsdp2_weights(model, buffer_size, is_lora=False):
     """
     Gather FSDP2 weights for model update.
     For FSDP2, we need to get the full tensor from the sharded parameters.
+    Also converts FSDP MoE weights from FSDP format to HF/vLLM expected format.
+
+    Yields batches of (name, tensor) pairs whose total size does not exceed
+    buffer_size. Expert DTensor parameters are gathered lazily (one layer at a
+    time) to avoid materializing all expert weights on GPU simultaneously.
     """
     if is_lora:
         from peft.utils import get_peft_model_state_dict
@@ -31,7 +39,12 @@ def gather_fsdp2_weights(model, buffer_size, is_lora=False):
         named_params = [(name, param) for name, param in model.named_parameters()]
 
     waiting_params, waiting_params_size = [], 0
-    for name, param in named_params:
+    need_convert_moe = (
+        version.parse(transformers.__version__) >= version.parse("5.2.0")
+        and getattr(model.config, "model_type", "") in ("qwen3_moe", "qwen3_next")
+    )
+    params_iter = _iter_convert_fsdps_moe_weights(named_params) if need_convert_moe else named_params
+    for name, param in params_iter:
         full_tensor_size = param.numel() * param.element_size()
         if waiting_params and waiting_params_size + full_tensor_size > buffer_size:
             yield [(n, p.data if not isinstance(p.data, DTensor) else p.data.full_tensor()) for n, p in waiting_params]
@@ -223,7 +236,7 @@ class FSDP2WeightUpdater:
                     infer_parallel_tensors = [None] * infer_parallel_size if co_infer_rank == 0 else None
                     global_dst_rank = dist.get_global_rank(self._infer_parallel_cpu_group, 0)
                     dist.gather_object(
-                        serialized_tensors, infer_parallel_tensors, dst=global_dst_rank, group=self._infer_parallel_cpu_group
+                        serialized_tensors, infer_parallel_tensors, global_dst_rank, group=self._infer_parallel_cpu_group
                     )
             if refs:
                 ray.get(refs)

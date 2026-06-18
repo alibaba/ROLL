@@ -65,8 +65,9 @@ class PretrainedConfig:
         save_dict = {}
         for f in dataclasses.fields(self):
             v = getattr(self, f.name)
-            if isinstance(v, list) and len(v) > 0 and callable(v[0]):
-                continue
+            if isinstance(v, list) and len(v) > 0:
+                if callable(v[0]) or isinstance(v[0], (torch.dtype, enum.Enum)):
+                    continue
             if callable(v) or isinstance(v, (torch.dtype, enum.Enum)):
                 continue
             if isinstance(v, PipelineParallelLayerLayout):
@@ -153,6 +154,9 @@ class PretrainedConfig:
                 setattr(self, name, getattr(args, name))
         self.bf16 = getattr(args, "bf16", self.bf16)
         self.fp16 = getattr(args, "fp16", self.fp16)
+
+        if getattr(self, "mtp_num_layers", None) == 0:
+            self.mtp_num_layers = None
 
     @classmethod
     def from_pretrained(cls, model_name_or_path: str, args: Optional["TrainingArguments"] = None):
@@ -295,6 +299,13 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             "choices": ["local", "transformer_engine"],
         },
     )
+    moe_parallel_folding: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether there is heterogeneous parallelism for moe and dense groups "
+            "set to true when etp_size != tp_size"
+        }
+    )
 
     def __post_init__(self):
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:
@@ -389,6 +400,9 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 f" ({self.pipeline_model_parallel_size}) and virtual_pipeline_model_parallel_size "
                 f"({self.virtual_pipeline_model_parallel_size})."
             )
+
+        if self.tensor_model_parallel_size != self.expert_tensor_parallel_size:
+            self.moe_parallel_folding = True
 
     def distribute_config_match(self, other: "McaModelConfig"):
         if not isinstance(other, McaModelConfig):

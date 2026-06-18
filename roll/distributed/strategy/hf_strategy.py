@@ -3,7 +3,6 @@ from concurrent import futures
 from datetime import timedelta
 from typing import Callable, Dict, List, Optional, Tuple
 
-import deepspeed
 import torch
 import torch.distributed as dist
 from accelerate import cpu_offload_with_hook

@@ -21,25 +21,27 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
-def update_quant_config(vllm_config):
-    # Use hf_overrides arguments of LLM with weight_block_size
+def update_quant_config(config, vllm_config):
+    # Use hf_overrides arguments with weight_block_size
     # to enable block quantization.
     # e.g.
     #   strategy_args:
     #     strategy_name: vllm
     #     strategy_config:
+    #       quantization: fp8
     #       hf_overrides:
     #         quantization_config:
     #           activation_scheme: dynamic
+    #           fmt: e4m3
     #           quant_method: fp8
     #           weight_block_size: [128, 128]
-    if not vllm_config.quant_config:
+    if "hf_overrides" not in config or "quantization_config" not in config["hf_overrides"]:
         return
-    if not isinstance(vllm_config.quant_config, Fp8Config):
-        return
-
+    assert config["hf_overrides"]["quantization_config"]["quant_method"] == "fp8"
+    assert isinstance(vllm_config.quant_config, Fp8Config)
     assert vllm_config.quant_config.activation_scheme == "dynamic"
-    vllm_config.quant_config.is_checkpoint_fp8_serialized = True
+    assert vllm_config.quant_config.is_checkpoint_fp8_serialized
+    vllm_config.quant_config.skip_process_weights_after_loading = True
     logger.info(f"Using custom vLLM quantization, block size {vllm_config.quant_config.weight_block_size}")
 
 def _fp8_linear_weight_loader(layer: weakref.ReferenceType, original_weight_loader, param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs) -> None:
@@ -108,6 +110,8 @@ def _fp8_linear_create_weights(
 ):
     _original_fp8_linear_create_weights(self, layer, input_size_per_partition, output_partition_sizes,
                                    input_size, output_size, params_dtype, **extra_weight_attrs)
+    if not getattr(self.quant_config, "skip_process_weights_after_loading", False):
+        return
 
     assert self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
@@ -137,12 +141,16 @@ def _fp8_linear_create_weights(
         layer.shard_num = len(output_partition_sizes)
         layer.shard_loaded = 0
 
+    layer.register_parameter("input_scale", None)
+
 _original_fp8_linear_create_weights = Fp8LinearMethod.create_weights
 Fp8LinearMethod.create_weights = _fp8_linear_create_weights
 
 def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
-    pass
+    if not getattr(self.quant_config, "skip_process_weights_after_loading", False):
+        _original_fp8_linear_process_weights_after_loading(self, layer)
 
+_original_fp8_linear_process_weights_after_loading = Fp8LinearMethod.process_weights_after_loading
 Fp8LinearMethod.process_weights_after_loading = _fp8_linear_process_weights_after_loading
 
 def _fp8_moe_w13_weight_loader(layer: weakref.ReferenceType, original_weight_loader, param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs) -> None:
@@ -176,6 +184,8 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
                    params_dtype: torch.dtype, **extra_weight_attrs):
     _original_fp8_moe_create_weights(self, layer, num_experts, hidden_size, intermediate_size_per_partition,
                                      params_dtype, **extra_weight_attrs) 
+    if not getattr(self.quant_config, "skip_process_weights_after_loading", False):
+        return
 
     assert self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
@@ -191,6 +201,25 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
 
     # TODO: support ep
     assert layer.local_num_experts == num_experts
+
+    if getattr(self, "_setup_kernel", None):
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+        assert self.fp8_backend not in [
+            Fp8MoeBackend.AITER,
+            Fp8MoeBackend.MARLIN,
+            Fp8MoeBackend.FLASHINFER_CUTLASS,
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            # TODO: support inflight fp8 quantization for DEEPGEMM and BATCHED_DEEPGEMM
+            Fp8MoeBackend.DEEPGEMM,
+            Fp8MoeBackend.BATCHED_DEEPGEMM,
+        ]
+        assert self.fp8_backend in [
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.BATCHED_TRITON,
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.XPU,
+        ]
 
     # store essential config in layer for custom weight loader
     layer.weight_block_size = self.quant_config.weight_block_size
@@ -213,6 +242,26 @@ _original_fp8_moe_create_weights = Fp8MoEMethod.create_weights
 Fp8MoEMethod.create_weights = _fp8_moe_create_weights
 
 def _fp8_moe_process_weights_after_loading(self, layer: Module) -> None:
-    pass
+    if not getattr(self.quant_config, "skip_process_weights_after_loading", False):
+        _original_fp8_moe_process_weights_after_loading(self, layer)
+    else:
+        if getattr(self, "_setup_kernel", None):
+            w13 = layer.w13_weight
+            w2 = layer.w2_weight
+            w13_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+            w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+            w13_input_scale = layer.w13_input_scale
+            w2_input_scale = layer.w2_input_scale
+            assert w13_input_scale is None
+            assert w2_input_scale is None
+            # _setup_kernel will change layer.w13_weight, layer.w2_weight
+            self._setup_kernel(
+                layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+            )
+            assert w13.data_ptr() == layer.w13_weight.data_ptr()
+            assert w2.data_ptr() == layer.w2_weight.data_ptr()
+            assert w13_scale.data_ptr() == getattr(layer, f"w13_{self.weight_scale_name}").data_ptr()
+            assert w2_scale.data_ptr() == getattr(layer, f"w2_{self.weight_scale_name}").data_ptr()
 
+_original_fp8_moe_process_weights_after_loading = Fp8MoEMethod.process_weights_after_loading
 Fp8MoEMethod.process_weights_after_loading = _fp8_moe_process_weights_after_loading

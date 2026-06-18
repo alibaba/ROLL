@@ -1,9 +1,5 @@
 defaults:
   - ../config/envs@_here_
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
 
 hydra:
   run:
@@ -29,7 +25,7 @@ checkpoint_config:
 # tracker_kwargs:
 #   log_dir: /data/oss_bucket_0/yuzhao/llm/tensorboard/roll_exp/deepeyes
 
-offload_nccl: true
+offload_nccl: false
 
 num_gpus_per_node: 8
 

@@ -12,7 +12,7 @@ To integrate a new model into **ROLL**, you must supply:
 | Phase     | Pick ≥ 1 backend |
 |-----------|-----------------|
 | Inference | `vllm`, `sglang` |
-| Training  | `DeepSpeed`, `Megatron` |
+| Training  | `FSDP2`, `Megatron` |
 
 ---
 
@@ -30,7 +30,7 @@ https://docs.sglang.ai/supported_models/support_new_models.html
 
 ## 2. Training Strategies
 
-### 2.1 `DeepSpeed`
+### 2.1 `FSDP2`
 
 1. Ensure your model can be loaded by  
    ```python
@@ -41,8 +41,8 @@ https://docs.sglang.ai/supported_models/support_new_models.html
 3. Make the model can be loaded in `roll/models/model_providers.py`.
 
 Once these steps are complete, you can:
-- train with the `deepspeed_train` strategy for `actor_train` worker, and  
-- with `hf_infer` or `deepspeed_infer` strategy for the `reference` worker.
+- train with the `fsdp2_train` strategy for `actor_train` worker, and  
+- with `hf_infer` or `fsdp2_infer` strategy for the `reference` worker.
 
 ### 2.2 `Megatron`
 

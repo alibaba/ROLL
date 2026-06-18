@@ -107,7 +107,7 @@ If the device does not support IPC, use either 'nccl-only' or 'ray' mode instead
      * `max_grad_norm`: Gradient clipping threshold
      * ...
    * **Distributed Strategy** (`strategy_args`)
-     * `strategy_name`: Distributed strategy to use (e.g., `megatron_train`, `deepspeed_infer`)
+     * `strategy_name`: Distributed strategy to use (e.g., `megatron_train`, `megatron_infer`)
      * Strategy-specific parameters: e.g., `tp_size` (tensor parallelism size), `pp_size` (pipeline parallelism size)
      * `gpu_memory_utilization`: GPU memory utilization (vLLM-specific)
    * **Device Mapping** (`device_mapping`)

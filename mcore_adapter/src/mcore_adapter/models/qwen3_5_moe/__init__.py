@@ -5,29 +5,26 @@ import torch
 
 from ..auto.config_auto import register_config
 from ..auto.modeling_auto import register_model
-from ..converter.convert_utils import (
-    convert_to_hf_prefix,
-    get_mca_moe_index,
-    get_mca_weight_prefix,
-    remove_mca_weight_prefix,
-)
 from ..converter.dist_converter import (
     DistParallelConfig,
     default_dist_config,
     gdn_dist_config,
+    mtp_config,
     register_dist_config,
     shared_moe_dist_config,
 )
 from ..converter.template import (
     ConverOp,
+    CopyConverOp,
     GatedQKVConverOp,
     GDNConv1dConverOp,
     RenameConverOp,
     StackConverOp,
     StackedTensors,
+    ZeroCenteredRMSNormConverOp,
     register_template,
 )
-from ..qwen3_5 import DropConverOp, Qwen3_5_GDNConverOp, Qwen3_5Template, ZeroCenteredRMSNormConverOp
+from ..qwen3_5 import Qwen3_5_GDNConverOp, Qwen3_5Template
 from ..qwen3_5.config_qwen3_5 import Qwen3_5Config
 from ..qwen3_5.modeling_qwen3_5 import Qwen3_5Model
 
@@ -71,6 +68,7 @@ register_dist_config(
     "qwen3_5_moe",
     default_dist_config.merge_configs(shared_moe_dist_config)
     .merge_configs(gdn_dist_config)
+    .merge_configs(mtp_config)
     .merge_configs(
         DistParallelConfig(
             pre_process_weights=["vision_model.*"],
@@ -82,45 +80,42 @@ register_dist_config(
 
 @dataclass
 class Qwen3_5_MoETemplate(Qwen3_5Template):
-    def add_mca_weight(self, name, weight, **kwargs):
-        pattern = r"^decoder\.layers\.(\d+)\.self_attention\.in_proj\.layer_norm_weight$"
-        match = re.match(pattern, name)
-        if match:
-            layer_idx = int(match.group(1)) if match else None
-            return {f"model.language_model.layers.{layer_idx}.input_layernorm.weight": weight}
-        weight_prefix = get_mca_weight_prefix(name)
-        original_name = remove_mca_weight_prefix(name)
-        moe_layer_index = get_mca_moe_index(name)
-        # Since experts weights are stacked in qwen3_vl_moe,
-        # we need to add the moe index to the original name to
-        # ensure all experts weights have the same weight_prefix
-        if moe_layer_index is not None:
-            original_name = str(moe_layer_index) + original_name
-            weight_prefix = name[: -len(original_name)]
-        if weight_prefix not in self.prefix_name_to_weight:
-            self.prefix_name_to_weight[weight_prefix] = {}
-        self.prefix_name_to_weight[weight_prefix][original_name] = weight
-        prefix_weights = self.prefix_name_to_weight[weight_prefix]
-        # However, when looking up the converter, we still use the original name without moe index
-        # This is because mca_name_to_converter is built before mca_names reset which happens at
-        # model converter init.
-        original_name = remove_mca_weight_prefix(name)
-        if ".lora_A." in original_name or ".lora_B." in original_name:
-            op = self.get_lora_conver_op(original_name, self.mca_name_to_converter, **kwargs)
+    def get_lora_conver_op(self, name, pattern_to_conver_ops: dict[str, ConverOp], lora_rank: int):
+        lora_name = name[name.find(".lora") :]
+        cache_key = f"{name}_{lora_rank}"
+        if cache_key in self._lora_op_cache:
+            return self._lora_op_cache[cache_key]
+
+        name = name[: name.find(".lora")] + ".weight"
+        op = self.get_conver_op(name, pattern_to_conver_ops)
+        kwargs = {}
+        if isinstance(op, RenameConverOp):
+            op_class = RenameConverOp
+        elif isinstance(op, (SplitConverOp, SplitStackConverOp)):
+            op_class = type(op)
+        elif "lora_A" in lora_name:
+            op_class = CopyConverOp
+        elif isinstance(op, StackConverOp):
+            op_class = StackConverOp
+            kwargs = {"dim": op.dim}
+        elif isinstance(op, GatedQKVConverOp):
+            op_class = GatedQKVConverOp
+            kwargs = {"hidden_size": lora_rank}
+        elif isinstance(op, Qwen3_5_GDNConverOp):
+            op_class = type(op)
         else:
-            op = self.get_conver_op(original_name, self.mca_name_to_converter)
-        name_to_weight = {
-            name: prefix_weights.pop(name)
-            for name in list(prefix_weights.keys())
-            if op.is_required_name(name, mca_name=True)
-        }
-        conver_res = op(name_to_weight, mca_to_hf=True)
-        if conver_res is None:
-            # not ready to convert
-            self.prefix_name_to_weight[weight_prefix].update(name_to_weight)
-            return conver_res
-        hf_prefix = convert_to_hf_prefix(weight_prefix, self.hf_layer_prefix, self.hf_moe_prefix)
-        return {hf_prefix + name: weight for name, weight in conver_res.items()}
+            raise ValueError(f"cannot find lora conver op for {name} in {pattern_to_conver_ops}")
+        lora_hf_names = [hf_name if hf_name.endswith(".weight") else hf_name + ".weight" for hf_name in op.hf_names]
+        lora_hf_names = [hf_name.replace(".weight", lora_name) for hf_name in lora_hf_names]
+        lora_mca_names = [mca_name.replace(".weight", lora_name) for mca_name in op.mca_names]
+        lora_op = op_class(
+            hf_names=lora_hf_names,
+            mca_names=lora_mca_names,
+            _mca_config=op.mca_config,
+            **kwargs,
+        )
+        self._lora_op_cache[cache_key] = lora_op
+        return lora_op
 
 
 register_template(
@@ -166,6 +161,7 @@ register_template(
         # "mlp_only_layers": "mlp_only_layers",
         "layer_types": "layer_types",
         "full_attention_interval": "linear_attention_freq",
+        "mtp_num_hidden_layers": "mtp_num_layers",
     },
     constant_mca_config={
         "swiglu": True,
@@ -181,6 +177,7 @@ register_template(
         "hetereogenous_dist_checkpoint": True,
         "attention_output_gate": True,
         "experimental_attention_variant": "gated_delta_net",
+        "mtp_loss_scaling_factor": 0.3,
     },
     weight_converters=[
         RenameConverOp(hf_names="lm_head.weight", mca_names="output_layer.weight"),
@@ -194,6 +191,8 @@ register_template(
         RenameConverOp(hf_names=".mlp.gate.weight", mca_names=".mlp.router.weight"),
         SplitStackConverOp(hf_names="gate_up_proj", mca_names=".linear_fc1.weight"),
         SplitConverOp(hf_names="down_proj", mca_names=".linear_fc2.weight"),
+        RenameConverOp(hf_names=".down_proj.weight", mca_names=".linear_fc2.weight"),
+        StackConverOp(hf_names=[".gate_proj.weight", ".up_proj.weight"], mca_names=".linear_fc1.weight", dim=0),
         # Shared experts
         RenameConverOp(
             hf_names=".mlp.shared_expert.down_proj.weight", mca_names=".mlp.shared_experts.linear_fc2.weight"
@@ -232,6 +231,9 @@ register_template(
         # vit related
         RenameConverOp(hf_names="model.visual.{}", mca_names="vision_model.{}"),
         # mtp related
-        DropConverOp(hf_names="mtp.*", mca_names=[]),
+        RenameConverOp(hf_names=".pre_fc_norm_embedding.weight", mca_names=".enorm.weight"),
+        RenameConverOp(hf_names=".pre_fc_norm_hidden.weight", mca_names=".hnorm.weight"),
+        RenameConverOp(hf_names=".fc.weight", mca_names=".eh_proj.weight"),
+        RenameConverOp(hf_names=".norm.weight", mca_names=".final_layernorm.weight"),
     ],
 )

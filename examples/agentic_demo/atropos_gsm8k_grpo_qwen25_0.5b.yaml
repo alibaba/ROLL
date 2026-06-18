@@ -31,15 +31,13 @@ actor_train:
     gradient_accumulation_steps: 32
   device_mapping: "[1]"
   strategy_args:
-    strategy_name: deepspeed_train
+    strategy_name: megatron_train
     strategy_config:
-      zero_optimization:
-        stage: 2
-        offload_optimizer:
-          device: cpu
-          pin_memory: false
-      bf16:
-        enabled: true
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
   data_args:
     template: qwen2_5
 
@@ -63,12 +61,8 @@ max_tokens_per_step: 512
 reference:
   device_mapping: "[1]"
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config:
-      zero_optimization:
-        stage: 2
-      bf16:
-        enabled: true
+    strategy_name: hf_infer
+    strategy_config: ~
 
 # --- RL Configs (GRPO) ---
 adv_estimator: "grpo"

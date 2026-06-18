@@ -43,6 +43,9 @@ class ConverOp(ABC):
             self.hf_names = [self.hf_names]
         if isinstance(self.mca_names, str):
             self.mca_names = [self.mca_names]
+        # Cache compiled regex patterns
+        self._hf_patterns_cache: Optional[list[re.Pattern]] = None
+        self._mca_patterns_cache: Optional[list[re.Pattern]] = None
 
     def __call__(self, name_to_weight: Dict[str, torch.Tensor], mca_to_hf: bool = False) -> Any:
         weight_len = len(self.mca_names if mca_to_hf else self.hf_names)
@@ -63,16 +66,30 @@ class ConverOp(ABC):
         self._mca_config = value
 
     @staticmethod
-    def _name_to_pattern(name: str):
-        return name.replace(".", "\.").replace("{}", "(.*)")
+    def _name_to_pattern(name: str) -> str:
+        return name.replace(".", r"\.").replace("{}", "(.*)")
+
+    def _get_compiled_patterns(self, mca_name: bool) -> List[re.Pattern]:
+        """Get compiled regex patterns with caching."""
+        if mca_name:
+            if self._mca_patterns_cache is None:
+                self._mca_patterns_cache = [
+                    re.compile(self._name_to_pattern(name)) for name in self.mca_names
+                ]
+            return self._mca_patterns_cache
+        else:
+            if self._hf_patterns_cache is None:
+                self._hf_patterns_cache = [
+                    re.compile(self._name_to_pattern(name)) for name in self.hf_names
+                ]
+            return self._hf_patterns_cache
 
     def is_required_name(self, name, mca_name: bool):
         required_names = self.mca_names if mca_name else self.hf_names
         if name in required_names:
             return True
-        for pattern in required_names:
-            re_pattern = self._name_to_pattern(pattern)
-            if re.match(re_pattern, name):
+        for pattern in self._get_compiled_patterns(mca_name):
+            if pattern.match(name):
                 return True
         return False
 
@@ -122,6 +139,15 @@ class ConverOp(ABC):
 
     def _mca_to_hf(self, weights: List[torch.Tensor]) -> List[torch.Tensor]:
         raise NotImplementedError()
+
+
+@dataclass
+class DropConverOp(ConverOp):
+    def _hf_to_mca(self, weights):
+        return []
+
+    def _mca_to_hf(self, weights):
+        return []
 
 
 @dataclass
@@ -338,19 +364,34 @@ class GDNConv1dConverOp(ConverOp):
 
 
 @dataclass
+class ZeroCenteredRMSNormConverOp(ConverOp):
+    def __post_init__(self):
+        super().__post_init__()
+        assert len(self.hf_names) == 1, f"ZeroCenteredRMSNormConverOp only support one name {self.hf_names}"
+        assert len(self.mca_names) == 1, f"ZeroCenteredRMSNormConverOp only support one name {self.mca_names}"
+
+    def _hf_to_mca(self, weights):
+        return weights[0].clone() - 1
+
+    def _mca_to_hf(self, weights):
+        return weights[0].clone() + 1
+
+
+@dataclass
 class Template:
     hf_model_type: str
     hf_layer_prefix: str
-    config_hf_to_mca: Dict[str, str]
-    weight_converters: List[ConverOp]
-    constant_mca_config: Dict[str, Any]
-    constant_hf_config: Dict[str, Any] = field(default_factory=dict)
+    config_hf_to_mca: dict[str, str]
+    weight_converters: list[ConverOp]
+    constant_mca_config: dict[str, Any]
+    constant_hf_config: dict[str, Any] = field(default_factory=dict)
     hf_moe_prefix: Optional[str] = None
-    hf_invalid_keys: List[str] = field(default_factory=list)
-    config_mca_to_hf: Optional[Dict[str, str]] = None
-    hf_name_to_converter: Dict[str, ConverOp] = field(default_factory=dict)
-    mca_name_to_converter: Dict[str, ConverOp] = field(default_factory=dict)
-    prefix_name_to_weight: Dict[str, Dict[str, torch.Tensor]] = field(default_factory=dict)
+    hf_invalid_keys: list[str] = field(default_factory=list)
+    config_mca_to_hf: Optional[dict[str, str]] = None
+    hf_name_to_converter: dict[str, ConverOp] = field(default_factory=dict)
+    mca_name_to_converter: dict[str, ConverOp] = field(default_factory=dict)
+    prefix_name_to_weight: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)
+    _lora_op_cache: dict[str, ConverOp] = field(default_factory=dict)
 
     def __post_init__(self):
         self.config_hf_to_mca = self.adjust_config_hf_to_mca()
@@ -520,7 +561,7 @@ class Template:
     def get_conver_op(self, name, pattern_to_conver_ops: Dict[str, ConverOp]):
         if name in pattern_to_conver_ops:
             return pattern_to_conver_ops[name]
-        for pattern in sorted(pattern_to_conver_ops, key=lambda x: len(x), reverse=True):
+        for pattern in pattern_to_conver_ops.keys():
             re_pattern = pattern.replace("{}", "(.*?)")
             if re.match(re_pattern, name):
                 return pattern_to_conver_ops[pattern]
@@ -528,14 +569,17 @@ class Template:
 
     def get_lora_conver_op(self, name, pattern_to_conver_ops: Dict[str, ConverOp], lora_rank: int):
         lora_name = name[name.find(".lora") :]
+        cache_key = f"{name}_{lora_rank}"
+        if cache_key in self._lora_op_cache:
+            return self._lora_op_cache[cache_key]
+
         name = name[: name.find(".lora")] + ".weight"
         op = self.get_conver_op(name, pattern_to_conver_ops)
+        kwargs = {}
         if isinstance(op, RenameConverOp):
             op_class = RenameConverOp
-            kwargs = {}
         elif "lora_A" in lora_name:
             op_class = CopyConverOp
-            kwargs = {}
         elif isinstance(op, StackConverOp):
             op_class = StackConverOp
             kwargs = {"dim": op.dim}
@@ -544,12 +588,14 @@ class Template:
             kwargs = {"hidden_size": lora_rank}
         else:
             raise ValueError(f"can not find lora conver op for {name} in {pattern_to_conver_ops}")
-        return op_class(
+        lora_op = op_class(
             hf_names=[hf_name.replace(".weight", lora_name) for hf_name in op.hf_names],
             mca_names=[mca_name.replace(".weight", lora_name) for mca_name in op.mca_names],
             _mca_config=op.mca_config,
             **kwargs,
         )
+        self._lora_op_cache[cache_key] = lora_op
+        return lora_op
 
     def hf_name_to_mca_names(self, hf_name) -> Optional[List[str]]:
         weight_prefix = get_weight_prefix(hf_name, self.hf_layer_prefix, moe_prefix=self.hf_moe_prefix)

@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import itertools
+import os
 import random
 import math
 import uuid
@@ -26,6 +27,7 @@ from roll.utils.taskgroups import TaskGroup # TODO use official TaskGroup after 
 from roll.utils.metrics.metrics_manager import DurationTracker
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
+from roll.utils.telemetry import get_tracer, inject_trace_context, attach_trace_context, init_telemetry
 
 
 logger = get_logger()
@@ -442,6 +444,7 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         collect_fn_kwargs,
         state: Dict[str, Any] = None,
         is_val: bool = False,
+        get_data_item_kwargs: Optional[Dict[str, Any]] = None,
     ):
         self.pipeline_config = pipeline_config
         set_seed(seed=pipeline_config.seed)
@@ -471,22 +474,23 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         self.request_id = uuid.uuid4()
         self.request_counter = 0
 
-        self.dataset = dataset
-        self.indices = list(range(len(dataset)))
-        if state is not None and state.get("dataset_iter_count", 0) > 0:
-            for _ in range(state["dataset_iter_count"]):
-                self.get_next_dataset_item()
-        self.dataset_epoch = 0
-        self.dataset_iter = None
-        self.dataset_iter_count = 0
-
         self.collect_fn_cls = collect_fn_cls
         self.collect_fn_kwargs = collect_fn_kwargs
+        self.get_data_item_kwargs = get_data_item_kwargs if get_data_item_kwargs else {}
         self.tokenizer = default_tokenizer_provider(model_args=self.actor_cluster.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.actor_cluster.worker_config.model_args)
         if "processor" in [f.name for f in fields(collect_fn_cls)]:
             collect_fn_kwargs["processor"] = self.processor
         self.collect_fn = self.collect_fn_cls(tokenizer=self.tokenizer, **self.collect_fn_kwargs)
+
+        self.dataset = dataset
+        self.indices = list(range(len(dataset)))
+        self.dataset_epoch = 0
+        self.dataset_iter = None
+        self.dataset_iter_count = 0
+        if state is not None and state.get("dataset_iter_count", 0) > 0:
+            for _ in range(state["dataset_iter_count"]):
+                self.get_next_dataset_item()
 
         self.async_sending_task = None
 
@@ -512,6 +516,14 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         self.udrl = udrl_cls()
 
         self.reward_scheduler = RewardScheduler()
+
+        # Initialize OpenTelemetry tracing on the scheduler actor
+        if os.environ.get("ROLL_OTEL_ENABLED") == "1":
+            init_telemetry(
+                service_name="scheduler",
+                otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                instance_id=f"scheduler-{'-'.join(self.reward_clusters.keys())}",
+            )
 
     async def initialize(self):
         await self.router_manager.initialize()
@@ -567,16 +579,7 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             request_data: DataProto = DataProto.from_single_dict(collect_data, meta_info=data.meta_info)
             request_data.batch["prompt_id"] = torch.arange(request_data.batch.batch_size[0], device=request_data.batch.device)
 
-            generate_non_tensor_batch_keys = []
-            if "multi_modal_data" in request_data.non_tensor_batch:
-                generate_non_tensor_batch_keys.append("multi_modal_data")
-
-            gen_batch = request_data.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=generate_non_tensor_batch_keys,
-            )
-            for key in generate_non_tensor_batch_keys:
-                request_data.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
+            gen_batch = request_data.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
             gen_batch.meta_info = request_data.meta_info
             num_return_sequences = generation_config["num_return_sequences"]
             request_data = request_data.repeat(repeat_times=num_return_sequences)
@@ -619,6 +622,21 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         if self.pipeline_config.generate_opt_level == 0:
             return await self.get_batch_opt_level_0(data, batch_size)
 
+        with (
+            attach_trace_context(data.meta_info),
+            get_tracer("scheduler").start_as_current_span(
+                "get_batch",
+                attributes={
+                    "global_step": global_step,
+                    "batch_size": batch_size,
+                    "domains": ",".join(self.reward_clusters.keys()),
+                },
+            ),
+        ):
+            inject_trace_context(data.meta_info)
+            return await self._get_batch_impl(data, global_step, batch_size)
+
+    async def _get_batch_impl(self, data: DataProto, global_step: int, batch_size: int) -> DataProto:
         num_return_sequences = data.meta_info["generation_config"]["num_return_sequences"]
         self.meta_info = copy.deepcopy(data.meta_info)
         self.meta_info["collect_non_finish"] = self.pipeline_config.async_generation_ratio > 0
@@ -677,6 +695,9 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         # DUMP MODE: Save merged batch (from mixin)
         await self._maybe_dump_batch(batch, global_step)
 
+        with get_tracer("scheduler").start_as_current_span("to_remote"):
+            loop = asyncio.get_running_loop()
+            batch = await loop.run_in_executor(None, DataProto.to_remote, batch)
         return batch
 
     def collect_items_as_batch(self, finished_items: List[ExperienceItem]) -> DataProto:
@@ -711,6 +732,11 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             metrics[f"scheduler/{domain}/score/mean"] = torch.mean(sequence_score).detach().item()
             metrics[f"scheduler/{domain}/score/max"] = torch.max(sequence_score).detach().item()
             metrics[f"scheduler/{domain}/score/min"] = torch.min(sequence_score).detach().item()
+            domain_extra_metrics = response_batch.meta_info.get("metrics", {})
+            for k, v in domain_extra_metrics.items():
+                metrics[f"scheduler/{domain}/{k}/mean"] = np.mean(v).item()
+                metrics[f"scheduler/{domain}/{k}/max"] = np.max(v).item()
+                metrics[f"scheduler/{domain}/{k}/min"] = np.min(v).item()
         batch.meta_info["metrics"].update(metrics)
 
         # TODO shigao implement REPORT_LENGTH_AND_REWARDS (deleted at refactor)
@@ -732,7 +758,48 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             await self.router_manager.abort_all()
             # Implicitly wait until all running tasks finished when TaskGroup context exit.
 
+    def get_next_data_item_by_dataloader(self, batch_size: int = 1, use_collect_fn: bool = False, num_workers=8):
+        # use Dataloader to parallel and prefetch
+        from torch.utils.data import DataLoader
+        from roll.datasets.collator import collate_fn_to_dict_list
+
+        if getattr(self, "dataloader", None) is None:
+            self.dataloader = DataLoader(
+                self.dataset,
+                batch_size=batch_size,
+                collate_fn=self.collect_fn if use_collect_fn else collate_fn_to_dict_list,
+                shuffle=True,
+                drop_last=False,
+                num_workers=num_workers,
+            )
+            self.dataloader_iter = iter(self.dataloader)
+            self.input_data_batch = None
+        if not (self.input_data_batch and self.idx_in_batch < len(list(self.input_data_batch.values())[0])):
+            self.idx_in_batch = 0
+            try:
+                self.input_data_batch = next(self.dataloader_iter)
+            except StopIteration:
+                self.dataset_epoch += 1
+                self.dataloader_iter = iter(self.dataloader)
+                self.input_data_batch = next(self.dataloader_iter)
+        data_item = dict(
+            (
+                k,
+                v[self.idx_in_batch : self.idx_in_batch + 1] if use_collect_fn else v[self.idx_in_batch],
+            )
+            for k, v in self.input_data_batch.items()
+        )
+        self.idx_in_batch += 1
+        self.dataset_iter_count += 1
+        return data_item
+
     def get_next_dataset_item(self):
+        if self.get_data_item_kwargs.get("use_dataloader", False):
+            return self.get_next_data_item_by_dataloader(
+                batch_size=self.get_data_item_kwargs.get("batch_size", 1),
+                use_collect_fn=self.get_data_item_kwargs.get("use_collect_fn", False),
+                num_workers=self.get_data_item_kwargs.get("num_workers", 8),
+            )
         if self.dataset_iter is None:
             random.seed(self.pipeline_config.seed + self.dataset_epoch)
             random.shuffle(self.indices)
@@ -770,40 +837,44 @@ class RolloutContext:
         num_return_sequences = scheduler.meta_info["generation_config"]["num_return_sequences"]
         context = RolloutContext(scheduler=scheduler, prompt_id=prompt_id, meta_info=scheduler.meta_info)
         success = False
-        try:
-            responses = await scheduler.udrl.process_new_prompt(context=context)
-            if responses is None:
-                logger.info(f"filter out prompt {prompt_id}")
-                raise asyncio.CancelledError # abort this prompt
-            responses = expand_responses(responses)
-            assert (
-                len(responses) == num_return_sequences or scheduler.replay_buffer.is_use_additional_prompts
-            ), "is_use_additional_prompts is required when using dynamic num_return_sequences"
-        except Exception as e:
-            logger.warning(f"abort prompt {prompt_id} on exception {e}")
-            raise
-        else:
-            success = True
-        finally:
-            scheduler.running_tasks.pop(prompt_id, None)
-
-            # commit/abort should be put at last in finally block, because commit may raise exception
-            if not success:
-                scheduler.replay_buffer.abort(prompt_id)
+        with attach_trace_context(scheduler.meta_info), get_tracer("scheduler").start_as_current_span(
+            "process_new_prompt",
+            attributes={"prompt_id": prompt_id},
+        ):
+            try:
+                responses = await scheduler.udrl.process_new_prompt(context=context)
+                if responses is None:
+                    logger.info(f"filter out prompt {prompt_id}")
+                    raise asyncio.CancelledError # abort this prompt
+                responses = expand_responses(responses)
+                assert (
+                    len(responses) == num_return_sequences or scheduler.replay_buffer.is_use_additional_prompts
+                ), "is_use_additional_prompts is required when using dynamic num_return_sequences"
+            except Exception as e:
+                logger.warning(f"abort prompt {prompt_id} on exception {e}")
+                raise
             else:
-                assert context.sampling_start_step is not None
-                scheduler.replay_buffer.commit(
-                    prompt_id,
-                    [
-                        ExperienceItem(
-                            prompt_id=prompt_id,
-                            domain=context.domain,
-                            sampling_start_step=context.sampling_start_step,
-                            data=response,
-                        )
-                        for response in responses
-                    ],
-                )
+                success = True
+            finally:
+                scheduler.running_tasks.pop(prompt_id, None)
+
+                # commit/abort should be put at last in finally block, because commit may raise exception
+                if not success:
+                    scheduler.replay_buffer.abort(prompt_id)
+                else:
+                    assert context.sampling_start_step is not None
+                    scheduler.replay_buffer.commit(
+                        prompt_id,
+                        [
+                            ExperienceItem(
+                                prompt_id=prompt_id,
+                                domain=context.domain,
+                                sampling_start_step=context.sampling_start_step,
+                                data=response,
+                            )
+                            for response in responses
+                        ],
+                    )
 
     def __init__(
         self,
@@ -843,8 +914,14 @@ class RolloutContext:
             self.got_data: bool = True
 
         dataset_item = self._scheduler.get_next_dataset_item()
-        domain = dataset_item.get("domain", "default")
-        collect_data = self._scheduler.collect_fn([dataset_item])
+        if self._scheduler.get_data_item_kwargs.get(
+            "use_dataloader", False
+        ) and self._scheduler.get_data_item_kwargs.get("use_collect_fn", False):
+            domain = dataset_item.get("domain", np.array(["default"], dtype=object)).tolist()[0]
+            collect_data = dataset_item
+        else:
+            domain = dataset_item.get("domain", "default")
+            collect_data = self._scheduler.collect_fn([dataset_item])
         self.domain = domain
         return DataProto.from_single_dict(collect_data, meta_info=meta_info), domain
 
@@ -869,8 +946,19 @@ class RolloutContext:
         domain: str,
     ) -> DataProto:
         assert self._in_do_generate_and_reward
-        with self._scheduler.generate_timer[domain].track():
-            request_id = self._scheduler.next_request_id()
+        request_id = self._scheduler.next_request_id()
+        with (
+            self._scheduler.generate_timer[domain].track(),
+            get_tracer("scheduler").start_as_current_span(
+                "rollout.generate",
+                attributes={
+                    "domain": domain,
+                    "prompt_id": self.prompt_id,
+                    "request_id": request_id,
+                },
+            ),
+        ):
+            inject_trace_context(req.meta_info)
             req.meta_info["request_id"] = request_id
             logger.debug(f"generate_and_reward: {self.prompt_id=} {request_id} generate_request")
             self.inflight_requests.add(request_id)
@@ -887,7 +975,17 @@ class RolloutContext:
         # reward worker得能支持单条数据计算, dynamic sampling对需要batch计算reward的需要注意...
         # 多域的时候,llm as judge, 需要单独为reward worker分配gpu
         assert self._in_do_generate_and_reward
-        with self._scheduler.reward_timer[domain].track():
+        with (
+            self._scheduler.reward_timer[domain].track(),
+            get_tracer("scheduler").start_as_current_span(
+                "rollout.compute_rewards",
+                attributes={
+                    "domain": domain,
+                    "prompt_id": self.prompt_id,
+                },
+            ),
+        ):
+            inject_trace_context(req.meta_info)
             reward_worker = next(self._scheduler.reward_worker_iters[domain])
             logger.debug(f"generate_and_reward: {self.prompt_id=} compute_rewards")
             output_count = req.batch.batch_size[0]

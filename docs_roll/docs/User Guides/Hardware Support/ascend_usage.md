@@ -1,21 +1,21 @@
 # ROLL x Ascend
 
-Last updated: 05/14/2026.
+Last updated: 11/25/2025.
 
 We have added support for Huawei Ascend devices in ROLL.
 
 ## Hardware Support 
 
-Atlas 900 A2 PODc and Atlas 900 A3 PODc
+Atlas 900 A2 PODc
 
 ## Installation
 
 ### Basic Environment Setup
 
 | Software | Version |
-| -------- |---------|
+| -------- | ------- |
 | Python   | 3.11    |
-| CANN     | 8.5.1   |
+| CANN     | 8.3.RC1 |
 
 ### Create Conda Environment
 
@@ -31,11 +31,11 @@ conda activate roll
 To use torch and torch_npu in ROLL, install them using the commands below:
 
 ```
-# Use CPU-only torch when installing outside the pre-built image
-pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+# Use CPU only torch
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cpu
 
-# Install the torch_npu version matching torch/CANN
-pip install torch_npu==2.8.0
+# Install torch_npu 2.7.1
+pip install torch_npu==2.7.1
 ```
 
 ### Install vllm & vllm-ascend
@@ -44,7 +44,7 @@ To use vllm in ROLL, compile and install vllm and vllm-ascend as follows:
 
 ```
 # vllm
-git clone -b v0.13.0 --depth 1 https://github.com/vllm-project/vllm.git
+git clone -b v0.11.0 --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/build.txt
 
@@ -52,7 +52,7 @@ VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
 
 # vllm-ascend
-git clone -b v0.13.0 --depth 1 https://github.com/vllm-project/vllm-ascend.git
+git clone -b v0.11.0rc1 --depth 1 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 
 pip install -e .
@@ -61,11 +61,11 @@ cd ..
 
 Or you could install `vllm` and `vllm-ascend` from pre-built wheel:
 ```
-# Install vllm-project/vllm. The newest supported version is v0.13.0.
-pip install vllm==0.13.0
+# Install vllm-project/vllm. The newest supported version is v0.11.0.
+pip install vllm==0.11.0
 
 # Install vllm-project/vllm-ascend from pypi.
-pip install vllm-ascend==0.13.0
+pip install vllm-ascend==0.11.0rc1
 ```
 
 ### Install ROLL
@@ -74,7 +74,6 @@ pip install vllm-ascend==0.13.0
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL
 pip install -r requirements_common.txt
-pip install deepspeed==0.16.4
 cd ..
 ```
 
@@ -82,24 +81,22 @@ cd ..
 
 | Software                    | Description   |
 | --------------------------- | ------------- |
-| transformers                | >= v4.57.6    |
+| transformers                | >= v4.57.1    |
 | flash_attn                  | not supported |
 | transformer-engine[pytorch] | not supported |
 
-1. `transformers` v4.57.6 supports enabling `--flash_attention_2`.
+1. `transformers` v4.57.1 supports enabling `--flash_attention_2`.
 2. `flash_attn` acceleration is not supported currently.
 3. `transformer-engine[pytorch]` is currently not supported.
 
 ```
-pip install transformers==4.57.6
+pip install transformers==4.57.1
 ```
 
 ## Quick Start: Single-Node Deployment
 
 Before full usage, we recommend testing the single-node pipeline to verify your environment and installation.
-Since Megatron-LM training is not yet supported, first change `strategy_args` in the relevant files to use the `deepspeed` option.
-
-**Note:** Currently, colocated mode is not supported on NPU. You need to modify `device_mapping` to ensure that training and inference are performed on different cards.
+Since Megatron-LM training is not yet supported, first change `strategy_args` in the relevant files to use the `fsdp2` option.
 
 1. Run the single-node pipeline via shell:
 
@@ -124,9 +121,10 @@ python examples/start_agentic_pipeline.py \
 
 | Feature         | Example                                                      | Training Backend | Inference Backend | Hardware          |
 | --------------- | ------------------------------------------------------------ | ---------------- | ----------------- | ----------------- |
-| Agentic         | examples/qwen2.5-0.5B-agentic/run_agentic_pipeline_sokoban.sh | DeepSpeed        | vLLM              | Atlas 900 A3 PODc |
-| Agentic-Rollout | examples/qwen2.5-0.5B-agentic/run_agentic_rollout_sokoban.sh | DeepSpeed        | vLLM              | Atlas 900 A3 PODc |
-| RLVR            | examples/ascend_examples/run_rlvr_pipeline.sh                | DeepSpeed        | vLLM              | Atlas 900 A2/A3 PODc |
+| Agentic         | examples/qwen2.5-0.5B-agentic/run_agentic_pipeline_sokoban.sh | FSDP2         | vLLM              | Atlas 900 A2 PODc |
+| Agentic-Rollout | examples/qwen2.5-0.5B-agentic/run_agentic_rollout_sokoban.sh | FSDP2         | vLLM              | Atlas 900 A2 PODc |
+| DPO             | examples/qwen2.5-3B-dpo_megatron/run_dpo_pipeline.sh         | FSDP2         | vLLM              | Atlas 900 A2 PODc |
+| RLVR            | examples/qwen2.5-7B-rlvr_megatron/run_rlvr_pipeline.sh       | FSDP2         | vLLM              | Atlas 900 A2 PODc |
 
 ## Disclaimer
 

@@ -36,7 +36,7 @@ actor_train:
     file_name: xxx/train.json
     prompt: instruction
   strategy_args:
-    strategy_name: megatron_train  # deepspeed_train/megatron_train for training
+    strategy_name: megatron_train  # fsdp2_train/megatron_train for training
     strategy_config:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
@@ -75,7 +75,7 @@ reference:
 ### Model Arguments (**model_args**)
 
 - `model_args.dtype`: Set model dtype as fp32, bf16, or fp16, otherwise use config's torch_dtype
-- `model_args.disable_gradient_checkpointing`: Disable gradient checkpointing. Applicable only to `actor_train` when `strategy_name` is `deepspeed_train`
+- `model_args.disable_gradient_checkpointing`: Disable gradient checkpointing. Applicable only to `actor_train` when `strategy_name` is `fsdp2_train`
 
 ### Data Arguments (**data_args**)
 
@@ -95,7 +95,7 @@ Configure generating_args under `actor_infer`.
 
 ### Strategy Arguments (**strategy_args**)
 
-- `strategy_args.strategy_name`: The name of training/inference strategy. `deepspeed_train`/`megatron_train` for training, `vllm`/`sglang`/`hf_infer` for inference.
+- `strategy_args.strategy_name`: The name of training/inference strategy. `fsdp2_train`/`megatron_train` for training, `vllm`/`sglang`/`hf_infer` for inference.
 - `strategy_args.strategy_config`: The config of training/inference strategy. Will be passed to `strategy_name`'s constructor. E.g. `strategy_config.tensor_model_parallel_size` for `megatron_train` strategy and `strategy_config.gpu_memory_utilization` for `vllm` strategy.
 
 Commonly used strategy configs are listed below:
@@ -129,24 +129,21 @@ Commonly used strategy configs are listed below:
 - `load_format`: The format of the model weights to load. Since there will be a `model update` in the beginning, this value should can be set to `dummy`.
 
 
-#### DeepSpeed Strategy Config
+#### FSDP2 Strategy Config
 
-There are DeepSpeed configurations in `./examples/config/` that can be overridden in the default list for strategy configuration.
+- `fsdp_size`: Number of FSDP shards
+  - If `fsdp_size >= world_size` or `fsdp_size <= 1`: pure FSDP2 mode
+  - If `fsdp_size < world_size`: HSDP mode with DDP replicas
+- `param_dtype`: Parameter data type (e.g., `bf16`, `fp16`, `float32`)
+- `reduce_dtype`: Data type for gradient reduction (e.g., `float32`)
+- `reshard_after_forward`: Whether to reshard parameters after forward pass
+  - `true`: Reshard after forward
+  - `false`: Keep parameters gathered
+- `offload_policy`: Whether to enable CPU offloading
+  - `true`: Offload parameters to CPU when not in use (saves GPU memory)
+  - `false`: Keep all parameters on GPU (faster but uses more memory)
 
-For example, to use the deepspeed_zero2 strategy, add the following to your config:
-
-```yaml
-defaults:
-  - ../config/envs@_here_
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
-actor_train:
-  strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero2}
-```
+Additionally, context parallel (Ulysses) is supported when using FSDP2 strategy by setting `ulysses_size` in `model_args`.
 
 ### Training Arguments (**training_args**)
 
@@ -155,7 +152,7 @@ Used for configuring training parameters such as `learning_rate`, `weight_decay`
 - `training_args.per_device_train_batch_size`: The batch size to use when training.
 - `training_args.gradient_accumulation_steps`: The number of gradient accumulation steps.
 
-In deepspeed training the global train batch size is `per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size (a.k.a length of `device_mapping` for `actor_train`/`critic`).
+In fsdp2 training the global train batch size is `per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size / `ulysses_size` (where `world_size` is the length of `device_mapping` for `actor_train`/`critic`).
 
 In megatron training the global train batch size is `per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size / `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `context_parallel_size` (don't need to divide `expert_model_parallel_size`).
 

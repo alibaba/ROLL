@@ -71,8 +71,6 @@ actor_train:
     warmup_ratio: 0
     lr_scheduler_type: constant
   strategy_args:
-#    strategy_name: deepspeed_train
-#    strategy_config: ${deepspeed_zero3}
     strategy_name: megatron_train
     strategy_config:
       tensor_model_parallel_size: 1

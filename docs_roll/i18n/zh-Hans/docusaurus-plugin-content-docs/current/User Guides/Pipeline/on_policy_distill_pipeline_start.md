@@ -27,6 +27,9 @@
     - [步骤3：启动流水线](#步骤3启动流水线)
     - [步骤4：监控](#步骤4监控)
     - [步骤5：输出和结果](#步骤5输出和结果)
+  - [Multi-Teacher OPD](#️multi-teacher-opd多教师蒸馏)
+    - [配置示例](#配置示例)
+    - [核心机制](#核心机制)
   - [常见问题](#️常见问题)
   - [参考资料](#参考资料)
 
@@ -245,9 +248,9 @@ On-Policy Distillation 的 Worker 角色根据模式有所不同：
 |----------|----------|------|
 | `student_train` | `actor_train` | 训练学生模型，使用 Teacher KL 计算损失 |
 | `student_infer` | `actor_infer` | 生成轨迹，计算 student log_probs |
-| `teacher` | `reference` | 计算 teacher log_probs |
+| `teacher` | `reference` / `references` | 计算 teacher log_probs（支持单个 WorkerConfig 或多 teacher Dict） |
 
-**注意**：配置文件中使用 `student_train`、`student_infer`、`teacher` 名称，系统会自动映射。
+**注意**：配置文件中使用 `student_train`、`student_infer`、`teacher` 名称，系统会自动映射。多 teacher 时 `teacher` 为 `Dict[str, WorkerConfig]`，内部归一化为 `self.references: Dict[str, Cluster]`。
 
 #### 混合模式
 
@@ -334,8 +337,16 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `use_opd` | 启用混合模式 OPD（将 Teacher KL 添加到奖励中） | `false` |
-| `opd_kl_coef` | OPD KL 系数，控制蒸馏信号相对于外部奖励的权重 | `1.0` |
 | `teacher` | 教师模型配置（自动映射到 reference） | 必须配置 |
+
+#### Multi-Teacher 模式参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `teacher` | Dict[str, WorkerConfig] 多教师配置 | — |
+| `teacher.{name}.opd_kl_coef` | 该教师的 KL 系数 | `1.0` |
+| `teacher.{name}.tag_included` | 该教师负责的 tag 列表，空表示全量 | `[]` |
+| `tag_to_template` | 按 tag 选择不同的 chat template | `{}` |
 
 
 ---
@@ -388,6 +399,172 @@ python examples/start_onpolicy_distill_pipeline.py \
 * **训练模型** – 检查点保存在 `output_dir` 中
 * **评估指标** – 记录在 TensorBoard 和控制台中
 * **生成示例** – 流水线定期输出生成示例，以便您可以直观地评估模型改进。
+
+---
+
+## ✨️Multi-Teacher OPD（多教师蒸馏）
+
+### 概述
+
+Multi-Teacher OPD 允许多个专长不同的教师模型同时指导一个学生模型，按数据领域（tag）将数据路由到对应的教师，避免无效计算并实现更精准的蒸馏。
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              Multi-Teacher OPD 数据流                              │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│   Student Infer rollout → batch (含 tag/domain 字段)              │
+│          │                                                        │
+│          ├── [math_dapo 数据] ──▶  Teacher-32B (数学专长)         │
+│          │                          计算 ref_log_probs_teacher_32B │
+│          │                                                        │
+│          └── [KodCode 数据]  ──▶  Teacher-14B (代码专长)          │
+│                                     计算 ref_log_probs_teacher_14B │
+│          │                                                        │
+│          ▼                                                        │
+│   Compute Advantage:                                              │
+│     对每条数据，只累加被路由到的 teacher 的 KL:                     │
+│     advantage = -Σ(opd_kl_coef_i * KL_i) (仅路由到的 teacher)      │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 配置示例
+
+#### 多教师纯 OPD 模式
+
+```yaml
+is_pure_opd: true
+global_template: qwen3
+
+# 按 tag 选择不同的 chat template（可选）
+tag_to_template:
+  math_dapo: qwen3        # 数学数据使用 qwen3 template（带 thinking）
+  KodCode: qwen3_nothink  # 代码数据使用 qwen3_nothink template
+
+student_train:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  data_args:
+    file_name:
+      - data/dapo_math_17k_simple_boxed.jsonl
+      - data/code_KodCode_data.jsonl
+    domain_interleave_probs:
+      math_rule: 0.6
+      code_rule: 0.4
+  device_mapping: list(range(0,8))
+  # ...
+
+student_infer:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  device_mapping: list(range(0,8))
+  # ...
+
+# teacher 配置为 Dict[str, WorkerConfig]
+teacher:
+  teacher_32B:
+    model_args:
+      model_name_or_path: Qwen/Qwen3-32B  # 数学专长教师
+    opd_kl_coef: 1.0
+    tag_included: [math_dapo]  # 只处理数学数据
+    device_mapping: list(range(8,16))
+    strategy_args:
+      strategy_name: megatron_infer
+      strategy_config:
+        tensor_model_parallel_size: 2
+        pipeline_model_parallel_size: 4
+
+  teacher_14B:
+    model_args:
+      model_name_or_path: Qwen/Qwen3-14B  # 代码专长教师
+    opd_kl_coef: 1.0
+    tag_included: [KodCode]  # 只处理代码数据
+    device_mapping: list(range(16,24))
+    strategy_args:
+      strategy_name: megatron_infer
+      strategy_config:
+        tensor_model_parallel_size: 2
+        pipeline_model_parallel_size: 2
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    tag_included: [math_dapo]
+  code_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.code_sandbox_reward_worker.CodeSandboxRewardWorker
+    tag_included: [KodCode]
+```
+
+#### 混合路由配置（通用教师 + 专长教师）
+
+```yaml
+teacher:
+  teacher_general:
+    model_args:
+      model_name_or_path: Qwen/Qwen3-72B
+    opd_kl_coef: 0.3
+    tag_included: []  # 空 = 负责所有 tag（通用教师）
+
+  teacher_math_specialist:
+    model_args:
+      model_name_or_path: DeepSeek-Math-67B
+    opd_kl_coef: 0.7
+    tag_included: [math_dapo, aime]  # 仅负责数学
+```
+
+此配置下，数学数据会同时被 `teacher_general`（KL 系数 0.3）和 `teacher_math_specialist`（KL 系数 0.7）计算 KL，两者的加权 KL 都参与 advantage。非数学数据只有 `teacher_general` 参与。
+
+### 核心机制
+
+#### 1. Tag 路由
+
+每条训练数据带有 `tag` 字段（如 `math_dapo`、`KodCode`）。每个 teacher 通过 `tag_included` 声明自己负责的 tag：
+
+- `tag_included: [math_dapo]` — 只处理 tag 为 `math_dapo` 的数据
+- `tag_included: []`（空列表）— 处理所有数据（通用教师）
+
+路由发生在 ref_log_probs 计算阶段（pipeline 层），teacher 只对被路由到的数据做 forward，避免无效推理开销。
+
+#### 2. Per-Teacher KL 系数
+
+每个 teacher 有独立的 `opd_kl_coef`，用于控制该教师蒸馏信号的权重：
+
+```
+advantage = -Σ(opd_kl_coef_i * KL(student || teacher_i))
+```
+
+只有被路由到的 teacher 参与该样本的 KL 累加。
+
+#### 3. 并行推理优化
+
+当多个 teacher 使用不同的 GPU（`device_mapping` 不重叠）时，系统会自动使用多线程并行执行各 teacher 的 forward pass，减少总推理时间。
+
+#### 4. tag_to_template
+
+不同领域的数据可能需要不同的 chat template 编码方式。通过 `tag_to_template` 配置，可以为特定 tag 的数据使用不同的 tokenization template：
+
+```yaml
+tag_to_template:
+  math_dapo: qwen3         # 带 thinking token
+  KodCode: qwen3_nothink   # 不带 thinking token
+```
+
+未在 `tag_to_template` 中配置的 tag 会 fallback 到 `global_template`。
+
+### 单 Teacher 向后兼容
+
+单 teacher 配置（`teacher` 为 WorkerConfig 而非 Dict）与原有行为完全一致：
+
+```yaml
+# 以下配置与多 teacher 之前的版本行为完全一样
+teacher:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-32B
+  device_mapping: list(range(0,16))
+```
+
+内部会自动归一化为 `{"default": WorkerConfig}`，循环只执行一次。
 
 ---
 
@@ -464,6 +641,18 @@ python examples/start_onpolicy_distill_pipeline.py \
 
 - **纯 OPD 模式**：适合纯蒸馏训练，只需要 Teacher KL 信号，使用 `start_onpolicy_distill_pipeline.py`
 - **混合模式**：适合 RL + 蒸馏联合训练，使用 `start_rlvr_pipeline.py` 并配置 `use_opd: true`
+
+### Q5: Multi-Teacher 模式下，如果某条数据没有任何 teacher 被路由到怎么办？
+
+该条数据的 `total_weighted_kld = 0`：
+- 纯 OPD 模式下 `advantage = 0`（该条数据不产生梯度）
+- 混合模式下 `advantage = rl_advantages`（仅 RL 信号，没有蒸馏信号）
+
+### Q6: 多个 teacher 的 device_mapping 可以重叠吗？
+
+可以，但不推荐：
+- **不重叠**（推荐）：系统自动并行执行各 teacher 的 forward pass，显著减少推理时间
+- **重叠**：系统会串行执行，不会冲突但总耗时为所有 teacher 之和
 
 ---
 

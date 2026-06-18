@@ -2,8 +2,9 @@ import os
 
 import torch
 from megatron.core import dist_checkpointing, mpu
+from megatron.core.dist_checkpointing.strategies.fully_parallel import FullyParallelSaveStrategyWrapper
 
-from .constants import TRACKER_FILENAME
+from .constants import DIST_MODEL_DIR, DIST_OPTIMIZER_DIR, TRACKER_FILENAME
 from .utils import get_logger
 
 
@@ -209,6 +210,13 @@ def find_checkpoint_rank_0(checkpoints_path, iteration, release=False):
     return None
 
 
+def find_dist_ckpt(checkpoint_dir):
+    dist_model_dir = os.path.join(get_checkpoint_dir(checkpoint_dir, return_base_dir=True), DIST_MODEL_DIR)
+    if os.path.exists(dist_model_dir) and dist_checkpointing.check_is_distributed_checkpoint(dist_model_dir):
+        return dist_model_dir
+    return None
+
+
 def _load_base_checkpoint(
     load_dir, rank0=False, sharded_state_dict=None, exit_on_missing_checkpoint=True, checkpoint_step=None
 ):
@@ -260,20 +268,52 @@ def _load_base_checkpoint(
     return state_dict, checkpoint_name, release
 
 
-def load_state_dict_from_checkpoint(checkpoint_dir):
-    # TODO(LZC): support distributed checkpoint
-    return _load_base_checkpoint(checkpoint_dir, exit_on_missing_checkpoint=False)[0]
+def _load_dist_checkpoint(checkpoint_dir, models):
+    logger.info(f"Reading dist model checkpoint from {checkpoint_dir}")
+    sharded_state_dict = models.sharded_state_dict()
+    state_dict = dist_checkpointing.load(sharded_state_dict, checkpoint_dir)
+    return state_dict
 
 
-def save_config_and_state_dict(save_directory, config, state_dict):
+def load_state_dict_from_checkpoint(checkpoint_dir, models = None):
+    dist_model_dir = find_dist_ckpt(checkpoint_dir)
+    if dist_model_dir:
+        return _load_dist_checkpoint(dist_model_dir, models)
+    else:
+        return _load_base_checkpoint(checkpoint_dir, exit_on_missing_checkpoint=False)[0]
+
+
+def save_config_and_state_dict(save_directory, config, state_dict, ckpt_format: str = "legacy"):
     # TODO: better directory structure
     tracker_file = get_checkpoint_tracker_filename(save_directory)
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         config.save_pretrained(save_directory)
         with open(tracker_file, "w") as f:
             f.write("1")
-    if not torch.distributed.is_initialized() or mpu.get_expert_data_parallel_rank() == 0:
-        checkpoint_name = get_checkpoint_name(save_directory)
-        ensure_directory_exists(checkpoint_name)
-        torch.save(state_dict, checkpoint_name)
-        logger.info(f"Saving model checkpoint to {checkpoint_name}")
+    if ckpt_format == "legacy":
+        if not torch.distributed.is_initialized() or mpu.get_expert_data_parallel_rank() == 0:
+            checkpoint_name = get_checkpoint_name(save_directory)
+            ensure_directory_exists(checkpoint_name)
+            torch.save(state_dict, checkpoint_name)
+            logger.info(f"Saving model checkpoint to {checkpoint_name}")
+    elif ckpt_format == "torch_dist":
+        checkpoint_dir = get_checkpoint_dir(save_directory, return_base_dir=True)
+        dist_model_dir = os.path.join(checkpoint_dir, DIST_MODEL_DIR)
+        os.makedirs(dist_model_dir, exist_ok=True)
+        logger.info(f"Saving distributed model checkpoint to {dist_model_dir}")
+        save_strategy = FullyParallelSaveStrategyWrapper(
+            dist_checkpointing.serialization.get_default_save_sharded_strategy(),
+            mpu.get_data_parallel_group(with_context_parallel=True),
+            do_cache_distribution=True,
+        )
+        dist_checkpointing.save(state_dict, dist_model_dir,
+                                sharded_strategy=save_strategy)
+        
+
+def generate_model_state_dict(model, ckpt_format: str = "legacy"):
+    if ckpt_format == "legacy":
+        return model.state_dict_for_save_checkpoint()
+    elif ckpt_format == "torch_dist":
+        return model.sharded_state_dict()
+    else:
+        raise ValueError(f"Unknown ckpt_format: {ckpt_format}")

@@ -1,0 +1,73 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen3-30BA3B-sft-config"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output_sft
+system_envs:
+  USE_MODELSCOPE: '1'
+
+track_with: ml_tracker
+tracker_kwargs:
+ # ml_tracker的实验名，自行设置，不要和别人重复，否则没有权限写入报错
+ project: ljy_fsdp-ep-exp_qwen3-30BA3B
+ name: sft_megatron-pp2-ep4_bf16_4096
+ notes: "scale aligner pipeline"
+ tags: # mltracker job tags，后续方便管理实验
+   - pipeline
+   - roll
+   - Qwen3
+
+num_gpus_per_node: 8
+
+save_steps: 100
+logging_steps: 1
+eval_steps: 100
+resume_from_checkpoint: false
+
+sequence_length: 4096
+
+pretrain: Qwen/Qwen3-30B-A3B-Base
+
+# sft related 
+# system_key: system_prompt # use the default system prompt in the tokenizer tmplate if not provided
+prompt_key: instruction
+query_key: input
+response_key: output
+
+# validation:
+#   data_args:
+#     file_name: ./data/code_alpaca_500.json
+#     template: qwen2_5
+
+sft_train:
+  model_args:
+    dtype: bf16
+  training_args:
+    num_train_epochs: 1
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 2
+    learning_rate: 5.0e-6
+  data_args:
+    file_name: ./data/code_alpaca_20k.json # https://huggingface.co/datasets/sahil2801/CodeAlpaca-20k
+    template: qwen2_5
+    preprocessing_num_workers: 4
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      virtual_pipeline_model_parallel_size: 8
+      expert_model_parallel_size: 4
+      context_parallel_size: 1
+      use_distributed_optimizer: true
+      sequence_parallel: true
+      moe_token_dispatcher_type: "alltoall"
+      moe_grouped_gemm: true
+      moe_layer_recompute: true
+  use_sequence_packing: True
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2

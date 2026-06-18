@@ -1,9 +1,3 @@
-defaults:
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
-
 hydra:
   run:
     dir: .

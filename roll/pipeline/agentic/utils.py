@@ -476,21 +476,49 @@ def agentic_compute_advantage(
     # Check OPD config
     is_pure_opd = getattr(pipeline_config, "is_pure_opd", False) if pipeline_config else False
     use_opd = getattr(pipeline_config, "use_opd", False) if pipeline_config else False
-    opd_kl_coef = getattr(pipeline_config, "opd_kl_coef", 1.0) if pipeline_config else 1.0
+    reference_configs = getattr(pipeline_config, "reference_configs", {"default": None}) if pipeline_config else {"default": None}
 
-    # Compute KL divergence for OPD modes
-    kld = None
     if is_pure_opd or use_opd:
-        kld = compute_approx_kl(
-            log_probs=data.batch["old_log_probs"] if getattr(pipeline_config, "enable_old_logprobs_recompute", False) else data.batch["infer_logprobs"],
-            log_probs_base=data.batch["ref_log_probs"],
-            action_mask=response_mask,
-            kl_penalty=getattr(pipeline_config, "kl_penalty", "kl"),
-        )
+        log_probs_key = "old_log_probs" if getattr(pipeline_config, "enable_old_logprobs_recompute", False) else "infer_logprobs"
+        kl_penalty = getattr(pipeline_config, "kl_penalty", "kl")
+        total_weighted_kld = torch.zeros_like(response_mask, dtype=torch.float32)
+        for name, ref_cfg in reference_configs.items():
+            ref_key = f"ref_log_probs_{name}"
+            mask_key = f"ref_log_probs_{name}_mask"
 
-    # For pure OPD mode, advantage is directly -kld
+            # Check if this teacher has a routing mask (set by pipeline when needs_teacher_routing)
+            if mask_key in data.batch:
+                teacher_mask = data.batch[mask_key]  # (batch_size,), bool
+            else:
+                # No mask = this teacher handles all tags (backward compatible)
+                teacher_mask = None
+
+            kl_coef_i = ref_cfg.opd_kl_coef if (ref_cfg and ref_cfg.opd_kl_coef is not None) else 1.0
+
+            if teacher_mask is not None and teacher_mask.sum() < teacher_mask.numel():
+                # Only compute KL on routed subset to avoid meaningless computation against zeros
+                subset_idx = teacher_mask.nonzero(as_tuple=True)[0]
+                kld_subset = compute_approx_kl(
+                    log_probs=data.batch[log_probs_key][subset_idx],
+                    log_probs_base=data.batch[ref_key][subset_idx],
+                    action_mask=response_mask[subset_idx],
+                    kl_penalty=kl_penalty,
+                )
+                kld_i = torch.zeros_like(response_mask, dtype=torch.float32)
+                kld_i[subset_idx] = kld_subset
+                total_weighted_kld += kl_coef_i * kld_i
+            else:
+                kld_i = compute_approx_kl(
+                    log_probs=data.batch[log_probs_key],
+                    log_probs_base=data.batch[ref_key],
+                    action_mask=response_mask,
+                    kl_penalty=kl_penalty,
+                )
+                total_weighted_kld += kl_coef_i * kld_i
+
+    # For pure OPD mode, advantage is directly -total_weighted_kld
     if is_pure_opd:
-        advantages = -kld
+        advantages = -total_weighted_kld
         returns = advantages
         data.batch["raw_advantages"] = advantages
     else:
@@ -518,9 +546,9 @@ def agentic_compute_advantage(
 
         data.batch["raw_advantages"] = advantages
 
-        # Apply mixed OPD mode
+        # Apply mixed OPD mode: advantages = rl_advantages - total_weighted_kld
         if use_opd:
-            advantages = advantages - opd_kl_coef * kld
+            advantages = advantages - total_weighted_kld
 
     if whiten_advantages:
         # TODO whiten过程中是否要考虑response的长度？

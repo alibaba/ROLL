@@ -61,9 +61,9 @@ gradient_accumulation_steps * per_device_train_batch_size * (world_size/tensor_m
 
 ### 如何设置 `gradient_accumulation_steps` 和 `per_device_train_batch_size`？
 
-#### 对于 DeepSpeed Backend：
+#### 对于 FSDP2 Backend：
 ```
-global_batch_size = per_device_train_batch_size * gradient_accumulation_steps * world_size
+global_batch_size = per_device_train_batch_size * gradient_accumulation_steps * world_size / ulysses_size
 ```
 其中 `world_size` 即 `actor_train`/`critic` 的 `device_mapping` 长度
 

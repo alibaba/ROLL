@@ -101,7 +101,6 @@ def encode_dataset(dataset, num_proc, encode_function, new_fingerprint=None):
             question_getter,
         ),
         batched=True,
-        batch_size=100,
         num_proc=num_proc,
         features=features,
         remove_columns=remove_columns,

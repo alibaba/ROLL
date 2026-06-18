@@ -85,7 +85,10 @@ class DPOTrainer(McaTrainer):
         self, labels: "torch.Tensor", loss_mask: "torch.Tensor", logits: "torch.Tensor", non_loss_data: bool = False
     ):
         batch_size = labels.size(0) // 2
-        logprobs = vocab_parallel_logprobs(logits, labels)
+        logprobs = vocab_parallel_logprobs(
+            logits, labels,
+            use_fused_kernel=self.args.cross_entropy_loss_fusion
+        )
         logprobs = (logprobs * loss_mask).sum(-1)
         if mpu.get_context_parallel_world_size() > 1:
             dist.all_reduce(logprobs, group=mpu.get_context_parallel_group())
@@ -145,7 +148,10 @@ class DPOTrainer(McaTrainer):
         logits: "torch.Tensor",
     ):
         batch_size = labels.size(0) // 2
-        logprobs = vocab_parallel_logprobs(logits, labels)
+        logprobs = vocab_parallel_logprobs(
+            logits, labels,
+            use_fused_kernel=self.args.cross_entropy_loss_fusion
+        )
         logprobs = (logprobs * loss_mask).sum(-1)
         response_lens = loss_mask.sum(-1)
         cp_size = mpu.get_context_parallel_world_size()

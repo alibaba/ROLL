@@ -1,5 +1,5 @@
 import copy
-from contextlib import nullcontext
+from contextlib import nullcontext, ExitStack
 from threading import Lock
 from typing import Optional
 
@@ -25,6 +25,7 @@ from roll.utils.constants import GenerateStopReason
 from roll.utils.functionals import pad_to_length, aggregate_metrics
 from roll.utils.logging import get_logger
 from roll.utils.str_utils import contains_renderable_field
+from roll.utils.telemetry import attach_trace_context, get_tracer
 
 
 class TrajEnvManager(BaseEnvManager):
@@ -49,6 +50,7 @@ class TrajEnvManager(BaseEnvManager):
         self.output_queue = output_queue
         self.mode = mode
         self.generate_scheduler: RouterManager = generate_scheduler
+        self.trace_stack = None
 
         # EnvManager states
         self.rollout_cache: Optional[RolloutCache] = None
@@ -111,13 +113,15 @@ class TrajEnvManager(BaseEnvManager):
 
         while self.running and rollout_cache is not None:
 
-            with Timer(name="generate", logger=None) as generate_timer:
+            with Timer(name="generate", logger=None) as generate_timer, \
+                get_tracer("env_manager").start_as_current_span("generate"):
                 lm_output: DataProto = self.make_decision(rollout_cache)
                 stop_reason = lm_output.meta_info.pop("stop_reason")
             log_stats["current_step"].append(self.current_step)
             log_stats["generate_time"].append(generate_timer.last)
 
-            with Timer(name="step", logger=None) as step_timer:
+            with Timer(name="step", logger=None) as step_timer, \
+                get_tracer("env_manager").start_as_current_span("step"):
                 if stop_reason == GenerateStopReason.FINISH:
                     rollout_cache: RolloutCache = self.step(lm_output)
             log_stats["step_time"].append(step_timer.last)
@@ -131,6 +135,7 @@ class TrajEnvManager(BaseEnvManager):
                 rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id] * rollout.batch.batch_size[0], dtype=object)
                 rollout.non_tensor_batch["traj_id"] = np.array([traj_id] * rollout.batch.batch_size[0], dtype=object)
                 ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id']))
+                self.trace_stack.close()
 
                 rollout_cache = self.reset()
                 start_step = self.current_step
@@ -150,6 +155,23 @@ class TrajEnvManager(BaseEnvManager):
             assert not self.running
             return None
         seed = self.group_seed + self.episode_id
+
+        traj_group_id = f"{self.rollout_cache.tag}_{self.rollout_cache.group_id}_{self.episode_id}_{self.group_seed}"
+        traj_id = f"{traj_group_id}_{self.rollout_cache.env_id}"
+        self.trace_stack = ExitStack()
+        self.trace_stack.enter_context(attach_trace_context(self.trace_meta))
+        self.trace_stack.enter_context(
+            get_tracer("env_manager").start_as_current_span(
+                "trajectory",
+                attributes={
+                    "traj_id": traj_id,
+                    "traj_group_id": traj_group_id,
+                    "env_id": self.env_config["env_id"],
+                    "group_id": self.env_config["group_id"],
+                    "episode_id": self.episode_id,
+                },
+            )
+        )
 
         with self.thread_lock, self.env_step_limiter:
             # `observation` describes the current game-state prompt;

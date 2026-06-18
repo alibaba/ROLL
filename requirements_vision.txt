@@ -1,1 +1,4 @@
 pycocotools  # for detection verify
+qwen_vl_utils  # for video
+decord  # for video
+rouge_score==0.1.2  # for video-r1 reward

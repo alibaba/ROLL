@@ -1,9 +1,3 @@
-defaults:
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
-
 hydra:
   run:
     dir: .
@@ -106,6 +100,7 @@ actor_train:
       moe_grouped_gemm: true
       moe_shared_expert_overlap: true
       bf16: true
+  #mtp_training_mode: standalone
   device_mapping: list(range(0,16))
   infer_batch_size: 1
 
@@ -131,6 +126,9 @@ actor_infer:
       tensor_parallel_size: 2
       optimization_level: 1
       sleep_level: 2
+      #speculative_config:
+       # method: mtp
+       # num_speculative_tokens: 3
   num_gpus_per_worker: 2
   device_mapping: list(range(0,16))
   infer_batch_size: 1

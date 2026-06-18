@@ -2,6 +2,7 @@ import asyncio
 import copy
 import gc
 import os
+import random
 from collections import deque
 from typing import Dict, List, Optional
 from packaging.version import Version
@@ -27,7 +28,7 @@ from roll.utils.functionals import (
     gather_unpadded_input_ids,
 )
 from roll.utils.logging import get_logger
-from roll.utils.offload_states import OffloadStateType
+from roll.utils.offload_states import OffloadStateType, clear_memory
 from roll.platforms import current_platform
 
 
@@ -45,9 +46,36 @@ class VllmStrategy(InferenceStrategy):
         self._metrics_snapshot_interval = 1.0  # Snapshot every 1 second
         self._metrics_task = None
 
+
+    def get_free_port_for_rank(self) -> int:
+        VLLM_PORT_START = 20000
+        PORT_RANGE = 500
+        MAX_LOCAL_WORKER_COUNT = 16
+
+        rank = self.worker.rank
+        effective_rank = rank % MAX_LOCAL_WORKER_COUNT
+        
+        range_start = VLLM_PORT_START + effective_rank * PORT_RANGE
+        range_end = range_start + PORT_RANGE
+        
+        for _ in range(PORT_RANGE):
+            port = random.randint(range_start, range_end - 1)
+            if self.worker.is_port_available(port):
+                return port
+        
+        raise RuntimeError(
+            f"Cannot allocate free port for rank {rank} (effective_rank={effective_rank}) in range [{range_start}, {range_end}]"
+        )
+
     async def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
         vllm_config = copy.deepcopy(self.worker_config.strategy_args.strategy_config)
+
+        # Apply GDN attention patch for mixed decode/spec-decode bug fix
+        # This patches vLLM versions < v0.17.2 that lack the fix
+        from roll.third_party.vllm.gdn_patcher import patch_gdn_attention
+        patch_gdn_attention()
+
         # Must explicitly set VLLM_USE_V1 to pass this check: https://github.com/vllm-project/vllm/pull/14972
         os.environ["VLLM_USE_V1"] = str(vllm_config.pop("VLLM_USE_V1", 1))
         self.sleep_level = vllm_config.pop("sleep_level", 1)
@@ -109,7 +137,8 @@ class VllmStrategy(InferenceStrategy):
         # https://github.com/vllm-project/vllm/blob/releases/v0.10.0/vllm/v1/engine/coordinator.py#L72
         if not data_parallel_size > 1:
             # set VLLM_PORT to avoid port conflict applied by vllm
-            vllm_port = self.worker.get_free_port()
+            vllm_port = self.get_free_port_for_rank()
+            logger.info(f"Allocated vllm_port {vllm_port} for rank {self.worker.rank}")
             os.environ["VLLM_PORT"] = str(vllm_port)
 
         self.model = await create_async_llm(resource_placement_groups=self.worker_config.resource_placement_groups, **vllm_config)
@@ -263,9 +292,15 @@ class VllmStrategy(InferenceStrategy):
         if "multi_modal_data" in payload:
             multi_modal_data = payload["multi_modal_data"]
             prompt_token_ids = multi_modal_data["prompt_token_ids"]
-            multi_modal_data = (multi_modal_data["multi_modal_data"]
-                                if "multi_modal_data" in multi_modal_data else None)
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids, multi_modal_data=multi_modal_data)
+            prompt = TokensPrompt(
+                prompt_token_ids=prompt_token_ids,
+                multi_modal_data=multi_modal_data["multi_modal_data"]
+                if "multi_modal_data" in multi_modal_data
+                else None,
+                mm_processor_kwargs=multi_modal_data["mm_processor_kwargs"]
+                if "mm_processor_kwargs" in multi_modal_data
+                else None,
+            )
         else:
             prompt = TokensPrompt(prompt_token_ids=payload["input_ids"])
 
@@ -306,11 +341,19 @@ class VllmStrategy(InferenceStrategy):
                         for token_id, lps in zip(completion_output.token_ids, completion_output.logprobs)
                     ]
                 )
-        return {
+
+        result = {
             "output_token_ids": output_token_ids,
             "finish_reasons": finish_reasons,
             "output_logprobs": logprobs,
         }
+
+        # Add speculative metrics if available
+        spec_metrics = self.get_speculative_metrics()
+        if spec_metrics:
+            result["metrics"] = spec_metrics
+
+        return result
 
     async def abort_requests(self, request_ids):
         for id in request_ids:
@@ -329,8 +372,7 @@ class VllmStrategy(InferenceStrategy):
             if self.is_model_in_gpu and self.worker.pipeline_config.is_actor_infer_colocated:
                 await self.model.offload_states(self.sleep_level)
                 self.is_model_in_gpu = False
-        gc.collect()
-        current_platform.empty_cache()
+        clear_memory()
     
     async def process_weights_after_loading(self,*args, **kwargs):
         await self.model.process_weights_after_loading()
@@ -351,25 +393,27 @@ class VllmStrategy(InferenceStrategy):
         peft_config["target_modules"] = set(self.worker_config.model_args.lora_target)
         await self.model.add_lora(peft_config)
 
+    # Mapping from raw vLLM metric names to internal keys
+    _VLLM_METRIC_MAP = {
+        "vllm:kv_cache_usage_perc": "vllm/kv_cache_usage_perc_max",
+        "vllm:num_requests_waiting": "vllm/num_requests_waiting_max",
+        "vllm:num_preemptions": "vllm/num_preemptions_max",
+        "vllm:spec_decode_num_drafts": "vllm/spec_decode_num_drafts",
+        "vllm:spec_decode_num_draft_tokens": "vllm/spec_decode_num_draft_tokens",
+        "vllm:spec_decode_num_accepted_tokens": "vllm/spec_decode_num_accepted_tokens",
+    }
+
     async def _collect_metrics_snapshot(self):
-        """Collect metrics snapshots periodically in a background thread."""
+        """Collect metrics snapshots periodically in a background task."""
         from vllm.v1.metrics.reader import get_metrics_snapshot
         while True:
             raw_metrics = get_metrics_snapshot()
-            snapshot = {
-                'vllm/kv_cache_usage_perc_max': [],
-                'vllm/num_requests_waiting_max': [],
-                'vllm/num_preemptions_max': []
-            }
+            snapshot = {key: [] for key in self._VLLM_METRIC_MAP.values()}
             for metric in raw_metrics:
-                if metric.name == "vllm:kv_cache_usage_perc":
-                    snapshot['vllm/kv_cache_usage_perc_max'].append(metric.value)
-                elif metric.name == "vllm:num_requests_waiting":
-                    snapshot['vllm/num_requests_waiting_max'].append(metric.value)
-                elif metric.name == "vllm:num_preemptions":
-                    snapshot['vllm/num_preemptions_max'].append(metric.value)
+                mapped_key = self._VLLM_METRIC_MAP.get(metric.name)
+                if mapped_key:
+                    snapshot[mapped_key].append(metric.value)
             self._metrics_snapshots.append(snapshot)
-
             await asyncio.sleep(self._metrics_snapshot_interval)
 
     def get_metrics(self, metric_names: Optional[List[str]] = None) -> Dict[str, float]:
@@ -387,6 +431,21 @@ class VllmStrategy(InferenceStrategy):
         metrics_snapshots = list_of_dict_to_dict_of_list(self._metrics_snapshots)
         self._metrics_snapshots.clear()
         return reduce_metrics(metrics_snapshots)
+
+    def get_speculative_metrics(self) -> Dict[str, float]:
+        """Get speculative decoding metrics in a format aligned with SGLang."""
+        metrics = self.get_metrics()
+        draft_tokens = metrics.get('vllm/spec_decode_num_draft_tokens', 0)
+        accepted_tokens = metrics.get('vllm/spec_decode_num_accepted_tokens', 0)
+        draft_count = metrics.get('vllm/spec_decode_num_drafts', 0)
+        if draft_tokens == 0:
+            return {}
+        return {
+            'spec_draft_token_num': draft_tokens,
+            'spec_accept_token_num': accepted_tokens,
+            'spec_accept_rate': accepted_tokens / draft_tokens if draft_tokens > 0 else 0.0,
+            'spec_accept_length': 1 + (accepted_tokens / draft_count) if draft_count > 0 else 1.0,
+        }
 
 
 def gather_outputs_to_pad_tensor(request_outputs: List["RequestOutput"], pad_token_id, device=None) -> torch.Tensor:

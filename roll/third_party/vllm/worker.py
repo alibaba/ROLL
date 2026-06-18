@@ -14,7 +14,14 @@ from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
 from roll.utils.logging import get_logger
+from roll.utils.offload_states import clear_memory
 from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tensors_from_bucket
+
+# Apply GDN attention patch at module import time.
+# This ensures the patch is applied in EngineCore subprocesses as well,
+# since this module is imported when worker_extension_cls is loaded.
+from roll.third_party.vllm.gdn_patcher import patch_gdn_attention
+patch_gdn_attention()
 
 logger = get_logger()
 
@@ -71,7 +78,19 @@ class WorkerBase:
             from roll.third_party.vllm.vllm_utils import patch_vllm_moe_model_weight_loader
 
             patch_vllm_moe_model_weight_loader(self.model_runner.model)
-        self.model_runner.model.load_weights(weights=weights)
+
+        # Convert to list for multiple iterations (draft model also needs the same weights)
+        weights_list = list(weights)
+
+        # Update target model (skips mtp.* prefixed weights via skip_prefixes)
+        self.model_runner.model.load_weights(weights=weights_list)
+
+        # Update drafter model (MTP/EAGLE) if exists
+        # Drafter models like EagleProposer and DraftModelProposer have a model attribute
+        # that needs to be updated separately with the same weights
+        if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
+            logger.info("Updating drafter (MTP/EAGLE) model weights...")
+            self.model_runner.drafter.model.load_weights(weights=weights_list)
 
     def load_states(self):
         self.reload_model()
@@ -99,8 +118,7 @@ class WorkerBase:
         self.kv_cache_loaded = False
         if hasattr(self, "recv_manager"):
             self.recv_manager.clear()
-        gc.collect()
-        current_platform.empty_cache()
+        clear_memory()
 
     def setup_collective_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         group_rank = self.rank + rank_offset

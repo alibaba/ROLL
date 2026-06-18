@@ -4,21 +4,31 @@ import random
 from collections import defaultdict
 from contextlib import nullcontext
 from typing import Callable, Dict, Optional, Tuple
+from abc import abstractmethod, ABC
 
+import accelerate
 import numpy as np
 import ray
+import transformers
+from transformers import AutoConfig, get_scheduler, set_seed
+from codetiming import Timer
+from packaging import version
 import torch
+from torch import optim
+from torch import Tensor
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from codetiming import Timer
-from torch import optim
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
-from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor import DTensor, distribute_tensor, distribute_module, Shard
+from torch.distributed.tensor.parallel import parallelize_module, ParallelStyle
+from torch.distributed._functional_collectives import (
+    all_to_all_single,
+    all_to_all_single_autograd,
+)
 from torch.nn.utils import clip_grad_norm_
 from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
-from transformers import AutoConfig, get_scheduler, set_seed
 
 from roll.datasets.collator import collate_fn_to_dict_list
 from roll.distributed.executor.worker import Worker
@@ -36,20 +46,21 @@ from roll.utils.checkpoint_manager import CheckpointManager, download_model
 from roll.utils.collective import collective
 from roll.utils.context_parallel import get_ulysses_group, set_upg_manager
 from roll.utils.context_parallel.autograd_gather import ulysses_gather
-from roll.utils.context_parallel.rmpad_ulysses import (
-    gather_outputs_and_unpad,
-    ulysses_pad_and_slice_inputs,
-    ulysses_pad_inputs,
-)
 from roll.utils.fsdp_utils import (
     apply_fsdp2,
     fsdp2_load_full_state_dict,
     get_init_weight_context_manager,
     get_shard_placement_fn,
+    get_shard_placement_fn_ep,
+    _permute,
+    _unpermute,
+    register_experts_forward_in_ExpertsInterface,
+    set_use_grouped_mm,
 )
 from roll.utils.functionals import append_to_dict, log_probs_from_logits
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.constants import IGNORE_INDEX
 
 logger = get_logger()
 
@@ -89,7 +100,7 @@ def _parse_dtype(dtype):
     return dtype
 
 
-def create_device_mesh_with_ulysses(world_size: int, fsdp_size: int):
+def create_device_mesh_with_ep(world_size: int, fsdp_size: int, efsdp_size: int, ep_size: int):
     """
     Create device mesh for FSDP.
     """
@@ -107,11 +118,206 @@ def create_device_mesh_with_ulysses(world_size: int, fsdp_size: int):
         mesh_shape = (ddp_size, fsdp_size)
         mesh_dim_names = ["ddp", "fsdp"]
 
-    return init_device_mesh(
+    device_mesh = init_device_mesh(
         current_platform.device_type,
         mesh_shape=mesh_shape,
         mesh_dim_names=mesh_dim_names,
     )
+
+    # Create device mesh for MoE
+    if ep_size > 1:
+        moe_model_size = efsdp_size * ep_size
+        if moe_model_size == world_size:
+            moe_mesh_shape = (efsdp_size, ep_size)
+            moe_mesh_dim_names = ("efsdp", "ep")
+        else:
+            eddp_size = world_size // moe_model_size
+            moe_mesh_shape = (eddp_size, efsdp_size, ep_size)
+            moe_mesh_dim_names = ["eddp", "efsdp", "ep"]
+
+        moe_device_mesh = init_device_mesh(
+            current_platform.device_type,
+            mesh_shape=moe_mesh_shape,
+            mesh_dim_names=moe_mesh_dim_names,
+        )
+    else:
+        moe_device_mesh = None
+
+    return device_mesh, moe_device_mesh
+
+
+class BaseExpertParallel(ParallelStyle, ABC):
+    """
+    Mirror torchtitan's BaseExpertParallel.
+    Reference: https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/expert_parallel.py #L30 #v0.2.2
+    """
+    @abstractmethod
+    def _partition_fn(self, name: str, mod: torch.nn.Module, device_mesh: DeviceMesh) -> None:
+        ...
+
+    @abstractmethod
+    def _token_dispatch(
+        self, mod: torch.nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        ...
+
+    @abstractmethod
+    def _token_combine(
+        self, mod: torch.nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        ...
+
+
+class ExpertParallel(BaseExpertParallel):
+    """
+    Mirror torchtitan's BaseExpertParallel.
+    Reference: https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/expert_parallel.py #L89 #v0.2.2
+    """
+    def __init__(self, num_experts: int):
+        super().__init__()
+        self.input_splits = None
+        self.output_splits = None
+        self.input_shape = None
+        self.permuted_indices = None
+        self.num_experts = num_experts
+
+    def _partition_fn(self, name: str, mod: torch.nn.Module, device_mesh: DeviceMesh) -> None:
+        for param_name, param in mod.named_parameters(recurse=False):
+            dist_param = torch.nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(param_name, dist_param)
+
+    def _token_dispatch(
+        self, mod: torch.nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        # Preprocess
+        x, selected_experts_indices, top_scores = inputs
+        self.x = x
+        self.top_scores = top_scores
+        self.bs_slen, self.dim = x.shape
+        self.top_k = top_scores.shape[-1]
+        num_tokens_per_expert = torch.histc(
+            selected_experts_indices.view(-1),
+            bins=self.num_experts,
+            min=0,
+            max=self.num_experts,
+        )
+        self.token_indices_experts_sorted = token_indices_experts_sorted = torch.argsort(
+            selected_experts_indices.view(-1), stable=True
+        )
+        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
+        # shape (bs*slen*top_k, dim)
+        routed_input = x[token_indices_experts_sorted // self.top_k]
+
+        # annotate module input placements/sharding with input_layouts
+        ep_degree = device_mesh.shape[0]
+        num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
+
+        # generate the input splits and output splits for all-to-all
+        with torch.no_grad():
+            num_tokens_per_expert_group = all_to_all_single(
+                num_tokens_per_expert,
+                None,
+                None,
+                group=device_mesh.get_group(),
+            )
+            # Need to wait explicitly because it is used by a triton kernel later
+            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+                num_tokens_per_expert_group
+            )
+            input_splits = (
+                num_tokens_per_expert.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            # NOTE: this would incur a device-to-host sync
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=False)
+            )
+            self.input_splits = input_splits.tolist()
+            self.output_splits = output_splits.tolist()
+
+        # perform all-to-all
+        routed_input = all_to_all_single_autograd(
+            routed_input,
+            self.output_splits,
+            self.input_splits,
+            device_mesh.get_group(),
+        )
+
+        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+        # However, the num_tokens_per_expert_group is not of the final target format
+        # [#tokens for local expert 0, #tokens for local expert 1, ...]
+        # Rather, it is of the format
+        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+        # We need to perform another shuffle to get the correct layout, via the _permute function
+        # below, which also does padding to make sure the number of tokens each expert gets locally
+        # is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+        # Note that this will create side effects when wrapping the for-loop implementation
+        # of GroupedExperts, as it does not need padding.
+
+        (
+            self.input_shape,
+            routed_input,
+            self.permuted_indices,
+            num_tokens_per_expert_group,
+        ) = _permute(
+            routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+        )
+
+        return routed_input, num_tokens_per_expert_group
+
+    def _token_combine(
+        self, mod: torch.nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        routed_output = _unpermute(
+            routed_output, self.input_shape, self.permuted_indices
+        )
+
+        routed_output = all_to_all_single_autograd(
+            routed_output,
+            self.input_splits,
+            self.output_splits,
+            device_mesh.get_group(),
+        )
+
+        # Postprocess
+        routed_output_unsorted = torch.zeros(
+            (self.bs_slen * self.top_k, self.dim),
+            dtype=routed_output.dtype,
+            device=routed_output.device,
+        )
+        routed_output_unsorted[self.token_indices_experts_sorted] = routed_output
+        routed_output_unsorted = routed_output_unsorted.reshape(
+            -1, self.top_k, self.dim
+        )
+        out_experts = (
+            torch.bmm(
+                self.top_scores.reshape(-1, 1, self.top_k),
+                routed_output_unsorted.to(self.top_scores.dtype),
+            )
+            .to(self.x.dtype)
+            .squeeze(1)
+        )
+
+        # Do cloning here to ensure that experts return a not-view tensor.
+        # View tensor + in-place modification later can break pre-backward hook of fsdp.
+        # For example, in qwen3.5, in-place modification is applied to the output of experts: expert_output += shared_expert_output
+        return out_experts.clone()
+
+    def _apply(self, module: torch.nn.Module, device_mesh: DeviceMesh) -> torch.nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
+            input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,
+        )
 
 
 class FSDP2StrategyBase(InferenceStrategy):
@@ -327,9 +533,6 @@ class FSDP2StrategyBase(InferenceStrategy):
         with Timer("load", logger=None) as load_timer:
             self.load_states()
 
-        dcp_checkpoint_dir = self._get_dcp_checkpoint_dir(save_dir)
-        os.makedirs(dcp_checkpoint_dir, exist_ok=True)
-
         with Timer("hf_save", logger=None) as hf_timer:
             full_state_options = self._get_dcp_state_dict_options(full_state_dict=True)
             full_model_state = get_model_state_dict(
@@ -348,13 +551,23 @@ class FSDP2StrategyBase(InferenceStrategy):
                 if getattr(self, "processor", None):
                     self.processor.save_pretrained(save_dir)
 
-        with Timer("dcp_save", logger=None) as dcp_timer:
-            self._save_checkpoint_with_dcp(checkpoint_dir=dcp_checkpoint_dir, is_last_step=is_last_step)
+        if self.save_only_model and dist.is_initialized():
+            dist.barrier()
 
-        # PumpkinComment:
-        # If DCP save is async, uploading (which may copy+delete the local dir) must not start
-        # until the async save has fully finished writing checkpoint shards.
-        dcp_save_future = self.checkpoint_future if (self.async_save_strategy and not is_last_step) else None
+        dcp_save_time = 0
+        dcp_save_future = None
+        if not self.save_only_model:
+            dcp_checkpoint_dir = self._get_dcp_checkpoint_dir(save_dir)
+            os.makedirs(dcp_checkpoint_dir, exist_ok=True)
+
+            with Timer("dcp_save", logger=None) as dcp_timer:
+                self._save_checkpoint_with_dcp(checkpoint_dir=dcp_checkpoint_dir, is_last_step=is_last_step)
+            dcp_save_time = dcp_timer.last
+
+            # PumpkinComment:
+            # If DCP save is async, uploading (which may copy+delete the local dir) must not start
+            # until the async save has fully finished writing checkpoint shards.
+            dcp_save_future = self.checkpoint_future if (self.async_save_strategy and not is_last_step) else None
 
         checkpoint_config = getattr(self.worker_config, "checkpoint_config", None) or {}
         async_upload = checkpoint_config.get("async_upload", True)
@@ -396,9 +609,16 @@ class FSDP2StrategyBase(InferenceStrategy):
                     keep_local_file=keep_local_file,
                 )
 
+        # When cpu_offload is enabled, restore optimizer states back to CPU after saving.
+        # Without this, optimizer.step() will fail due to device mismatch (optimizer on GPU, grads on CPU).
+        with Timer("offload", logger=None) as offload_timer:
+            if self.cpu_offload_enabled:
+                self.offload_states()
+
         return {
             "load": load_timer.last,
-            "dcp_save": dcp_timer.last,
+            "offload": offload_timer.last,
+            "dcp_save": dcp_save_time,
             "hf_save": hf_timer.last,
         }
 
@@ -610,17 +830,31 @@ class FSDP2StrategyBase(InferenceStrategy):
         self.worker_config.model_args.compute_dtype = torch_dtype
 
         fsdp_size = self.worker_config.strategy_args.strategy_config.get("fsdp_size", 1)
-        if cp_size > 1 and (fsdp_size <= 1 or fsdp_size >= world_size):
-            fsdp_size = world_size // cp_size
-            self.worker_config.strategy_args.strategy_config["fsdp_size"] = fsdp_size
-            if global_rank == 0:
-                logger.info(f"CP enabled: auto-setting fsdp_size={fsdp_size} so ddp_size==cp_size for hybrid sharding")
-        elif fsdp_size != world_size:
-            logger.warning(f"fsdp_size {fsdp_size} is not equal to world_size {world_size}, using world_size instead")
-            fsdp_size = world_size
+        assert fsdp_size >= cp_size, "fsdp size should be greater than cp size."
 
-        self.worker_config.strategy_args.strategy_config["fsdp_size"] = fsdp_size
-        self.device_mesh = create_device_mesh_with_ulysses(world_size=world_size, fsdp_size=fsdp_size)
+        # Get expert parallel config
+        efsdp_size = self.worker_config.strategy_args.strategy_config.get("efsdp_size", 1)
+        ep_size = self.worker_config.strategy_args.strategy_config.get("ep_size", 1)
+        moe_use_grouped_mm = self.worker_config.strategy_args.strategy_config.get("moe_use_grouped_mm", False)
+        self.ep_enabled = ep_size > 1
+
+        # Check efsdp, ep size
+        if self.ep_enabled:
+            assert version.parse(transformers.__version__) >= version.parse("5.2.0")
+
+            moe_model_size = efsdp_size * ep_size
+            assert moe_model_size > 0 and moe_model_size <= world_size and world_size % moe_model_size == 0, \
+                f"efsdp_size * ep_size {moe_model_size} must be in [1, world_size({world_size})], and divisible by world_size {world_size}"
+
+        if moe_use_grouped_mm and self.ep_enabled:
+            set_use_grouped_mm(True)
+
+        # Patch ExpertsInterface to offer more options of forward function in transformers's MoeExperts
+        if self.ep_enabled:
+            register_experts_forward_in_ExpertsInterface()
+
+        # Create device mesh
+        self.device_mesh, self.moe_device_mesh = create_device_mesh_with_ep(world_size=world_size, fsdp_size=fsdp_size, efsdp_size=efsdp_size, ep_size=ep_size)
 
         model_name_or_path = download_model(self.worker_config.model_args.model_name_or_path)
         config = AutoConfig.from_pretrained(
@@ -631,7 +865,10 @@ class FSDP2StrategyBase(InferenceStrategy):
 
         self._validate_ulysses_compat(config, cp_size)
 
-        use_meta_tensor = not getattr(config, "tie_word_embeddings", False)
+        use_meta_tensor = not getattr(config, "tie_word_embeddings", False) and not self.ep_enabled
+        # accelerate v1.7.0 don't support _is_hf_initialized which is needed by use_meta_tensor
+        if version.parse(accelerate.__version__) == version.parse("1.7.0"):
+            use_meta_tensor = False
         init_context = get_init_weight_context_manager(
             use_meta_tensor=use_meta_tensor,
             mesh=self.device_mesh,
@@ -649,7 +886,27 @@ class FSDP2StrategyBase(InferenceStrategy):
 
         self.is_lora = self.worker_config.model_args.lora_target is not None
 
+        # Set _experts_implementation
+        layers = self._get_layers(model)
+
+        if self.ep_enabled:
+            layers[0].mlp.experts.config._experts_implementation = "ep"
+        elif moe_use_grouped_mm:
+            assert version.parse(transformers.__version__) >= version.parse("5.2.0"), "moe_use_grouped_mm requires transformers>=5.2.0"
+            layers[0].mlp.experts.config._experts_implementation = "grouped_mm"
+
         return model, torch_dtype, cp_size
+
+    def _get_layers(self, model):
+        if self.is_lora: # PeftModel
+            base_model = model.base_model.model.model
+        else:
+            base_model = model.model
+        
+        if hasattr(base_model, "layers"):
+            return base_model.layers
+        else: # multi-modal model
+            return base_model.language_model.layers
 
     @staticmethod
     def _validate_ulysses_compat(config, cp_size: int):
@@ -725,6 +982,10 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
             default_model_dtype=torch.bfloat16,
         )
 
+        # Initialize expert parallel model (must be before FSDP2 wrapping)
+        if self.ep_enabled:
+            self.apply_moe_ep(model)
+
         self.setup_fsdp2_configuration()
         self.initialize_fsdp2_model(model)
 
@@ -737,6 +998,7 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
         self.async_save_strategy = async_save_strategy
         if self.async_save_strategy:
             self.checkpoint_future = None
+        self.save_only_model = self.worker_config.strategy_args.strategy_config.get("save_only_model", False)
 
         # Get mixed precision settings from config
         param_dtype = self.worker_config.strategy_args.strategy_config.get("param_dtype", torch.bfloat16)
@@ -764,6 +1026,15 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
 
         offload_policy_cfg = self.worker_config.strategy_args.strategy_config.get("offload_policy", False)
         self.cpu_offload_enabled = bool(offload_policy_cfg)
+
+        # Perform reduce scatter during gradient accumulation.
+        # Default to True, because it decrease cuda memory usage and increase training speed according to tests.
+        self.reduce_scatter_during_grad_accumulation = bool(
+            self.worker_config.strategy_args.strategy_config.get("reduce_scatter_during_grad_accumulation", True)
+        )
+        if self.reduce_scatter_during_grad_accumulation:
+            logger.info("[FSDP2] reduce_scatter_during_grad_accumulation is ENABLED")
+
         offload_policy = None
         if self.cpu_offload_enabled:
             offload_policy = CPUOffloadPolicy(
@@ -781,13 +1052,40 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
                 fsdp_size=self.worker_config.strategy_args.strategy_config.get("fsdp_size", 1)
             ),
         }
+        self.moe_fsdp_config = self.fsdp_config.copy()
+        if self.ep_enabled:
+            self.moe_fsdp_config["mesh"] = self.moe_device_mesh["eddp", "efsdp"] if "eddp" in self.moe_device_mesh.mesh_dim_names else self.moe_device_mesh["efsdp"]
+            self.moe_fsdp_config["shard_placement_fn"] = get_shard_placement_fn_ep(
+                efsdp_size=self.worker_config.strategy_args.strategy_config.get("efsdp_size", 1),
+            )
+
+    def apply_moe_ep(self, model):
+        layers = self._get_layers(model)
+
+        num_experts = layers[0].mlp.experts.num_experts
+        experts_plan = ExpertParallel(num_experts=num_experts)
+        experts_mesh = self.moe_device_mesh["ep"]
+        for layer in layers:
+            if hasattr(layer.mlp, "experts"):
+                parallelize_module(
+                    module=layer.mlp.experts,
+                    device_mesh=experts_mesh,
+                    parallelize_plan=experts_plan,
+                )
 
     def initialize_fsdp2_model(self, model):
         offload_policy = self.fsdp_config["offload_policy"]
-        full_state = model.state_dict()
+
+        # Use nn.Module.state_dict() instead of model.state_dict() to get standard FQN keys
+        # (e.g. 'pretrained_model.model.layers.0...') that match what PyTorch's
+        # _iterate_valid_model_state() returns internally. Custom state_dict() methods
+        # (like AutoModelForCausalLMWithValueHead's) may strip prefixes, causing key
+        # mismatches in _broadcast_state_dict during FSDP2 initialization.
+        full_state = torch.nn.Module.state_dict(model)
         apply_fsdp2(
             model,
             self.fsdp_config,
+            self.moe_fsdp_config,
             self.worker_config.strategy_args.strategy_config,
             self.is_lora,
         )
@@ -797,10 +1095,13 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
             full_state,
             self.device_mesh,
             offload_policy,
+            self.ep_enabled,
         )
 
         self.model = model
 
+    # Add torch.no_grad() to disable gradient calculation.
+    # torch.no_grad() in pipeline cannot work because pipeline and worker are in different processes.
     @torch.no_grad()
     def forward_step(
         self,
@@ -851,6 +1152,15 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
                                 multi_modal_data[key].append(sample_mm_inputs[key])
                         for key in multi_modal_data.keys():
                             assert key not in forward_args
+                            mm_data = multi_modal_data[key]
+                            # All mm fields are not padded in collator currently and some should be padded first
+                            # pixel_values/pixel_values_videos for images/videos are concated for packing
+                            # input_features for audios with shape `(bs, freqs, frames)` should be padded before concat
+                            need_padding = any(t.shape[-1] != mm_data[0].shape[-1] for t in mm_data[1:])
+                            if need_padding:  # input_features/feature_attention_mask
+                                max_mm_len = max(t.shape[-1] for t in mm_data)
+                                for i, t in enumerate(mm_data):
+                                    mm_data[i] = torch.nn.functional.pad(t, (0, max_mm_len - t.shape[-1]), "constant", 0)
                             # DataProto.to('cuda') in upper frame not work for non_tensor_batch
                             forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
                         forward_args.update({"force_vit_image": True})
@@ -1063,6 +1373,10 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
         )
         logger.info(f"max steps worker train {self.worker_config.training_args.max_steps}")
 
+        # Initialize expert parallel model
+        if self.ep_enabled:
+            self.apply_moe_ep(model)
+
         # Setup FSDP-2 configuration
         self.setup_fsdp2_configuration()
 
@@ -1119,18 +1433,104 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
             set_sync_fn(True)
 
     def _clip_grad_norm(self, max_norm: float):
-        if not self.cpu_offload_enabled:
+        if not self.cpu_offload_enabled and not self.ep_enabled:
             grad_norm = clip_grad_norm_(
                 self.model.parameters(),
                 max_norm=max_norm,
             )
-        else:
+        elif not self.cpu_offload_enabled:
+            grad_norm = self._clip_grad_norm_with_ep(max_norm)
+        elif not self.ep_enabled:
             grad_norm = self._clip_grad_norm_cpu_offload(max_norm)
+        else:
+            grad_norm = self._clip_grad_norm_with_ep(max_norm, cpu_offload_enabled=True)
 
         if isinstance(grad_norm, DTensor):
             grad_norm = grad_norm.full_tensor()
 
         return grad_norm
+    
+    @torch.no_grad()
+    def _clip_grad_norm_with_ep(self, max_norm: float, cpu_offload_enabled: bool = False):
+        """
+        Reference to torchtitan's _clip_grad_norm_with_ep:
+        Reference: https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/utils.py #L479 #v0.2.2
+        """
+        parameters = list(self.model.parameters())
+        ep_params = []
+        non_ep_params = []
+        ep_grads = []
+        non_ep_grads = []
+
+        for p in parameters:
+            if p.grad is None:
+                continue
+            assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
+            mesh_dim_names = p.device_mesh.mesh_dim_names
+            assert mesh_dim_names is not None
+            if "efsdp" in mesh_dim_names:
+                # Divide the gradient of the moe parameter by ep to ensure that the gradient is calculated from data on a single rank,
+                # keeping it aligned with fsdp.
+                ep_size = self.worker_config.strategy_args.strategy_config.get("ep_size", 1)
+                p.grad.div_(ep_size)
+                ep_params.append(p)
+                ep_grads.append(p.grad)
+            else:
+                non_ep_params.append(p)
+                non_ep_grads.append(p.grad)
+
+        # Either list can be empty depending on the parallelization strategy:
+        # - In torchtitan with separate dense/sparse meshes, both lists are typically non-empty
+        # - In autoparallel, all params may live on a single sparse mesh with "ep" dimension,
+        #   so non_ep_grads would be empty
+        # - In PP + EP setups, certain PP ranks may only own EP or non-EP layers
+        ep_grads_total_norm = _get_total_norm(
+            ep_grads,
+            norm_type=2.0,
+            error_if_nonfinite=False,
+            foreach=None,
+        )
+        # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
+        if isinstance(ep_grads_total_norm, DTensor):
+            ep_grads_total_norm = ep_grads_total_norm.full_tensor()
+
+        non_ep_grads_total_norm = _get_total_norm(
+            non_ep_grads,
+            norm_type=2.0,
+            error_if_nonfinite=False,
+            foreach=None,
+        )
+        # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
+        if isinstance(non_ep_grads_total_norm, DTensor):
+            non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
+
+        # move norm scalar to GPU
+        if cpu_offload_enabled:
+            ep_grads_total_norm = ep_grads_total_norm.to(current_platform.current_device(), non_blocking=True)
+            non_ep_grads_total_norm = non_ep_grads_total_norm.to(current_platform.current_device(), non_blocking=True)
+
+        # Calculate total norm
+        norm_type = 2.0
+        total_norm = (
+            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
+        )
+        total_norm **= 1.0 / norm_type
+
+        # Do clipping
+        _clip_grads_with_norm_(
+            ep_params,
+            max_norm=max_norm,
+            total_norm=total_norm,
+            foreach=None,
+        )
+        _clip_grads_with_norm_(
+            non_ep_params,
+            max_norm=max_norm,
+            total_norm=total_norm,
+            foreach=None,
+        )
+
+        return total_norm
 
     def _clip_grad_norm_cpu_offload(self, max_norm: float):
         """
@@ -1217,7 +1617,15 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
             # PumpkinComment:
             # model.no_sync is replaced by model.set_requires_gradient_sync(False) in FSDP2
             # but also add support for model.no_sync for compatibility
-            sync_context = contextlib.nullcontext()
+            #
+            # When reduce_scatter_during_grad_accumulation is enabled, sync every step to decrease cuda memory usage.
+            # Reference: https://docs.pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.FullyShardedDataParallel.no_sync
+            if self.reduce_scatter_during_grad_accumulation:
+                sync_context = contextlib.nullcontext()
+            else:
+                sync_context = (
+                    self._grad_accumulation_context() if not sync_boundary and not no_sync else contextlib.nullcontext()
+                )
 
             with (
                 sync_context,
@@ -1265,6 +1673,12 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
                     self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
 
+
+        # Log cuda memory
+        max_memory_allocated = torch.cuda.memory.max_memory_allocated() / (1024 ** 3)
+        max_memory_reserved = torch.cuda.memory.max_memory_reserved() / (1024 ** 3)
+        metrics[f"system/max_memory_allocated@max"] = max_memory_allocated
+        metrics[f"system/max_memory_reserved@max"] = max_memory_reserved
         return metrics
 
     def setup_model_update(self, infer_cluster, model_update_name: str):
@@ -1281,3 +1695,74 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
 
     def model_update(self, model_update_name: str):
         return self.weight_updaters[model_update_name].model_update()
+    
+    def get_labels_on_cp_rank(
+        self,
+        labels: torch.Tensor,
+    ):
+        """Get labels for specific context parallel rank"""
+        seqlens_in_batch = labels.size(1)
+        assert (
+            seqlens_in_batch % self.worker.rank_info.cp_size == 0
+        ), f"input_length={seqlens_in_batch} not divisible by cp_size={self.worker.rank_info.cp_size}"
+        cp_middle_rank_len = seqlens_in_batch // self.worker.rank_info.cp_size
+        padded_labels = labels
+        start_index = cp_middle_rank_len * self.worker.rank_info.cp_rank
+        end_index = cp_middle_rank_len * (self.worker.rank_info.cp_rank + 1)
+        labels_this_cp_rank = padded_labels[:, start_index:end_index]
+        return labels_this_cp_rank
+
+    def op_compute_language_loss(self, logits: torch.Tensor, labels: torch.Tensor, batch_num_tokens: int):
+        """
+        Override for FSDP2 strategy: compute language loss from logits.
+
+        In FSDP2 strategy with HuggingFace models, the model returns logits
+        (not per-token loss like in Megatron strategy where labels are passed to the model).
+
+        Note: DataCollatorForSFT already shifts labels (shift_feature=True by default),
+        so logits and labels are already aligned. Do NOT shift again here.
+
+        Args:
+            logits: Model output logits [batch_size, seq_len, vocab_size]
+            labels: Pre-shifted labels [batch_size, seq_len], already aligned with logits
+            batch_num_tokens: Number of valid tokens for loss normalization
+
+        Returns:
+            loss: Scalar loss tensor
+            metrics: Dict
+        """
+        cp_size = self.worker.rank_info.cp_size
+        # Slice labels to match the sharded logits
+        if cp_size > 1:
+            labels = self.get_labels_on_cp_rank(labels)
+            labels = labels.contiguous()
+        
+        # Compute per-token loss mask
+        loss_mask = (labels != IGNORE_INDEX).float()
+        loss_mask = loss_mask.view(-1).float()
+        
+        # Compute cross entropy loss per token (reduction='none' to get per-token losses)
+        per_token_losses = torch.nn.functional.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            labels.view(-1),
+            ignore_index=IGNORE_INDEX,
+            reduction='none',  # Get per-token loss
+        )
+        
+        # Apply loss mask and sum
+        losses_sum = torch.sum(per_token_losses.view(-1) * loss_mask)
+        
+        # All-reduce across CP ranks
+        if cp_size > 1:
+            loss_info = torch.cat([losses_sum.view(1)])
+            dist.all_reduce(
+                loss_info, op=dist.ReduceOp.SUM, group=get_ulysses_group()
+            )
+            losses_sum = loss_info[0]
+        
+        # Normalize by batch_num_tokens
+        loss = losses_sum.clone() / batch_num_tokens  # clone to make sure loss is not a view
+        
+        metrics = {f"{self.worker_config.name}/loss@sum": loss.clone().detach().item()}
+
+        return loss, metrics

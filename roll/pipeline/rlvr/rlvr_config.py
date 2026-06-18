@@ -84,6 +84,10 @@ class RLVRConfig(PPOConfig):
     global_template: str = field(
         default=None,
         metadata={"help": "The template of the global."})
+    tag_to_template: Dict[str, str] = field(
+        default_factory=dict,
+        metadata={"help": "Mapping from tag to template name. Tags not in this dict fall back to global_template."}
+    )
     dataset_filter: DatasetFilterConfig = field(
         default_factory=DatasetFilterConfig,
         metadata={"help": "Configuration for filtering dataset by source and difficulty"},
@@ -170,6 +174,11 @@ class RLVRConfig(PPOConfig):
             self.critic.worker_cls = "roll.pipeline.base_worker.CriticWorker"
         if self.reward_model is not None and self.reward_model.worker_cls is None:
             self.reward_model.worker_cls = "roll.pipeline.base_worker.InferWorker"
+        # Multi-teacher: set worker_cls for each _reference_configs entry
+        if hasattr(self, '_reference_configs'):
+            for ref_cfg in self._reference_configs.values():
+                if ref_cfg.worker_cls is None:
+                    ref_cfg.worker_cls = "roll.pipeline.rlvr.actor_worker.ActorWorker"
 
         if self.router_args is None:
             self.router_args = RouterArguments(router_name="PromptAffinityRouter", router_config=dict())
@@ -184,6 +193,30 @@ class RLVRConfig(PPOConfig):
             self.tag_2_domain = {
                 tag: key for key, worker_config in self.rewards.items() for tag in worker_config.tag_included
             }
+
+        # OPD mode: include teacher tag_included in tag_2_domain mapping
+        # so that teacher tags are also mapped to domains for routing
+        if self.is_pure_opd or self.use_opd:
+            if self.tag_2_domain is None:
+                self.tag_2_domain = {}
+                self.domain_2_tag = {}
+            for name, ref_cfg in self._reference_configs.items():
+                for tag in ref_cfg.tag_included:
+                    if tag not in self.tag_2_domain:
+                        # If no reward covers this tag, map tag to itself as domain
+                        self.tag_2_domain[tag] = tag
+                        if tag not in self.domain_2_tag:
+                            self.domain_2_tag[tag] = {tag}
+
+        # Validate tag_to_template entries
+        if self.tag_to_template:
+            from roll.datasets.chat_template import chat_templates
+            for tag, tmpl_name in self.tag_to_template.items():
+                if tmpl_name not in chat_templates:
+                    raise ValueError(
+                        f"Template '{tmpl_name}' for tag '{tag}' in tag_to_template not found. "
+                        f"Available templates: {list(chat_templates.keys())}"
+                    )
 
         if self.async_pipeline:
             assert self.async_generation_ratio >= 1.0, "async_generation_ratio must be >= 1.0"
@@ -228,6 +261,11 @@ class RLVRConfig(PPOConfig):
         for worker_config in self.rewards.values():
             if worker_config.device_mapping is not None:
                 total_devices.extend(worker_config.device_mapping)
+        # Also include _reference_configs device_mappings for multi-teacher
+        if hasattr(self, '_reference_configs'):
+            for ref_cfg in self._reference_configs.values():
+                if isinstance(ref_cfg, WorkerConfig) and ref_cfg.device_mapping is not None:
+                    total_devices.extend(ref_cfg.device_mapping)
         if len(total_devices) > 0:
             max_gpu_num = max(total_devices) + 1
             if max_gpu_num <= self.num_gpus_per_node:

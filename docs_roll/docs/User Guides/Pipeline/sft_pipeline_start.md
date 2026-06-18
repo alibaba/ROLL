@@ -108,7 +108,7 @@ A typical config includes:
      - `dataloader_num_workers`
      - ...
    - **Strategy args** (`strategy_args`)
-     - `strategy_name`: e.g., `megatron_train` / `deepspeed_train`, etc.
+     - `strategy_name`: e.g., `megatron_train` / `fsdp2_train`, etc.
      - Parallelism-related parameters (tensor/pipeline parallel sizes, etc.)
    - **Device mapping** (`device_mapping`)
      - Specifies which GPUs the worker uses
