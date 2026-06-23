@@ -22,7 +22,7 @@ Ensure your hardware and host drivers are ready:
 | ---- | ----------- |
 | Hardware | Atlas 900 A2 PODc (Ascend 910B1) or Atlas 900 A3 PODc (Ascend 910_9391) |
 | Host OS | Ubuntu 22.04 |
-| CANN | 8.5.1 |
+| CANN | 9.0.0 |
 | Ascend NPU Driver | Installed on host (`npu-smi info` shows devices) |
 | Docker | >= 20.10 |
 
@@ -32,12 +32,12 @@ Use the pre-built Ascend image that matches your hardware. Official ROLL NPU ima
 
 ```bash
 # For A2 hardware
-docker pull roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:cann851-910b-py311-torch280-vllm0130
-docker tag roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:cann851-910b-py311-torch280-vllm0130 roll:ascend-a2
+docker pull quay.io/ascend/roll:main-a2
+docker tag quay.io/ascend/roll:main-a2 roll:ascend-a2
 
 # For A3 hardware
-docker pull roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:cann851-a3-py311-torch280-vllm0130
-docker tag roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:cann851-a3-py311-torch280-vllm0130 roll:ascend-a3
+docker pull quay.io/ascend/roll:main-a3
+docker tag quay.io/ascend/roll:main-a3 roll:ascend-a3
 ```
 
 The current repository includes `docker/Dockerfile.A2` and `docker/Dockerfile.A3` for building custom images. If you maintain a custom image, keep the dependency versions aligned with the pre-built image.
@@ -224,41 +224,43 @@ When adapting the GPU RLVR configuration for NPU, the following changes are **re
 
 | Item | GPU | NPU |
 | ---- | --- | --- |
-| Training backend | Megatron or DeepSpeed | DeepSpeed only (Megatron not supported) |
+| Training backend | Megatron or FSDP2 | FSDP2 only (Megatron not supported on NPU) |
 | Inference backend | vLLM | vLLM-Ascend |
-| Reference model strategy | `megatron_infer` | `hf_infer` |
-| Device placement | Colocated mode supported | Colocated mode **not** supported; training and inference must use separate NPUs |
+| Reference model strategy | `megatron_infer` | `fsdp2_infer` |
 | Attention implementation | `flash_attn` or `fa2` | `fa2` via `transformers` (not `flash_attn` package) |
 | Communication backend | NCCL | HCCL |
 | Device visibility | `CUDA_VISIBLE_DEVICES` | `ASCEND_RT_VISIBLE_DEVICES` |
-| DeepSpeed config | ZeRO-2 or ZeRO-3 | ZeRO-3 + CPU offloading recommended for 7B+ models |
+| Sharding config | FSDP2 or Megatron optimizer sharding | FSDP2 with `offload_policy: true` recommended for 7B+ models |
 
 ### Complete NPU Configuration Example
 
-Create a YAML config file based on an existing GPU config (such as `examples/qwen2.5-7B-rlvr_megatron/rlvr_config_amd.yaml`). Below is a complete NPU-adapted configuration with key differences marked with `# NPU` comments:
+Below is a complete NPU-adapted configuration (adapted from `examples/ascend_examples/qwen3_30b_rlvr_fsdp2.yaml`), with key differences marked with `# NPU` comments:
 
 ```yaml
-defaults:
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
-
 hydra:
   run:
     dir: .
   output_subdir: null
 
-exp_name: "qwen2.5-7B-rlvr-npu"
+exp_name: "qwen3-30BA3B-rlvr-npu"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
+system_envs:
+  USE_MODELSCOPE: '1'
+  HCCL_NPU_SOCKET_PORT_RANGE: auto       # NPU: allow same-device multi-process HCCL port allocation
+  VLLM_ASCEND_ENABLE_NZ: '0'             # NPU: disable FRACTAL_NZ for RL weight reload flows
 
 checkpoint_config:
   type: file_system
-  output_dir: /data/models/${exp_name}
+  output_dir: ./output/models/${exp_name}
 
-num_gpus_per_node: 8
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ./output/tensorboard/rlvr_npu
+rpc_timeout: 72000
+
+num_gpus_per_node: 16
 
 max_steps: 500
 save_steps: 100
@@ -266,7 +268,7 @@ logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
 
-rollout_batch_size: 64
+rollout_batch_size: 32
 prompt_length: 2048
 response_length: 4096
 num_return_sequences_in_group: 8
@@ -294,54 +296,53 @@ length_loss_weight: false
 add_token_level_kl: false
 whiten_advantages: true
 
-pretrain: Qwen/Qwen2.5-7B
-reward_pretrain: Qwen/Qwen2.5-7B
-
-track_with: tensorboard
-tracker_kwargs:
-  log_dir: ./output/tensorboard/rlvr_npu
-
-validation:
-  data_args:
-    template: qwen2_5
-    file_name:
-      - data/math_benchmarks.jsonl
-  generating_args:
-    max_new_tokens: ${response_length}
-    top_p: 0.6
-    top_k: 50
-    num_beams: 1
-    temperature: 0.6
-    num_return_sequences: 1
+pretrain: Qwen/Qwen3-30B-A3B
+reward_pretrain: Qwen/Qwen3-30B-A3B
 
 actor_train:
   model_args:
-    attn_implementation: fa2            # NPU: Use fa2 via transformers, NOT flash_attn
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 1
-    gradient_accumulation_steps: 32
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
     warmup_steps: 20
+    num_train_epochs: 50
   data_args:
     template: qwen2_5
     file_name:
       - data/math_deepmath_deal.jsonl
-      - data/code_KodCode_data.jsonl
     domain_interleave_probs:
-      math_rule: 0.5
-      code_sandbox: 0.5
+      math_rule: 1
     dataset_dir: data
     messages: messages
     interleave_probs: "1.0"
+    preprocessing_num_workers: 16
   strategy_args:
-    strategy_name: deepspeed_train      # NPU: Must use DeepSpeed, NOT megatron_train
-    strategy_config: ${deepspeed_zero3_cpuoffload}  # NPU: Use ZeRO-3 + CPU offloading for 7B
-  device_mapping: list(range(0,4))      # NPU: Training on NPUs 0-3
-  infer_batch_size: 4
+    strategy_name: fsdp2_train      # NPU: Must use FSDP2, NOT megatron_train
+    strategy_config:
+      fsdp_size: 16                 # NPU: FSDP2 sharding size
+      param_dtype: bf16
+      reduce_dtype: bf16
+      offload_policy: true          # NPU: Enable CPU offloading for large models
+      apply_expert_patch: true      # NPU: Required for MoE models
+      apply_tiled_mlp: true         # NPU: TiledMLP to reduce memory
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      wrap_policy:                  # NPU: MoE-specific wrap policy
+        wrap_embeddings: true
+        wrap_lm_output: true
+        moe_experts:
+          - Qwen3MoeMLP
+        transformer_layer_cls_to_wrap:
+          - Qwen3MoeAttention
+          - Qwen3MoeSparseMoeBlock
+  use_remove_padding: true
+  device_mapping: list(range(0,16))     # NPU: Training on NPUs 0-15
+  infer_batch_size: 2
 
 actor_infer:
   model_args:
@@ -361,23 +362,32 @@ actor_infer:
     strategy_config:
       gpu_memory_utilization: 0.8
       block_size: 16
-      max_model_len: 8000
-  device_mapping: list(range(4,8))      # NPU: Inference on NPUs 4-7 (separate from training)
+      max_model_len: 6144
+      tensor_parallel_size: 2
+      enforce_eager: true
+      load_format: dummy
+  device_mapping: list(range(0,16))     # NPU: Inference shares NPUs with training
   infer_batch_size: 1
 
 reference:
   model_args:
-    attn_implementation: fa2            # NPU: Use fa2 via transformers
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: hf_infer             # NPU: Use hf_infer, NOT megatron_infer
-    strategy_config: ~
-  device_mapping: list(range(4,8))      # NPU: Share inference NPUs with actor_infer
-  infer_batch_size: 8
+    strategy_name: fsdp2_infer          # NPU: Use fsdp2_infer, NOT megatron_infer
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: bf16
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      offload_policy: true
+  device_mapping: list(range(0,16))     # NPU: Reference shares NPUs with training
+  infer_batch_size: 2
 
 rewards:
   math_rule:
@@ -387,23 +397,13 @@ rewards:
     data_args:
       template: qwen2_5
     tag_included: [deepmath_103k, aime]
-    world_size: 4
-    infer_batch_size: 1
-  code_sandbox:
-    use_local: true
-    worker_cls: roll.pipeline.rlvr.rewards.code_sandbox_reward_worker.CodeSandboxRewardWorker
-    tag_included: [KodCode]
-    model_args:
-      model_name_or_path: ${reward_pretrain}
-    data_args:
-      template: qwen2_5
-    world_size: 4
+    world_size: 8
     infer_batch_size: 1
 ```
 
 ### Key Configuration Changes Explained
 
-#### 1. Training Strategy: DeepSpeed instead of Megatron
+#### 1. Training Strategy: FSDP2 instead of Megatron
 
 ```yaml
 # GPU (original)
@@ -417,13 +417,18 @@ actor_train:
 # NPU (adapted)
 actor_train:
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3_cpuoffload}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 4
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: true
 ```
 
-For 7B models on 4 NPUs, use `deepspeed_zero3_cpuoffload` to avoid OOM. For smaller models (e.g., 0.5B), `deepspeed_zero3` may be sufficient.
+For 7B models on 4 NPUs, set `offload_policy: true` to enable CPU offloading and avoid OOM. For smaller models (e.g., 0.5B), `offload_policy: false` may be sufficient.
 
-#### 2. Reference Model: hf_infer instead of megatron_infer
+#### 2. Reference Model: fsdp2_infer instead of megatron_infer
 
 ```yaml
 # GPU
@@ -434,26 +439,16 @@ reference:
 # NPU
 reference:
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 4
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: true
 ```
 
-#### 3. Device Mapping: Separate Training and Inference NPUs
-
-NPU does **not** support colocated mode. Training and inference must run on different NPUs:
-
-```yaml
-actor_train:
-  device_mapping: list(range(0,4))    # Training: NPUs 0-3
-actor_infer:
-  device_mapping: list(range(4,8))    # Inference: NPUs 4-7
-reference:
-  device_mapping: list(range(4,8))    # Shares inference NPUs
-```
-
-See [Device Mapping Reference](#device-mapping-reference) for more allocation patterns.
-
-#### 4. Attention Implementation
+#### 3. Attention Implementation
 
 Use `fa2` through the `transformers` library instead of the `flash_attn` package:
 
@@ -463,7 +458,7 @@ actor_train:
     attn_implementation: fa2    # NOT flash_attn
 ```
 
-#### 5. System Environment Variables
+#### 4. System Environment Variables
 
 ROLL injects device visibility and Ray runtime variables for workers, but production runs should still set HCCL, memory, vLLM-Ascend, cache, and logging variables explicitly. See the [NPU Environment Configuration Guide](ascend_npu_env_config.md) for the recommended single-node and multi-node settings.
 
@@ -479,7 +474,7 @@ export PYTHONPATH="/workspace/ROLL:$PYTHONPATH"
 
 python examples/start_rlvr_pipeline.py \
     --config_path ascend_examples \
-    --config_name qwen3_8b_rlvr_deepspeed
+    --config_name qwen3_30b_rlvr_fsdp2
 ```
 
 If you save the custom configuration above as `<config_dir>/rlvr_npu.yaml`, use `--config_path <config_dir> --config_name rlvr_npu` instead.
@@ -507,9 +502,13 @@ export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_EXEC_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 export HCCL_IF_IP=10.0.0.1             # This node's IP
 export HCCL_SOCKET_IFNAME="enp194s0f0" # HCCL network interface
 export HCCL_IF_BASE_PORT=23456
+
+# vLLM-Ascend RL scenario
+export VLLM_ASCEND_ENABLE_NZ=0
 
 # NPU memory, CPU, vLLM, cache, logging... (same as single-node)
 # See the NPU Environment Configuration Guide for the full list
@@ -530,9 +529,13 @@ export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_EXEC_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 export HCCL_IF_IP=10.0.0.2             # This node's IP
 export HCCL_SOCKET_IFNAME="enp194s0f0"
 export HCCL_IF_BASE_PORT=23456
+
+# vLLM-Ascend RL scenario
+export VLLM_ASCEND_ENABLE_NZ=0
 
 # NPU memory, CPU, vLLM, cache, logging... (same as single-node)
 ```
@@ -597,8 +600,13 @@ num_gpus_per_node: 8
 # Training on Node0 NPUs 0-7
 actor_train:
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3_cpuoffload}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: true
   device_mapping: list(range(0,8))
 
 # Inference on Node1 NPUs 0-7
@@ -613,8 +621,13 @@ actor_infer:
 # Reference model shares inference NPUs
 reference:
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: true
   device_mapping: list(range(8,16))
 ```
 
@@ -690,7 +703,7 @@ save_steps: 100
 Set `resume_from_checkpoint` to the checkpoint path to resume training:
 
 ```yaml
-resume_from_checkpoint: /data/models/qwen2.5-7B-rlvr-npu/checkpoint-100
+resume_from_checkpoint: ./output/models/qwen3-30BA3B-rlvr-npu/checkpoint-100
 ```
 
 Or override via the launch command:
@@ -699,38 +712,38 @@ Or override via the launch command:
 python examples/start_rlvr_pipeline.py \
     --config_path <config_dir> \
     --config_name rlvr_npu \
-    resume_from_checkpoint=/data/models/qwen2.5-7B-rlvr-npu/checkpoint-100
+    resume_from_checkpoint=./output/models/qwen3-30BA3B-rlvr-npu/checkpoint-100
 ```
 
 ## Device Mapping Reference
 
-Since NPU does not support colocated mode, you must allocate separate NPUs for training and inference. Below are common allocation patterns for RLVR:
+Below are common NPU allocation patterns for RLVR. You may use colocated mode (training and inference sharing NPUs) or separate NPUs based on your workload and hardware:
 
 ### 8-NPU Single Node (7B Model)
 
 | Component | NPUs | Count | Notes |
 | --------- | ---- | ----- | ----- |
-| actor_train | 0-3 | 4 | DeepSpeed ZeRO-3 + CPU offloading |
+| actor_train | 0-3 | 4 | FSDP2 + CPU offloading |
 | actor_infer | 4-7 | 4 | vLLM-Ascend |
-| reference | 4-7 (shared) | - | hf_infer, shares with actor_infer |
+| reference | 4-7 (shared) | - | fsdp2_infer, shares with actor_infer |
 | reward workers | CPU | - | Math rule & code sandbox run on CPU |
 
 ### 16-NPU Single Node (A3, 7B Model)
 
 | Component | NPUs | Count | Notes |
 | --------- | ---- | ----- | ----- |
-| actor_train | 0-7 | 8 | DeepSpeed ZeRO-3 |
+| actor_train | 0-7 | 8 | FSDP2 |
 | actor_infer | 8-15 | 8 | vLLM-Ascend |
-| reference | 8-15 (shared) | - | hf_infer, shares with actor_infer |
+| reference | 8-15 (shared) | - | fsdp2_infer, shares with actor_infer |
 | reward workers | CPU | - | Math rule & code sandbox run on CPU |
 
 ### 2×8-NPU Multi-Node (7B Model)
 
 | Component | NPUs | Count | Notes |
 | --------- | ---- | ----- | ----- |
-| actor_train | Node0: 0-7 | 8 | DeepSpeed ZeRO-3 + CPU offloading |
+| actor_train | Node0: 0-7 | 8 | FSDP2 + CPU offloading |
 | actor_infer | Node1: 0-7 | 8 | vLLM-Ascend |
-| reference | Node1: 0-7 (shared) | - | hf_infer, shares with actor_infer |
+| reference | Node1: 0-7 (shared) | - | fsdp2_infer, shares with actor_infer |
 | reward workers | CPU | - | Math rule & code sandbox run on CPU |
 
 ## Supported Reward Workers on NPU
@@ -753,12 +766,11 @@ When using `LLMJudgeRewardWorker`, the judge model requires its own NPU devices 
 
 Use this checklist when migrating an existing GPU RLVR configuration to NPU:
 
-- [ ] Change `actor_train.strategy_args.strategy_name` from `megatron_train` to `deepspeed_train`
-- [ ] Change `actor_train.strategy_args.strategy_config` to `${deepspeed_zero3_cpuoffload}` or `${deepspeed_zero3}`
-- [ ] Change `reference.strategy_args.strategy_name` from `megatron_infer` to `hf_infer`
-- [ ] Set `reference.strategy_args.strategy_config` to `~` (null)
+- [ ] Change `actor_train.strategy_args.strategy_name` from `megatron_train` to `fsdp2_train`
+- [ ] Change `actor_train.strategy_args.strategy_config` to FSDP2 config (with `offload_policy: true` for 7B+ models)
+- [ ] Change `reference.strategy_args.strategy_name` from `megatron_infer` to `fsdp2_infer`
+- [ ] Set `reference.strategy_args.strategy_config` to FSDP2 config matching `actor_train`
 - [ ] Add `attn_implementation: fa2` to `actor_train.model_args` and `reference.model_args`
-- [ ] Ensure `device_mapping` separates training and inference NPUs (no colocated mode)
 - [ ] Remove any `flash_attn` references
 - [ ] Remove any Megatron-specific config (e.g., `tensor_model_parallel_size`, `pipeline_model_parallel_size`)
 - [ ] Verify `llm_judge` reward worker has separate NPU allocation (if used)
@@ -776,7 +788,7 @@ The first inference request after model loading triggers operator compilation, w
 
 If you encounter OOM with a 7B model on 4 NPUs:
 
-1. Switch to `deepspeed_zero3_cpuoffload` strategy.
+1. Switch to `fsdp2_train` strategy with `offload_policy: true`.
 2. Reduce `per_device_train_batch_size` to 1.
 3. Increase `gradient_accumulation_steps` accordingly.
 4. Reduce `max_model_len` in vLLM config (e.g., from 8192 to 4096).
@@ -800,7 +812,7 @@ The `triton` package conflicts with `triton-ascend` on NPU. Fix with:
 
 ```bash
 pip uninstall -y triton triton-ascend
-pip install triton-ascend==3.2.0
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
 
 For more troubleshooting tips, see the [Ascend NPU FAQ](ascend_npu_faq.md).

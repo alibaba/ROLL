@@ -1,8 +1,8 @@
 # 使用 Docker 在昇腾 NPU 上运行 ROLL
 
-最后更新：2026/04/27。
+最后更新：2026/06/23。
 
-本指南介绍如何使用 `Dockerfile.A2` 和 `Dockerfile.A3` 在**华为昇腾 NPU** 上构建并运行 ROLL。
+本指南介绍如何在**华为昇腾 NPU** 上获取、构建并运行 ROLL 镜像。推荐优先使用预构建镜像；如需自定义依赖，再使用 `Dockerfile.A2` 或 `Dockerfile.A3` 构建。Atlas A5 当前使用 [ROLL x Ascend](ascend_usage.md) 中的手动安装配置。
 
 ## 硬件与软件要求
 
@@ -10,10 +10,12 @@
 | ---- | ------------- | ------------- |
 | 硬件 | Atlas 900 A2 PODc（Ascend 910B1） | Atlas 900 A3 PODc（Ascend 910_9391） |
 | 宿主机操作系统 | Ubuntu 22.04 | Ubuntu 22.04 |
-| CANN | 8.5.1 | 8.5.1 |
+| CANN | 9.0.0 | 9.0.0 |
 | Python | 3.11 | 3.11 |
 | Docker | >= 20.10 | >= 20.10 |
 | 昇腾 NPU 驱动 | 已安装在宿主机上 | 已安装在宿主机上 |
+
+本 Docker 指南覆盖 A2/A3 Dockerfile。Atlas A5 请使用手动安装配置：torch 2.10、vLLM v0.20.2、vLLM-Ascend `main`，并在构建 vLLM-Ascend 时设置 `COMPILE_CUSTOM_KERNELS=1`。
 
 ## 主要组件
 
@@ -21,21 +23,51 @@
 
 | 组件 | 版本 |
 | ---- | ---- |
-| PyTorch | 2.8.0+cpu |
-| vLLM | 0.13.0 |
-| vLLM-Ascend | 0.13.0 |
-| DeepSpeed | 0.16.4 |
+| PyTorch | 2.9.0+cpu |
+| vLLM | 0.18.0 |
+| vLLM-Ascend | 0.18 |
 | Transformers | 4.57.6 |
-| triton-ascend | 3.2.0 |
+| triton-ascend | 3.2.1 |
+
+Atlas A5 使用更新的手动安装版本组合：
+
+| 组件 | Atlas A5 版本 / 设置 |
+| ---- | -------------------- |
+| PyTorch | 2.10 |
+| vLLM | v0.20.2 |
+| vLLM-Ascend | `main` 分支 |
+| 必需构建变量 | `COMPILE_CUSTOM_KERNELS=1` |
 
 主要区别在于基础镜像和 SOC 版本：
 
 | 项目 | Dockerfile.A2 | Dockerfile.A3 |
 | ---- | ------------- | ------------- |
-| 基础镜像 | `quay.io/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11` | `quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11` |
+| 基础镜像 | `quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.11` | `quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.11` |
 | SOC_VERSION | `ascend910b1` | `ascend910_9391` |
 
-## 构建 Docker 镜像
+## 获取 Docker 镜像
+
+### 方式 A：使用预构建镜像（推荐）
+
+根据你的硬件拉取对应镜像，并打成本指南后续命令使用的本地标签：
+
+**Atlas 900 A2 PODc（Ascend 910B1）：**
+
+```bash
+docker pull quay.io/ascend/roll:main-a2
+docker tag quay.io/ascend/roll:main-a2 roll:ascend-a2
+```
+
+**Atlas 900 A3 PODc（Ascend 910_9391）：**
+
+```bash
+docker pull quay.io/ascend/roll:main-a3
+docker tag quay.io/ascend/roll:main-a3 roll:ascend-a3
+```
+
+可用镜像标签请以 https://quay.io/repository/ascend/roll?tab=tags 为准。如果你使用预构建镜像，可以直接跳到 [运行容器](#运行容器)。
+
+### 方式 B：从 Dockerfile 构建镜像
 
 ### 1. 克隆 ROLL 仓库
 
@@ -88,6 +120,7 @@ docker run -dit \
     --device /dev/davinci4 \
     --device /dev/davinci5 \
     --device /dev/davinci6 \
+    --device /dev/davinci7 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -115,6 +148,7 @@ docker run -dit \
     --device /dev/davinci4 \
     --device /dev/davinci5 \
     --device /dev/davinci6 \
+    --device /dev/davinci7 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -190,7 +224,7 @@ npu-smi info
 env | grep -E "ASCEND|LD_LIBRARY_PATH|PATH"
 
 # 验证 Python 包
-python -c "import torch; import torch_npu; print(torch_npu.npu.is_available())"
+python -c "import torch; import torch_npu; print(torch.npu.is_available())"
 python -c "import vllm; print(f'vllm: {vllm.__version__}')"
 python -c "import vllm_ascend; print(f'vllm_ascend available')"
 ```
@@ -199,21 +233,20 @@ python -c "import vllm_ascend; print(f'vllm_ascend available')"
 
 ### 重要配置说明
 
-由于昇腾 NPU 上暂不支持 Megatron-LM 训练，需要使用 **DeepSpeed** 作为训练后端。请确保配置文件中使用以下设置：
+由于昇腾 NPU 上不支持 Megatron-LM 训练，需要使用 **FSDP2** 作为训练后端。请确保配置文件中使用以下设置：
 
-1. 将 `strategy_args` 设置为使用 DeepSpeed
-2. 设置 `device_mapping`，确保训练和推理在不同的 NPU 卡上执行
+1. 将 `strategy_args` 设置为使用 FSDP2
 
 
 ### 示例：RLVR 流水线
 
 ```bash
 python examples/start_rlvr_pipeline.py \
-    --config_path qwen2.5-7B-rlvr_megatron \
-    --config_name rlvr_config_amd
+    --config_path ascend_examples \
+    --config_name qwen3_30b_rlvr_fsdp2
 ```
 
-> **注意：** `rlvr_config_amd` 配置专为非 NVIDIA 硬件设计，使用 DeepSpeed 作为训练后端。请根据你的 NPU 拓扑调整配置文件中的 `device_mapping`。
+> **注意：** `qwen3_30b_rlvr_fsdp2` 配置专为昇腾 NPU 设计，使用 FSDP2 作为训练后端。请根据你的 NPU 拓扑调整配置文件中的 `device_mapping`。
 
 ## 常见问题
 

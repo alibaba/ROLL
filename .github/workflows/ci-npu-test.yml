@@ -198,7 +198,7 @@ jobs:
       - name: Install ROLL requirements
         run: |
           python3 -m pip install -r requirements_common.txt
-          python3 -m pip install deepspeed==0.16.4 tensorboard
+          python3 -m pip install tensorboard
 
       - name: Install SGLang NPU kernel from source
         shell: bash
@@ -289,7 +289,7 @@ jobs:
               except metadata.PackageNotFoundError:
                   return "not installed"
 
-          packages = ("vllm-ascend", "transformers", "deepspeed", "triton-ascend")
+          packages = ("vllm-ascend", "transformers", "triton-ascend")
           for package_name in packages:
               print(f"{package_name}={package_version(package_name)}")
 
@@ -302,7 +302,6 @@ jobs:
           export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
           python3 -m pytest tests/third_party/sglang \
                             tests/third_party/vllm \
-                            tests/third_party/deepspeed \
                             tests/distributed \
                             tests/models \
                             tests/pipeline \
@@ -315,4 +314,3 @@ jobs:
                             -v --timeout=600 --durations=0 --durations-min=0 -x
         env:
           ROLL_NPU_CI: "1"
-          DS_UNITTEST_TIMEOUT: "600"

@@ -8,11 +8,11 @@
 
 运行本样例前，请确保：
 
-1. 已拉取与硬件匹配的预构建昇腾镜像（参见 [Docker 使用指南](ascend_docker_usage.md)）。
+1. 已拉取或构建与硬件匹配的昇腾镜像（参见 [Docker 使用指南](ascend_docker_usage.md)）。
 2. 已在容器内验证环境（参见 [验证环境](ascend_docker_usage.md#验证环境)）。
 3. 已将模型权重下载到容器可访问的目录。
 
-当前仓库在 `examples/ascend_examples` 中提供可直接运行的昇腾 RLVR 示例，包括 `qwen3_8b_rlvr_deepspeed.yaml` 和 `run_rlvr_pipeline.sh`。
+当前仓库在 `examples/ascend_examples` 中提供可直接运行的昇腾 RLVR 示例，包括 `qwen3_30b_rlvr_fsdp2.yaml` 和 `run_rlvr_pipeline.sh`。
 
 
 ## GPU 与 NPU 的关键差异
@@ -21,15 +21,14 @@
 
 | 项目 | GPU | NPU |
 | ---- | --- | --- |
-| 训练后端 | Megatron 或 DeepSpeed | 仅 DeepSpeed（不支持 Megatron） |
-| 设备放置 | 支持 Colocated 模式 | **不支持** Colocated 模式；训练和推理必须使用不同的 NPU 卡 |
+| 训练后端 | Megatron 或 FSDP2 | 仅 FSDP2（NPU 不支持 Megatron） |
 | 注意力实现 | `flash_attn` 或 `fa2` | 通过 `transformers` 使用 `fa2`（不能使用 `flash_attn` 包） |
 | 通信后端 | NCCL | HCCL |
 | 设备可见性 | `CUDA_VISIBLE_DEVICES` | `ASCEND_RT_VISIBLE_DEVICES` |
 
 ## 样例 1：单机 Agentic 流水线（Qwen2.5-0.5B）
 
-本样例在单个 8 卡 NPU 节点上使用 DeepSpeed ZeRO-3 运行 FrozenLake Agentic 流水线。
+本样例在单个 8 卡 NPU 节点上使用 FSDP2 运行 FrozenLake Agentic 流水线。
 
 ### 步骤 1：启动容器
 
@@ -68,6 +67,7 @@ docker run -dit \
 export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 
 # NPU 显存
 export NPU_MEMORY_FRACTION=0.96
@@ -82,8 +82,8 @@ export OMP_NUM_THREADS=1
 
 # vLLM-Ascend 推理
 export VLLM_USE_V1=1
+export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # 算子编译缓存
@@ -99,15 +99,11 @@ export ATB_LOG_LEVEL=ERROR
 
 ### 步骤 3：创建 NPU 配置文件
 
-创建 YAML 配置文件（如 `agentic_frozen_lake_npu.yaml`），以下为 NPU 专用配置。与 GPU 配置的关键差异以 `# NPU` 注释标记：
+创建 YAML 配置文件 `examples/agentic_frozen_lake_npu/agentic_frozen_lake_npu.yaml`，以下为 NPU 专用配置。该路径很重要：配置中的 `defaults: - ../config/traj_envs@_here_` 依赖 `examples/` 下的相对目录结构；如果放到其他目录，需要同步调整 `defaults` 路径。与 GPU 配置的关键差异以 `# NPU` 注释标记：
 
 ```yaml
 defaults:
   - ../config/traj_envs@_here_
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
 
 hydra:
   run:
@@ -124,6 +120,8 @@ system_envs:
   HCCL_CONNECT_TIMEOUT: "3600"
   HCCL_DETERMINISTIC: "false"
   HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_NPU_SOCKET_PORT_RANGE: "auto"
+  VLLM_ASCEND_ENABLE_NZ: "0"
   NPU_MEMORY_FRACTION: "0.96"
   CPU_AFFINITY_CONF: "2"
   OMP_NUM_THREADS: "1"
@@ -172,8 +170,13 @@ actor_train:
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: deepspeed_train    # NPU: 必须使用 DeepSpeed，不能用 megatron_train
-    strategy_config: ${deepspeed_zero3}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 4
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: false    # NPU: 必须使用 FSDP2，不能用 megatron_train
   device_mapping: list(range(0,4))    # NPU: 训练使用 NPU 0-3
   infer_batch_size: 2
 
@@ -208,8 +211,13 @@ reference:
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 4
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: false
   device_mapping: list(range(4,8))    # NPU: 与 actor_infer 共享推理卡
   infer_batch_size: 2
 
@@ -253,13 +261,13 @@ cd /workspace/ROLL
 export PYTHONPATH="/workspace/ROLL:$PYTHONPATH"
 
 python examples/start_agentic_pipeline.py \
-    --config_path <config_dir> \
+    --config_path agentic_frozen_lake_npu \
     --config_name agentic_frozen_lake_npu
 ```
 
-## 样例 2：单机 RLVR 流水线（Qwen3-8B）
+## 样例 2：单机 RLVR 流水线（Qwen3-30B-A3B）
 
-本样例使用仓库中的 `examples/ascend_examples/qwen3_8b_rlvr_deepspeed.yaml` 配置在昇腾 NPU 上运行 RLVR 流水线。
+本样例使用仓库中的 `examples/ascend_examples/qwen3_30b_rlvr_fsdp2.yaml` 配置在昇腾 NPU 上运行 RLVR 流水线。
 
 ### 关键配置
 
@@ -269,6 +277,8 @@ system_envs:
   HCCL_CONNECT_TIMEOUT: "3600"
   HCCL_DETERMINISTIC: "false"
   HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_NPU_SOCKET_PORT_RANGE: "auto"
+  VLLM_ASCEND_ENABLE_NZ: "0"
   NPU_MEMORY_FRACTION: "0.96"
   CPU_AFFINITY_CONF: "2"
   OMP_NUM_THREADS: "1"
@@ -277,26 +287,25 @@ system_envs:
 
 rollout_batch_size: 32
 prompt_length: 2048
-response_length: 8192
+response_length: 4096
 num_return_sequences_in_group: 8
 
-pretrain: Qwen/Qwen3-8B-Base
-reward_pretrain: Qwen/Qwen3-8B-Base
+pretrain: Qwen/Qwen3-30B-A3B
+reward_pretrain: Qwen/Qwen3-30B-A3B
 
 actor_train:
   model_args:
-    attn_implementation: fa2          # NPU: 通过 transformers 使用 fa2，不能使用 flash_attn
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 1
-    gradient_accumulation_steps: 32
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
     warmup_steps: 20
   data_args:
-    template: qwen3
+    template: qwen2_5
     file_name:
       - data/math_deepmath_deal.jsonl
     domain_interleave_probs:
@@ -304,10 +313,28 @@ actor_train:
     dataset_dir: data
     messages: messages
     interleave_probs: "1.0"
+    preprocessing_num_workers: 16
   strategy_args:
-    strategy_name: deepspeed_train    # NPU: 必须使用 DeepSpeed
-    strategy_config: ${deepspeed_zero3}
-  device_mapping: list(range(0,8))    # NPU: 训练使用 NPU 0-7
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: bf16
+      offload_policy: true
+      apply_expert_patch: true          # NPU: MoE 模型必须启用
+      apply_tiled_mlp: true             # NPU: TiledMLP 降低显存
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      wrap_policy:                      # NPU: MoE 专用 wrap policy
+        wrap_embeddings: true
+        wrap_lm_output: true
+        moe_experts:
+          - Qwen3MoeMLP
+        transformer_layer_cls_to_wrap:
+          - Qwen3MoeAttention
+          - Qwen3MoeSparseMoeBlock
+  use_remove_padding: true
+  device_mapping: list(range(0,16))    # NPU: 训练使用 NPU 0-15
   infer_batch_size: 2
 
 actor_infer:
@@ -322,15 +349,18 @@ actor_infer:
     temperature: 0.99
     num_return_sequences: ${num_return_sequences_in_group}
   data_args:
-    template: qwen3
+    template: qwen2_5
   strategy_args:
     strategy_name: vllm
     strategy_config:
       gpu_memory_utilization: 0.8
       block_size: 16
-      max_model_len: 8000
-  device_mapping: list(range(8,12))   # NPU: 推理使用 NPU 8-11
-  infer_batch_size: 4
+      max_model_len: 6144
+      tensor_parallel_size: 2
+      enforce_eager: true
+      load_format: dummy
+  device_mapping: list(range(0,16))    # NPU: 推理与训练共享 NPU
+  infer_batch_size: 1
 
 reference:
   model_args:
@@ -338,12 +368,19 @@ reference:
     dtype: bf16
     model_type: ~
   data_args:
-    template: qwen3
+    template: qwen2_5
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
-  device_mapping: list(range(12,16))  # NPU: Reference 使用 NPU 12-15
-  infer_batch_size: 1
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: bf16
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      offload_policy: true
+  device_mapping: list(range(0,16))    # NPU: Reference 与训练共享 NPU
+  infer_batch_size: 2
 
 rewards:
   math_rule:
@@ -351,8 +388,8 @@ rewards:
     model_args:
       model_name_or_path: ${reward_pretrain}
     data_args:
-      template: qwen3
-    tag_included: [deepmath_103k, MATH-500, OlympiadBench, minervamath, aime2025, gsm8k, aime, amc23, math_rule]
+      template: qwen2_5
+    tag_included: [deepmath_103k, aime]
     world_size: 8
     infer_batch_size: 1
 ```
@@ -365,7 +402,7 @@ export PYTHONPATH="/workspace/ROLL:$PYTHONPATH"
 
 python examples/start_rlvr_pipeline.py \
     --config_path ascend_examples \
-    --config_name qwen3_8b_rlvr_deepspeed
+    --config_name qwen3_30b_rlvr_fsdp2
 ```
 
 ## 样例 3：多机分布式训练
@@ -418,7 +455,7 @@ python examples/start_rlvr_pipeline.py \
 ip addr
 
 # 或用 NPU 工具查看 HCCL 接口
-for i in {0..7}; do hccn_tool -i $i -ip -g; done
+for i in $(seq 0 7); do hccn_tool -i $i -ip -g; done
 
 # NPU 设备 IP 通常在高速互联网络上（如 192.168.x.x）。
 # 使用对应的以太网接口名称（如 enp194s0f0, eth0）作为 HCCL_SOCKET_IFNAME。
@@ -463,16 +500,16 @@ docker run -dit \
 
 ```bash
 # 检查链路状态（全部应显示 "up"）
-for i in {0..7}; do hccn_tool -i $i -link -g; done
+for i in $(seq 0 7); do hccn_tool -i $i -link -g; done
 
 # 检查 TLS 一致性（所有卡应显示相同的 switch 值）
-for i in {0..7}; do hccn_tool -i $i -tls -g; done | grep switch
+for i in $(seq 0 7); do hccn_tool -i $i -tls -g; done | grep switch
 
 # 若 TLS 不一致，在所有节点的所有卡上统一关闭：
-for i in {0..7}; do hccn_tool -i $i -tls -s enable 0; done
+for i in $(seq 0 7); do hccn_tool -i $i -tls -s enable 0; done
 
 # 查看 NPU 设备 IP
-for i in {0..7}; do hccn_tool -i $i -ip -g; done
+for i in $(seq 0 7); do hccn_tool -i $i -ip -g; done
 
 # 测试跨节点连通性（在节点 B 上执行，替换为节点 A 的 device IP）
 hccn_tool -i 0 -ping -g address <节点A的device_ip>
@@ -495,6 +532,7 @@ export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_EXEC_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 export HCCL_IF_IP=<NODE_IP>          # 当前节点 IP
 export HCCL_SOCKET_IFNAME=<网卡名称>  # 例如 enp194s0f0
 export HCCL_IF_BASE_PORT=23456
@@ -512,8 +550,8 @@ export OMP_NUM_THREADS=1
 
 # === vLLM-Ascend 推理 ===
 export VLLM_USE_V1=1
+export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # === 算子编译缓存 ===
@@ -620,8 +658,13 @@ num_gpus_per_node: 8
 # 训练在节点0的 NPU 0-7
 actor_train:
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3_cpuoffload}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: true
   device_mapping: list(range(0,8))
 
 # 推理在节点1的 NPU 0-7
@@ -637,28 +680,32 @@ actor_infer:
 # Reference 模型共享推理卡
 reference:
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: true
   device_mapping: list(range(8,16))
 ```
 
 完整的多机 RLVR 配置示例（2 节点 × 8 卡）：
 
 ```yaml
-defaults:
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
-
 hydra:
   run:
     dir: .
   output_subdir: null
 
-exp_name: "qwen2.5-7B-rlvr-npu-multinode"
+exp_name: "qwen3-30BA3B-rlvr-npu-multinode"
 seed: 42
 logging_dir: /data/logs
 output_dir: /data/output
+system_envs:
+  USE_MODELSCOPE: '1'
+  HCCL_NPU_SOCKET_PORT_RANGE: "auto"
+  VLLM_ASCEND_ENABLE_NZ: "0"
 
 checkpoint_config:
   type: file_system
@@ -672,7 +719,7 @@ logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
 
-rollout_batch_size: 64
+rollout_batch_size: 32
 prompt_length: 2048
 response_length: 4096
 num_return_sequences_in_group: 8
@@ -681,37 +728,52 @@ ppo_epochs: 1
 adv_estimator: "reinforce"
 whiten_advantages: true
 
-pretrain: /data/models/Qwen2.5-7B
-reward_pretrain: /data/models/Qwen2.5-7B
+pretrain: Qwen/Qwen3-30B-A3B
+reward_pretrain: Qwen/Qwen3-30B-A3B
 
 actor_train:
   model_args:
-    attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 1
-    gradient_accumulation_steps: 32
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
     warmup_steps: 20
   data_args:
     template: qwen2_5
     file_name:
       - data/math_deepmath_deal.jsonl
-      - data/code_KodCode_data.jsonl
     domain_interleave_probs:
-      math_rule: 0.5
-      code_sandbox: 0.5
+      math_rule: 1
     dataset_dir: /data/datasets
     messages: messages
     interleave_probs: "1.0"
+    preprocessing_num_workers: 16
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3_cpuoffload}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      offload_policy: true
+      apply_expert_patch: true
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      wrap_policy:
+        wrap_embeddings: true
+        wrap_lm_output: true
+        moe_experts:
+          - Qwen3MoeMLP
+        transformer_layer_cls_to_wrap:
+          - Qwen3MoeAttention
+          - Qwen3MoeSparseMoeBlock
+  use_remove_padding: true
   device_mapping: list(range(0,8))    # 节点0 NPU 0-7 用于训练
-  infer_batch_size: 4
+  infer_batch_size: 2
 
 actor_infer:
   model_args:
@@ -731,23 +793,32 @@ actor_infer:
     strategy_config:
       gpu_memory_utilization: 0.8
       block_size: 16
-      max_model_len: 8000
+      max_model_len: 6144
+      tensor_parallel_size: 2
+      enforce_eager: true
+      load_format: dummy
   device_mapping: list(range(8,16))   # 节点1 NPU 0-7 用于推理
   infer_batch_size: 1
 
 reference:
   model_args:
-    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      offload_policy: true
   device_mapping: list(range(8,16))   # 共享推理卡
-  infer_batch_size: 8
+  infer_batch_size: 2
 
 rewards:
   math_rule:
@@ -757,17 +828,7 @@ rewards:
     data_args:
       template: qwen2_5
     tag_included: [deepmath_103k, aime]
-    world_size: 4
-    infer_batch_size: 1
-  code_sandbox:
-    use_local: true
-    worker_cls: roll.pipeline.rlvr.rewards.code_sandbox_reward_worker.CodeSandboxRewardWorker
-    tag_included: [KodCode]
-    model_args:
-      model_name_or_path: ${reward_pretrain}
-    data_args:
-      template: qwen2_5
-    world_size: 4
+    world_size: 8
     infer_batch_size: 1
 ```
 
@@ -798,7 +859,7 @@ rewards:
 
 ## 设备映射参考
 
-由于 NPU 不支持 colocated 模式，必须为训练和推理分配不同的 NPU 卡。以下是常见的分配方案：
+以下是常见的 NPU 分配方案。可以根据工作负载和硬件情况选择共卡模式（训练和推理共享 NPU）或分离模式：
 
 ### 8 卡单机
 
@@ -837,7 +898,7 @@ rewards:
 
 如果在 4 张 NPU 上运行 7B 模型遇到 OOM：
 
-1. 切换到 `deepspeed_zero3_cpuoffload` 策略。
+1. 切换到 `fsdp2_train` 策略并设置 `offload_policy: true`。
 2. 将 `per_device_train_batch_size` 减小到 1。
 3. 相应增大 `gradient_accumulation_steps`。
 4. 减小 vLLM 配置中的 `max_model_len`（如从 8192 减到 4096）。

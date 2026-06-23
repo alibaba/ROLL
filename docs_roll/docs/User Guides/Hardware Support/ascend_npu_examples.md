@@ -8,11 +8,11 @@ This document provides end-to-end configuration examples for running ROLL on Hua
 
 Before running these examples, ensure you have:
 
-1. Pulled the pre-built Ascend image that matches your hardware (see [Docker Usage Guide](ascend_docker_usage.md)).
+1. Pulled or built the Ascend image that matches your hardware (see [Docker Usage Guide](ascend_docker_usage.md)).
 2. Verified the environment inside the container (see [Verify the Environment](ascend_docker_usage.md#verify-the-environment)).
 3. Downloaded the model weights to a directory accessible from inside the container.
 
-The repository currently includes a runnable Ascend RLVR example in `examples/ascend_examples`, including `qwen3_8b_rlvr_deepspeed.yaml` and `run_rlvr_pipeline.sh`.
+The repository currently includes a runnable Ascend RLVR example in `examples/ascend_examples`, including `qwen3_30b_rlvr_fsdp2.yaml` and `run_rlvr_pipeline.sh`.
 
 ## Key Differences from GPU
 
@@ -20,15 +20,14 @@ When adapting GPU configurations for NPU, the following changes are **required**
 
 | Item | GPU | NPU |
 | ---- | --- | --- |
-| Training backend | Megatron or DeepSpeed | DeepSpeed only (Megatron not supported) |
-| Device placement | Colocated mode supported | Colocated mode **not** supported; training and inference must use separate NPUs |
+| Training backend | Megatron or FSDP2 | FSDP2 only (Megatron not supported on NPU) |
 | Attention implementation | `flash_attn` or `fa2` | `fa2` via `transformers` (not `flash_attn` package) |
 | Communication backend | NCCL | HCCL |
 | Device visibility | `CUDA_VISIBLE_DEVICES` | `ASCEND_RT_VISIBLE_DEVICES` |
 
 ## Example 1: Single-Node Agentic Pipeline (Qwen2.5-0.5B)
 
-This example runs the FrozenLake agentic pipeline on a single 8-NPU node using DeepSpeed ZeRO-3.
+This example runs the FrozenLake agentic pipeline on a single 8-NPU node using FSDP2.
 
 ### Step 1: Start the Container
 
@@ -67,6 +66,7 @@ docker run -dit \
 export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 
 # NPU memory
 export NPU_MEMORY_FRACTION=0.96
@@ -81,8 +81,8 @@ export OMP_NUM_THREADS=1
 
 # vLLM-Ascend inference
 export VLLM_USE_V1=1
+export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # Operator compilation cache
@@ -98,15 +98,11 @@ export ATB_LOG_LEVEL=ERROR
 
 ### Step 3: Create NPU Configuration File
 
-Create a YAML config file (e.g., `agentic_frozen_lake_npu.yaml`) with the following NPU-specific settings. Key differences from the GPU config are marked with `# NPU` comments:
+Create `examples/agentic_frozen_lake_npu/agentic_frozen_lake_npu.yaml` with the following NPU-specific settings. This location matters: the config uses `defaults: - ../config/traj_envs@_here_`, which depends on the relative directory layout under `examples/`. If you save the file elsewhere, update the `defaults` path accordingly. Key differences from the GPU config are marked with `# NPU` comments:
 
 ```yaml
 defaults:
   - ../config/traj_envs@_here_
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
 
 hydra:
   run:
@@ -123,6 +119,8 @@ system_envs:
   HCCL_CONNECT_TIMEOUT: "3600"
   HCCL_DETERMINISTIC: "false"
   HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_NPU_SOCKET_PORT_RANGE: "auto"
+  VLLM_ASCEND_ENABLE_NZ: "0"
   NPU_MEMORY_FRACTION: "0.96"
   CPU_AFFINITY_CONF: "2"
   OMP_NUM_THREADS: "1"
@@ -171,8 +169,13 @@ actor_train:
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: deepspeed_train    # NPU: Must use DeepSpeed, NOT megatron_train
-    strategy_config: ${deepspeed_zero3}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 4
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: false    # NPU: Must use FSDP2, NOT megatron_train
   device_mapping: list(range(0,4))    # NPU: Training on NPUs 0-3
   infer_batch_size: 2
 
@@ -207,8 +210,13 @@ reference:
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 4
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: false
   device_mapping: list(range(4,8))    # NPU: Share inference NPUs with actor_infer
   infer_batch_size: 2
 
@@ -252,13 +260,13 @@ cd /workspace/ROLL
 export PYTHONPATH="/workspace/ROLL:$PYTHONPATH"
 
 python examples/start_agentic_pipeline.py \
-    --config_path <config_dir> \
+    --config_path agentic_frozen_lake_npu \
     --config_name agentic_frozen_lake_npu
 ```
 
-## Example 2: Single-Node RLVR Pipeline (Qwen3-8B)
+## Example 2: Single-Node RLVR Pipeline (Qwen3-30B-A3B)
 
-This example runs the RLVR pipeline on Ascend NPU using the repository config `examples/ascend_examples/qwen3_8b_rlvr_deepspeed.yaml`.
+This example runs the RLVR pipeline on Ascend NPU using the repository config `examples/ascend_examples/qwen3_30b_rlvr_fsdp2.yaml`.
 
 ### Key Configuration Changes
 
@@ -268,6 +276,8 @@ system_envs:
   HCCL_CONNECT_TIMEOUT: "3600"
   HCCL_DETERMINISTIC: "false"
   HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_NPU_SOCKET_PORT_RANGE: "auto"
+  VLLM_ASCEND_ENABLE_NZ: "0"
   NPU_MEMORY_FRACTION: "0.96"
   CPU_AFFINITY_CONF: "2"
   OMP_NUM_THREADS: "1"
@@ -276,26 +286,25 @@ system_envs:
 
 rollout_batch_size: 32
 prompt_length: 2048
-response_length: 8192
+response_length: 4096
 num_return_sequences_in_group: 8
 
-pretrain: Qwen/Qwen3-8B-Base
-reward_pretrain: Qwen/Qwen3-8B-Base
+pretrain: Qwen/Qwen3-30B-A3B
+reward_pretrain: Qwen/Qwen3-30B-A3B
 
 actor_train:
   model_args:
-    attn_implementation: fa2          # NPU: Use fa2 via transformers, NOT flash_attn
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 1
-    gradient_accumulation_steps: 32
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
     warmup_steps: 20
   data_args:
-    template: qwen3
+    template: qwen2_5
     file_name:
       - data/math_deepmath_deal.jsonl
     domain_interleave_probs:
@@ -303,10 +312,28 @@ actor_train:
     dataset_dir: data
     messages: messages
     interleave_probs: "1.0"
+    preprocessing_num_workers: 16
   strategy_args:
-    strategy_name: deepspeed_train    # NPU: Must use DeepSpeed
-    strategy_config: ${deepspeed_zero3}
-  device_mapping: list(range(0,8))    # NPU: Training on NPUs 0-7
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: bf16
+      offload_policy: true
+      apply_expert_patch: true          # NPU: Required for MoE models
+      apply_tiled_mlp: true             # NPU: TiledMLP to reduce memory
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      wrap_policy:                      # NPU: MoE-specific wrap policy
+        wrap_embeddings: true
+        wrap_lm_output: true
+        moe_experts:
+          - Qwen3MoeMLP
+        transformer_layer_cls_to_wrap:
+          - Qwen3MoeAttention
+          - Qwen3MoeSparseMoeBlock
+  use_remove_padding: true
+  device_mapping: list(range(0,16))    # NPU: Training on NPUs 0-15
   infer_batch_size: 2
 
 actor_infer:
@@ -321,15 +348,18 @@ actor_infer:
     temperature: 0.99
     num_return_sequences: ${num_return_sequences_in_group}
   data_args:
-    template: qwen3
+    template: qwen2_5
   strategy_args:
     strategy_name: vllm
     strategy_config:
       gpu_memory_utilization: 0.8
       block_size: 16
-      max_model_len: 8000
-  device_mapping: list(range(8,12))   # NPU: Inference on NPUs 8-11
-  infer_batch_size: 4
+      max_model_len: 6144
+      tensor_parallel_size: 2
+      enforce_eager: true
+      load_format: dummy
+  device_mapping: list(range(0,16))    # NPU: Inference shares NPUs with training
+  infer_batch_size: 1
 
 reference:
   model_args:
@@ -337,12 +367,19 @@ reference:
     dtype: bf16
     model_type: ~
   data_args:
-    template: qwen3
+    template: qwen2_5
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
-  device_mapping: list(range(12,16))  # NPU: Reference on NPUs 12-15
-  infer_batch_size: 1
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: bf16
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      offload_policy: true
+  device_mapping: list(range(0,16))    # NPU: Reference shares NPUs with training
+  infer_batch_size: 2
 
 rewards:
   math_rule:
@@ -350,8 +387,8 @@ rewards:
     model_args:
       model_name_or_path: ${reward_pretrain}
     data_args:
-      template: qwen3
-    tag_included: [deepmath_103k, MATH-500, OlympiadBench, minervamath, aime2025, gsm8k, aime, amc23, math_rule]
+      template: qwen2_5
+    tag_included: [deepmath_103k, aime]
     world_size: 8
     infer_batch_size: 1
 ```
@@ -364,7 +401,7 @@ export PYTHONPATH="/workspace/ROLL:$PYTHONPATH"
 
 python examples/start_rlvr_pipeline.py \
     --config_path ascend_examples \
-    --config_name qwen3_8b_rlvr_deepspeed
+    --config_name qwen3_30b_rlvr_fsdp2
 ```
 
 ## Example 3: Multi-Node Distributed Training
@@ -417,7 +454,7 @@ Before starting, identify the correct HCCL network interface on each node:
 ip addr
 
 # Or use the NPU tool to check HCCL interfaces
-for i in {0..7}; do hccn_tool -i $i -ip -g; done
+for i in $(seq 0 7); do hccn_tool -i $i -ip -g; done
 
 # The NPU device IPs are typically on a high-speed interconnect (e.g., 192.168.x.x).
 # Use the corresponding ethernet interface name (e.g., enp194s0f0, eth0) for HCCL_SOCKET_IFNAME.
@@ -462,16 +499,16 @@ On **each** node, verify that NPU devices can communicate:
 
 ```bash
 # Check link status (all should show "up")
-for i in {0..7}; do hccn_tool -i $i -link -g; done
+for i in $(seq 0 7); do hccn_tool -i $i -link -g; done
 
 # Check TLS consistency (all should show the same switch value)
-for i in {0..7}; do hccn_tool -i $i -tls -g; done | grep switch
+for i in $(seq 0 7); do hccn_tool -i $i -tls -g; done | grep switch
 
 # If TLS is inconsistent, disable it on all cards on all nodes:
-for i in {0..7}; do hccn_tool -i $i -tls -s enable 0; done
+for i in $(seq 0 7); do hccn_tool -i $i -tls -s enable 0; done
 
 # Check NPU device IPs
-for i in {0..7}; do hccn_tool -i $i -ip -g; done
+for i in $(seq 0 7); do hccn_tool -i $i -ip -g; done
 
 # Test cross-node connectivity (run on node B, replace with node A's device IP)
 hccn_tool -i 0 -ping -g address <node_a_device_ip>
@@ -494,6 +531,7 @@ export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_EXEC_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 export HCCL_IF_IP=<NODE_IP>          # Current node's IP address
 export HCCL_SOCKET_IFNAME=<interface> # e.g., enp194s0f0
 export HCCL_IF_BASE_PORT=23456
@@ -511,8 +549,8 @@ export OMP_NUM_THREADS=1
 
 # === vLLM-Ascend inference ===
 export VLLM_USE_V1=1
+export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # === Operator compilation cache ===
@@ -619,8 +657,13 @@ num_gpus_per_node: 8
 # Training on Node0 NPUs 0-7
 actor_train:
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3_cpuoffload}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: true
   device_mapping: list(range(0,8))
 
 # Inference on Node1 NPUs 0-7
@@ -636,28 +679,32 @@ actor_infer:
 # Reference model shares inference NPUs
 reference:
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      reshard_after_forward: true
+      offload_policy: true
   device_mapping: list(range(8,16))
 ```
 
 Complete multi-node RLVR config example (2 nodes × 8 NPUs):
 
 ```yaml
-defaults:
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
-
 hydra:
   run:
     dir: .
   output_subdir: null
 
-exp_name: "qwen2.5-7B-rlvr-npu-multinode"
+exp_name: "qwen3-30BA3B-rlvr-npu-multinode"
 seed: 42
 logging_dir: /data/logs
 output_dir: /data/output
+system_envs:
+  USE_MODELSCOPE: '1'
+  HCCL_NPU_SOCKET_PORT_RANGE: "auto"
+  VLLM_ASCEND_ENABLE_NZ: "0"
 
 checkpoint_config:
   type: file_system
@@ -671,7 +718,7 @@ logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
 
-rollout_batch_size: 64
+rollout_batch_size: 32
 prompt_length: 2048
 response_length: 4096
 num_return_sequences_in_group: 8
@@ -680,37 +727,52 @@ ppo_epochs: 1
 adv_estimator: "reinforce"
 whiten_advantages: true
 
-pretrain: /data/models/Qwen2.5-7B
-reward_pretrain: /data/models/Qwen2.5-7B
+pretrain: Qwen/Qwen3-30B-A3B
+reward_pretrain: Qwen/Qwen3-30B-A3B
 
 actor_train:
   model_args:
-    attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
   training_args:
     learning_rate: 1.0e-6
     weight_decay: 0
-    per_device_train_batch_size: 1
-    gradient_accumulation_steps: 32
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
     warmup_steps: 20
   data_args:
     template: qwen2_5
     file_name:
       - data/math_deepmath_deal.jsonl
-      - data/code_KodCode_data.jsonl
     domain_interleave_probs:
-      math_rule: 0.5
-      code_sandbox: 0.5
+      math_rule: 1
     dataset_dir: /data/datasets
     messages: messages
     interleave_probs: "1.0"
+    preprocessing_num_workers: 16
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3_cpuoffload}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      offload_policy: true
+      apply_expert_patch: true
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      wrap_policy:
+        wrap_embeddings: true
+        wrap_lm_output: true
+        moe_experts:
+          - Qwen3MoeMLP
+        transformer_layer_cls_to_wrap:
+          - Qwen3MoeAttention
+          - Qwen3MoeSparseMoeBlock
+  use_remove_padding: true
   device_mapping: list(range(0,8))    # Node0 NPUs 0-7 for training
-  infer_batch_size: 4
+  infer_batch_size: 2
 
 actor_infer:
   model_args:
@@ -730,23 +792,32 @@ actor_infer:
     strategy_config:
       gpu_memory_utilization: 0.8
       block_size: 16
-      max_model_len: 8000
+      max_model_len: 6144
+      tensor_parallel_size: 2
+      enforce_eager: true
+      load_format: dummy
   device_mapping: list(range(8,16))   # Node1 NPUs 0-7 for inference
   infer_batch_size: 1
 
 reference:
   model_args:
-    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: hf_infer
-    strategy_config: ~
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: bf16
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      offload_policy: true
   device_mapping: list(range(8,16))   # Share inference NPUs
-  infer_batch_size: 8
+  infer_batch_size: 2
 
 rewards:
   math_rule:
@@ -756,17 +827,7 @@ rewards:
     data_args:
       template: qwen2_5
     tag_included: [deepmath_103k, aime]
-    world_size: 4
-    infer_batch_size: 1
-  code_sandbox:
-    use_local: true
-    worker_cls: roll.pipeline.rlvr.rewards.code_sandbox_reward_worker.CodeSandboxRewardWorker
-    tag_included: [KodCode]
-    model_args:
-      model_name_or_path: ${reward_pretrain}
-    data_args:
-      template: qwen2_5
-    world_size: 4
+    world_size: 8
     infer_batch_size: 1
 ```
 
@@ -797,7 +858,7 @@ Pattern 1 has lower cross-node HCCL communication overhead during inference. Pat
 
 ## Device Mapping Reference
 
-Since NPU does not support colocated mode, you must allocate separate NPUs for training and inference. Here are common allocation patterns:
+Here are common NPU allocation patterns. You may use colocated mode (training and inference sharing NPUs) or separate NPUs based on your workload and hardware:
 
 ### 8-NPU Single Node
 
@@ -836,7 +897,7 @@ The first inference request after model loading triggers operator compilation, w
 
 If you encounter OOM with a 7B model on 4 NPUs:
 
-1. Switch to `deepspeed_zero3_cpuoffload` strategy.
+1. Switch to `fsdp2_train` strategy with `offload_policy: true`.
 2. Reduce `per_device_train_batch_size` to 1.
 3. Increase `gradient_accumulation_steps` accordingly.
 4. Reduce `max_model_len` in vLLM config (e.g., from 8192 to 4096).

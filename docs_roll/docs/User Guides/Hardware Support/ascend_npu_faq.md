@@ -88,33 +88,20 @@ export VLLM_ASCEND_ENABLE_NZ=0
 
 ```bash
 pip uninstall -y triton triton-ascend
-pip install triton-ascend==3.2.0
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
 
 ## Training Configuration
-
-### Colocated Mode Not Supported
-
-**Symptom:** Training fails when `actor_train` and `actor_infer` share the same NPU devices.
-
-**Solution:** NPU does not support colocated mode. You must configure `device_mapping` so that training and inference run on separate NPUs. For example:
-
-```yaml
-actor_train:
-  device_mapping: list(range(0, 4))
-actor_infer:
-  device_mapping: list(range(4, 8))
-```
 
 ### Megatron Strategy Not Supported
 
 **Symptom:** Errors when using `strategy: megatron` in configuration on NPU.
 
-**Solution:** Megatron-LM training is not yet supported on Ascend NPU in the provided examples. Use DeepSpeed as the training backend:
+**Solution:** Megatron-LM is not supported on Ascend NPU. Use FSDP2 as the training backend:
 
 ```yaml
 strategy_args:
-  strategy_name: deepspeed_train
+  strategy_name: fsdp2_train
 ```
 
 ### HCCL Communication Timeout or Failure
@@ -274,13 +261,6 @@ To make it persistent, add the following line to `/etc/security/limits.conf` ins
 * hard nofile 65536
 ```
 
-You can also configure it globally in your ROLL YAML config:
-
-```yaml
-system_envs:
-  RAY_ULIMIT_NOFILE: "65536"
-```
-
 ### Out of NPU Memory
 
 **Symptom:** Training or inference crashes with OOM (Out of Memory) errors.
@@ -289,11 +269,12 @@ system_envs:
 
 1. Reduce `rollout_batch_size` or `num_return_sequences_in_group` in your configuration file.
 2. Reduce `per_device_train_batch_size` and increase `gradient_accumulation_steps` accordingly.
-3. Enable DeepSpeed ZeRO-3 with CPU offloading in your config:
+3. Enable FSDP2 with CPU offloading in your config:
    ```yaml
    strategy_args:
-     strategy_name: deepspeed_train
-     strategy_config: ${deepspeed_zero3_cpuoffload}
+     strategy_name: fsdp2_train
+     strategy_config:
+       offload_policy: true
    ```
 4. Use a smaller model or apply LoRA to reduce memory footprint.
 
@@ -303,7 +284,7 @@ system_envs:
 
 **Solution:**
 
-1. Ensure CANN and vLLM-Ascend versions are compatible (both should be v0.13.0).
+1. Ensure CANN and vLLM-Ascend versions are compatible (current images use CANN 9.0.0 with vLLM-Ascend v0.18).
 2. Check that the SOC version matches your hardware.
 3. Adjust vLLM parameters such as `gpu_memory_utilization` and `max_model_len` in your config.
 4. Verify that `triton-ascend` is installed (not `triton`), as the wrong triton backend can cause kernel compilation fallbacks.

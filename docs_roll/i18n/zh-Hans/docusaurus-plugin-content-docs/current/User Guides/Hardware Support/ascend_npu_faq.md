@@ -88,33 +88,20 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 
 ```bash
 pip uninstall -y triton triton-ascend
-pip install triton-ascend==3.2.0
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
 
 ## 训练配置
-
-### 不支持 Colocated 模式
-
-**现象：** `actor_train` 和 `actor_infer` 共用同一组 NPU 设备时训练失败。
-
-**解决方案：** NPU 不支持 colocated 模式，必须配置 `device_mapping` 使训练和推理在不同的 NPU 卡上执行。例如：
-
-```yaml
-actor_train:
-  device_mapping: list(range(0, 4))
-actor_infer:
-  device_mapping: list(range(4, 8))
-```
 
 ### 不支持 Megatron 策略
 
 **现象：** 在 NPU 上使用 `strategy: megatron` 配置时报错。
 
-**解决方案：** 当前提供的昇腾示例暂不支持 Megatron-LM 训练，请使用 DeepSpeed 作为训练后端：
+**解决方案：** 昇腾 NPU 上不支持 Megatron-LM 训练，请使用 FSDP2 作为训练后端：
 
 ```yaml
 strategy_args:
-  strategy_name: deepspeed_train
+  strategy_name: fsdp2_train
 ```
 
 ### HCCL 通信超时或失败
@@ -274,13 +261,6 @@ ulimit -n 65536
 * hard nofile 65536
 ```
 
-也可以在 ROLL YAML 配置中全局设置：
-
-```yaml
-system_envs:
-  RAY_ULIMIT_NOFILE: "65536"
-```
-
 ### NPU 显存不足
 
 **现象：** 训练或推理过程中出现 OOM（Out of Memory）错误而崩溃。
@@ -289,11 +269,12 @@ system_envs:
 
 1. 在配置文件中减小 `rollout_batch_size` 或 `num_return_sequences_in_group`。
 2. 减小 `per_device_train_batch_size`，同时相应增大 `gradient_accumulation_steps`。
-3. 在配置中启用 DeepSpeed ZeRO-3 + CPU Offloading：
+3. 在配置中启用 FSDP2 + CPU Offloading：
    ```yaml
    strategy_args:
-     strategy_name: deepspeed_train
-     strategy_config: ${deepspeed_zero3_cpuoffload}
+     strategy_name: fsdp2_train
+     strategy_config:
+       offload_policy: true
    ```
 4. 使用更小的模型或应用 LoRA 以降低显存占用。
 
@@ -303,7 +284,7 @@ system_envs:
 
 **解决方案：**
 
-1. 确保 CANN 和 vLLM-Ascend 版本兼容（均应为 v0.13.0）。
+1. 确保 CANN 和 vLLM-Ascend 版本兼容（当前镜像使用 CANN 9.0.0 与 vLLM-Ascend v0.18）。
 2. 检查 SOC 版本是否与硬件匹配。
 3. 调整配置中 vLLM 的 `gpu_memory_utilization` 和 `max_model_len` 参数。
 4. 确认已安装 `triton-ascend`（而非 `triton`），错误的 triton 后端会导致算子编译回退。

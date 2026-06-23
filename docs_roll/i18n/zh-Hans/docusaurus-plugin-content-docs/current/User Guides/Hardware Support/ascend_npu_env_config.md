@@ -1,6 +1,6 @@
 # 昇腾 NPU 环境变量配置指南
 
-最后更新：2026/04/27。
+最后更新：2026/06/23。
 
 本文档说明在华为昇腾 NPU 上运行 ROLL 时涉及的关键环境变量，涵盖设备管理、HCCL 通信、显存优化、CPU 调度、vLLM-Ascend 推理及调试日志等方面。
 
@@ -79,6 +79,7 @@ export MASTER_PORT=6379
 | `HCCL_DETERMINISTIC` | `false` | 关闭确定性计算，开启会显著降低通信性能 |
 | `HCCL_OP_EXPANSION_MODE` | `"AIV"` | 通信算法展开位置，`AIV` 使用 Vector Core，性能优于 `AI_CPU`/`HOST`/`HOST_TS` |
 | `HCCL_BUFFSIZE` | 如 `"2147483648"` | HCCL 通信缓冲区大小（字节），大数据量场景可增大 |
+| `HCCL_NPU_SOCKET_PORT_RANGE` | `auto` | 同一 NPU 上运行多个 worker 进程时，允许 HCCL 自动分配非默认的 device 侧网卡端口 |
 | `HCCL_IF_IP` | 节点 IP 地址 | 指定 HCCL 跨节点通信使用的 IP 地址，多机训练必需 |
 | `HCCL_SOCKET_IFNAME` | 如 `"enp194s0f0"` | HCCL Socket 通信使用的网卡名称，所有节点必须一致 |
 | `HCCL_IF_BASE_PORT` | 如 `23456` | HCCL 跨节点通信基础端口，确保端口未被防火墙拦截 |
@@ -90,6 +91,7 @@ export MASTER_PORT=6379
 export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 ```
 
 示例（多机）：
@@ -99,6 +101,7 @@ export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_EXEC_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 export HCCL_IF_IP=$(hostname -I | awk '{print $1}')
 export HCCL_SOCKET_IFNAME="enp194s0f0"
 export HCCL_IF_BASE_PORT=23456
@@ -151,8 +154,7 @@ export CPU_AFFINITY_CONF=1,npu0:0-1,npu1:2-3,npu2:4-5,npu3:6-7
 | `VLLM_USE_V1` | `1` | 启用 vLLM V1 架构，vLLM-Ascend 必需 |
 | `VLLM_ATTENTION_BACKEND` | `XFORMERS` | vLLM 注意力计算后端 |
 | `VLLM_ASCEND_ENABLE_FLASHCOMM` | `1` | 启用昇腾 FlashComm 高速通信优化 |
-| `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE` | `1` | 启用大模型稠密计算优化 |
-| `VLLM_ASCEND_ENABLE_PREFETCH_MLP` | `1` | 启用 MLP 层权重预取 |
+| `VLLM_ASCEND_ENABLE_PREFETCH_MLP` | `1` | 启用 MLP 层权重预取。它替代了较早版本中的 dense optimize 开关。 |
 | `VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE` | `1` | 启用 TopK 算子融合优化，提升生成解码性能 |
 | `VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE` | `1` | 打印 prefill/decode 阶段耗时详情（调试用） |
 | `VLLM_ASCEND_TRACE_RECOMPILES` | `1` | 追踪算子重编译，用于调试性能问题 |
@@ -164,8 +166,24 @@ export CPU_AFFINITY_CONF=1,npu0:0-1,npu1:2-3,npu2:4-5,npu3:6-7
 export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
+```
+
+## vLLM-Ascend 构建相关变量
+
+以下变量用于从源码构建 vLLM-Ascend。请在执行 `pip install -e .` 前设置；它不需要在每次运行 ROLL 时都导出。
+
+| 变量 | 推荐值 | 说明 |
+| ---- | ------ | ---- |
+| `COMPILE_CUSTOM_KERNELS` | Atlas A5 设置为 `1` | 编译 vLLM-Ascend 自定义 kernel。使用 vLLM-Ascend `main` 的 Atlas A5 安装配置需要设置该变量。 |
+
+示例（Atlas A5）：
+
+```bash
+git clone -b main --depth 1 https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+export COMPILE_CUSTOM_KERNELS=1
+pip install -v -e .
 ```
 
 ## CANN 日志与调试变量
@@ -243,7 +261,6 @@ export OMP_NUM_THREADS=1
 # vLLM-Ascend 推理
 export VLLM_USE_V1=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # 算子编译缓存
