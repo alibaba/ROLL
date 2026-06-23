@@ -40,6 +40,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             requirements_common.txt
+            requirements_vision.txt
             mcore_adapter/pyproject.toml
             mcore_adapter/requirements.txt
             setup.py
@@ -50,13 +51,11 @@ jobs:
           pip install --upgrade pip
           # Install PyTorch CPU-only to keep CI lightweight
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          # Install core test dependencies (subset of requirements_common.txt)
-          pip install pytest pytest-timeout pytest-asyncio numpy tensordict pydantic dacite \
-            more_itertools hydra-core omegaconf peft==0.12.0 datasets==3.1.0 \
-            trl==0.9.6 transformers ray[default] sympy deprecated codetiming pybase64 imageio \
-            jsonschema mcp gem-llm==0.0.4 openai==2.31.0 gym 'gymnasium[toy-text]' gym_sokoban rl-rock
-          # Install mcore_adapter and roll itself
-          pip install -e ./mcore_adapter
+          # Install common dependencies, including mcore_adapter and TransferQueue
+          pip install -r requirements_common.txt
+          # Install CI-only pytest plugins and ROCK CLI used by agentic tests
+          pip install pytest-timeout pytest-asyncio rl-rock
+          # Install roll itself
           pip install -e .
           rock admin start
 
