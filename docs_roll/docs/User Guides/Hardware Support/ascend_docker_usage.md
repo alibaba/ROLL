@@ -2,7 +2,7 @@
 
 Last updated: 06/23/2026.
 
-This guide explains how to get, build, and run ROLL images on **Huawei Ascend NPU**. Prefer the pre-built image when possible; use `Dockerfile.A2` or `Dockerfile.A3` when you need to customize dependencies. Atlas A5 currently follows the manual installation profile in [ROLL x Ascend](ascend_usage.md).
+This guide explains how to get, build, and run ROLL images on **Huawei Ascend NPU**. Prefer the pre-built image when possible; use `Dockerfile.A2` or `Dockerfile.A3` when you need to customize dependencies. Atlas 950 currently follows the manual installation profile in [ROLL x Ascend](ascend_usage.md).
 
 ## Hardware & Software Requirements
 
@@ -15,7 +15,7 @@ This guide explains how to get, build, and run ROLL images on **Huawei Ascend NP
 | Docker | >= 20.10 | >= 20.10 |
 | Ascend NPU Driver | Installed on host | Installed on host |
 
-This Docker guide covers the A2/A3 Dockerfiles. For Atlas A5, use the manual installation profile: torch 2.10, vLLM v0.20.2, vLLM-Ascend `main`, and `COMPILE_CUSTOM_KERNELS=1` when building vLLM-Ascend.
+This Docker guide covers the A2/A3 Dockerfiles. For Atlas 950, use the manual installation profile: torch 2.10, vLLM v0.20.2, vLLM-Ascend `main`, and `COMPILE_CUSTOM_KERNELS=1` when building vLLM-Ascend.
 
 ## Key Components
 
@@ -29,9 +29,9 @@ Both Dockerfiles install the same versions of core dependencies:
 | Transformers | 4.57.6 |
 | triton-ascend | 3.2.1 |
 
-Atlas A5 uses a newer manual installation stack:
+Atlas 950 uses a newer manual installation stack:
 
-| Component | Atlas A5 Version / Setting |
+| Component | Atlas 950 Version / Setting |
 | --------- | -------------------------- |
 | PyTorch | 2.10 |
 | vLLM | v0.20.2 |

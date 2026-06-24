@@ -2,7 +2,7 @@
 
 最后更新：2026/06/23。
 
-本指南介绍如何在**华为昇腾 NPU** 上获取、构建并运行 ROLL 镜像。推荐优先使用预构建镜像；如需自定义依赖，再使用 `Dockerfile.A2` 或 `Dockerfile.A3` 构建。Atlas A5 当前使用 [ROLL x Ascend](ascend_usage.md) 中的手动安装配置。
+本指南介绍如何在**华为昇腾 NPU** 上获取、构建并运行 ROLL 镜像。推荐优先使用预构建镜像；如需自定义依赖，再使用 `Dockerfile.A2` 或 `Dockerfile.A3` 构建。Atlas 950 当前使用 [ROLL x Ascend](ascend_usage.md) 中的手动安装配置。
 
 ## 硬件与软件要求
 
@@ -15,7 +15,7 @@
 | Docker | >= 20.10 | >= 20.10 |
 | 昇腾 NPU 驱动 | 已安装在宿主机上 | 已安装在宿主机上 |
 
-本 Docker 指南覆盖 A2/A3 Dockerfile。Atlas A5 请使用手动安装配置：torch 2.10、vLLM v0.20.2、vLLM-Ascend `main`，并在构建 vLLM-Ascend 时设置 `COMPILE_CUSTOM_KERNELS=1`。
+本 Docker 指南覆盖 A2/A3 Dockerfile。Atlas 950 请使用手动安装配置：torch 2.10、vLLM v0.20.2、vLLM-Ascend `main`，并在构建 vLLM-Ascend 时设置 `COMPILE_CUSTOM_KERNELS=1`。
 
 ## 主要组件
 
@@ -29,9 +29,9 @@
 | Transformers | 4.57.6 |
 | triton-ascend | 3.2.1 |
 
-Atlas A5 使用更新的手动安装版本组合：
+Atlas 950 使用更新的手动安装版本组合：
 
-| 组件 | Atlas A5 版本 / 设置 |
+| 组件 | Atlas 950 版本 / 设置 |
 | ---- | -------------------- |
 | PyTorch | 2.10 |
 | vLLM | v0.20.2 |
