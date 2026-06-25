@@ -3101,5 +3101,20 @@
       "total": 226,
       "open": 21
     }
+  },
+  "2026-06-25": {
+    "stars": 3266,
+    "forks": 291,
+    "contributors": 55,
+    "commits": 487,
+    "issues": {
+      "total": 226,
+      "open": 95,
+      "fixRate": 57
+    },
+    "prs": {
+      "total": 226,
+      "open": 21
+    }
   }
 }
