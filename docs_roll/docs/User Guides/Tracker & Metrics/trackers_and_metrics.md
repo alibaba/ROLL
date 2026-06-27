@@ -10,6 +10,7 @@ The ROLL framework currently supports the following trackers:
 2. **Weights & Biases (WandB)** - Powerful machine learning experiment tracking platform
 3. **SwanLab** - Next-generation AI experiment tracking tool
 4. **Stdout** - Direct output to standard output
+5. **Trackio** - Local-first experiment tracker with optional Hugging Face Hub synchronization
 
 ## Configuring Trackers
 
@@ -46,6 +47,25 @@ tracker_kwargs:
 
 # Using Stdout
 track_with: stdout
+
+# Using Trackio
+track_with: trackio
+tracker_kwargs:
+  project: roll-experiments
+  name: ${exp_name}
+  group: grpo
+  tags:
+    - roll
+    - rl
+    - trackio
+
+  # Optional: synchronize experiments to the Hugging Face Hub
+  dataset_id: username/roll-experiments
+  space_id: username/trackio-dashboard
+
+  # Optional GPU monitoring
+  auto_log_gpu: true
+  gpu_log_interval: 2
 ```
 
 ## SwanLab Usage Details
@@ -74,6 +94,10 @@ tracker_kwargs:
 2. Register or log in to your account
 3. Go to the user settings page
 4. Find the API key and copy it
+
+## Trackio Usage Details
+
+Trackio is a local-first experiment tracker that records training metrics, system metrics, and configuration locally while optionally synchronizing experiment artifacts to the Hugging Face Hub. It integrates directly with ROLL's tracking interface and requires no external tracking server.
 
 ## Metric Monitoring
 
