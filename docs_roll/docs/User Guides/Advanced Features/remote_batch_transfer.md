@@ -20,6 +20,7 @@ In RL training pipelines (especially VLM and Agentic scenarios), `DataProto` bat
 - **Transfer Backend**: A pluggable storage backend responsible for `put`, `get`, and `delete` operations. Currently supported backends:
   - `None` (Dummy): No remote storage; data stays local (default).
   - `TransferQueue`: Uses the [TransferQueue](https://github.com/kvcache-ai/TransferQueue) library for high-performance distributed key-value transfer.
+  - `Mooncake`: Uses Mooncake as an optional structured `DataProto` transfer backend for large tensor, non-tensor, and multimodal rollout payloads.
 
 ### How It Works
 
@@ -41,10 +42,29 @@ transfer_backend:
         num_data_storage_units: 16
 ```
 
+Mooncake can be enabled as an optional backend:
+
+```yaml
+transfer_backend:
+  backend_name: Mooncake
+  backend_config:
+    client_scope: node
+    local_hostname: 192.168.0.1
+    metadata_server: P2PHANDSHAKE
+    global_segment_size: 8589934592
+    local_buffer_size: 8589934592
+    protocol: rdma
+    rdma_devices: erdma_0
+    master_server_addr: 192.168.0.1:50051
+```
+
 - `backend_name`: The name of the transfer backend to use.
   - `null` (default): Disables remote transfer; all data stays local. This is the default behavior when `transfer_backend` is not configured.
   - `TransferQueue`: Uses the TransferQueue library for high-performance data transfer.
-- `backend_config`: Backend-specific configuration dictionary. For TransferQueue, this corresponds to the TransferQueue initialization config.
+  - `Mooncake`: Uses Mooncake structured `DataProto` transfer. This backend supports tensor batch fields, `non_tensor_batch`, and `meta_info`, and is intended for large multi-node rollout payloads.
+- `backend_config`: Backend-specific configuration dictionary.
+  - For TransferQueue, this corresponds to the TransferQueue initialization config.
+  - For Mooncake, this config can be passed explicitly as shown above, or loaded from Mooncake environment configuration.
   - `backend.SimpleStorage.num_data_storage_units`: The number of storage units to shard data across. Can be configured based on the number of CPU cores and cluster nodes. `msgpack` serialization has a maximum 4 GB limit per object, so larger data transfers require more storage units to shard `non_tensor_batch` into smaller pieces.
 
 ### Agentic Pipeline Optimization
@@ -65,6 +85,7 @@ Manually calling `to_remote` inside environment workers is incompatible with fil
 | Backend | Status | Notes |
 |---------|--------|-------|
 | TransferQueue | End-to-end tested | Production-ready. Tested across RLVR, VLM, and Agentic pipelines. |
+| Mooncake | Experimental | Optional structured `DataProto` backend for tensor, non-tensor, metadata, and multimodal rollout payloads. |
 | RayMemoryStore | Illustration only | Not tested. Provided as a reference implementation for the `ColumnRemoteBatch` pattern. |
 
 ### TODO

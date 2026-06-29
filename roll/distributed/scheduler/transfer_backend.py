@@ -41,8 +41,8 @@ def _check_transfer_queue_available():
 
 def _check_mooncake_available():
     try:
-        import mooncake.dataproto_transfer  # noqa: F401
         import mooncake.store  # noqa: F401
+        import mooncake.structured_object_store  # noqa: F401
     except ImportError as exc:
         raise ImportError("Mooncake transfer backend requires the mooncake Python package.") from exc
 
@@ -155,7 +155,13 @@ def create_tensordict(fields: dict[str, torch.Tensor | np.ndarray]) -> TensorDic
 
 class DummyClient:
 
-    def put(self, partition, row_ids: list[str], fields: dict[str, torch.Tensor | np.ndarray], batch_size: int):
+    def put(
+        self,
+        partition,
+        row_ids: list[str],
+        fields: dict[str, torch.Tensor | np.ndarray],
+        batch_size: int,
+    ):
         return None
 
     def get(self, partition, keys: list[str], fields: list[Any]):
@@ -190,7 +196,13 @@ class RayMemoryStoreClient:
             get_if_exists=True,
         ).remote()
 
-    def put(self, partition, row_ids: list[str], fields: dict[str, torch.Tensor | np.ndarray], batch_size: int):
+    def put(
+        self,
+        partition,
+        row_ids: list[str],
+        fields: dict[str, torch.Tensor | np.ndarray],
+        batch_size: int,
+    ):
         # TODO move RayMemoryStoreClient to another file
         from roll.distributed.scheduler.remote_protocol import ColumnRemoteBatch
 
@@ -223,7 +235,13 @@ class MooncakeNodeTransferActor:
     def __init__(self, config: dict[str, Any] | None = None):
         self.client = MooncakeClient(config)
 
-    def put(self, partition, row_ids: list[str], fields: dict[str, torch.Tensor | np.ndarray], batch_size: int):
+    def put(
+        self,
+        partition,
+        row_ids: list[str],
+        fields: dict[str, torch.Tensor | np.ndarray],
+        batch_size: int,
+    ):
         return self.client.put(partition, row_ids, fields, batch_size)
 
     def get(self, partition, keys: list[str], fields: list[Any]):
@@ -238,7 +256,13 @@ class MooncakeNodeClientProxy:
         self.config = dict(config or {})
         self.actor = self._get_node_actor()
 
-    def put(self, partition, row_ids: list[str], fields: dict[str, torch.Tensor | np.ndarray], batch_size: int):
+    def put(
+        self,
+        partition,
+        row_ids: list[str],
+        fields: dict[str, torch.Tensor | np.ndarray],
+        batch_size: int,
+    ):
         return ray.get(self.actor.put.remote(partition, row_ids, fields, batch_size))
 
     def get(self, partition, keys: list[str], fields: list[Any]):
@@ -264,55 +288,49 @@ class MooncakeNodeClientProxy:
 class MooncakeClient:
     def __init__(self, config: dict[str, Any] | None = None):
         _check_mooncake_available()
-        from mooncake.dataproto_transfer import MooncakeDataProtoTransferBackend
         from mooncake.store import MooncakeDistributedStore
-        from roll.distributed.scheduler.protocol import DataProto
+        from mooncake.structured_object_store import BundleTransferPolicy, MooncakeBundleTransfer
 
         config = config or {}
         store = MooncakeDistributedStore()
-        setup_args = config.get("setup_args")
-        setup_kwargs = config.get("setup_kwargs")
-        if setup_args is not None:
-            ret = store.setup(*setup_args)
-        elif setup_kwargs is not None:
-            ret = store.setup(**setup_kwargs)
-        else:
-            ret = self._setup_store_from_env(store)
+        ret = self._setup_store(store, config)
         if ret != 0:
             raise RuntimeError(f"Mooncake store setup failed, return code={ret}")
 
-        self.backend = MooncakeDataProtoTransferBackend(
-            store,
-            key_prefix=config.get("key_prefix", "roll"),
-            data_cls=DataProto,
-        )
-        self.shard_policy = self._create_shard_policy(config.get("shard_policy"))
+        self.backend = MooncakeBundleTransfer(store, key_prefix=config.get("key_prefix", "roll"))
+        policy_config = config.get("transfer_policy")
+        self.transfer_policy = BundleTransferPolicy(**policy_config) if policy_config else None
 
-    def put(self, partition, row_ids: list[str], fields: dict[str, torch.Tensor | np.ndarray], batch_size: int):
+    def put(
+        self,
+        partition,
+        row_ids: list[str],
+        fields: dict[str, torch.Tensor | np.ndarray],
+        batch_size: int,
+    ):
         from roll.distributed.scheduler.protocol import DataProto
         from roll.distributed.scheduler.remote_protocol import ColumnRemoteBatch
 
-        tensors = {key: value for key, value in fields.items() if isinstance(value, torch.Tensor)}
-        non_tensors = {key: value for key, value in fields.items() if isinstance(value, np.ndarray)}
-        if len(tensors) + len(non_tensors) != len(fields):
-            unsupported = {
-                key: type(value) for key, value in fields.items() if key not in tensors and key not in non_tensors
-            }
-            raise TypeError(f"Unsupported Mooncake fields: {unsupported}")
-
-        if tensors:
-            data = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, meta_info={})
+        batch_fields, non_tensor_fields = self._split_fields(fields)
+        meta_info = {"roll_row_ids": row_ids}
+        if batch_fields:
+            data = DataProto.from_dict(tensors=batch_fields, non_tensors=non_tensor_fields, meta_info=meta_info)
         else:
-            data = DataProto(batch=None, non_tensor_batch=non_tensors, meta_info={})
+            data = DataProto(
+                batch=TensorDict({}, batch_size=[batch_size]),
+                non_tensor_batch=non_tensor_fields,
+                meta_info=meta_info,
+            )
         assert len(data) == batch_size
-        ref = self.backend.put_dataproto(data, partition=partition, shard_policy=self.shard_policy)
+
+        ref = self.backend.put_dataproto(data, partition=partition, policy=self.transfer_policy)
         field_refs = {
-            key: {"ref": ref, "kind": "batch" if key in tensors else "non_tensor"}
+            key: {"ref": ref, "kind": "batch" if key in batch_fields else "non_tensor"}
             for key in fields.keys()
         }
         return ColumnRemoteBatch(
             partition=partition,
-            device=data.batch.device if tensors else None,
+            device=data.batch.device if batch_fields else None,
             fields=field_refs,
             is_nested=False,
             cache=create_tensordict(fields),
@@ -322,53 +340,108 @@ class MooncakeClient:
     def get(self, partition, keys: list[str], fields: list[Any]):
         if not fields:
             return TensorDict({}, batch_size=[0])
-        ref = fields[0]["ref"]
-        if any(field["ref"].object_id != ref.object_id for field in fields):
-            raise ValueError("Mooncake backend cannot materialize fields from different refs in one get")
-        batch_fields = [key for key, field in zip(keys, fields) if field["kind"] == "batch"]
-        non_tensor_fields = [key for key, field in zip(keys, fields) if field["kind"] == "non_tensor"]
-        data = self.backend.materialize_dataproto(
-            ref,
-            batch_fields=batch_fields,
-            non_tensor_fields=non_tensor_fields,
-            include_meta_info=False,
-        )
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for key, field in zip(keys, fields):
+            ref = field["ref"]
+            group = grouped.setdefault(self._ref_key(ref), {"ref": ref, "batch": [], "non_tensor": []})
+            group[field["kind"]].append(key)
+
         data_dict = {}
-        if data._batch is not None:
-            data_dict.update(data._batch.to_dict())
-        data_dict.update(data._non_tensor_batch)
+        for group in grouped.values():
+            data = self.backend.get_dataproto(
+                group["ref"],
+                batch_fields=group["batch"],
+                non_tensor_fields=group["non_tensor"],
+            )
+            data_dict.update(data.get("batch", {}))
+            data_dict.update(data.get("non_tensor_batch", {}))
         return create_tensordict({key: data_dict[key] for key in keys})
 
     def delete(self, partition, keys: list[str], fields: list[Any]):
         deleted = set()
         for field in fields:
             ref = field["ref"]
-            if ref.object_id in deleted:
+            ref_key = self._ref_key(ref)
+            if ref_key in deleted:
                 continue
-            self.backend.remove_dataproto(ref)
-            deleted.add(ref.object_id)
+            self.backend.cleanup_dataproto(ref)
+            deleted.add(ref_key)
 
-    def _setup_store_from_env(self, store):
+    def _setup_store(self, store, config: dict[str, Any]) -> int:
+        setup_args = config.get("setup_args")
+        setup_kwargs = config.get("setup_kwargs")
+        if setup_args is not None:
+            return store.setup(*setup_args)
+        if setup_kwargs is not None:
+            return store.setup(**setup_kwargs)
+        if config.get("master_server_addr") or config.get("master_server_address"):
+            return store.setup(
+                self._require_config(config, "local_hostname"),
+                self._require_config(config, "metadata_server"),
+                config.get("global_segment_size", 3355443200),
+                config.get("local_buffer_size", 1073741824),
+                config.get("protocol", "tcp"),
+                config.get("rdma_devices") or config.get("device_name", ""),
+                config.get("master_server_addr") or config.get("master_server_address"),
+            )
+        return self._setup_store_from_env(store, config)
+
+    def _setup_store_from_env(self, store, config: dict[str, Any]) -> int:
         from mooncake.mooncake_config import MooncakeConfig
 
-        config = MooncakeConfig.load_from_env()
+        mooncake_config = MooncakeConfig.load_from_env()
         return store.setup(
-            config.local_hostname,
-            config.metadata_server,
-            config.global_segment_size,
-            config.local_buffer_size,
-            config.protocol,
-            config.device_name or "",
-            config.master_server_address,
+            config.get("local_hostname", mooncake_config.local_hostname),
+            config.get("metadata_server", mooncake_config.metadata_server),
+            config.get("global_segment_size", mooncake_config.global_segment_size),
+            config.get("local_buffer_size", mooncake_config.local_buffer_size),
+            config.get("protocol", mooncake_config.protocol),
+            config.get("rdma_devices") or config.get("device_name", mooncake_config.device_name or ""),
+            config.get("master_server_addr")
+            or config.get("master_server_address", mooncake_config.master_server_address),
         )
 
-    def _create_shard_policy(self, config: dict[str, Any] | None):
-        if not config:
-            return None
-        from mooncake.dataproto_transfer import DataProtoShardPolicy
+    @staticmethod
+    def _split_fields(
+        fields: dict[str, torch.Tensor | np.ndarray],
+    ) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
+        tensors = {key: value for key, value in fields.items() if isinstance(value, torch.Tensor)}
+        non_tensors = {key: value for key, value in fields.items() if isinstance(value, np.ndarray)}
+        MooncakeClient._validate_fields(tensors, non_tensors, fields)
+        return tensors, non_tensors
 
-        return DataProtoShardPolicy(**config)
+    @staticmethod
+    def _validate_fields(
+        batch_fields: dict[str, Any],
+        non_tensor_fields: dict[str, Any],
+        all_fields: dict[str, Any] | None = None,
+    ) -> None:
+        unsupported = {}
+        for key, value in batch_fields.items():
+            if not isinstance(value, torch.Tensor):
+                unsupported[key] = type(value)
+        for key, value in non_tensor_fields.items():
+            if not isinstance(value, np.ndarray):
+                unsupported[key] = type(value)
+        if all_fields is not None:
+            known = set(batch_fields) | set(non_tensor_fields)
+            unsupported.update(
+                {key: type(value) for key, value in all_fields.items() if key not in known}
+            )
+        if unsupported:
+            raise TypeError(f"Unsupported Mooncake fields: {unsupported}")
 
+    @staticmethod
+    def _ref_key(ref) -> str:
+        return getattr(ref, "object_id", repr(ref))
+
+    @staticmethod
+    def _require_config(config: dict[str, Any], key: str) -> Any:
+        value = config.get(key)
+        if value is None or value == "":
+            raise ValueError(f"Mooncake backend_config requires {key!r} when master_server_addr is set")
+        return value
 
 def init_transfer_queue_server(config):
     # Must create enough storage units or may encounter:
@@ -383,7 +456,13 @@ class TransferQueueClient:
         _check_transfer_queue_available()
         tq.init()
 
-    def put(self, partition, row_ids: list[str], fields: dict[str, torch.Tensor | np.ndarray], batch_size: int):
+    def put(
+        self,
+        partition,
+        row_ids: list[str],
+        fields: dict[str, torch.Tensor | np.ndarray],
+        batch_size: int,
+    ):
         # TODO move TransferQueueClient to another file
         from roll.distributed.scheduler.remote_protocol import RowRemoteBatch
 

@@ -20,6 +20,7 @@ ROLL 框架支持 **RemoteBatch**，一种惰性数据传输机制，将数据�
 - **传输后端（Transfer Backend）**：负责 `put`、`get` 和 `delete` 操作的可插拔存储后端。目前支持的后端：
   - `None`（Dummy）：无远程存储，数据保留在本地（默认）。
   - `TransferQueue`：使用 [TransferQueue](https://github.com/kvcache-ai/TransferQueue) 库进行高性能分布式键值传输。
+  - `Mooncake`：作为可选的结构化 `DataProto` 传输后端，用于大规模 tensor、non-tensor 和多模态 rollout payload。
 
 ### 工作原理
 
@@ -41,10 +42,29 @@ transfer_backend:
         num_data_storage_units: 16
 ```
 
+Mooncake 可以作为可选 backend 启用：
+
+```yaml
+transfer_backend:
+  backend_name: Mooncake
+  backend_config:
+    client_scope: node
+    local_hostname: 192.168.0.1
+    metadata_server: P2PHANDSHAKE
+    global_segment_size: 8589934592
+    local_buffer_size: 8589934592
+    protocol: rdma
+    rdma_devices: erdma_0
+    master_server_addr: 192.168.0.1:50051
+```
+
 - `backend_name`：要使用的传输后端名称。
   - `null`（默认）：禁用远程传输，所有数据保留在本地。未配置 `transfer_backend` 时的默认行为。
   - `TransferQueue`：使用 TransferQueue 库进行高性能数据传输。
-- `backend_config`：后端特定的配置字典。对于 TransferQueue，对应 TransferQueue 的初始化配置。
+  - `Mooncake`：使用 Mooncake 结构化 `DataProto` 传输，支持 tensor batch、`non_tensor_batch` 和 `meta_info`，适用于大规模多节点 rollout payload。
+- `backend_config`：后端特定的配置字典。
+  - 对于 TransferQueue，对应 TransferQueue 的初始化配置。
+  - 对于 Mooncake，可以像上例一样显式配置，也可以从 Mooncake 环境配置中加载。
   - `backend.SimpleStorage.num_data_storage_units`：数据分片的存储单元数量。可以根据 CPU 核数和集群节点数进行配置。`msgpack` 序列化单个对象有最大 4GB 的限制，因此传输大数据时需要更多的 storage unit 来将 `non_tensor_batch` 分片成更小的块。
 
 ### Agentic Pipeline 优化
@@ -65,6 +85,7 @@ output_queue.put(batch)
 | 后端 | 状态 | 说明 |
 |------|------|------|
 | TransferQueue | 端到端已测试 | 生产可用。已在 RLVR、VLM 和 Agentic Pipeline 中测试通过。 |
+| Mooncake | 实验性 | 可选的结构化 `DataProto` backend，支持 tensor、non-tensor、metadata 和多模态 rollout payload。 |
 | RayMemoryStore | 仅作示例 | 未经测试。仅作为 `ColumnRemoteBatch` 模式的参考实现提供。 |
 
 ### TODO
