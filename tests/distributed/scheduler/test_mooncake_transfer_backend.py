@@ -1,12 +1,14 @@
-import sys
-import types
-from types import SimpleNamespace
+import os
+import shutil
+import socket
+import subprocess
+import time
 
 import numpy as np
+import pytest
 import torch
 
 from roll.configs.base_config import TransferBackendArguments
-from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.scheduler.transfer_backend import (
     MOONCAKE_CLIENT_SCOPE_NODE,
     MOONCAKE_CLIENT_SCOPE_PROCESS,
@@ -16,50 +18,58 @@ from roll.distributed.scheduler.transfer_backend import (
 )
 
 
-class FakeMooncakeStore:
-    def setup(self, *args, **kwargs):
-        return 0
+def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            if sock.connect_ex((host, port)) == 0:
+                return
+        time.sleep(0.1)
+    raise TimeoutError(f"Timed out waiting for {host}:{port}")
 
 
-class FakeMooncakeBackend:
-    refs = {}
-    removed = []
-
-    def __init__(self, store, key_prefix="dataproto", data_cls=None):
-        self.data_cls = data_cls
-
-    def put_dataproto(self, data, partition="default", shard_policy=None):
-        object_id = f"{partition}/ref"
-        ref = SimpleNamespace(object_id=object_id, row_count=len(data), manifest_key="manifest", manifest={})
-        self.refs[object_id] = data
-        return ref
-
-    def materialize_dataproto(
-        self,
-        ref,
-        batch_fields=None,
-        non_tensor_fields=None,
-        include_meta_info=True,
-    ):
-        data = self.refs[ref.object_id]
-        tensors = {}
-        if data._batch is not None:
-            selected = set(batch_fields or [])
-            tensors = {key: value for key, value in data._batch.to_dict().items() if key in selected}
-        non_tensors = {
-            key: value for key, value in data._non_tensor_batch.items() if key in set(non_tensor_fields or [])
-        }
-        return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors) if tensors else DataProto(
-            batch=None, non_tensor_batch=non_tensors
-        )
-
-    def remove_dataproto(self, ref):
-        self.removed.append(ref.object_id)
+def _mooncake_master_endpoint() -> tuple[str, int]:
+    master = os.environ.get("MOONCAKE_MASTER", "")
+    if not master:
+        pytest.skip("Set MOONCAKE_MASTER to run the Mooncake RDMA backend test")
+    host, port = master.rsplit(":", 1)
+    return host, int(port)
 
 
-class FakeShardPolicy:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+@pytest.fixture(scope="module")
+def mooncake_master():
+    host, port = _mooncake_master_endpoint()
+    if shutil.which("mooncake_master") is None:
+        pytest.skip("mooncake_master is not available in PATH")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        if sock.connect_ex((host, port)) == 0:
+            yield f"{host}:{port}"
+            return
+
+    process = subprocess.Popen(
+        [
+            "mooncake_master",
+            f"--rpc_address={host}",
+            f"--rpc_port={port}",
+            "--logtostderr=true",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        _wait_for_port(host, port)
+        yield f"{host}:{port}"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def test_mooncake_client_scope_defaults_to_node():
@@ -82,20 +92,45 @@ def test_mooncake_process_scope_keeps_config_small():
     assert "node_actor_session_id" not in config.backend_config
 
 
-def test_mooncake_client_round_trip(monkeypatch):
-    mooncake = types.ModuleType("mooncake")
-    store_mod = types.ModuleType("mooncake.store")
-    transfer_mod = types.ModuleType("mooncake.dataproto_transfer")
-    store_mod.MooncakeDistributedStore = FakeMooncakeStore
-    transfer_mod.MooncakeDataProtoTransferBackend = FakeMooncakeBackend
-    transfer_mod.DataProtoShardPolicy = FakeShardPolicy
-    monkeypatch.setitem(sys.modules, "mooncake", mooncake)
-    monkeypatch.setitem(sys.modules, "mooncake.store", store_mod)
-    monkeypatch.setitem(sys.modules, "mooncake.dataproto_transfer", transfer_mod)
+def test_mooncake_client_splits_roll_fields():
+    fields = {
+        "tokens": torch.tensor([[1], [2]]),
+        "prompt": np.array(["a", "b"], dtype=object),
+    }
 
-    FakeMooncakeBackend.refs = {}
-    FakeMooncakeBackend.removed = []
-    client = MooncakeClient({"setup_args": [], "shard_policy": {"enabled": True}})
+    tensors, non_tensors = MooncakeClient._split_fields(fields)
+
+    assert tensors == {"tokens": fields["tokens"]}
+    assert non_tensors == {"prompt": fields["prompt"]}
+
+
+def test_mooncake_client_rejects_unsupported_fields():
+    with pytest.raises(TypeError, match="Unsupported Mooncake fields"):
+        MooncakeClient._split_fields({"bad": ["a", "b"]})
+
+
+def test_mooncake_client_real_rdma_round_trip(mooncake_master):
+    protocol = os.environ.get("MOONCAKE_PROTOCOL", "")
+    if protocol != "rdma":
+        pytest.skip("Set MOONCAKE_PROTOCOL=rdma to run the Mooncake RDMA backend test")
+
+    local_hostname = os.environ.get("MOONCAKE_LOCAL_HOSTNAME", "")
+    rdma_devices = os.environ.get("MOONCAKE_DEVICE_NAME", "")
+    if not local_hostname or not rdma_devices:
+        pytest.skip("Set MOONCAKE_LOCAL_HOSTNAME and MOONCAKE_DEVICE_NAME for RDMA testing")
+
+    client = MooncakeClient(
+        {
+            "local_hostname": local_hostname,
+            "metadata_server": os.environ.get("MOONCAKE_METADATA_SERVER", "P2PHANDSHAKE"),
+            "global_segment_size": int(os.environ.get("MOONCAKE_GLOBAL_SEGMENT_SIZE", 1024 * 1024 * 1024)),
+            "local_buffer_size": int(os.environ.get("MOONCAKE_LOCAL_BUFFER_SIZE", 1024 * 1024 * 1024)),
+            "protocol": protocol,
+            "rdma_devices": rdma_devices,
+            "master_server_addr": mooncake_master,
+            "transfer_policy": {"copy_mode": "auto"},
+        }
+    )
     fields = {
         "tokens": torch.tensor([[1, 2], [3, 4]]),
         "prompt": np.array(["a", "b"], dtype=object),
@@ -108,4 +143,3 @@ def test_mooncake_client_round_trip(monkeypatch):
     assert list(materialized["prompt"]) == ["a", "b"]
 
     client.delete("rollout", list(remote.fields.keys()), list(remote.fields.values()))
-    assert FakeMooncakeBackend.removed == ["rollout/ref"]
