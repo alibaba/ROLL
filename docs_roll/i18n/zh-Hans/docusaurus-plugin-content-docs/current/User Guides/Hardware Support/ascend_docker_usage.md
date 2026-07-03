@@ -15,7 +15,7 @@
 | Docker | >= 20.10 | >= 20.10 |
 | 昇腾 NPU 驱动 | 已安装在宿主机上 | 已安装在宿主机上 |
 
-本 Docker 指南覆盖 A2/A3 Dockerfile。Atlas 950 请使用手动安装配置：torch 2.10、vLLM v0.20.2、vLLM-Ascend `main`，并在构建 vLLM-Ascend 时设置 `COMPILE_CUSTOM_KERNELS=1`。
+本 Docker 指南覆盖 A2/A3 Dockerfile。Ascend 950 请使用手动安装配置：torch 2.10、vLLM v0.20.2、vLLM-Ascend `main`，并在构建 vLLM-Ascend 时设置 `COMPILE_CUSTOM_KERNELS=1`。
 
 ## 主要组件
 
@@ -29,9 +29,9 @@
 | Transformers | 4.57.6 |
 | triton-ascend | 3.2.1 |
 
-Atlas 950 使用更新的手动安装版本组合：
+Ascend 950 使用更新的手动安装版本组合：
 
-| 组件 | Atlas 950 版本 / 设置 |
+| 组件 | Ascend 950 版本 / 设置 |
 | ---- | -------------------- |
 | PyTorch | 2.10 |
 | vLLM | v0.20.2 |
@@ -113,6 +113,7 @@ docker build -f docker/Dockerfile.A3 --build-arg SOC_VERSION=ascend910_9391 -t r
 ```bash
 docker run -dit \
     --name roll_a2 \
+    --ulimit nofile=65536:65536 \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -141,6 +142,7 @@ docker run -dit \
 ```bash
 docker run -dit \
     --name roll_a3 \
+    --ulimit nofile=65536:65536 \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -149,6 +151,14 @@ docker run -dit \
     --device /dev/davinci5 \
     --device /dev/davinci6 \
     --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -171,6 +181,7 @@ docker run -dit \
 ```bash
 docker run -dit \
     --name roll_ascend \
+    --ulimit nofile=65536:65536 \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \

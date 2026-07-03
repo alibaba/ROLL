@@ -12,11 +12,11 @@ ROLL's Ascend support is currently validated on training-series Ascend hardware:
 | ------- | -------------- | ----- |
 | Atlas 900 A2 PODc (Ascend 910B1) / Atlas A2 training series | √ | Use `docker/Dockerfile.A2` or the `roll:ascend-a2` image. |
 | Atlas 900 A3 PODc (Ascend 910_9391) / Atlas A3 training series | √ | Use `docker/Dockerfile.A3` or the `roll:ascend-a3` image. |
-| Atlas A5 training series | √ | Use the A5 installation profile: torch 2.10, vLLM v0.20.2, vLLM-Ascend `main`, and `COMPILE_CUSTOM_KERNELS=1` when building vLLM-Ascend. |
+| Ascend 950 training series | √ | Use the Ascend 950 installation profile: torch 2.10, vLLM v0.20.2, vLLM-Ascend `main`, and `COMPILE_CUSTOM_KERNELS=1` when building vLLM-Ascend. |
 | Atlas A2/A3 inference series and Atlas 200I/500 A2 inference products | x | Current ROLL NPU images and examples target training-series devices. |
 | Other Ascend training or inference products | Not validated | Validate the driver, firmware, CANN, `torch_npu`, and vLLM-Ascend versions before use. |
 
-> In this table, `√` means supported by the current ROLL Ascend Dockerfiles/examples or the manual A5 installation profile, and `x` means not supported in the current ROLL NPU setup.
+> In this table, `√` means supported by the current ROLL Ascend Dockerfiles/examples or the manual Ascend 950 installation profile, and `x` means not supported in the current ROLL NPU setup.
 
 Supported operating systems:
 
@@ -24,7 +24,7 @@ Supported operating systems:
 | ------------------- | ------------ | ----- |
 | Physical host | Ubuntu 22.04 | Recommended and validated by the current ROLL Ascend guides. |
 | ROLL Ascend container | Ubuntu 22.04 | The A2/A3 Dockerfiles are based on `quay.io/ascend/cann:9.0.0-*-ubuntu22.04-py3.11`. |
-| Atlas A5 manual installation | Ubuntu 22.04 | Use the A5-specific torch/vLLM stack below. Keep the driver, firmware, CANN, and `torch_npu` versions aligned with the target A5 environment. |
+| Ascend 950 manual installation | Ubuntu 22.04 | Use the Ascend 950-specific torch/vLLM stack below. Keep the driver, firmware, CANN, and `torch_npu` versions aligned with the target Ascend 950 environment. |
 | VM/container deployments on other host OS versions | Follow Ascend/CANN compatibility guidance | Check the Ascend compatibility query assistant and the CANN Software Installation OS compatibility notes for the target hardware. |
 
 ## Installation
@@ -36,7 +36,7 @@ Supported operating systems:
 | Python   | 3.11    |
 | CANN     | 9.0.0   |
 
-For Atlas A5, keep Python 3.11 and use the A5-specific torch/vLLM stack described in [A5 Installation Profile](#a5-installation-profile).
+For Ascend 950 , keep Python 3.11 and use the Ascend 950-specific torch/vLLM stack described in [Ascend 950 Installation Profile](#Ascend 950-installation-profile).
 
 ### Create Conda Environment
 
@@ -89,9 +89,9 @@ pip install vllm==0.18.0
 pip install vllm-ascend==0.18
 ```
 
-### A5 Installation Profile
+### Ascend 950 Installation Profile
 
-For Atlas A5, use torch 2.10, vLLM v0.20.2, and vLLM-Ascend from the `main` branch. Set `COMPILE_CUSTOM_KERNELS=1` before installing vLLM-Ascend so its custom kernels are built:
+For Ascend 950, use torch 2.10, vLLM v0.20.2, and vLLM-Ascend from the `main` branch. Set `COMPILE_CUSTOM_KERNELS=1` before installing vLLM-Ascend so its custom kernels are built:
 
 ```
 # Install torch 2.10
@@ -172,7 +172,7 @@ python examples/start_agentic_pipeline.py \
 | --------------- | ------------------------------------------------------------ | ---------------- | ----------------- | ----------------- |
 | Agentic         | examples/qwen2.5-0.5B-agentic/run_agentic_pipeline_sokoban.sh | FSDP2            | vLLM              | Atlas 900 A2/A3 PODc |
 | Agentic-Rollout | examples/qwen2.5-0.5B-agentic/run_agentic_rollout_sokoban.sh | FSDP2            | vLLM              | Atlas 900 A2/A3 PODc |
-| RLVR            | examples/ascend_examples/run_rlvr_pipeline.sh                | FSDP2            | vLLM              | Atlas 900 A2/A3/A5 training series |
+| RLVR            | examples/ascend_examples/run_rlvr_pipeline.sh                | FSDP2            | vLLM              | Atlas 900 A2/A3/Ascend 950 training series |
 
 ## Disclaimer
 

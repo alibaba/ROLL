@@ -2,7 +2,7 @@
 
 Last updated: 06/23/2026.
 
-This guide explains how to get, build, and run ROLL images on **Huawei Ascend NPU**. Prefer the pre-built image when possible; use `Dockerfile.A2` or `Dockerfile.A3` when you need to customize dependencies. Atlas 950 currently follows the manual installation profile in [ROLL x Ascend](ascend_usage.md).
+This guide explains how to get, build, and run ROLL images on **Huawei Ascend NPU**. Prefer the pre-built image when possible; use `Dockerfile.A2` or `Dockerfile.A3` when you need to customize dependencies. Ascend 950 currently follows the manual installation profile in [ROLL x Ascend](ascend_usage.md).
 
 ## Hardware & Software Requirements
 
@@ -15,7 +15,7 @@ This guide explains how to get, build, and run ROLL images on **Huawei Ascend NP
 | Docker | >= 20.10 | >= 20.10 |
 | Ascend NPU Driver | Installed on host | Installed on host |
 
-This Docker guide covers the A2/A3 Dockerfiles. For Atlas 950, use the manual installation profile: torch 2.10, vLLM v0.20.2, vLLM-Ascend `main`, and `COMPILE_CUSTOM_KERNELS=1` when building vLLM-Ascend.
+This Docker guide covers the A2/A3 Dockerfiles. For Ascend 950, use the manual installation profile: torch 2.10, vLLM v0.20.2, vLLM-Ascend `main`, and `COMPILE_CUSTOM_KERNELS=1` when building vLLM-Ascend.
 
 ## Key Components
 
@@ -29,9 +29,9 @@ Both Dockerfiles install the same versions of core dependencies:
 | Transformers | 4.57.6 |
 | triton-ascend | 3.2.1 |
 
-Atlas 950 uses a newer manual installation stack:
+Ascend 950 uses a newer manual installation stack:
 
-| Component | Atlas 950 Version / Setting |
+| Component | Ascend 950 Version / Setting |
 | --------- | -------------------------- |
 | PyTorch | 2.10 |
 | vLLM | v0.20.2 |
@@ -113,6 +113,7 @@ docker build -f docker/Dockerfile.A3 --build-arg SOC_VERSION=ascend910_9391 -t r
 ```bash
 docker run -dit \
     --name roll_a2 \
+    --ulimit nofile=65536:65536 \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -141,6 +142,7 @@ docker run -dit \
 ```bash
 docker run -dit \
     --name roll_a3 \
+    --ulimit nofile=65536:65536 \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -149,6 +151,14 @@ docker run -dit \
     --device /dev/davinci5 \
     --device /dev/davinci6 \
     --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -171,6 +181,7 @@ For multi-NPU training, mount all available NPU devices. Adjust the number of `-
 ```bash
 docker run -dit \
     --name roll_ascend \
+    --ulimit nofile=65536:65536 \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \

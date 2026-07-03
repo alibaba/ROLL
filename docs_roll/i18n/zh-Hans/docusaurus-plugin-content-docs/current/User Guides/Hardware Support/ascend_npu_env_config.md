@@ -175,9 +175,9 @@ export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 | 变量 | 推荐值 | 说明 |
 | ---- | ------ | ---- |
-| `COMPILE_CUSTOM_KERNELS` | Atlas A5 设置为 `1` | 编译 vLLM-Ascend 自定义 kernel。使用 vLLM-Ascend `main` 的 Atlas A5 安装配置需要设置该变量。 |
+| `COMPILE_CUSTOM_KERNELS` | Ascend 950 设置为 `1` | 编译 vLLM-Ascend 自定义 kernel。使用 vLLM-Ascend `main` 的 Ascend 950 安装配置需要设置该变量。 |
 
-示例（Atlas A5）：
+示例（Ascend 950）：
 
 ```bash
 git clone -b main --depth 1 https://github.com/vllm-project/vllm-ascend.git
