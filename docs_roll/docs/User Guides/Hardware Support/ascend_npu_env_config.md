@@ -175,9 +175,9 @@ The following variable is used when building vLLM-Ascend from source. Set it bef
 
 | Variable | Recommended Value | Description |
 | -------- | ----------------- | ----------- |
-| `COMPILE_CUSTOM_KERNELS` | `1` for Atlas A5 | Compile vLLM-Ascend custom kernels. Required by the Atlas A5 installation profile that uses vLLM-Ascend `main`. |
+| `COMPILE_CUSTOM_KERNELS` | `1` for Ascend 950 | Compile vLLM-Ascend custom kernels. Required by the Ascend 950 installation profile that uses vLLM-Ascend `main`. |
 
-Example (Atlas A5):
+Example (Ascend 950):
 
 ```bash
 git clone -b main --depth 1 https://github.com/vllm-project/vllm-ascend.git
