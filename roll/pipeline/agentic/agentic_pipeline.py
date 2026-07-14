@@ -219,6 +219,71 @@ class AgenticPipeline(BasePipeline):
         else:
             self.partial_gpu_mode = False
 
+    def _trackio_traces_enabled(self) -> bool:
+        return (
+            self.pipeline_config.track_with == "trackio"
+            and getattr(self.pipeline_config, "trackio_max_traces_per_step", 0) > 0
+        )
+
+    @staticmethod
+    def _trace_metadata_value(value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return value.detach().cpu().item()
+            return value.detach().cpu().tolist()
+        if isinstance(value, np.ndarray):
+            if value.size == 1:
+                return value.item()
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    def _log_trackio_rollout_traces(self, batch: DataProto, global_step: int, split: str = "train"):
+        if not self._trackio_traces_enabled() or "traj_id" not in batch.non_tensor_batch:
+            return
+
+        traces = []
+        max_traces = getattr(self.pipeline_config, "trackio_max_traces_per_step", 0)
+        batch_grouped = batch.group_by(keys="traj_id")
+        for trajectory_index, (group_name, group_batch) in enumerate(batch_grouped.items()):
+            if len(traces) >= max_traces:
+                break
+
+            if "step" in group_batch.non_tensor_batch.keys():
+                indices = torch.argsort(torch.from_numpy(group_batch.non_tensor_batch["step"].astype(np.int64)))
+                group_batch.reorder(indices)
+
+            prompt_mask = group_batch.batch["prompt_mask"]
+            non_prompt_mask = torch.logical_not(group_batch.batch["prompt_mask"]) * group_batch.batch["attention_mask"]
+            input_ids = group_batch.batch["input_ids"]
+            prompt_ids_list = [input_ids[i][mask.bool()] for i, mask in enumerate(prompt_mask)]
+            response_ids_list = [input_ids[i][mask.bool()] for i, mask in enumerate(non_prompt_mask)]
+            prompts = self.tokenizer.batch_decode(prompt_ids_list, skip_special_tokens=False)
+            responses = self.tokenizer.batch_decode(response_ids_list, skip_special_tokens=False)
+
+            messages = []
+            for prompt, response in zip(prompts, responses):
+                messages.append({"role": "user", "content": prompt})
+                messages.append({"role": "assistant", "content": response})
+
+            metadata = {
+                "split": split,
+                "step": global_step,
+                "trajectory_index": trajectory_index,
+                "traj_id": self._trace_metadata_value(group_name),
+            }
+            for key in ("tags", "traj_group_id", "episode_scores", "step_scores", "sample_uuid"):
+                if key in group_batch.non_tensor_batch:
+                    metadata[key] = self._trace_metadata_value(group_batch.non_tensor_batch[key][0])
+            for key in ("response_level_rewards", "advantages"):
+                if key in group_batch.batch:
+                    metadata[key] = self._trace_metadata_value(group_batch.batch[key][0])
+
+            traces.append({"messages": messages, "metadata": metadata})
+
+        self.tracker.log_traces(f"{split}/agentic_rollouts", traces, step=global_step)
+
     @torch.no_grad()
     def run(self):
         # Calculate tokens-per-second system throughput
@@ -575,6 +640,7 @@ class AgenticPipeline(BasePipeline):
                             )
 
                         log_res = []
+                        self._log_trackio_rollout_traces(batch, global_step)
                         batch_grouped = batch.group_by(keys="traj_id")
                         for group_name, group_batch in batch_grouped.items():
                             if "step" in group_batch.non_tensor_batch.keys():

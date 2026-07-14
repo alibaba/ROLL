@@ -1,11 +1,12 @@
-from concurrent import futures
 import json
+from concurrent import futures
 from functools import wraps
-from typing import Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import torch
 
 from roll.utils.logging import get_logger
+
 
 logger = get_logger()
 
@@ -57,6 +58,9 @@ def strip_at_tag_in_log(func):
 class BaseTracker:
 
     def log(self, values: dict, step: Optional[int], **kwargs):
+        pass
+
+    def log_traces(self, name: str, records: List[dict], step: Optional[int] = None):
         pass
 
     def finish(self):
@@ -184,12 +188,13 @@ class TrackioTracker(BaseTracker):
         group = kwargs.pop("group", None)
         space_id = kwargs.pop("space_id", None)
         dataset_id = kwargs.pop("dataset_id", None)
-        tags = kwargs.pop("tags", None)
+        kwargs.pop("tags", None)
 
         auto_log_gpu = kwargs.pop("auto_log_gpu", True)
         gpu_log_interval = kwargs.pop("gpu_log_interval", 2)
 
         import trackio
+        self.trackio = trackio
 
         if space_id:
             logger.info(f"[Trackio] Using HF Space: {space_id}")
@@ -203,7 +208,6 @@ class TrackioTracker(BaseTracker):
             config=config,
             space_id=space_id,
             dataset_id=dataset_id,
-            tags=tags,
             auto_log_gpu=auto_log_gpu,
             gpu_log_interval=gpu_log_interval,
         )
@@ -217,6 +221,18 @@ class TrackioTracker(BaseTracker):
 
     def log_system(self, values: dict):
         self.run.log_system(values)
+
+    def log_traces(self, name: str, records: List[dict], step: Optional[int] = None):
+        if not records:
+            return
+        traces = [
+            self.trackio.Trace(
+                messages=record["messages"],
+                metadata=record.get("metadata"),
+            )
+            for record in records
+        ]
+        self.run.log({name: traces}, step=step)
 
     def finish(self):
         self.run.finish()

@@ -374,6 +374,60 @@ class RLVRPipeline(BasePipeline):
         for domain in self.rewards.keys():
             self.running[domain] = RunningMoments()
 
+    def _trackio_traces_enabled(self) -> bool:
+        return (
+            self.pipeline_config.track_with == "trackio"
+            and getattr(self.pipeline_config, "trackio_max_traces_per_step", 0) > 0
+        )
+
+    @staticmethod
+    def _trace_metadata_value(value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return value.detach().cpu().item()
+            return value.detach().cpu().tolist()
+        if isinstance(value, np.ndarray):
+            if value.size == 1:
+                return value.item()
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    def _log_trackio_rollout_traces(self, batch: DataProto, global_step: int):
+        if not self._trackio_traces_enabled() or "prompts" not in batch.batch or "responses" not in batch.batch:
+            return
+
+        max_traces = min(getattr(self.pipeline_config, "trackio_max_traces_per_step", 0), len(batch))
+        prompts = self.tokenizer.batch_decode(batch.batch["prompts"][:max_traces], skip_special_tokens=False)
+        responses = self.tokenizer.batch_decode(batch.batch["responses"][:max_traces], skip_special_tokens=False)
+
+        traces = []
+        for sample_index, (prompt, response) in enumerate(zip(prompts, responses)):
+            metadata = {
+                "split": "train",
+                "step": global_step,
+                "sample_index": sample_index,
+            }
+            for key in ("prompt_id", "scores", "response_level_rewards"):
+                if key in batch.batch:
+                    metadata[key] = self._trace_metadata_value(batch.batch[key][sample_index])
+            for key in ("domain", "tag", "sample_uuid"):
+                if key in batch.non_tensor_batch:
+                    metadata[key] = self._trace_metadata_value(batch.non_tensor_batch[key][sample_index])
+
+            traces.append(
+                {
+                    "messages": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": response},
+                    ],
+                    "metadata": metadata,
+                }
+            )
+
+        self.tracker.log_traces("rollout/rlvr", traces, step=global_step)
+
     @torch.no_grad()
     def save_metrics(self, batch):
         def remove_leading_zeros(A, r_mask):
@@ -729,6 +783,7 @@ class RLVRPipeline(BasePipeline):
                         self.save_metrics(domain_batch)
 
                 batch = DataProto.concat(batch_list)
+                self._log_trackio_rollout_traces(batch, global_step)
 
                 if batch.batch["final_response_mask"].sum() == 0:
                     logger.info("Warning: final_response_mask.sum() == 0! Current step will be skipped.")
