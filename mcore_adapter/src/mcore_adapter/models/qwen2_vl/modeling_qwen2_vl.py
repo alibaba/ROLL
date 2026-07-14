@@ -74,7 +74,7 @@ class Qwen2VLModel(McaGPTModel, ModuleUtilsMixin):
             image_input_lengths, pixel_values, grid_thw, None
         )
 
-        vision_model_dtype = self.vision_model.blocks[0].mlp.down_proj.weight.dtype
+        vision_model_dtype = self.vision_model.blocks[0].mlp.fc1.weight.dtype
         pixel_values = pixel_values.type(vision_model_dtype)
         image_embeds = self.vision_model(pixel_values, grid_thw=grid_thw)
         if not isinstance(image_embeds, torch.Tensor):

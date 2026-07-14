@@ -150,7 +150,7 @@ register_template(
         "image_token_id": "image_token_id",
         "video_token_id": "video_token_id",
         "vision_config": "vision_config",
-        "rope_parameters": "rope_scaling",
+        "rope_parameters": "rope_parameters",
         # Linear attention
         "linear_conv_kernel_dim": "linear_conv_kernel_dim",
         "linear_key_head_dim": "linear_key_head_dim",

@@ -4,6 +4,7 @@ from ..converter.template import (
     QKVConverOp,
     RenameConverOp,
     StackConverOp,
+    VisionTemplate,
     register_template,
 )
 from .config_qwen2_vl import Qwen2VLConfig
@@ -23,6 +24,7 @@ register_dist_config(
 register_template(
     "qwen2_vl",
     hf_layer_prefix="model.layers.",
+    template_class=VisionTemplate,
     config_hf_to_mca={
         "max_position_embeddings": "max_sequence_length",
         "hidden_size": "hidden_size",
@@ -43,6 +45,7 @@ register_template(
         "video_token_id": "video_token_id",
         "vision_config": "vision_config",
         "rope_scaling": "rope_scaling",
+        "rope_parameters": "rope_parameters",
     },
     constant_mca_config={
         "swiglu": True,

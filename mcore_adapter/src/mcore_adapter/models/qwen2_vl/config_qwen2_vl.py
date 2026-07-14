@@ -39,5 +39,7 @@ class Qwen2VLConfig(McaModelConfig):
             * vision_config_obj.temporal_patch_size
         )  # 1176
         self.mrope_section = self.rope_scaling.get("mrope_section")
+        if self.mrope_section is None:
+            self.mrope_section = self.rope_parameters.get("mrope_section")
 
         assert self.hidden_dropout == 0.0, "hidden dropout is Not supported for qwen2_vl yet."

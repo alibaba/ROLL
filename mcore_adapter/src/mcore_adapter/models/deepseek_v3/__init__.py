@@ -22,7 +22,7 @@ from .modeling_deepseek_v3 import DeepSeekV3Model
 class DeepSeekV3Template(Template):
     def convert_hf_to_mca_config_kws(self, hf_config, **kw_args):
         # convert mla related parameters
-        rope_scaling = getattr(hf_config, "rope_scaling", None)
+        rope_scaling = getattr(hf_config, "rope_scaling", None) or getattr(hf_config, "rope_parameters", None)
         if rope_scaling:
             if rope_scaling.get("original_max_position_embeddings", None):
                 kw_args["max_position_embeddings"] = rope_scaling["original_max_position_embeddings"]
@@ -185,6 +185,7 @@ register_template(
         "vocab_size": "padded_vocab_size",
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
+        "rope_parameters": "rope_parameters",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
         "v_head_dim": "v_head_dim",
         "qk_nope_head_dim": "qk_head_dim",

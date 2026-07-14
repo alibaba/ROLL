@@ -385,6 +385,14 @@ class MegatronArguments(DistributingParallelArguments):
             "`torch_dist` is a megatron built-in distributed checkpointing format"
         },
     )
+    ckpt_d2h_non_blocking: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether set non_blocking=True for GPU-to-CPU (D2H) tensor transfers during async checkpoint saving. "
+            "Default is False (synchronous D2H) to avoid segfaults on certain GPU+CPU hardware combinations. "
+            "Set to True only if your hardware supports reliable async pinned memory transfers."
+        },
+    )
 
     sequence_packing: bool = field(
         default=False,
