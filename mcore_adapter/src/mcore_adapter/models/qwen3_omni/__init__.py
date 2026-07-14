@@ -73,6 +73,7 @@ register_template(
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
         "rope_scaling": "rope_scaling",
+        "rope_parameters": "rope_parameters",
         "intermediate_size": "ffn_hidden_size",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
         # MoE related

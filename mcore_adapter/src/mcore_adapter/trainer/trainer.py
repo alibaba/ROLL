@@ -51,7 +51,13 @@ from transformers.utils import is_peft_available
 from ..checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
 from ..constants import ADAPTER_CONFIG_NAME, DIST_OPTIMIZER_DIR, IGNORE_INDEX
 from ..initialize import initialize_megatron
-from ..patcher import patch_torch_find_nd_overlapping_shards, patch_torch_validate_global_plan
+from ..patcher import (
+    patch_apply_aux_loss,
+    patch_hybrid_optimizer,
+    patch_megatron_preload_tensors_non_blocking,
+    patch_torch_find_nd_overlapping_shards,
+    patch_torch_validate_global_plan,
+)
 from ..platforms import current_platform
 from ..training_args import TrainingArguments
 from ..utils import distributed_reduce, get_logger, is_transformers_version_greater_than
@@ -93,6 +99,9 @@ class McaTrainer(Trainer):
             self.processing_class: PreTrainedTokenizer = kwargs.get("tokenizer")
         patch_torch_find_nd_overlapping_shards()
         patch_torch_validate_global_plan()
+        patch_megatron_preload_tensors_non_blocking(non_blocking=args.ckpt_d2h_non_blocking)
+        patch_hybrid_optimizer()
+        patch_apply_aux_loss()
         initialize_megatron(args=args)
         self.args = args
         super().__init__(

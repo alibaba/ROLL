@@ -15,4 +15,4 @@ class LlamaConfig(McaModelConfig):
 
     def __post_init__(self):
         super().__post_init__()
-        self.rotary_scaling = self.rope_scaling is not None
+        self.rotary_scaling = self.rope_scaling is not None or self.rope_parameters is not None

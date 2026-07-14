@@ -27,7 +27,7 @@ from ..converter.template import (
     GDNConv1dConverOp,
     RenameConverOp,
     StackConverOp,
-    Template,
+    VisionTemplate,
     ZeroCenteredRMSNormConverOp,
     register_template,
 )
@@ -87,24 +87,11 @@ register_dist_config(
 
 
 @dataclass
-class Qwen3_5Template(Template):
+class Qwen3_5Template(VisionTemplate):
     def __post_init__(self):
         super().__post_init__()
         self.hf_ln_pattern = re.compile(r"^model\.language_model\.layers\.(\d+)\.input_layernorm\.weight$")
         self.mca_ln_pattern = re.compile(r"^decoder\.layers\.(\d+)\.self_attention\.in_proj\.layer_norm_weight$")
-
-    def adjust_config_hf_to_mca(self):
-        non_text_config_keys = set(
-            list(filter(lambda k: k.endswith("_token_id"), self.config_hf_to_mca.keys()))
-            + ["vision_config", "tie_word_embeddings"]
-        )
-        new_config_hf_to_mca = {}
-        for hf_key, mca_key in self.config_hf_to_mca.items():
-            new_hf_key = hf_key
-            if hf_key not in non_text_config_keys:
-                new_hf_key = "text_config." + new_hf_key
-            new_config_hf_to_mca[new_hf_key] = mca_key
-        return new_config_hf_to_mca
 
     def add_hf_weight(self, name, weight):
         match = re.match(self.hf_ln_pattern, name)
@@ -249,7 +236,7 @@ register_template(
         "image_token_id": "image_token_id",
         "video_token_id": "video_token_id",
         "vision_config": "vision_config",
-        "rope_parameters": "rope_scaling",
+        "rope_parameters": "rope_parameters",
         # Linear attention
         "linear_conv_kernel_dim": "linear_conv_kernel_dim",
         "linear_key_head_dim": "linear_key_head_dim",

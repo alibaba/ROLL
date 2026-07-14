@@ -607,6 +607,22 @@ class Template:
         return [mca_prefix + name for name in op.mca_names]
 
 
+@dataclass
+class VisionTemplate(Template):
+    def adjust_config_hf_to_mca(self):
+        non_text_config_keys = set(
+            list(filter(lambda k: k.endswith("_token_id"), self.config_hf_to_mca.keys()))
+            + ["vision_config", "tie_word_embeddings"]
+        )
+        new_config_hf_to_mca = {}
+        for hf_key, mca_key in self.config_hf_to_mca.items():
+            new_hf_key = hf_key
+            if hf_key not in non_text_config_keys:
+                new_hf_key = "text_config." + new_hf_key
+            new_config_hf_to_mca[new_hf_key] = mca_key
+        return new_config_hf_to_mca
+
+
 templates: Dict[str, Template] = {}
 
 

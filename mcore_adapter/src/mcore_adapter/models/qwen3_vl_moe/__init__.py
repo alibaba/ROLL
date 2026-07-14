@@ -23,9 +23,10 @@ from ..converter.template import (
     QKVConverOp,
     RenameConverOp,
     StackedTensors,
+    VisionTemplate,
     register_template,
 )
-from ..qwen3_vl import Qwen3VLConfig, Qwen3VLModel, Qwen3VLTemplate
+from ..qwen3_vl import Qwen3VLConfig, Qwen3VLModel
 
 
 if TYPE_CHECKING:
@@ -82,7 +83,7 @@ register_dist_config(
 
 
 @dataclass
-class Qwen3VLMoeTemplate(Qwen3VLTemplate):
+class Qwen3VLMoeTemplate(VisionTemplate):
     def add_mca_weight(self, name, weight, **kwargs):
         weight_prefix = get_mca_weight_prefix(name)
         original_name = remove_mca_weight_prefix(name)
@@ -136,6 +137,7 @@ register_template(
         "vocab_size": "padded_vocab_size",
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
+        "rope_parameters": "rope_parameters",
         "intermediate_size": "ffn_hidden_size",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
         # MoE related

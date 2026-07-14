@@ -31,6 +31,7 @@ register_template(
         "intermediate_size": "ffn_hidden_size",
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
+        "rope_parameters": "rope_parameters",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
     },
     constant_mca_config={

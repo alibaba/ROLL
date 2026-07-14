@@ -43,6 +43,10 @@ class PretrainedConfig:
         default=None,
         metadata={"help": "Corresponding HuggingFace transformers config json."},
     )
+    rope_parameters: Optional[dict] = field(
+        default=None,
+        metadata={"help": "Rope parameters."},
+    )
 
     def post_init(self):
         self.__post_init__()
@@ -348,6 +352,9 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 self.yarn_mscale_all_dim = 0
             if not hasattr(self, "yarn_correction_range_round_to_int"):
                 self.yarn_correction_range_round_to_int = True
+
+        if self.rope_parameters is not None:
+            self.rotary_base = self.rope_parameters.get("rope_theta", self.rotary_base)
 
         if (
             self.recompute_granularity == "full"
