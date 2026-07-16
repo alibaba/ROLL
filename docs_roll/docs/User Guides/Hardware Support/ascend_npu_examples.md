@@ -1,6 +1,6 @@
 # Ascend NPU End-to-End Configuration Examples
 
-Last updated: 04/27/2026.
+Last updated: 07/16/2026.
 
 This document provides end-to-end configuration examples for running ROLL on Huawei Ascend NPU, including environment setup, resource allocation, and launch commands for both single-node and multi-node scenarios.
 
@@ -12,18 +12,20 @@ Before running these examples, ensure you have:
 2. Verified the environment inside the container (see [Verify the Environment](ascend_docker_usage.md#verify-the-environment)).
 3. Downloaded the model weights to a directory accessible from inside the container.
 
-The repository currently includes a runnable Ascend RLVR example in `examples/ascend_examples`, including `qwen3_30b_rlvr_fsdp2.yaml` and `run_rlvr_pipeline.sh`.
+The repository includes runnable examples in `examples/ascend_examples`: an FSDP2 RLVR example (`qwen3_30b_rlvr_fsdp2.yaml` and `run_rlvr_pipeline.sh`) and a Megatron DPO example (`qwen3_4B_dpo_megatron.yaml` and `run_dpo_pipeline.sh`).
 
 ## Key Differences from GPU
 
-When adapting GPU configurations for NPU, the following changes are **required**:
+When adapting GPU configurations for NPU, select either the FSDP2 path used by the examples below or a compatible Megatron configuration with its optional NPU dependencies:
 
 | Item | GPU | NPU |
 | ---- | --- | --- |
-| Training backend | Megatron or FSDP2 | FSDP2 only (Megatron not supported on NPU) |
+| Training backend | Megatron or FSDP2 | FSDP2 in the examples below; Megatron for compatible A2/A3 configurations after optional dependencies are installed |
 | Attention implementation | `flash_attn` or `fa2` | `fa2` via `transformers` (not `flash_attn` package) |
 | Communication backend | NCCL | HCCL |
 | Device visibility | `CUDA_VISIBLE_DEVICES` | `ASCEND_RT_VISIBLE_DEVICES` |
+
+For the Megatron path, first complete [Install Megatron on Ascend](ascend_usage.md#install-megatron-on-ascend). The following Agentic examples intentionally remain on FSDP2.
 
 ## Example 1: Single-Node Agentic Pipeline (Qwen2.5-0.5B)
 
@@ -82,7 +84,7 @@ export OMP_NUM_THREADS=1
 # vLLM-Ascend inference
 export VLLM_USE_V1=1
 export VLLM_ASCEND_ENABLE_NZ=0
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM=0
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # Operator compilation cache
@@ -175,7 +177,7 @@ actor_train:
       param_dtype: bf16
       reduce_dtype: bf16
       reshard_after_forward: true
-      offload_policy: false    # NPU: Must use FSDP2, NOT megatron_train
+      offload_policy: false    # NPU FSDP2 example
   device_mapping: list(range(0,4))    # NPU: Training on NPUs 0-3
   infer_batch_size: 2
 
@@ -550,7 +552,7 @@ export OMP_NUM_THREADS=1
 # === vLLM-Ascend inference ===
 export VLLM_USE_V1=1
 export VLLM_ASCEND_ENABLE_NZ=0
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM=0
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # === Operator compilation cache ===

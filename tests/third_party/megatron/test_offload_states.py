@@ -3,7 +3,6 @@ from typing import Optional, List
 
 import pytest
 import torch
-import torch.distributed as dist
 
 from roll.platforms import current_platform
 from megatron.core import DistributedDataParallel
@@ -33,11 +32,18 @@ from roll.third_party.megatron.offload_states_patch import (
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 
+def _default_model_name():
+    local_model = "/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"
+    return os.environ.get(
+        "ROLL_MEGATRON_TEST_MODEL",
+        local_model if os.path.isdir(local_model) else "Qwen/Qwen2.5-0.5B-Instruct",
+    )
+
 
 class McaModelCreator:
 
-    def __init__(self, optimizer_type, model_name="/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"):
-        self.model_name = model_name
+    def __init__(self, optimizer_type, model_name=None):
+        self.model_name = model_name or _default_model_name()
         if optimizer_type is None:
             self.megatron_train_args = TrainingArguments(
                 output_dir="./output",
@@ -128,7 +134,9 @@ class McaModelCreator:
 
         self.tokenizer = default_tokenizer_provider(model_args=self.model_args)
         self.model = default_actor_model_provider(
-            tokenizer=self.tokenizer, training_args=self.megatron_train_args, model_args=self.model_args
+            tokenizer=self.tokenizer,
+            training_args=self.megatron_train_args,
+            model_args=self.model_args,
         )
         for module in self.model.get_models():
             module.requires_grad_(False)
@@ -141,8 +149,14 @@ class McaModelCreator:
 
         self.tokenizer = default_tokenizer_provider(model_args=self.model_args)
         self.model = default_actor_model_provider(
-            tokenizer=self.tokenizer, training_args=self.megatron_train_args, model_args=self.model_args
+            tokenizer=self.tokenizer,
+            training_args=self.megatron_train_args,
+            model_args=self.model_args,
+            is_trainable=True,
         )
+        for module in self.model.get_models():
+            module.train()
+            module.requires_grad_(True)
 
         ddp_config = DistributedDataParallelConfig(
             grad_reduce_in_fp32=self.megatron_train_args.accumulate_allreduce_grads_in_fp32,
@@ -188,26 +202,33 @@ class McaModelCreator:
         bind_megatron_offload_states_func(optimizer=self.optimizer)
 
         if not isinstance(self.optimizer, ChainedOptimizer):
-            self.scheduler = get_scheduler(
-                "cosine",
-                optimizer=self.optimizer if self.optimizer is None else self.optimizer.optimizer,
-                num_warmup_steps=self.megatron_train_args.get_warmup_steps(self.megatron_train_args.max_steps),
-                num_training_steps=self.megatron_train_args.max_steps,
-                scheduler_specific_kwargs=self.megatron_train_args.lr_scheduler_kwargs,
-            )
-        else:
-            lr_schedulers = []
-            for opt in self.optimizer.chained_optimizers:
-                sch = get_scheduler(
+            base_optimizer = self.optimizer if self.optimizer is None else self.optimizer.optimizer
+            if base_optimizer is not None:
+                self.scheduler = get_scheduler(
                     "cosine",
-                    optimizer=opt if opt is None else opt.optimizer,
+                    optimizer=base_optimizer,
                     num_warmup_steps=self.megatron_train_args.get_warmup_steps(self.megatron_train_args.max_steps),
                     num_training_steps=self.megatron_train_args.max_steps,
                     scheduler_specific_kwargs=self.megatron_train_args.lr_scheduler_kwargs,
                 )
-                lr_schedulers.append(sch)
+        else:
+            lr_schedulers = []
+            for opt in self.optimizer.chained_optimizers:
+                base_optimizer = opt if opt is None else opt.optimizer
+                if base_optimizer is None:
+                    continue
+                lr_schedulers.append(
+                    get_scheduler(
+                        "cosine",
+                        optimizer=base_optimizer,
+                        num_warmup_steps=self.megatron_train_args.get_warmup_steps(self.megatron_train_args.max_steps),
+                        num_training_steps=self.megatron_train_args.max_steps,
+                        scheduler_specific_kwargs=self.megatron_train_args.lr_scheduler_kwargs,
+                    )
+                )
 
-            self.scheduler = ChainedScheduler(lr_schedulers)
+            if lr_schedulers:
+                self.scheduler = ChainedScheduler(lr_schedulers)
 
 
 """
@@ -216,64 +237,24 @@ torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s tests/third_par
 """
 
 
-def test_megatron_init_memory():
-    MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
-    torch.cuda.memory._record_memory_history(
-        max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
-    )
-
+def test_megatron_dist_optimizer_offload_reload_smoke():
     mca_model = McaModelCreator(optimizer_type="dist_optimizer")
-
-    # buffer_data = []
-    # for buffer in mca_model.optimizer.buffers:
-    #     buffer_data.append(buffer.param_data.data.storage().data_ptr())
-
-    mca_model.optimizer.offload_states(include=[MegatronOffloadStateType.other_params], pin_memory=True)
-
-    t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-    del t0
-
-    mca_model.optimizer.reload_states(include=[MegatronOffloadStateType.model_params])
-    if dist.get_rank() == 0:
-        t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-        dump_file = f"./memory_dump/snapshot_megatron_init_offload_{os.environ['RANK']}.pickle"
-        os.makedirs(os.path.dirname(dump_file), exist_ok=True)
-        torch.cuda.memory._dump_snapshot(dump_file)
-        torch.cuda.memory._record_memory_history(enabled=None)
-
-    # tensors_group_by_data_ptr = defaultdict(list)
-    # tensors = objgraph.by_type('Tensor')
-    # print(f"len(tensor)={len(tensors)}")
-    # for tensor in tensors:
-    #     tensors_group_by_data_ptr[tensor.storage().data_ptr()].append(tensor)
-    #
-    # for buffer in buffer_data:
-    #     objgraph.show_backrefs(tensors_group_by_data_ptr[buffer], max_depth=10,
-    #                            extra_ignore=[id(locals())],
-    #                            filename=f'/checkpoint/binary/ScaleAligner/memory_dump/buffer_data_group_tensors.param_data_{datetime.now().strftime("%Y%m%d-%H%M%S")}.png')
-
-
-def test_megatron_init_ddp_memory():
-    MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
-    torch.cuda.memory._record_memory_history(
-        max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
+    run_model_dist_optimizer(
+        mca_model,
+        included_state=[MegatronOffloadStateType.other_params],
+        pin_memory=True,
+        non_blocking=True,
     )
 
+
+def test_megatron_no_grad_module_offload_reload_smoke():
     mca_model = McaModelCreator(optimizer_type=None)
-
-    offload_megatron_no_grad_module(model_chunks=mca_model.model.get_models())
-
-    t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-    del t0
-
-    reload_megatron_no_grad_module(model_chunks=mca_model.model.get_models())
-
-    if dist.get_rank() == 0:
-        t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-        dump_file = f"./memory_dump/snapshot_megatron_init_ddp_offload_{os.environ['RANK']}.pickle"
-        os.makedirs(os.path.dirname(dump_file), exist_ok=True)
-        torch.cuda.memory._dump_snapshot(dump_file)
-        torch.cuda.memory._record_memory_history(enabled=None)
+    run_model_infer(
+        mca_model,
+        included_state=[MegatronOffloadStateType.model_params],
+        pin_memory=True,
+        non_blocking=True,
+    )
 
 
 def check_devices(tensors: List[torch.Tensor], target_device) -> None:
@@ -284,16 +265,32 @@ def check_devices(tensors: List[torch.Tensor], target_device) -> None:
 
 def check_tensors(expected_tensors: List[torch.Tensor], tensors: List[torch.Tensor]) -> None:
     for tensor_expected, tensor_restored in zip(expected_tensors, tensors):
-        assert torch.equal(tensor_expected, tensor_restored)
+        assert torch.equal(tensor_expected.to(tensor_restored.device), tensor_restored)
+
+
+def current_device():
+    return f"{current_platform.device_type}:{current_platform.current_device()}"
+
+
+def prepare_model_batch(batch):
+    input_ids, token_attention_mask = batch
+    input_ids = input_ids.to(current_device())
+    token_attention_mask = token_attention_mask.to(current_device())
+    position_ids = torch.clip(torch.cumsum(token_attention_mask, dim=-1) - 1, min=0, max=None)
+    seq_length = input_ids.size(1)
+    causal_mask = torch.triu(
+        torch.ones((1, 1, seq_length, seq_length), dtype=torch.bool, device=input_ids.device),
+        diagonal=1,
+    )
+    padding_mask = token_attention_mask[:, None, None, :].eq(0)
+    attention_mask = causal_mask | padding_mask
+    return input_ids, attention_mask, position_ids
 
 
 def run_model_infer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
     with torch.no_grad():
         for batch in mca_model.data_loader:
-            input_ids, attention_mask = batch
-            input_ids = input_ids.to("cuda")
-            attention_mask = attention_mask.to("cuda")
-            position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+            input_ids, attention_mask, position_ids = prepare_model_batch(batch)
 
             models = mca_model.model.get_models()
             for model in models:
@@ -329,10 +326,7 @@ def run_model_dist_optimizer(mca_model: McaModelCreator, included_state, pin_mem
     assert isinstance(mca_model.optimizer, DistributedOptimizer)
 
     for batch in mca_model.data_loader:
-        input_ids, attention_mask = batch
-        input_ids = input_ids.to("cuda")
-        attention_mask = attention_mask.to("cuda")
-        position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+        input_ids, attention_mask, position_ids = prepare_model_batch(batch)
 
         models = mca_model.model.get_models()
         for model in models:
@@ -534,10 +528,7 @@ def run_model_fp16_optimizer(mca_model: McaModelCreator, included_state, pin_mem
     assert isinstance(mca_model.optimizer, Float16OptimizerWithFloat16Params)
 
     for batch in mca_model.data_loader:
-        input_ids, attention_mask = batch
-        input_ids = input_ids.to("cuda")
-        attention_mask = attention_mask.to("cuda")
-        position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+        input_ids, attention_mask, position_ids = prepare_model_batch(batch)
 
         models = mca_model.model.get_models()
         for model in models:
@@ -710,10 +701,7 @@ def run_model_fp32_optimizer(mca_model: McaModelCreator, included_state, pin_mem
     assert isinstance(mca_model.optimizer, FP32Optimizer)
 
     for batch in mca_model.data_loader:
-        input_ids, attention_mask = batch
-        input_ids = input_ids.to("cuda")
-        attention_mask = attention_mask.to("cuda")
-        position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+        input_ids, attention_mask, position_ids = prepare_model_batch(batch)
 
         models = mca_model.model.get_models()
         for model in models:

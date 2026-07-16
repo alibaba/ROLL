@@ -1,6 +1,6 @@
 # 使用 Docker 在昇腾 NPU 上运行 ROLL
 
-最后更新：2026/06/23。
+最后更新：2026/07/16。
 
 本指南介绍如何在**华为昇腾 NPU** 上获取、构建并运行 ROLL 镜像。推荐优先使用预构建镜像；如需自定义依赖，再使用 `Dockerfile.A2` 或 `Dockerfile.A3` 构建。Atlas 950 当前使用 [ROLL x Ascend](ascend_usage.md) 中的手动安装配置。
 
@@ -244,9 +244,9 @@ python -c "import vllm_ascend; print(f'vllm_ascend available')"
 
 ### 重要配置说明
 
-由于昇腾 NPU 上不支持 Megatron-LM 训练，需要使用 **FSDP2** 作为训练后端。请确保配置文件中使用以下设置：
+仓库内置的 RLVR 示例采用 **FSDP2**，使用昇腾基础镜像中的依赖即可运行。A2/A3 上兼容的 Megatron 配置需要按照[在昇腾上安装 Megatron](ascend_usage.md#在昇腾上安装-megatron)补充可选依赖；A2/A3 Dockerfile 默认不会安装这些依赖。
 
-1. 将 `strategy_args` 设置为使用 FSDP2
+运行内置 FSDP2 RLVR 示例时，请将 `strategy_args` 设置为 FSDP2。
 
 
 ### 示例：RLVR 流水线
