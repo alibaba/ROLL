@@ -323,7 +323,7 @@ class MooncakeClient:
             )
         assert len(data) == batch_size
 
-        ref = self.backend.put_dataproto(data, partition=partition, policy=self.transfer_policy)
+        ref = self.backend.put(data, type="dataproto", partition=partition, policy=self.transfer_policy)
         field_refs = {
             key: {"ref": ref, "kind": "batch" if key in batch_fields else "non_tensor"}
             for key in fields.keys()
@@ -349,10 +349,12 @@ class MooncakeClient:
 
         data_dict = {}
         for group in grouped.values():
-            data = self.backend.get_dataproto(
+            data = self.backend.get(
                 group["ref"],
+                type="dataproto",
                 batch_fields=group["batch"],
                 non_tensor_fields=group["non_tensor"],
+                data_cls=dict,
             )
             data_dict.update(data.get("batch", {}))
             data_dict.update(data.get("non_tensor_batch", {}))
