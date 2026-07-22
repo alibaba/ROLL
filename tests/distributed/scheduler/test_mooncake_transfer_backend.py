@@ -2,7 +2,9 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
+import types
 
 import numpy as np
 import pytest
@@ -107,6 +109,81 @@ def test_mooncake_client_splits_roll_fields():
 def test_mooncake_client_rejects_unsupported_fields():
     with pytest.raises(TypeError, match="Unsupported Mooncake fields"):
         MooncakeClient._split_fields({"bad": ["a", "b"]})
+
+
+def test_mooncake_client_uses_unified_dataproto_api(monkeypatch):
+    calls = []
+
+    class FakeStore:
+        def setup(self, *args, **kwargs):
+            return 0
+
+    class FakePolicy:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTransfer:
+        def __init__(self, store, key_prefix):
+            self.store = store
+            self.key_prefix = key_prefix
+
+        def put(self, data, **kwargs):
+            calls.append(("put", kwargs, data))
+            return "ref"
+
+        def get(self, ref, **kwargs):
+            calls.append(("get", kwargs, ref))
+            return {
+                "batch": {"tokens": torch.tensor([[1], [2]])},
+                "non_tensor_batch": {"prompt": np.array(["a", "b"], dtype=object)},
+            }
+
+    mooncake_module = types.ModuleType("mooncake")
+    store_module = types.ModuleType("mooncake.store")
+    structured_module = types.ModuleType("mooncake.structured_object_store")
+    store_module.MooncakeDistributedStore = FakeStore
+    structured_module.BundleTransferPolicy = FakePolicy
+    structured_module.MooncakeBundleTransfer = FakeTransfer
+    monkeypatch.setitem(sys.modules, "mooncake", mooncake_module)
+    monkeypatch.setitem(sys.modules, "mooncake.store", store_module)
+    monkeypatch.setitem(sys.modules, "mooncake.structured_object_store", structured_module)
+
+    client = MooncakeClient(
+        {
+            "local_hostname": "127.0.0.1",
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "tcp",
+            "master_server_addr": "127.0.0.1:50051",
+        }
+    )
+
+    remote = client.put(
+        "rollout",
+        ["0", "1"],
+        {
+            "tokens": torch.tensor([[1], [2]]),
+            "prompt": np.array(["a", "b"], dtype=object),
+        },
+        batch_size=2,
+    )
+    materialized = client.get("rollout", ["tokens", "prompt"], [remote.fields["tokens"], remote.fields["prompt"]])
+
+    put_name, put_kwargs, put_data = calls[0]
+    get_name, get_kwargs, get_ref = calls[1]
+    assert put_name == "put"
+    assert put_kwargs["type"] == "dataproto"
+    assert put_kwargs["partition"] == "rollout"
+    assert put_data.meta_info["roll_row_ids"] == ["0", "1"]
+    assert get_name == "get"
+    assert get_ref == "ref"
+    assert get_kwargs == {
+        "type": "dataproto",
+        "batch_fields": ["tokens"],
+        "non_tensor_fields": ["prompt"],
+        "data_cls": dict,
+    }
+    assert torch.equal(materialized["tokens"], torch.tensor([[1], [2]]))
+    assert list(materialized["prompt"]) == ["a", "b"]
 
 
 def test_mooncake_client_real_rdma_round_trip(mooncake_master):
