@@ -468,10 +468,14 @@ def agentic_compute_advantage(
 ):
     if response_mask is None:
         response_mask = data.batch["response_mask"][:, 1:]
-    if response_mask.sum() == 0:
+    valid_token_count = int(response_mask.sum().item())
+    # masked_whiten uses Bessel's correction, so unbiased variance is undefined with fewer than two valid tokens.
+    if valid_token_count <= 1:
         whiten_rewards = False
         whiten_advantages = False
-        logger.info("Warning: domain final_response_mask.sum() == 0! All masked_whiten will be skipped.")
+        logger.warning(
+            f"Only {valid_token_count} valid response token(s) remain; reward and advantage whitening are disabled."
+        )
 
     # Check OPD config
     is_pure_opd = getattr(pipeline_config, "is_pure_opd", False) if pipeline_config else False
