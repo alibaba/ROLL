@@ -1,6 +1,6 @@
 # ROLL x Ascend
 
-最后更新：2026/06/23。
+最后更新：2026/07/16。
 
 我们在 ROLL 上增加对华为昇腾设备的支持。
 
@@ -116,6 +116,57 @@ pip install -v -e .
 cd ..
 ```
 
+### 在昇腾上安装 Megatron
+
+此步骤为可选项。当 ROLL 配置使用 `megatron_train` 或 `megatron_infer` 策略时，需要安装以下依赖。这里的版本组合与当前 NPU CI 验证环境保持一致：
+
+| 软件 | 版本 |
+| ---- | ---- |
+| Megatron-Core | `core_r0.17.0` |
+| TransformerEngineNPU | `main` |
+| MegatronAdaptor | `core_r0.17.0` |
+
+
+```
+python -m pip install --upgrade pip wheel
+python -m pip install "setuptools<80" pybind11 "packaging>=24.2"
+
+# Megatron-Core 0.17
+export MEGATRON_CORE_SRC=/tmp/Megatron-LM
+rm -rf "${MEGATRON_CORE_SRC}"
+git clone --depth 1 --branch core_r0.17.0 \
+  https://github.com/NVIDIA/Megatron-LM.git "${MEGATRON_CORE_SRC}"
+python -m pip install --ignore-requires-python --no-build-isolation --no-deps \
+  -e "${MEGATRON_CORE_SRC}"
+
+# 昇腾 Transformer Engine 和 Megatron 适配补丁
+export TRANSFORMER_ENGINE_NPU_SRC=/tmp/TransformerEngineNPU
+export MEGATRON_ADAPTOR_SRC=/tmp/MegatronAdaptor
+rm -rf "${TRANSFORMER_ENGINE_NPU_SRC}" "${MEGATRON_ADAPTOR_SRC}"
+git clone --depth 1 --branch main \
+  https://gitcode.com/Ascend/TransformerEngineNPU.git \
+  "${TRANSFORMER_ENGINE_NPU_SRC}"
+git clone --depth 1 --branch core_r0.17.0 \
+  https://gitcode.com/Ascend/MegatronAdaptor.git \
+  "${MEGATRON_ADAPTOR_SRC}"
+python -m pip install --no-build-isolation -e "${TRANSFORMER_ENGINE_NPU_SRC}"
+python -m pip install --no-build-isolation -e "${MEGATRON_ADAPTOR_SRC}"
+```
+
+在已初始化昇腾 Toolkit 环境的终端中验证安装：
+
+```
+python - <<'PY'
+import megatron_adaptor
+import megatron.core
+import transformer_engine.pytorch
+
+print("MegatronAdaptor NPU dependencies are available.")
+PY
+```
+
+此 NPU 环境不要安装 NVIDIA `transformer-engine[pytorch]` 包。TransformerEngineNPU 提供适配昇腾的实现。
+
 ### 安装 ROLL
 
 ```
@@ -132,11 +183,11 @@ cd ..
 | ---- | ---- |
 | transformers | >= v4.57.6 |
 | flash_attn | 不支持 |
-| transformer-engine[pytorch] | 不支持 |
+| transformer-engine[pytorch] | 昇腾上不支持；Megatron 请使用 TransformerEngineNPU |
 
 1. `transformers` v4.57.6 支持启用 `--flash_attention_2`。
 2. 目前不支持 `flash_attn` 加速。
-3. 目前不支持 `transformer-engine[pytorch]`。
+3. 昇腾上不支持 NVIDIA `transformer-engine[pytorch]` 包，Megatron 配置改用 TransformerEngineNPU。
 
 ```
 pip install transformers==4.57.6
@@ -144,8 +195,7 @@ pip install transformers==4.57.6
 
 ## 快速开始：单节点部署指引
 
-正式使用前，建议您通过对单节点流水线的训练尝试以检验环境准备和安装的正确性。
-由于 NPU 上不支持 Megatron-LM 训练，请首先将对应文件中 `strategy_args` 参数修改为 `fsdp2` 选项。
+正式使用前，建议您通过单节点流水线训练检验环境准备和安装是否正确。FSDP2 示例可直接使用基础昇腾环境；运行采用 `megatron_train` 或 `megatron_infer` 的配置前，请先完成[在昇腾上安装 Megatron](#在昇腾上安装-megatron)。
 
 
 1. 使用 shell 执行单节点流水线：
@@ -154,7 +204,13 @@ pip install transformers==4.57.6
 bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_single_node_demo.sh  
 ```
 
-2. 使用配置文件执行 agentic pipeline：
+2. 运行 Megatron DPO 示例：
+
+```
+bash examples/ascend_examples/run_dpo_pipeline.sh
+```
+
+3. 使用配置文件执行 agentic pipeline：
 
 ```
 # 确保当前位于 ROLL 项目目录的根目录下
@@ -174,6 +230,7 @@ python examples/start_agentic_pipeline.py \
 | Agentic | examples/qwen2.5-0.5B-agentic/run_agentic_pipeline_sokoban.sh | FSDP2 | vLLM | Atlas 900 A2/A3/Ascend 950 训练系列 |
 | Agentic-Rollout | examples/qwen2.5-0.5B-agentic/run_agentic_rollout_sokoban.sh | FSDP2 | vLLM | Atlas 900 A2/A3/Ascend 950 训练系列 |
 | RLVR | examples/ascend_examples/run_rlvr_pipeline.sh | FSDP2 | vLLM | Atlas 900 A2/A3/Ascend 950 训练系列 |
+| DPO | examples/ascend_examples/run_dpo_pipeline.sh | Megatron | Megatron | Atlas 900 A2/A3 训练系列 |
 
 ## 声明
 

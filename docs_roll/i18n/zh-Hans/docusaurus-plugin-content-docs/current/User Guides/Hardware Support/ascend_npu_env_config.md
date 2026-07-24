@@ -153,7 +153,7 @@ export CPU_AFFINITY_CONF=1,npu0:0-1,npu1:2-3,npu2:4-5,npu3:6-7
 | ---- | ------ | ---- |
 | `VLLM_USE_V1` | `1` | 启用 vLLM V1 架构，vLLM-Ascend 必需 |
 | `VLLM_ATTENTION_BACKEND` | `XFORMERS` | vLLM 注意力计算后端 |
-| `VLLM_ASCEND_ENABLE_FLASHCOMM` | `1` | 启用昇腾 FlashComm 高速通信优化 |
+| `VLLM_ASCEND_ENABLE_FLASHCOMM` | `0` | 启用昇腾 FlashComm 高速通信优化 |
 | `VLLM_ASCEND_ENABLE_PREFETCH_MLP` | `1` | 启用 MLP 层权重预取。它替代了较早版本中的 dense optimize 开关。 |
 | `VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE` | `1` | 启用 TopK 算子融合优化，提升生成解码性能 |
 | `VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE` | `1` | 打印 prefill/decode 阶段耗时详情（调试用） |
@@ -165,7 +165,7 @@ export CPU_AFFINITY_CONF=1,npu0:0-1,npu1:2-3,npu2:4-5,npu3:6-7
 ```bash
 export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=XFORMERS
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM=0
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 ```
 
@@ -260,7 +260,7 @@ export OMP_NUM_THREADS=1
 
 # vLLM-Ascend 推理
 export VLLM_USE_V1=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM=0
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # 算子编译缓存

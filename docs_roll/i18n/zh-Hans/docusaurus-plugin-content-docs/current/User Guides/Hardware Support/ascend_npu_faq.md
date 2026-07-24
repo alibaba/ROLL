@@ -1,6 +1,6 @@
 # 昇腾 NPU 常见问题
 
-最后更新：2026/04/27。
+最后更新：2026/07/16。
 
 本文档汇总了在华为昇腾 NPU 上运行 ROLL 时可能遇到的常见问题及解决方案。
 
@@ -93,11 +93,23 @@ pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.c
 
 ## 训练配置
 
-### 不支持 Megatron 策略
+### Megatron 策略初始化错误
 
-**现象：** 在 NPU 上使用 `strategy: megatron` 配置时报错。
+**现象：** 在 NPU 上使用 `megatron_train` 或 `megatron_infer` 时出现导入或初始化错误。
 
-**解决方案：** 昇腾 NPU 上不支持 Megatron-LM 训练，请使用 FSDP2 作为训练后端：
+**解决方案：** 已验证的 A2/A3 配置可以使用 Megatron，但基础昇腾环境不会默认安装其可选依赖。请先完成[在昇腾上安装 Megatron](ascend_usage.md#在昇腾上安装-megatron)，然后在已初始化昇腾 Toolkit 的环境中验证三个依赖包：
+
+```bash
+python - <<'PY'
+import megatron_adaptor
+import megatron.core
+import transformer_engine.pytorch
+
+print("MegatronAdaptor NPU dependencies are available.")
+PY
+```
+
+如果不需要 Megatron 路径，也可以选择 FSDP2，并保留与之匹配的 FSDP2 策略配置：
 
 ```yaml
 strategy_args:

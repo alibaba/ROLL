@@ -1,6 +1,6 @@
 # Running ROLL on Ascend NPU with Docker
 
-Last updated: 06/23/2026.
+Last updated: 07/16/2026.
 
 This guide explains how to get, build, and run ROLL images on **Huawei Ascend NPU**. Prefer the pre-built image when possible; use `Dockerfile.A2` or `Dockerfile.A3` when you need to customize dependencies. Ascend 950 currently follows the manual installation profile in [ROLL x Ascend](ascend_usage.md).
 
@@ -244,9 +244,9 @@ python -c "import vllm_ascend; print(f'vllm_ascend available')"
 
 ### Important Configuration Notes
 
-Since Megatron-LM is not supported on Ascend NPU, you need to use **FSDP2** as the training backend. Make sure your configuration files use the following settings:
+The bundled RLVR example uses **FSDP2** and runs with the base Ascend image dependencies. Compatible Megatron configurations on A2/A3 require the optional packages from [Install Megatron on Ascend](ascend_usage.md#install-megatron-on-ascend); the A2/A3 Dockerfiles do not install them by default.
 
-1. Set `strategy_args` to use FSDP2
+For the bundled FSDP2 RLVR example, set `strategy_args` to use FSDP2.
 
 ### Example: RLVR Pipeline
 
