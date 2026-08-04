@@ -570,6 +570,7 @@ class RLVRPipeline(BasePipeline):
                 batch.meta_info["global_step"] = global_step
                 batch.meta_info["_broadcast_non_tensor_batch"] = True
                 batch.meta_info["loss_mask_keys"] = ['response_mask', 'final_response_mask']
+                batch.meta_info["is_offload_optimizer_states_in_train_step"] = self.pipeline_config.is_offload_optimizer_states_in_train_step
                 batch.non_tensor_batch['sample_uuid'] = np.array([str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object)
                 batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
 
