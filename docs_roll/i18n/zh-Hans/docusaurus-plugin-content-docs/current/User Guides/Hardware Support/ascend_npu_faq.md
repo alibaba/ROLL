@@ -1,6 +1,6 @@
 # 昇腾 NPU 常见问题
 
-最后更新：2026/04/27。
+最后更新：2026/08/17。
 
 本文档汇总了在华为昇腾 NPU 上运行 ROLL 时可能遇到的常见问题及解决方案。
 
@@ -51,8 +51,8 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 
 **解决方案：** 确保使用了与硬件匹配的预构建镜像：
 
-- **Atlas 900 A2 PODc** → 使用 `roll:ascend-a2`（`ascend910b1`）
-- **Atlas 900 A3 PODc** → 使用 `roll:ascend-a3`（`ascend910_9391`）
+- **Atlas 900 A2 PODc** → 使用 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12`（`ascend910b1`）
+- **Atlas 900 A3 PODc** → 使用 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12`（`ascend910_9391`）
 
 当前仓库包含用于构建自定义镜像的 `docker/Dockerfile.A2` 和 `docker/Dockerfile.A3`。如果维护自定义镜像，请确保 SOC 版本与目标硬件匹配。
 
@@ -284,7 +284,7 @@ ulimit -n 65536
 
 **解决方案：**
 
-1. 确保 CANN 和 vLLM-Ascend 版本兼容（当前镜像使用 CANN 9.0.0 与 vLLM-Ascend v0.18）。
+1. 确保 CANN 与昇腾软件栈版本兼容。当前 ROLL A2/A3 镜像使用 CANN 9.1.0、PyTorch 2.10.0、torch-npu 2.10.0.post4、vLLM 0.23.0、vLLM-Ascend v0.23.0rc1。
 2. 检查 SOC 版本是否与硬件匹配。
 3. 调整配置中 vLLM 的 `gpu_memory_utilization` 和 `max_model_len` 参数。
 4. 确认已安装 `triton-ascend`（而非 `triton`），错误的 triton 后端会导致算子编译回退。

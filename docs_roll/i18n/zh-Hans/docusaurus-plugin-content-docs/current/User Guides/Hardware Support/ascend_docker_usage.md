@@ -1,114 +1,128 @@
 # 使用 Docker 在昇腾 NPU 上运行 ROLL
 
-最后更新：2026/06/23。
+最后更新：2026 年 8 月 18 日。
 
-本指南介绍如何在**华为昇腾 NPU** 上获取、构建并运行 ROLL 镜像。推荐优先使用预构建镜像；如需自定义依赖，再使用 `Dockerfile.A2` 或 `Dockerfile.A3` 构建。Atlas 950 当前使用 [ROLL x Ascend](ascend_usage.md) 中的手动安装配置。
+## 快速参考
 
-## 硬件与软件要求
+- ROLL 仓库：[alibaba/ROLL](https://github.com/alibaba/ROLL)
+- 昇腾使用指南：[ROLL x Ascend](ascend_usage.md)
+- 昇腾 NPU 示例：[昇腾 NPU 示例](ascend_npu_examples.md)
+- 可用的预构建镜像：[Quay 上的 ROLL 镜像](https://quay.io/repository/ascend/roll?tab=tags)
+- Issue 跟踪器：[GitHub Issues](https://github.com/alibaba/ROLL/issues)
 
-| 项目 | Dockerfile.A2 | Dockerfile.A3 |
-| ---- | ------------- | ------------- |
-| 硬件 | Atlas 900 A2 PODc（Ascend 910B1） | Atlas 900 A3 PODc（Ascend 910_9391） |
-| 宿主机操作系统 | Ubuntu 22.04 | Ubuntu 22.04 |
-| CANN | 9.0.0 | 9.0.0 |
-| Python | 3.11 | 3.11 |
-| Docker | >= 20.10 | >= 20.10 |
-| 昇腾 NPU 驱动 | 已安装在宿主机上 | 已安装在宿主机上 |
+---
 
-本 Docker 指南覆盖 A2/A3 Dockerfile。Ascend 950 请使用手动安装配置：torch 2.10、vLLM v0.20.2、vLLM-Ascend `main`，并在构建 vLLM-Ascend 时设置 `COMPILE_CUSTOM_KERNELS=1`。
+## ROLL NPU 镜像
 
-## 主要组件
+ROLL 昇腾 NPU 镜像提供在华为昇腾训练系列 NPU 上运行 ROLL 所需的运行时和 Python 依赖。建议优先使用预构建镜像；如果需要自定义镜像或在本地重新构建，请使用 `Dockerfile.A2` 或 `Dockerfile.A3`。
 
-两个 Dockerfile 安装的核心依赖版本相同：
+当前 Dockerfile 覆盖 Atlas 900 A2 和 A3 训练系列设备。
+
+---
+
+## 支持的标签和 Dockerfile 链接
+
+| 硬件 | 本地标签 | 预构建镜像 | Dockerfile | 基础镜像 |
+|---|---|---|---|---|
+| Atlas 900 A2 PODc / Ascend 910B1 | `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` | `quay.io/ascend/roll:main-a2` | [`docker/Dockerfile.A2`](https://github.com/alibaba/ROLL/blob/main/docker/Dockerfile.A2) | `quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12-devel` |
+| Atlas 900 A3 PODc / Ascend 910_9391 | `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` | `quay.io/ascend/roll:main-a3` | [`docker/Dockerfile.A3`](https://github.com/alibaba/ROLL/blob/main/docker/Dockerfile.A3) | `quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12-devel` |
+
+---
+
+## 镜像内容
 
 | 组件 | 版本 |
-| ---- | ---- |
-| PyTorch | 2.9.0+cpu |
-| vLLM | 0.18.0 |
-| vLLM-Ascend | 0.18 |
+|---|---|
+| CANN | 9.1.0 |
+| Python | 3.12 |
+| PyTorch | 2.10.0 |
+| torch-npu | 2.10.0.post4 |
+| vLLM | 0.23.0 |
+| vLLM-Ascend | 0.23.0rc1 |
 | Transformers | 4.57.6 |
 | triton-ascend | 3.2.1 |
 
-Ascend 950 使用更新的手动安装版本组合：
+---
 
-| 组件 | Ascend 950 版本 / 设置 |
-| ---- | -------------------- |
-| PyTorch | 2.10 |
-| vLLM | v0.20.2 |
-| vLLM-Ascend | `main` 分支 |
-| 必需构建变量 | `COMPILE_CUSTOM_KERNELS=1` |
+## 支持的硬件
 
-主要区别在于基础镜像和 SOC 版本：
+| 硬件 | SOC_VERSION | Docker 支持 |
+|---|---|---|
+| Atlas 900 A2 PODc / Ascend 910B1 | `ascend910b1` | `Dockerfile.A2` 和 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` 支持 |
+| Atlas 900 A3 PODc / Ascend 910_9391 | `ascend910_9391` | `Dockerfile.A3` 和 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` 支持 |
 
-| 项目 | Dockerfile.A2 | Dockerfile.A3 |
-| ---- | ------------- | ------------- |
-| 基础镜像 | `quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.11` | `quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.11` |
-| SOC_VERSION | `ascend910b1` | `ascend910_9391` |
+A2/A3 Docker 镜像的宿主机要求：
 
-## 获取 Docker 镜像
+| 项目 | 要求 |
+|---|---|
+| 宿主机操作系统 | Ubuntu 22.04 |
+| Docker | >= 20.10 |
+| 昇腾 NPU 驱动 | 安装在宿主机上 |
 
-### 方式 A：使用预构建镜像（推荐）
+---
 
-根据你的硬件拉取对应镜像，并打成本指南后续命令使用的本地标签：
+## 快速开始
 
-**Atlas 900 A2 PODc（Ascend 910B1）：**
+### 获取镜像
+
+拉取与目标硬件匹配的镜像，并设置后续命令使用的本地标签：
+
+Atlas 900 A2 PODc：
 
 ```bash
 docker pull quay.io/ascend/roll:main-a2
-docker tag quay.io/ascend/roll:main-a2 roll:ascend-a2
+docker tag quay.io/ascend/roll:main-a2 roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12
 ```
 
-**Atlas 900 A3 PODc（Ascend 910_9391）：**
+Atlas 900 A3 PODc：
 
 ```bash
 docker pull quay.io/ascend/roll:main-a3
-docker tag quay.io/ascend/roll:main-a3 roll:ascend-a3
+docker tag quay.io/ascend/roll:main-a3 roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12
 ```
 
-可用镜像标签请以 https://quay.io/repository/ascend/roll?tab=tags 为准。如果你使用预构建镜像，可以直接跳到 [运行容器](#运行容器)。
+### 构建镜像
 
-### 方式 B：从 Dockerfile 构建镜像
-
-### 1. 克隆 ROLL 仓库
+从 Dockerfile 构建前，先克隆仓库：
 
 ```bash
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL
 ```
 
-### 2. 构建镜像
-
-根据你的硬件选择对应的 Dockerfile：
-
-**Atlas 900 A2 PODc（Ascend 910B1）：**
+构建 Atlas 900 A2 PODc 镜像：
 
 ```bash
-docker build -f docker/Dockerfile.A2 -t roll:ascend-a2 .
+docker build -f docker/Dockerfile.A2 -t roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12 .
 ```
 
-**Atlas 900 A3 PODc（Ascend 910_9391）：**
+构建 Atlas 900 A3 PODc 镜像：
 
 ```bash
-docker build -f docker/Dockerfile.A3 -t roll:ascend-a3 .
+docker build -f docker/Dockerfile.A3 -t roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 .
 ```
 
-> **注意：** 构建过程会从源码编译 vLLM 和 vLLM-Ascend，耗时较长，请确保有足够的磁盘空间（至少 50GB）和网络访问。
+构建过程会从源码编译 vLLM 和 vLLM-Ascend。请预留至少 50 GB 磁盘空间，并确保构建主机可以访问所需的软件包和源码仓库。
 
-你也可以在构建时自定义 SOC 版本：
+也可以显式覆盖 SOC 版本：
 
 ```bash
-# A2 自定义 SOC 版本
-docker build -f docker/Dockerfile.A2 --build-arg SOC_VERSION=ascend910b1 -t roll:ascend-a2 .
+# A2
+docker build -f docker/Dockerfile.A2 \
+    --build-arg SOC_VERSION=ascend910b1 \
+    -t roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12 .
 
-# A3 自定义 SOC 版本
-docker build -f docker/Dockerfile.A3 --build-arg SOC_VERSION=ascend910_9391 -t roll:ascend-a3 .
+# A3
+docker build -f docker/Dockerfile.A3 \
+    --build-arg SOC_VERSION=ascend910_9391 \
+    -t roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 .
 ```
+
+---
 
 ## 运行容器
 
-### 基本启动
-
-**A2：**
+宿主机必须向容器暴露昇腾设备文件和驱动目录。下面的示例启动一个挂载 8 个 NPU 的 A2 容器：
 
 ```bash
 docker run -dit \
@@ -131,13 +145,15 @@ docker run -dit \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /home/$USER:/home/$USER \
+    -v /path/to/models:/path/to/models \
+    -v /path/to/data:/path/to/data \
     --ipc=host \
     --net=host \
-    roll:ascend-a2 \
+    roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12 \
     /bin/bash
 ```
 
-**A3：**
+A3 使用 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12`，并修改容器名称、增加可用的设备文件。完整的 16 卡 A3 节点还需要挂载 `/dev/davinci8` 到 `/dev/davinci15`：
 
 ```bash
 docker run -dit \
@@ -168,52 +184,17 @@ docker run -dit \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /home/$USER:/home/$USER \
-    --ipc=host \
-    --net=host \
-    roll:ascend-a3 \
-    /bin/bash
-```
-
-### 多卡启动（训练推荐）
-
-多 NPU 训练时，需要挂载所有可用的 NPU 设备。根据节点上的 NPU 数量调整 `--device /dev/davinciX` 的数量：
-
-```bash
-docker run -dit \
-    --name roll_ascend \
-    --ulimit nofile=65536:65536 \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/Ascend/add-ons:/usr/local/Ascend/add-ons \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /home/$USER:/home/$USER \
     -v /path/to/models:/path/to/models \
     -v /path/to/data:/path/to/data \
     --ipc=host \
     --net=host \
-    roll:ascend-a3 \
+    roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 \
     /bin/bash
 ```
 
-> **注意：**
-> - `--device /dev/davinciX`：挂载 NPU 设备，根据可用 NPU 数量增减。
-> - `--device /dev/davinci_manager`、`--device /dev/devmm_svm`、`--device /dev/hisi_hdc`：昇腾 NPU 必需的管理设备。
-> - `-v /usr/local/Ascend/driver`：挂载宿主机昇腾驱动。
-> - `-v /path/to/models` 和 `-v /path/to/data`：根据需要挂载模型权重和训练数据目录。
+根据宿主机上的 NPU 数量调整 `/dev/davinciX` 条目。进行多 NPU 训练时，请挂载训练拓扑所需的全部设备。
 
-### 进入容器
+进入运行中的容器：
 
 ```bash
 # A2
@@ -223,63 +204,61 @@ docker exec -it roll_a2 /bin/bash
 docker exec -it roll_a3 /bin/bash
 ```
 
+---
+
 ## 验证环境
 
-进入容器后，验证昇腾环境是否正确配置：
+在容器内执行以下检查：
 
 ```bash
-# 验证 NPU 可见性
+# 检查 NPU 是否可见
 npu-smi info
 
-# 验证 CANN 环境已加载
+# 检查 CANN 环境变量
 env | grep -E "ASCEND|LD_LIBRARY_PATH|PATH"
 
-# 验证 Python 包
+# 检查 Python 软件包和 NPU 可用性
 python -c "import torch; import torch_npu; print(torch.npu.is_available())"
 python -c "import vllm; print(f'vllm: {vllm.__version__}')"
-python -c "import vllm_ascend; print(f'vllm_ascend available')"
+python -c "import vllm_ascend; print('vllm_ascend available')"
 ```
 
-## 运行 ROLL 流水线
+---
 
-### 重要配置说明
+## 在昇腾 NPU 上运行 ROLL 流水线
 
-由于昇腾 NPU 上不支持 Megatron-LM 训练，需要使用 **FSDP2** 作为训练后端。请确保配置文件中使用以下设置：
+ROLL 的昇腾 NPU 示例使用 **FSDP2** 作为训练后端。当前昇腾配置不支持 Megatron-LM。启动流水线前，请修改模型路径，并根据 NPU 拓扑设置 `device_mapping`。
 
-1. 将 `strategy_args` 设置为使用 FSDP2
-
-
-### 示例：RLVR 流水线
+RLVR 流水线示例：
 
 ```bash
 python examples/start_rlvr_pipeline.py \
-    --config_path ascend_examples \
-    --config_name qwen3_30b_rlvr_fsdp2
+    --config_path examples/ascend_examples \
+    --config_name qwen3_8b_rlvr_fsdp2
 ```
 
-> **注意：** `qwen3_30b_rlvr_fsdp2` 配置专为昇腾 NPU 设计，使用 FSDP2 作为训练后端。请根据你的 NPU 拓扑调整配置文件中的 `device_mapping`。
+仓库还在 `examples/ascend_examples` 下提供了 `qwen3_30b_rlvr_fsdp2.yaml` 和 `run_rlvr_pipeline.sh`。请根据可用 NPU 的显存和拓扑选择配置。
 
-## 常见问题
+---
 
-### 容器内 NPU 不可见
+## 注意事项
 
-确保所有必需的设备和管理路径已正确挂载。在容器内使用 `npu-smi info` 检查。
+- 启动容器前，请在宿主机上安装兼容的昇腾 NPU 驱动。
+- A2/A3 Docker 镜像基于 Ubuntu 22.04 和 Python 3.12。
+- 如果无法导入 `vLLM-Ascend`，请在容器内重新加载昇腾环境：
 
-### vLLM-Ascend 导入错误
+  ```bash
+  source /usr/local/Ascend/ascend-toolkit/set_env.sh
+  source /usr/local/Ascend/nnal/atb/set_env.sh
+  ```
 
-验证 CANN 环境是否正确加载：
+- 镜像构建时会将这些命令写入 `/root/.bashrc`。如果切换到非 root 用户，必要时请手动执行这些命令。
+- 如果 NPU 不可见，请检查挂载的设备文件、驱动路径和 `npu-smi info` 输出。
 
-```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-```
+---
 
-这些命令在镜像构建时已自动添加到 `/root/.bashrc`。如果切换到非 root 用户，可能需要手动执行。
+## 许可证
 
-### 显存不足
+ROLL 基于 [Apache License 2.0](https://github.com/alibaba/ROLL/blob/main/LICENSE) 发布。
 
-在配置文件中减小 `rollout_batch_size` 或 `num_return_sequences_in_group` 以降低 NPU 显存占用。
-
-## 声明
-
-ROLL 中提供的 Ascend 支持代码皆为参考样例，生产环境使用请通过官方正式途径沟通。
+CANN、昇腾驱动组件、Python 软件包、系统库和其他预安装依赖可能分别受其各自许可证约束。

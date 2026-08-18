@@ -1,6 +1,6 @@
 # 在昇腾 NPU 上运行 RLVR 流水线
 
-最后更新：2026/04/28。
+最后更新：2026/08/17。
 
 本文档提供在华为昇腾 NPU 上运行 RLVR（Reinforcement Learning with Verifiable Rewards）流水线的端到端指南，涵盖环境准备、数据准备、模型下载、配置编写、训练启动、监控与评估，以及从 checkpoint 恢复训练。
 
@@ -22,7 +22,13 @@
 | ---- | ---- |
 | 硬件 | Atlas 900 A2 PODc（Ascend 910B1）或 Atlas 900 A3 PODc（Ascend 910_9391） |
 | 宿主机 OS | Ubuntu 22.04 |
-| CANN | 9.0.0 |
+| Python | 3.12 |
+| CANN | 9.1.0 |
+| PyTorch | 2.10.0 |
+| torch-npu | 2.10.0.post4 |
+| vLLM | 0.23.0 |
+| vLLM-Ascend | 0.23.0rc1 |
+| triton-ascend | 3.2.1 |
 | Ascend NPU 驱动 | 已在宿主机安装（`npu-smi info` 能看到设备） |
 | Docker | >= 20.10 |
 
@@ -33,11 +39,11 @@
 ```bash
 # A2 硬件
 docker pull quay.io/ascend/roll:main-a2
-docker tag quay.io/ascend/roll:main-a2 roll:ascend-a2
+docker tag quay.io/ascend/roll:main-a2 roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12
 
 # A3 硬件
 docker pull quay.io/ascend/roll:main-a3
-docker tag quay.io/ascend/roll:main-a3 roll:ascend-a3
+docker tag quay.io/ascend/roll:main-a3 roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12
 ```
 
 当前仓库提供 `docker/Dockerfile.A2` 和 `docker/Dockerfile.A3`，用于构建自定义镜像。如果你维护自定义镜像，请确保依赖版本与预构建镜像保持一致。
@@ -68,7 +74,7 @@ docker run -dit \
     -v /path/to/data:/data \
     --ipc=host \
     --net=host \
-    roll:ascend-a3 \
+    roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 \
     /bin/bash
 ```
 
