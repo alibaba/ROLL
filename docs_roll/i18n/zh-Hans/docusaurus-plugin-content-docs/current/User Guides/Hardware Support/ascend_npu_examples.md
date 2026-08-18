@@ -56,7 +56,7 @@ docker run -dit \
     -v /path/to/data:/data \
     --ipc=host \
     --net=host \
-    roll:ascend-a3 \
+    roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 \
     /bin/bash
 ```
 
@@ -488,7 +488,7 @@ docker run -dit \
     -v /shared/storage:/data \
     --ipc=host \
     --net=host \
-    roll:ascend-a3 \
+    roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 \
     /bin/bash
 ```
 

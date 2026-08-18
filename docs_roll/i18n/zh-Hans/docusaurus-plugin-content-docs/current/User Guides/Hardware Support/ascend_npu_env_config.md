@@ -1,6 +1,6 @@
 # 昇腾 NPU 环境变量配置指南
 
-最后更新：2026/06/23。
+最后更新：2026/08/17。
 
 本文档说明在华为昇腾 NPU 上运行 ROLL 时涉及的关键环境变量，涵盖设备管理、HCCL 通信、显存优化、CPU 调度、vLLM-Ascend 推理及调试日志等方面。
 
@@ -24,6 +24,7 @@ ROLL 在运行时自动注入以下环境变量（定义在 `roll/platforms/npu.
 | ---- | -- | ---- |
 | `ASCEND_HOME_PATH` | `/usr/local/Ascend/ascend-toolkit/latest` | CANN 工具包根路径 |
 | `LD_LIBRARY_PATH` | 包含多个 Ascend lib64 路径 | 动态库搜索路径，确保 `libascendcl.so` 等可被加载 |
+| `HCCL_NPU_SOCKET_PORT_RANGE` | `auto` | 同一 NPU 上多进程运行时允许 HCCL 自动分配非默认 device 侧网卡端口 |
 
 预构建镜像会通过 `/root/.bashrc` 自动加载以下 CANN 环境脚本：
 
@@ -151,8 +152,9 @@ export CPU_AFFINITY_CONF=1,npu0:0-1,npu1:2-3,npu2:4-5,npu3:6-7
 
 | 变量 | 推荐值 | 说明 |
 | ---- | ------ | ---- |
-| `VLLM_USE_V1` | `1` | 启用 vLLM V1 架构，vLLM-Ascend 必需 |
+| `VLLM_USE_V1` | `1` | 保持当前 ROLL vLLM 路径启用。ROLL 默认将其设为 `1`；vLLM >= 0.11.1 已将该开关标记为过时 |
 | `VLLM_ATTENTION_BACKEND` | `XFORMERS` | vLLM 注意力计算后端 |
+| `VLLM_ASCEND_ENABLE_NZ` | `0` | ROLL 强化学习权重刷新场景禁用 FRACTAL_NZ |
 | `VLLM_ASCEND_ENABLE_FLASHCOMM` | `1` | 启用昇腾 FlashComm 高速通信优化 |
 | `VLLM_ASCEND_ENABLE_PREFETCH_MLP` | `1` | 启用 MLP 层权重预取。它替代了较早版本中的 dense optimize 开关。 |
 | `VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE` | `1` | 启用 TopK 算子融合优化，提升生成解码性能 |
@@ -168,6 +170,10 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 ```
+
+:::note
+上面的显存和任务队列配置适用于 FSDP2 训练及一般 NPU 任务。ROLL 的 vLLM worker 会将 `TASK_QUEUE_ENABLE` 覆盖为 `1`、清空 `PYTORCH_NPU_ALLOC_CONF`，并设置 `VLLM_ASCEND_ENABLE_NZ=0`，以保证 vLLM 运行稳定。
+:::
 
 ## vLLM-Ascend 构建相关变量
 

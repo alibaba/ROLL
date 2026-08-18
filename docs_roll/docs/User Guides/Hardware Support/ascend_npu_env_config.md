@@ -1,6 +1,6 @@
 # Ascend NPU Environment Configuration Guide
 
-Last updated: 06/23/2026.
+Last updated: 08/17/2026.
 
 This document describes the key environment variables for running ROLL on Huawei Ascend NPU, covering device management, HCCL communication, memory optimization, CPU scheduling, vLLM-Ascend inference, and debugging.
 
@@ -24,6 +24,7 @@ The pre-built Ascend images described in [Ascend NPU Docker Usage Guide](ascend_
 | -------- | ----- | ----------- |
 | `ASCEND_HOME_PATH` | `/usr/local/Ascend/ascend-toolkit/latest` | CANN toolkit root path |
 | `LD_LIBRARY_PATH` | Includes multiple Ascend `lib64` paths | Dynamic library search path, ensures `libascendcl.so` etc. can be loaded |
+| `HCCL_NPU_SOCKET_PORT_RANGE` | `auto` | Allows HCCL to allocate non-default device-side NIC ports for same-device multi-process workloads |
 
 The following CANN environment scripts are automatically sourced via `/root/.bashrc` in the pre-built images:
 
@@ -151,8 +152,9 @@ export CPU_AFFINITY_CONF=1,npu0:0-1,npu1:2-3,npu2:4-5,npu3:6-7
 
 | Variable | Recommended Value | Description |
 | -------- | ----------------- | ----------- |
-| `VLLM_USE_V1` | `1` | Enable vLLM V1 architecture. Required for vLLM-Ascend |
+| `VLLM_USE_V1` | `1` | Keep the current ROLL vLLM path enabled. ROLL sets this to `1` by default; vLLM versions >= 0.11.1 deprecate this switch |
 | `VLLM_ATTENTION_BACKEND` | `XFORMERS` | vLLM attention computation backend |
+| `VLLM_ASCEND_ENABLE_NZ` | `0` | Disable FRACTAL_NZ for ROLL reinforcement-learning weight reload flows |
 | `VLLM_ASCEND_ENABLE_FLASHCOMM` | `1` | Enable Ascend FlashComm high-speed communication optimization |
 | `VLLM_ASCEND_ENABLE_PREFETCH_MLP` | `1` | Enable MLP layer weight prefetching. This replaces the older dense optimize toggle in current vLLM-Ascend releases. |
 | `VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE` | `1` | Enable TopK operator fusion optimization for generation decoding |
@@ -168,6 +170,10 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 ```
+
+:::note
+The memory and task-queue recommendations above apply to FSDP2 training and general NPU workloads. ROLL's vLLM workers override `TASK_QUEUE_ENABLE` to `1`, clear `PYTORCH_NPU_ALLOC_CONF`, and set `VLLM_ASCEND_ENABLE_NZ=0` for vLLM runtime stability.
+:::
 
 ## vLLM-Ascend Build Variables
 

@@ -1,6 +1,6 @@
 # ROLL x Ascend
 
-Last updated: 06/23/2026.
+Last updated: 08/17/2026.
 
 We have added support for Huawei Ascend devices in ROLL.
 
@@ -10,8 +10,8 @@ ROLL's Ascend support is currently validated on training-series Ascend hardware:
 
 | Product | Support status | Notes |
 | ------- | -------------- | ----- |
-| Atlas 900 A2 PODc (Ascend 910B1) / Atlas A2 training series | √ | Use `docker/Dockerfile.A2` or the `roll:ascend-a2` image. |
-| Atlas 900 A3 PODc (Ascend 910_9391) / Atlas A3 training series | √ | Use `docker/Dockerfile.A3` or the `roll:ascend-a3` image. |
+| Atlas 900 A2 PODc (Ascend 910B1) / Atlas A2 training series | √ | Use `docker/Dockerfile.A2` or the `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` image. |
+| Atlas 900 A3 PODc (Ascend 910_9391) / Atlas A3 training series | √ | Use `docker/Dockerfile.A3` or the `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` image. |
 | Ascend 950 training series | √ | Use the Ascend 950 installation profile: torch 2.10, vLLM v0.20.2, vLLM-Ascend `main`, and `COMPILE_CUSTOM_KERNELS=1` when building vLLM-Ascend. |
 | Atlas A2/A3 inference series and Atlas 200I/500 A2 inference products | x | Current ROLL NPU images and examples target training-series devices. |
 | Other Ascend training or inference products | Not validated | Validate the driver, firmware, CANN, `torch_npu`, and vLLM-Ascend versions before use. |
@@ -23,7 +23,7 @@ Supported operating systems:
 | Deployment scenario | Supported OS | Notes |
 | ------------------- | ------------ | ----- |
 | Physical host | Ubuntu 22.04 | Recommended and validated by the current ROLL Ascend guides. |
-| ROLL Ascend container | Ubuntu 22.04 | The A2/A3 Dockerfiles are based on `quay.io/ascend/cann:9.0.0-*-ubuntu22.04-py3.11`. |
+| ROLL Ascend container | Ubuntu 22.04 | The A2/A3 Dockerfiles are based on `quay.io/ascend/cann:9.1.0-*-ubuntu22.04-py3.12-devel`. |
 | Ascend 950 manual installation | Ubuntu 22.04 | Use the Ascend 950-specific torch/vLLM stack below. Keep the driver, firmware, CANN, and `torch_npu` versions aligned with the target Ascend 950 environment. |
 | VM/container deployments on other host OS versions | Follow Ascend/CANN compatibility guidance | Check the Ascend compatibility query assistant and the CANN Software Installation OS compatibility notes for the target hardware. |
 
@@ -33,8 +33,8 @@ Supported operating systems:
 
 | Software | Version |
 | -------- |---------|
-| Python   | 3.11    |
-| CANN     | 9.0.0   |
+| Python   | 3.12    |
+| CANN     | 9.1.0   |
 
 For Ascend 950 , keep Python 3.11 and use the Ascend 950-specific torch/vLLM stack described in [Ascend 950 Installation Profile](#Ascend 950-installation-profile).
 
@@ -43,7 +43,7 @@ For Ascend 950 , keep Python 3.11 and use the Ascend 950-specific torch/vLLM sta
 Use the following commands to create a new conda environment in Miniconda:
 
 ```
-conda create --name roll python=3.11
+conda create --name roll python=3.12
 conda activate roll
 ```
 
@@ -53,10 +53,12 @@ To use torch and torch_npu in ROLL, install them using the commands below:
 
 ```
 # Use CPU-only torch when installing outside the pre-built image
-pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cpu
+pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu
 
 # Install the torch_npu version matching torch/CANN
-pip install torch_npu==2.9.0
+python -m pip install \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    --no-deps torch-npu==2.10.0.post4
 ```
 
 ### Install vllm & vllm-ascend
@@ -65,28 +67,33 @@ To use vllm in ROLL, compile and install vllm and vllm-ascend as follows:
 
 ```
 # vllm
-git clone -b v0.18.0 --depth 1 https://github.com/vllm-project/vllm.git
+git clone -b v0.23.0 --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
-pip install -r requirements/build.txt
 
 VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
 
 # vllm-ascend
-git clone -b v0.18.0 --depth 1 https://github.com/vllm-project/vllm-ascend.git
+git clone -b v0.23.0rc1 --depth 1 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
+git submodule update --init --recursive
 
-pip install -e .
+pip install -e . --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 cd ..
+
+# Install the Ascend Triton implementation after the other packages
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
 
 Or you could install `vllm` and `vllm-ascend` from pre-built wheel:
 ```
-# Install vllm-project/vllm. The newest supported version is v0.18.0.
-pip install vllm==0.18.0
+# Install vllm-project/vllm. The newest supported version is v0.23.0.
+pip install vllm==0.23.0
 
 # Install vllm-project/vllm-ascend from pypi.
-pip install vllm-ascend==0.18
+pip install \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    vllm-ascend==0.23.0rc1
 ```
 
 ### Ascend 950 Installation Profile
@@ -130,6 +137,8 @@ cd ..
 | Software                    | Description   |
 | --------------------------- | ------------- |
 | transformers                | >= v4.57.6    |
+| torch-npu                   | 2.10.0.post4  |
+| triton-ascend               | 3.2.1 (required instead of `triton`) |
 | flash_attn                  | not supported |
 | transformer-engine[pytorch] | not supported |
 
@@ -139,6 +148,8 @@ cd ..
 
 ```
 pip install transformers==4.57.6
+pip uninstall -y triton triton-ascend
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
 
 ## Quick Start: Single-Node Deployment

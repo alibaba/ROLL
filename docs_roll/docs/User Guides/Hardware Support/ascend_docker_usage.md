@@ -1,114 +1,128 @@
-# Running ROLL on Ascend NPU with Docker
+# ROLL on Ascend NPU with Docker
 
-Last updated: 06/23/2026.
+Last updated: 08/18/2026.
 
-This guide explains how to get, build, and run ROLL images on **Huawei Ascend NPU**. Prefer the pre-built image when possible; use `Dockerfile.A2` or `Dockerfile.A3` when you need to customize dependencies. Ascend 950 currently follows the manual installation profile in [ROLL x Ascend](ascend_usage.md).
+## Quick Reference
 
-## Hardware & Software Requirements
+- ROLL repository: [alibaba/ROLL](https://github.com/alibaba/ROLL)
+- Ascend usage guide: [ROLL x Ascend](ascend_usage.md)
+- Ascend NPU examples: [Ascend NPU Examples](ascend_npu_examples.md)
+- Available pre-built images: [ROLL images on Quay](https://quay.io/repository/ascend/roll?tab=tags)
+- Issue tracker: [GitHub Issues](https://github.com/alibaba/ROLL/issues)
 
-| Item | Dockerfile.A2 | Dockerfile.A3 |
-| ---- | ------------- | ------------- |
-| Hardware | Atlas 900 A2 PODc (Ascend 910B1) | Atlas 900 A3 PODc (Ascend 910_9391) |
-| Host OS | Ubuntu 22.04 | Ubuntu 22.04 |
-| CANN | 9.0.0 | 9.0.0 |
-| Python | 3.11 | 3.11 |
-| Docker | >= 20.10 | >= 20.10 |
-| Ascend NPU Driver | Installed on host | Installed on host |
+---
 
-This Docker guide covers the A2/A3 Dockerfiles. For Ascend 950, use the manual installation profile: torch 2.10, vLLM v0.20.2, vLLM-Ascend `main`, and `COMPILE_CUSTOM_KERNELS=1` when building vLLM-Ascend.
+## ROLL NPU Image
 
-## Key Components
+The ROLL Ascend NPU images provide the runtime and Python dependencies required to run ROLL on Huawei Ascend training-series NPUs. Use a pre-built image when possible. Build from `Dockerfile.A2` or `Dockerfile.A3` when you need to customize the image or rebuild it locally.
 
-Both Dockerfiles install the same versions of core dependencies:
+The Dockerfiles currently cover Atlas 900 A2 and A3 training-series devices.
+
+---
+
+## Supported Tags and Dockerfile Links
+
+| Hardware | Local tag | Pre-built image | Dockerfile | Base image |
+|---|---|---|---|---|
+| Atlas 900 A2 PODc / Ascend 910B1 | `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` | `quay.io/ascend/roll:main-a2` | [`docker/Dockerfile.A2`](https://github.com/alibaba/ROLL/blob/main/docker/Dockerfile.A2) | `quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12-devel` |
+| Atlas 900 A3 PODc / Ascend 910_9391 | `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` | `quay.io/ascend/roll:main-a3` | [`docker/Dockerfile.A3`](https://github.com/alibaba/ROLL/blob/main/docker/Dockerfile.A3) | `quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12-devel` |
+
+---
+
+## Image Contents
 
 | Component | Version |
-| --------- | ------- |
-| PyTorch | 2.9.0+cpu |
-| vLLM | 0.18.0 |
-| vLLM-Ascend | 0.18 |
+|---|---|
+| CANN | 9.1.0 |
+| Python | 3.12 |
+| PyTorch | 2.10.0 |
+| torch-npu | 2.10.0.post4 |
+| vLLM | 0.23.0 |
+| vLLM-Ascend | 0.23.0rc1 |
 | Transformers | 4.57.6 |
 | triton-ascend | 3.2.1 |
 
-Ascend 950 uses a newer manual installation stack:
+---
 
-| Component | Ascend 950 Version / Setting |
-| --------- | -------------------------- |
-| PyTorch | 2.10 |
-| vLLM | v0.20.2 |
-| vLLM-Ascend | `main` branch |
-| Required build variable | `COMPILE_CUSTOM_KERNELS=1` |
+## Supported Hardware
 
-The primary difference is the base image and SOC version:
+| Hardware | SOC_VERSION | Docker support |
+|---|---|---|
+| Atlas 900 A2 PODc / Ascend 910B1 | `ascend910b1` | Supported by `Dockerfile.A2` and `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` |
+| Atlas 900 A3 PODc / Ascend 910_9391 | `ascend910_9391` | Supported by `Dockerfile.A3` and `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` |
 
-| Item | Dockerfile.A2 | Dockerfile.A3 |
-| ---- | ------------- | ------------- |
-| Base Image | `quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.11` | `quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.11` |
-| SOC_VERSION | `ascend910b1` | `ascend910_9391` |
+Host requirements for the A2/A3 Docker images:
 
-## Get the Docker Image
+| Item | Requirement |
+|---|---|
+| Host OS | Ubuntu 22.04 |
+| Docker | >= 20.10 |
+| Ascend NPU driver | Installed on the host |
 
-### Option A: Use the Pre-built Image (Recommended)
+---
 
-Pull the image that matches your hardware, then tag it with the local name used by the commands below:
+## Quick Start
 
-**For Atlas 900 A2 PODc (Ascend 910B1):**
+### Get the Image
+
+Pull the image that matches the target hardware and apply the local tag used by the commands below:
+
+For Atlas 900 A2 PODc:
 
 ```bash
 docker pull quay.io/ascend/roll:main-a2
-docker tag quay.io/ascend/roll:main-a2 roll:ascend-a2
+docker tag quay.io/ascend/roll:main-a2 roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12
 ```
 
-**For Atlas 900 A3 PODc (Ascend 910_9391):**
+For Atlas 900 A3 PODc:
 
 ```bash
 docker pull quay.io/ascend/roll:main-a3
-docker tag quay.io/ascend/roll:main-a3 roll:ascend-a3
+docker tag quay.io/ascend/roll:main-a3 roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12
 ```
 
-Check https://quay.io/repository/ascend/roll?tab=tags for available image tags. If you use a pre-built image, continue with [Run the Container](#run-the-container).
+### Build the Image
 
-### Option B: Build from Dockerfile
-
-### 1. Clone the ROLL Repository
+Clone the repository before building from a Dockerfile:
 
 ```bash
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL
 ```
 
-### 2. Build the Image
-
-Choose the Dockerfile that matches your hardware:
-
-**For Atlas 900 A2 PODc (Ascend 910B1):**
+Build for Atlas 900 A2 PODc:
 
 ```bash
-docker build -f docker/Dockerfile.A2 -t roll:ascend-a2 .
+docker build -f docker/Dockerfile.A2 -t roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12 .
 ```
 
-**For Atlas 900 A3 PODc (Ascend 910_9391):**
+Build for Atlas 900 A3 PODc:
 
 ```bash
-docker build -f docker/Dockerfile.A3 -t roll:ascend-a3 .
+docker build -f docker/Dockerfile.A3 -t roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 .
 ```
 
-> **Note:** The build process compiles vLLM and vLLM-Ascend from source, which may take a considerable amount of time. Please ensure sufficient disk space (at least 50GB) and network access.
+The build compiles vLLM and vLLM-Ascend from source. Reserve at least 50 GB of disk space and ensure that the build host has network access to the required package and source repositories.
 
-You can also customize the SOC version at build time:
+To override the SOC version explicitly:
 
 ```bash
-# A2 with custom SOC version
-docker build -f docker/Dockerfile.A2 --build-arg SOC_VERSION=ascend910b1 -t roll:ascend-a2 .
+# A2
+docker build -f docker/Dockerfile.A2 \
+    --build-arg SOC_VERSION=ascend910b1 \
+    -t roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12 .
 
-# A3 with custom SOC version
-docker build -f docker/Dockerfile.A3 --build-arg SOC_VERSION=ascend910_9391 -t roll:ascend-a3 .
+# A3
+docker build -f docker/Dockerfile.A3 \
+    --build-arg SOC_VERSION=ascend910_9391 \
+    -t roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 .
 ```
 
-## Run the Container
+---
 
-### Basic Startup
+## Run Container
 
-**For A2:**
+The host must expose the Ascend device files and driver directories to the container. The following example starts an A2 container with eight NPUs:
 
 ```bash
 docker run -dit \
@@ -131,13 +145,15 @@ docker run -dit \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /home/$USER:/home/$USER \
+    -v /path/to/models:/path/to/models \
+    -v /path/to/data:/path/to/data \
     --ipc=host \
     --net=host \
-    roll:ascend-a2 \
+    roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12 \
     /bin/bash
 ```
 
-**For A3:**
+For A3, use `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12`, change the container name, and add the available device files. A full 16-NPU A3 node also requires `/dev/davinci8` through `/dev/davinci15`:
 
 ```bash
 docker run -dit \
@@ -168,118 +184,81 @@ docker run -dit \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /home/$USER:/home/$USER \
-    --ipc=host \
-    --net=host \
-    roll:ascend-a3 \
-    /bin/bash
-```
-
-### Multi-NPU Startup (Recommended for Training)
-
-For multi-NPU training, mount all available NPU devices. Adjust the number of `--device /dev/davinciX` entries according to the NPU count on your node:
-
-```bash
-docker run -dit \
-    --name roll_ascend \
-    --ulimit nofile=65536:65536 \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/Ascend/add-ons:/usr/local/Ascend/add-ons \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /home/$USER:/home/$USER \
     -v /path/to/models:/path/to/models \
     -v /path/to/data:/path/to/data \
     --ipc=host \
     --net=host \
-    roll:ascend-a3 \
+    roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 \
     /bin/bash
 ```
 
-> **Note:**
-> - `--device /dev/davinciX`: Mounts NPU devices. Add or remove entries based on available NPU count.
-> - `--device /dev/davinci_manager`, `--device /dev/devmm_svm`, `--device /dev/hisi_hdc`: Required management devices for Ascend NPU.
-> - `-v /usr/local/Ascend/driver`: Mounts the host Ascend driver.
-> - `-v /path/to/models` and `-v /path/to/data`: Mount model weights and training data directories as needed.
+Adjust the `/dev/davinciX` entries to the number of NPUs available on the host. For multi-NPU training, mount every device required by the training topology.
 
-### Enter the Container
+Enter a running container:
 
 ```bash
-# For A2
+# A2
 docker exec -it roll_a2 /bin/bash
 
-# For A3
+# A3
 docker exec -it roll_a3 /bin/bash
 ```
 
-## Verify the Environment
+---
 
-After entering the container, verify that the Ascend environment is properly configured:
+## Verify Environment
+
+Run these checks inside the container:
 
 ```bash
-# Verify NPU visibility
+# NPU visibility
 npu-smi info
 
-# Verify CANN environment is loaded
+# CANN environment variables
 env | grep -E "ASCEND|LD_LIBRARY_PATH|PATH"
 
-# Verify Python packages
+# Python packages and NPU availability
 python -c "import torch; import torch_npu; print(torch.npu.is_available())"
 python -c "import vllm; print(f'vllm: {vllm.__version__}')"
-python -c "import vllm_ascend; print(f'vllm_ascend available')"
+python -c "import vllm_ascend; print('vllm_ascend available')"
 ```
 
-## Run ROLL Pipelines
+---
 
-### Important Configuration Notes
+## Run ROLL Pipeline on Ascend NPU
 
-Since Megatron-LM is not supported on Ascend NPU, you need to use **FSDP2** as the training backend. Make sure your configuration files use the following settings:
+ROLL's Ascend NPU examples use **FSDP2** as the training backend. Megatron-LM is not supported by the current Ascend setup. Before launching a pipeline, update the model paths and set `device_mapping` according to the NPU topology.
 
-1. Set `strategy_args` to use FSDP2
-
-### Example: RLVR Pipeline
+Example RLVR pipeline:
 
 ```bash
-# After modifying model paths and adjusting device_mapping
 python examples/start_rlvr_pipeline.py \
-    --config_path ascend_examples \
-    --config_name qwen3_30b_rlvr_fsdp2
+    --config_path examples/ascend_examples \
+    --config_name qwen3_8b_rlvr_fsdp2
 ```
 
-> **Note:** The `qwen3_30b_rlvr_fsdp2` configuration is specifically designed for Ascend NPU with FSDP2 as the training backend. Adjust `device_mapping` in the configuration file according to your NPU topology.
+The repository also includes `qwen3_30b_rlvr_fsdp2.yaml` and `run_rlvr_pipeline.sh` under `examples/ascend_examples`. Use a configuration that matches the available NPU memory and topology.
 
-## Troubleshooting
+---
 
-### NPU Not Visible Inside Container
+## Notes
 
-Ensure all required devices and driver paths are mounted correctly. Check with `npu-smi info` inside the container.
+- Install a compatible Ascend NPU driver on the host before starting the container.
+- The A2/A3 Docker images are based on Ubuntu 22.04 and Python 3.12.
+- If `vLLM-Ascend` cannot be imported, reload the Ascend environment inside the container:
 
-### vLLM-Ascend Import Error
+  ```bash
+  source /usr/local/Ascend/ascend-toolkit/set_env.sh
+  source /usr/local/Ascend/nnal/atb/set_env.sh
+  ```
 
-Verify that the CANN environment is properly sourced:
+- These commands are added to `/root/.bashrc` during image build. If you switch to a non-root user, source them manually when necessary.
+- If an NPU is not visible, check the mounted device files, driver paths, and `npu-smi info` output.
 
-```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-```
+---
 
-These commands are automatically added to `/root/.bashrc` during the image build. If you switch to a non-root user, you may need to source them manually.
+## License
 
-### Out of Memory
+ROLL is released under the [Apache License 2.0](https://github.com/alibaba/ROLL/blob/main/LICENSE).
 
-Reduce `rollout_batch_size` or `num_return_sequences_in_group` in your configuration file to lower NPU memory usage.
-
-## Disclaimer
-
-The Ascend support provided in ROLL is intended as a reference example. For production use, please consult official channels.
+CANN, Ascend driver components, Python packages, system libraries, and other pre-installed dependencies may be subject to their own licenses.

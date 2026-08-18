@@ -1,6 +1,6 @@
 # Running RLVR Pipeline on Ascend NPU
 
-Last updated: 04/28/2026.
+Last updated: 08/17/2026.
 
 This guide provides a complete end-to-end walkthrough for running the RLVR (Reinforcement Learning with Verifiable Rewards) pipeline on Huawei Ascend NPU, covering environment setup, data preparation, model download, configuration, training launch, monitoring & evaluation, and checkpoint resumption.
 
@@ -22,7 +22,13 @@ Ensure your hardware and host drivers are ready:
 | ---- | ----------- |
 | Hardware | Atlas 900 A2 PODc (Ascend 910B1) or Atlas 900 A3 PODc (Ascend 910_9391) |
 | Host OS | Ubuntu 22.04 |
-| CANN | 9.0.0 |
+| Python | 3.12 |
+| CANN | 9.1.0 |
+| PyTorch | 2.10.0 |
+| torch-npu | 2.10.0.post4 |
+| vLLM | 0.23.0 |
+| vLLM-Ascend | 0.23.0rc1 |
+| triton-ascend | 3.2.1 |
 | Ascend NPU Driver | Installed on host (`npu-smi info` shows devices) |
 | Docker | >= 20.10 |
 
@@ -33,11 +39,11 @@ Use the pre-built Ascend image that matches your hardware. Official ROLL NPU ima
 ```bash
 # For A2 hardware
 docker pull quay.io/ascend/roll:main-a2
-docker tag quay.io/ascend/roll:main-a2 roll:ascend-a2
+docker tag quay.io/ascend/roll:main-a2 roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12
 
 # For A3 hardware
 docker pull quay.io/ascend/roll:main-a3
-docker tag quay.io/ascend/roll:main-a3 roll:ascend-a3
+docker tag quay.io/ascend/roll:main-a3 roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12
 ```
 
 The current repository includes `docker/Dockerfile.A2` and `docker/Dockerfile.A3` for building custom images. If you maintain a custom image, keep the dependency versions aligned with the pre-built image.
@@ -68,7 +74,7 @@ docker run -dit \
     -v /path/to/data:/data \
     --ipc=host \
     --net=host \
-    roll:ascend-a3 \
+    roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12 \
     /bin/bash
 ```
 

@@ -1,4 +1,4 @@
-FROM quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12-devel
 
 ARG SOC_VERSION="ascend910_9391"
 
@@ -27,29 +27,33 @@ RUN pip config set global.index-url https://mirrors.huaweicloud.com/repository/p
 
 WORKDIR /workspace
 
-RUN git clone --depth 1 -b v0.18.0 https://github.com/vllm-project/vllm.git && \
-    git clone --depth 1 -b v0.18.0 https://github.com/vllm-project/vllm-ascend.git
+RUN git clone --depth 1 -b v0.23.0 https://github.com/vllm-project/vllm.git && \
+    git clone --depth 1 -b v0.23.0rc1 https://github.com/vllm-project/vllm-ascend.git
 
 RUN cd vllm && \
-    pip install -r requirements/build.txt && \
     VLLM_TARGET_DEVICE=empty pip install -v -e . && \
     pip uninstall -y triton && \
     pip cache purge && \
     cd ..
 
-RUN pip install torch==2.9.0+cpu torchvision==0.24.0 torchaudio==2.9.0 \
-    --index-url https://download.pytorch.org/whl/cpu
+RUN pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
 
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     cd vllm-ascend && \
-    pip install -r requirements.txt && \
-    SOC_VERSION=${SOC_VERSION} pip install -v -e . --extra-index-url https://download.pytorch.org/whl/cpu
+    git submodule update --init --recursive && \
+    pip install -r requirements.txt --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    SOC_VERSION=${SOC_VERSION} pip install -v -e . --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+RUN python3 -m pip install --index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
+        --no-deps torch-npu==2.10.0.post4
 
 WORKDIR /workspace/ROLL
 COPY . .
 
-RUN pip install -r requirements_common.txt
+RUN grep -v '^gem-llm' requirements_common.txt > requirements_npu.txt && \
+    pip install -r requirements_npu.txt && \
+    rm -f requirements_npu.txt
 
 RUN pip install "transformers==4.57.6" "tensorboard==2.20.0"
 

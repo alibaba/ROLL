@@ -1,6 +1,6 @@
 # Ascend NPU FAQ
 
-Last updated: 04/27/2026.
+Last updated: 08/17/2026.
 
 This document compiles common issues encountered when running ROLL on Huawei Ascend NPU and their solutions.
 
@@ -51,8 +51,8 @@ These commands are automatically added to `/root/.bashrc` during the Docker imag
 
 **Solution:** Make sure you are using the correct pre-built image for your hardware:
 
-- **Atlas 900 A2 PODc** → Use `roll:ascend-a2` (`ascend910b1`)
-- **Atlas 900 A3 PODc** → Use `roll:ascend-a3` (`ascend910_9391`)
+- **Atlas 900 A2 PODc** → Use `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` (`ascend910b1`)
+- **Atlas 900 A3 PODc** → Use `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` (`ascend910_9391`)
 
 The current repository includes `docker/Dockerfile.A2` and `docker/Dockerfile.A3` for building custom images. If you maintain a custom image, ensure its SOC version matches the target hardware.
 
@@ -284,7 +284,7 @@ To make it persistent, add the following line to `/etc/security/limits.conf` ins
 
 **Solution:**
 
-1. Ensure CANN and vLLM-Ascend versions are compatible (current images use CANN 9.0.0 with vLLM-Ascend v0.18).
+1. Ensure CANN and the Ascend software stack are compatible. The current ROLL A2/A3 images use CANN 9.1.0, PyTorch 2.10.0, torch-npu 2.10.0.post4, vLLM 0.23.0, and vLLM-Ascend v0.23.0rc1.
 2. Check that the SOC version matches your hardware.
 3. Adjust vLLM parameters such as `gpu_memory_utilization` and `max_model_len` in your config.
 4. Verify that `triton-ascend` is installed (not `triton`), as the wrong triton backend can cause kernel compilation fallbacks.
