@@ -53,7 +53,10 @@ To use torch and torch_npu in ROLL, install them using the commands below:
 
 ```
 # Use CPU-only torch when installing outside the pre-built image
-pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+pip install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
+    torch==2.10.0+cpu torchvision==0.25.0 torchaudio==2.10.0
 
 # Install the torch_npu version matching torch/CANN
 python -m pip install \
@@ -78,7 +81,7 @@ git clone -b v0.23.0rc1 --depth 1 https://github.com/vllm-project/vllm-ascend.gi
 cd vllm-ascend
 git submodule update --init --recursive
 
-pip install -e . --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+pip install -e . --no-build-isolation --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 cd ..
 
 # Install the Ascend Triton implementation after the other packages

@@ -53,7 +53,10 @@ conda activate roll
 
 ```
 # 在预构建镜像外手动安装时，使用 CPU 版 torch
-pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+pip install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
+    torch==2.10.0+cpu torchvision==0.25.0 torchaudio==2.10.0
 
 # 安装与 torch/CANN 匹配的 torch_npu
 python -m pip install \
@@ -78,7 +81,7 @@ git clone -b v0.23.0rc1 --depth 1 https://github.com/vllm-project/vllm-ascend.gi
 cd vllm-ascend
 git submodule update --init --recursive
 
-pip install -e . --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+pip install -e . --no-build-isolation --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 cd ..
 
 # 在其他依赖安装完成后安装昇腾 Triton 实现
