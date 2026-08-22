@@ -6,6 +6,7 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import PipelinePar
 from transformers import Seq2SeqTrainingArguments as HFSeq2SeqTrainingArguments
 from transformers import TrainingArguments as HFTrainingArguments
 
+from .platforms import current_platform
 from .utils import get_logger
 
 
@@ -226,6 +227,10 @@ class DistributingParallelArguments:
             "global batch, versus the default behavior of assuming all tokens are non-padded."
         },
     )
+    micro_batch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "MegatronAdaptor alias for per_device_train_batch_size."},
+    )
     transformer_impl: Optional[Literal["local", "transformer_engine"]] = field(
         default=None,
         metadata={
@@ -257,13 +262,29 @@ class DistributingParallelArguments:
     )
     fp8_param: bool = field(
         default=False,
-        # TODO: fp8_param does not work with mxfp8 for now, check TE support later.
-        metadata={"help": "If true, use fp8 weights during training instead of bf16."},
+        metadata={"help": "If true, use trainable fp8 weights during Megatron training instead of bf16."},
     )
     fp8: Optional[str] = field(
         default=None,
         metadata={
             "help": "FP8 format to use. Supported formats: 'e4m3', 'hybrid'. Do not change if unsure",
+        },
+    )
+    fp8_format: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Alias of fp8 used by MegatronAdaptor on Ascend. If omitted, fp8 is used.",
+        },
+    )
+    use_flash_attn: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Forward the MegatronAdaptor NPU flash attention switch."},
+    )
+    use_flash_attn_npu_batch_invariant: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Use MegatronAdaptor flash-attn-npu batch-invariant attention. "
+            "When enabled on NPU, use_flash_attn is forced to False to avoid duplicate attention patches.",
         },
     )
     additional_configs: Optional[Union[str, dict]] = field(
@@ -284,6 +305,34 @@ class DistributingParallelArguments:
 
         if self.recompute_modules is not None and isinstance(self.recompute_modules, str):
             self.recompute_modules = self.recompute_modules.split(",")
+
+        if self.micro_batch_size is None and getattr(self, "per_device_train_batch_size", None) is not None:
+            self.micro_batch_size = self.per_device_train_batch_size
+
+        if self.fp8 and self.fp8_format and self.fp8 != self.fp8_format:
+            raise ValueError(f"fp8 ({self.fp8}) and fp8_format ({self.fp8_format}) must match when both are set.")
+        if self.fp8_recipe and not (self.fp8 or self.fp8_format):
+            raise ValueError("fp8_recipe requires fp8 or fp8_format to enable Megatron FP8 training.")
+        if self.fp8 and self.fp8_format is None:
+            self.fp8_format = self.fp8
+        if self.fp8_format and self.fp8 is None:
+            self.fp8 = self.fp8_format
+        # Ascend uses TransformerEngine for both reduced-precision and FP8 paths;
+        # the FP8 format and recipe are configured independently by ``self.fp8`` and ``self.fp8_recipe``.
+        if current_platform.is_npu() and self.transformer_impl in (None, "local"):
+            self.transformer_impl = "transformer_engine"
+        if self.fp8 and self.transformer_impl == "local":
+            raise ValueError("Megatron FP8 training requires transformer_impl='transformer_engine'.")
+        if (
+            current_platform.is_npu()
+            and self.transformer_impl == "transformer_engine"
+            and self.use_flash_attn is None
+        ):
+            self.use_flash_attn = not bool(self.use_flash_attn_npu_batch_invariant)
+        if current_platform.is_npu() and self.use_flash_attn_npu_batch_invariant:
+            self.use_flash_attn = False
+        if self.fp8_param:
+            self._validate_fp8_param_training()
 
         logger.info(f"cuda_graph_scope before processing: {self.cuda_graph_scope}, type: {type(self.cuda_graph_scope)}")
         if self.cuda_graph_scope is not None and isinstance(self.cuda_graph_scope, str):
@@ -309,6 +358,18 @@ class DistributingParallelArguments:
             self.virtual_pipeline_model_parallel_size = num_stages // self.pipeline_model_parallel_size
             if self.virtual_pipeline_model_parallel_size == 1:
                 self.virtual_pipeline_model_parallel_size = None
+
+    def _validate_fp8_param_training(self):
+        if not current_platform.is_npu():
+            raise ValueError("fp8_param=True is only supported for Ascend NPU ModelSlim MXFP8 checkpoints.")
+        if self.transformer_impl is None:
+            self.transformer_impl = "transformer_engine"
+        if self.transformer_impl != "transformer_engine":
+            raise ValueError("fp8_param=True requires transformer_impl='transformer_engine'.")
+        if not self.fp8:
+            raise ValueError("fp8_param=True requires fp8 or fp8_format to be set.")
+        if not self.fp8_recipe:
+            raise ValueError("fp8_param=True requires fp8_recipe to be set.")
 
     def get_config_dict(self):
         config_dict = {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) is not None}

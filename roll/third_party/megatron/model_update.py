@@ -28,6 +28,32 @@ if is_peft_available():
 logger = get_logger()
 
 
+def normalize_weight_for_model_update(weight: torch.Tensor) -> torch.Tensor:
+    """Return a regular floating tensor suitable for HF conversion and vLLM loading."""
+    if not torch.is_tensor(weight):
+        dequantize = getattr(weight, "dequantize", None)
+        if callable(dequantize):
+            weight = dequantize()
+            if not torch.is_tensor(weight):
+                raise TypeError(f"Unsupported dequantized weight type for model update: {type(weight)!r}")
+        else:
+            data = getattr(weight, "data", None)
+            if torch.is_tensor(data):
+                dtype = getattr(weight, "dtype", None)
+                weight = data.to(dtype=dtype) if isinstance(dtype, torch.dtype) and data.dtype != dtype else data
+            else:
+                raise TypeError(f"Unsupported weight type for model update: {type(weight)!r}")
+
+    if str(weight.dtype).startswith("torch.float8"):
+        return weight.to(torch.bfloat16)
+    return weight
+
+
+def estimate_weight_size_for_model_update(weight: torch.Tensor, group_size: int = 1) -> int:
+    weight = normalize_weight_for_model_update(weight)
+    return weight.numel() * weight.element_size() * group_size
+
+
 def gather_and_convert_weights(
     weights_info: list[tuple[str, torch.Tensor]],
     model_converter: ModelConverter,
@@ -43,6 +69,7 @@ def gather_and_convert_weights(
         handles, gathered_named_weights = [], []
         group_size = dist.get_world_size(ep_group)
         for mcore_name, weight in weights_info:
+            weight = normalize_weight_for_model_update(weight)
             if group_size == 1:
                 gathered_named_weights.append((mcore_name, [weight]))
                 handles.append(None)
@@ -73,6 +100,7 @@ def gather_and_convert_weights(
     handles, gathered_named_weights = [], []
     group_size = 1 if tp_group is None else dist.get_world_size(tp_group)
     for mcore_name, weight in weights_info:
+        weight = normalize_weight_for_model_update(weight)
         if group_size == 1:
             gathered_named_weights.append((mcore_name, [weight]))
             handles.append(None)
@@ -133,9 +161,9 @@ def _gather_hf_weights(
         group_size = 1 if group is None else dist.get_world_size(group)
         group_size *= 1 if ep_group is None else dist.get_world_size(ep_group)
         for mcore_name, weight in weights_info:
-            weight_size = weight.numel() * weight.element_size() * group_size
+            weight_size = estimate_weight_size_for_model_update(weight, group_size)
             if buffer_size is not None and waiting_weights_size + weight_size > buffer_size:
-                yield gather_and_convert_weights(waiting_weights, model_converter, group, ep_group)
+                yield gather_and_convert_weights(waiting_weights, model_converter, group, ep_group, **kwargs)
                 waiting_weights, waiting_weights_size = [], 0
             waiting_weights.append((mcore_name, weight))
             waiting_weights_size += weight_size
@@ -186,6 +214,7 @@ def gather_weights_meta_cross_pp(models: list[McaGPTModel]):
     model_converter = ModelConverter(model_config, to_hf=True, efficient_mode=True)
     named_weights_meta = []
     for mcore_name, weight in _iter_vp_stage_named_weights(models, model_converter):
+        weight = normalize_weight_for_model_update(weight)
         weight_size = weight.numel() * weight.element_size()
         if model_converter.dist_converter.is_expert_parallel_weight(mcore_name):
             weight_size *= model_config.expert_model_parallel_size * model_config.expert_tensor_parallel_size
@@ -235,7 +264,8 @@ def gather_all_hf_weights(models: list[McaGPTModel], buffer_size: int, weights_m
         models[0].config, pipeline_model_parallel_rank=pp_rank, to_hf=True, efficient_mode=True
     )
     cur_stage_state_dict = {
-        mcore_name: weight for mcore_name, weight in _iter_vp_stage_named_weights(models, model_converter)
+        mcore_name: normalize_weight_for_model_update(weight)
+        for mcore_name, weight in _iter_vp_stage_named_weights(models, model_converter)
     }
 
     def _gather_batch_params(named_weights_with_stage: list[tuple[str, torch.Tensor, int]]):

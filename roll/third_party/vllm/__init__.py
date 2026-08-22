@@ -1,5 +1,6 @@
 import os
 import pathlib
+from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List
 
 import dataclasses
@@ -15,6 +16,7 @@ from roll.platforms import current_platform
 import roll.third_party.vllm.fp8 as fp8
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
+from roll.utils.vllm_online_quantization import apply_online_quantization_config
 
 
 logger = get_logger()
@@ -47,7 +49,7 @@ logger.info(f"Using vllm version {vllm.__version__}")
 
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     kwargs["enable_sleep_mode"] = True
-    if "attention_config" not in kwargs and "attention_config" in {
+    if not current_platform.is_npu() and "attention_config" not in kwargs and "attention_config" in {
         f.name: f for f in dataclasses.fields(AsyncEngineArgs)
     }:  # vllm<=0.12.0 not has attention_config in AsyncEngineArgs
         kwargs["attention_config"] = {"backend": "FLASH_ATTN"}
@@ -79,11 +81,19 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
         # os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN" # for 280 rollout pipeline 乱码
 
+    online_quant_config = apply_online_quantization_config(kwargs)
+    if online_quant_config is not None:
+        logger.info(
+            "Enabled ROLL online quantization, %d quant config entries",
+            len(online_quant_config),
+        )
+
     engine_args = AsyncEngineArgs(**kwargs)
     # VLLM_USE_V1 may be modified inside create_engine_config
     vllm_config = engine_args.create_engine_config(UsageContext.ENGINE_CONTEXT)
 
     fp8.update_quant_config(config=kwargs, vllm_config=vllm_config)
+    fp8.update_mxfp8_quant_config(vllm_config)  # Ascend NPU MXFP8 detection & setup
 
     # change parallel_config.placement_group for CustomRayDistributedExecutor
     parallel_config = vllm_config.parallel_config

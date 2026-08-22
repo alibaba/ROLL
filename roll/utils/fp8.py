@@ -1,6 +1,53 @@
-from typing import List
+from collections.abc import Mapping
+from typing import Any, List
 
 import torch
+
+
+def _get_quant_config_value(config: Any, key: str, default: Any = None) -> Any:
+    return config.get(key, default) if isinstance(config, Mapping) else getattr(config, key, default)
+
+
+def _is_ascend_config(config: Any) -> bool:
+    return str(_get_quant_config_value(config, "quant_method", "")).lower() == "ascend"
+
+
+def is_mxfp8_ascend(quant_config: Any) -> bool:
+    """Return whether this is an Ascend MXFP8 configuration."""
+    if quant_config is None:
+        return False
+
+    return (
+        quant_config.__class__.__name__ == "AscendModelSlimConfig"
+        or _is_ascend_config(quant_config)
+        or any(
+            _is_ascend_config(_get_quant_config_value(quant_config, key))
+            for key in ("quant_description", "quantization_config")
+        )
+    )
+
+
+def per_block_fp8_quant_ascend(
+    param_value: torch.Tensor,
+    dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a tensor using Ascend MXFP8 dynamic quantization."""
+    try:
+        import torch_npu
+    except ImportError as exc:
+        raise RuntimeError("torch_npu is required for Ascend MXFP8 quantization.") from exc
+
+    npu = getattr(torch, "npu", None)
+    if npu is None or not npu.is_available():
+        raise RuntimeError("No available Ascend NPU was detected.")
+
+    weight, scale = torch_npu.npu_dynamic_mx_quant(
+        param_value.to(dtype or torch.bfloat16),
+        axis=-1,
+        dst_type=torch_npu.float8_e4m3fn,
+    )
+    return weight, scale.flatten(-2, -1)
+
 
 # Block quant operator
 #

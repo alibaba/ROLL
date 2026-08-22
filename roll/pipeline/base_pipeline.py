@@ -96,6 +96,7 @@ class BasePipeline:
     def model_update(self, global_step):
         metrics = {}
         for model_update_group in self.model_update_groups:
+            model_update_group.tgt_cluster.begin_model_update()
             metrics.update(model_update_group.model_update(global_step))
             model_update_group.tgt_cluster.process_weights_after_loading()
         return metrics

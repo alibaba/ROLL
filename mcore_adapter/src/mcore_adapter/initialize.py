@@ -5,6 +5,10 @@ import numpy as np
 import torch
 from megatron.core import mpu, tensor_parallel
 
+from .npu_runtime import (
+    bootstrap_npu_runtime as _bootstrap_npu_runtime,
+    sync_megatron_adaptor_args as _sync_megatron_adaptor_args,
+)
 from .platforms import current_platform
 from .training_args import TrainingArguments
 from .utils import get_logger
@@ -29,13 +33,15 @@ def _set_random_seed(seed_):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if current_platform.device_count() > 0:
+        if (current_platform.is_cuda() or current_platform.is_npu()) and current_platform.device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(seed)
     else:
         raise ValueError("Seed ({}) should be a positive integer.".format(seed))
 
 
 def initialize_megatron(args: "TrainingArguments"):
+    _bootstrap_npu_runtime()
+    _sync_megatron_adaptor_args(args)
     if not is_distribute_initialized():
         _initialize_distributed(args)
     _set_random_seed(args.seed)

@@ -1,29 +1,40 @@
 import gc
 import hashlib
 import json
-import time
 from collections import OrderedDict
 from typing import Iterable, Tuple
 
 import torch
-import vllm
-from packaging.version import Version
 
 from roll.platforms import current_platform
-from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
+from roll.third_party.vllm.vllm_utils import (
+    TensorLoRARequest,
+    patch_vllm_lora_manager,
+    patch_vllm_moe_model_weight_loader,
+)
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
+from roll.utils.fp8 import is_mxfp8_ascend
 from roll.utils.logging import get_logger
-from roll.utils.offload_states import clear_memory
 from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tensors_from_bucket
 
-# Apply GDN attention patch at module import time.
-# This ensures the patch is applied in EngineCore subprocesses as well,
-# since this module is imported when worker_extension_cls is loaded.
-from roll.third_party.vllm.gdn_patcher import patch_gdn_attention
-patch_gdn_attention()
-
 logger = get_logger()
+
+
+def _restore_mxfp8_weights(model: torch.nn.Module) -> None:
+    """Restore vLLM-Ascend MXFP8 weights to checkpoint layout before refit."""
+    restored = 0
+    for module in model.modules():
+        if not getattr(module, "_mxfp8_transformed", False):
+            continue
+        quant_method = getattr(module, "quant_method", None)
+        quant_method = getattr(quant_method, "quant_method", quant_method)
+        restore = getattr(quant_method, "restore_weights_for_rl_loading", None)
+        if restore is not None:
+            restore(module)
+            restored += 1
+    if restored:
+        logger.info("MXFP8: restored %d modules before weight update", restored)
 
 
 class TensorLoraManager:
@@ -35,90 +46,82 @@ class TensorLoraManager:
         self.lora_params[name] = weight
 
     def build_request(self, peft_config: dict) -> TensorLoRARequest:
-        """
-        Generate a unique LoRA ID based on the PEFT configuration rather than
-        using a timestamp to assert all tp-ranks get the same LoRA ID.
-        """
+        """Build the same LoRA ID on every TP rank from the PEFT config."""
         self.add_lora_count += 1
         peft_config["add_lora_count"] = self.add_lora_count
         peft_config_str = json.dumps(peft_config, sort_keys=True)
-        hash_obj = hashlib.sha256(peft_config_str.encode("utf-8"))
-        hex_dig = hash_obj.hexdigest()
-        lora_int_id = int(hex_dig, 16) % 0x7FFFFFFF
-
-        lora_request = TensorLoRARequest(
-            lora_name=f"{lora_int_id}",
+        lora_int_id = int(hashlib.sha256(peft_config_str.encode()).hexdigest(), 16) % 0x7FFFFFFF
+        request = TensorLoRARequest(
+            lora_name=str(lora_int_id),
             lora_int_id=lora_int_id,
             lora_path="dummy_lora_path",
             peft_config=peft_config,
             lora_tensors=self.lora_params,
         )
-        del self.lora_params
         self.lora_params = OrderedDict()
-        return lora_request
+        return request
 
 
 class WorkerBase:
     def custom_init_worker(self, *args, **kwargs):
-        self.weight_loaded: bool = True
-        self.kv_cache_loaded: bool = True
-        self.buffers = None
-        self.buffer_cache = None
+        self.weight_loaded = True
+        self.kv_cache_loaded = True
         self.tensor_lora_manager = TensorLoraManager()
+        self._is_mxfp8_model = is_mxfp8_ascend(self.vllm_config.quant_config)
+        self._model_update_in_progress = False
 
     def reload_model(self):
         if not self.weight_loaded:
             self.wake_up(["weights"])
             self.weight_loaded = True
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # before updating the parameters, we need to reinitialize the previously released model
+    def begin_model_update(self):
+        if not self._is_mxfp8_model:
+            return
+        if self._model_update_in_progress:
+            raise RuntimeError("MXFP8 model update is already in progress")
         self.reload_model()
-        if vllm.__version__ < "0.8.5":
-            from roll.third_party.vllm.vllm_utils import patch_vllm_moe_model_weight_loader
+        _restore_mxfp8_weights(self.model_runner.model)
+        self._model_update_in_progress = True
 
-            patch_vllm_moe_model_weight_loader(self.model_runner.model)
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        self.reload_model()
+        auto_finalize = self._is_mxfp8_model and not self._model_update_in_progress
+        if auto_finalize:
+            self.begin_model_update()
 
-        # Convert to list for multiple iterations (draft model also needs the same weights)
         weights_list = list(weights)
-
-        # Update target model (skips mtp.* prefixed weights via skip_prefixes)
+        patch_vllm_moe_model_weight_loader(self.model_runner.model)
         self.model_runner.model.load_weights(weights=weights_list)
 
-        # Update drafter model (MTP/EAGLE) if exists
-        # Drafter models like EagleProposer and DraftModelProposer have a model attribute
-        # that needs to be updated separately with the same weights
-        if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
+        drafter = getattr(self.model_runner, "drafter", None)
+        if hasattr(drafter, "model"):
             logger.info("Updating drafter (MTP/EAGLE) model weights...")
-            self.model_runner.drafter.model.load_weights(weights=weights_list)
+            patch_vllm_moe_model_weight_loader(drafter.model)
+            drafter.model.load_weights(weights=weights_list)
+
+        if auto_finalize:
+            self.process_weights_after_loading()
 
     def load_states(self):
         self.reload_model()
         if not self.kv_cache_loaded:
             self.wake_up(["kv_cache"])
             self.kv_cache_loaded = True
-        if vllm.__version__ < "0.8.5" and self.buffers is not None:
-            # https://github.com/vllm-project/vllm/issues/16564
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self.buffers:
-                    buffer.data.copy_(self.buffers[name].data)
-            self.buffers = None
 
     def offload_states(self, level):
-        assert (self.weight_loaded and self.kv_cache_loaded) or (not self.weight_loaded and not self.kv_cache_loaded)
+        assert (self.weight_loaded and self.kv_cache_loaded) or (
+            not self.weight_loaded and not self.kv_cache_loaded
+        )
         if not self.weight_loaded:
             return
-        if vllm.__version__ < "0.8.5" and level == 2:
-            # https://github.com/vllm-project/vllm/issues/16564
-            model = self.model_runner.model
-            self.buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
         self.sleep(level)
         self.weight_loaded = False
         self.kv_cache_loaded = False
         if hasattr(self, "recv_manager"):
             self.recv_manager.clear()
-        clear_memory()
+        gc.collect()
+        current_platform.empty_cache()
 
     def setup_collective_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         group_rank = self.rank + rank_offset
@@ -159,28 +162,21 @@ class WorkerBase:
             for name, weight in named_params:
                 self.tensor_lora_manager.add_weight(name, weight)
             return
-        self.load_weights([(name, weight) for name, weight in named_params])
+        self.load_weights(named_params)
 
     def process_weights_after_loading(self):
-        if Version(vllm.__version__) >= Version("0.11.1"):
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading
-            from vllm.utils.torch_utils import set_default_torch_dtype
-            device_config = self.device_config
-            load_config = self.vllm_config.load_config
-            load_device = (device_config.device if load_config.device is None else load_config.device)
-            target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype):
-                process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
-        if (Version("0.11.0") == Version(vllm.__version__) or
-                Version("0.11.1rc1") == Version(vllm.__version__) or
-                Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__)):
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading,set_default_torch_dtype
-            device_config = self.device_config
-            load_config = self.vllm_config.load_config
-            load_device = (device_config.device if load_config.device is None else load_config.device)
-            target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype):
-                process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.utils import process_weights_after_loading
+        from vllm.utils.torch_utils import set_default_torch_dtype
+
+        load_device = self.vllm_config.load_config.device or self.device_config.device
+        with set_default_torch_dtype(self.model_config.dtype), set_current_vllm_config(self.vllm_config):
+            process_weights_after_loading(
+                self.model_runner.model,
+                self.model_config,
+                torch.device(load_device),
+            )
+        self._model_update_in_progress = False
 
 
 class WorkerV1(WorkerBase):

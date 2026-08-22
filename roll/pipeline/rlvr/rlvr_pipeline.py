@@ -328,12 +328,8 @@ class RLVRPipeline(BasePipeline):
                 is_val=True,
             )
 
-        refs = []
-        refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        if self.reward_model_cluster:
-            refs.extend(self.reward_model_cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
-
+        # Reference workers offload their model states at the end of initialize().
+        # Initialize them before vLLM reserves its KV cache on colocated devices.
         if self.use_ref_model:
             if clusters_have_disjoint_devices(self.references):
                 ref_init_refs = []
@@ -345,7 +341,13 @@ class RLVRPipeline(BasePipeline):
                     ref_cluster.initialize(pipeline_config=self.pipeline_config, blocking=True)
 
         refs = []
-        for key, cluster in self.rewards.items():
+        refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
+        if self.reward_model_cluster:
+            refs.extend(self.reward_model_cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
+        ray.get(refs)
+
+        refs = []
+        for cluster in self.rewards.values():
             refs.extend(cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
 

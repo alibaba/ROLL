@@ -1,3 +1,4 @@
+import os
 from importlib import import_module
 
 import torch
@@ -45,7 +46,23 @@ class NpuPlatform(Platform):
             "RAY_get_check_signal_interval_milliseconds": "1",
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             "RAY_CGRAPH_get_timeout": '600',
+            # ---- Ascend NPU quantization / inference env vars ----
+            # Disable vLLM-Ascend's automatic quantization detection – ROLL manages
+            # quantization explicitly (MXFP8 online quant, blockwise FP8, etc.).
+            "VLLM_ASCEND_AUTO_DETECT_QUANTIZATION": "0",
+            # Required All2All backend for Ascend NPU in vLLM.
+            "VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv",
+            # Disable NZ format on NPU (required for compatibility).
+            "VLLM_ASCEND_ENABLE_NZ": "0",
+            # Prevent hanging / crash during weight sync between actor and rollout
+            # in disaggregated mode.  See:
+            # https://docs.vllm.ai/en/latest/usage/troubleshooting.html#known-issues
+            "NCCL_CUMEM_ENABLE": "0",
         }
+        # Support different TASK_QUEUE_ENABLE mode for train vs rollout on NPU.
+        task_queue = os.environ.get("VLLM_ASCEND_TASK_QUEUE_ENABLE", None)
+        if task_queue is not None:
+            env_vars["TASK_QUEUE_ENABLE"] = task_queue
         return env_vars
 
     @classmethod

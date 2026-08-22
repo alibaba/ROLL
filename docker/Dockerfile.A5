@@ -1,0 +1,75 @@
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-950-ubuntu22.04-py3.12-devel
+
+ARG VLLM_VERSION=v0.23.0
+ARG VLLM_ASCEND_VERSION=v0.23.0rc1
+ARG MEGATRON_VERSION=core_r0.17.0
+ARG MEGATRON_ADAPTOR_VERSION=core_r0.17.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple \
+    VLLM_TARGET_DEVICE=empty \
+    ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest \
+    SOC_VERSION=ascend950pr_9599 \
+    HF_ENDPOINT=https://hf-mirror.com \
+    VLLM_USE_MODELSCOPE=True \
+    PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \
+    TASK_QUEUE_ENABLE=2 \
+    HCCL_NPU_SOCKET_PORT_RANGE=auto
+
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential ca-certificates git iproute2 \
+        openjdk-17-jdk pkg-config tmux zip && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --upgrade pip setuptools wheel setuptools-rust setuptools-scm packaging "cmake>=3.26" ninja && \
+    python3 -m pip install --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 && \
+    python3 -m pip install --no-deps torch-npu==2.10.0.post4 && \
+    python3 -m pip install --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple \
+        triton-ascend==3.2.2
+
+WORKDIR /workspace
+
+RUN git clone --depth 1 --branch ${VLLM_VERSION} \
+        https://github.com/vllm-project/vllm.git vllm-${VLLM_VERSION} && \
+    git clone --depth 1 --branch ${VLLM_ASCEND_VERSION} \
+        https://github.com/vllm-project/vllm-ascend.git vllm-ascend-${VLLM_ASCEND_VERSION} && \
+    git clone --depth 1 --branch ${MEGATRON_VERSION} \
+        https://github.com/NVIDIA/Megatron-LM.git Megatron-LM && \
+    git clone --depth 1 https://gitcode.com/Ascend/TransformerEngineNPU TransformerEngineNPU && \
+    git clone --depth 1 --branch ${MEGATRON_ADAPTOR_VERSION} \
+        https://gitcode.com/Ascend/MegatronAdaptor MegatronAdaptor
+
+RUN source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    python3 -m pip install -r /workspace/vllm-${VLLM_VERSION}/requirements/common.txt && \
+    python3 -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84 && \
+    python3 -m pip install --no-build-isolation --no-deps -e /workspace/vllm-${VLLM_VERSION} && \
+    python3 -m pip install decorator msgpack numba pandas pandas-stubs \
+        pybind11 quart scipy && \
+    python3 -m pip install --no-build-isolation --no-deps \
+        -e /workspace/vllm-ascend-${VLLM_ASCEND_VERSION}
+
+WORKDIR /workspace/ROLL
+COPY . .
+
+RUN source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    python3 -m pip install --ignore-requires-python gem-llm==0.0.4 && \
+    grep -v '^gem-llm==0.0.4$' requirements_common.txt > /tmp/requirements_common_nogem.txt && \
+    python3 -m pip install -r /tmp/requirements_common_nogem.txt && \
+    python3 -m pip install deepspeed==0.16.4 tensorboard && \
+    python3 -m pip install --no-build-isolation -e /workspace/Megatron-LM && \
+    python3 -m pip install --no-build-isolation -e /workspace/TransformerEngineNPU && \
+    python3 -m pip install --no-build-isolation -e /workspace/MegatronAdaptor && \
+    python3 -m pip install --no-build-isolation -e /workspace/ROLL && \
+    rm -f /tmp/requirements_common_nogem.txt
+
+RUN echo "source /usr/local/Ascend/ascend-toolkit/set_env.sh" >> /root/.bashrc && \
+    echo "source /usr/local/Ascend/nnal/atb/set_env.sh" >> /root/.bashrc && \
+    echo "export HCCL_NPU_SOCKET_PORT_RANGE=auto" >> /root/.bashrc
+
+CMD ["bash"]
