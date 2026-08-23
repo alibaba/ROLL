@@ -3986,5 +3986,20 @@
       "total": 238,
       "open": 26
     }
+  },
+  "2026-08-23": {
+    "stars": 3368,
+    "forks": 307,
+    "contributors": 56,
+    "commits": 497,
+    "issues": {
+      "total": 234,
+      "open": 100,
+      "fixRate": 57
+    },
+    "prs": {
+      "total": 238,
+      "open": 26
+    }
   }
 }
