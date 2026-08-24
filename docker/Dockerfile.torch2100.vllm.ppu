@@ -1,0 +1,63 @@
+FROM pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.10.0-ubuntu24.04-cuda13.0-vllm0.17.1-py312
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm-256color
+ENV PIP_ROOT_USER_ACTION=ignore
+
+# Internal PyPI index; packages missing from it fall back to the Aliyun mirror
+ENV PIP_INDEX_URL=https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+ENV PIP_TRUSTED_HOST=pkg.flytiger-eco.com
+ENV PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+
+# Base image /tmp lacks write permission which breaks apt; restore standard permission first
+RUN chmod 1777 /tmp && apt-get update \
+    && apt-get install -y --no-install-recommends iproute2 tmux zip git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /opt/ROLL
+WORKDIR /opt/ROLL
+
+# Pin PPU-custom versions of torch/vllm/flash-attn etc. so public indexes cannot override them
+ENV PIP_CONSTRAINT=/opt/ROLL/docker/constraints_ppu.txt
+
+RUN pip install --upgrade pip setuptools wheel
+
+# gem-llm==0.0.4 wrongly excludes Python 3.12.x; install it separately with --ignore-requires-python.
+# --no-build-isolation: SAIL PPU sdist packages import torch in setup.py.
+RUN sed -e '/^gem-llm/d' \
+        -e '\|^\./mcore_adapter|d' \
+        -e 's|^-r requirements_vision.txt|-r /opt/ROLL/requirements_vision.txt|' \
+        requirements_common.txt > /tmp/requirements_common_ppu.txt \
+    && sed 's|-r requirements_common.txt|-r /tmp/requirements_common_ppu.txt|' requirements_torch2100_vllm_ppu.txt > /tmp/requirements_ppu.txt \
+    && pip install --no-build-isolation -r /tmp/requirements_ppu.txt \
+    && pip install --no-build-isolation --ignore-requires-python gem-llm==0.0.4
+
+# Install mcore_adapter with deps: pulls full megatron-core to replace the base image's stripped stub.
+RUN pip install --no-build-isolation /opt/ROLL/mcore_adapter
+
+# torchvision (needed by vLLM Qwen3.5 VL) from SAIL only: clear PIP_EXTRA_INDEX_URL so the
+# stock mirror wheel is not preferred over the PPU build.
+RUN PIP_EXTRA_INDEX_URL= pip install --no-deps --no-build-isolation torchvision==0.25.0 \
+    -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple \
+    --trusted-host pkg.flytiger-eco.com
+
+# FLA for Qwen3.5 hybrid attention: install internal fla to back up the PPU kda shims,
+# replace with fla-org build, restore shims. Must precede 'pip install -e .'.
+RUN pip install -q --no-deps --no-build-isolation fla \
+    && mkdir -p /tmp/fla_ppu_backup \
+    && cp /usr/local/lib/python3.12/site-packages/fla/kda.py \
+          /usr/local/lib/python3.12/site-packages/fla/_fused_sigmoid_gating_cuda.cpython-312-x86_64-linux-gnu.so \
+          /tmp/fla_ppu_backup/ \
+    && pip uninstall -y -q fla \
+    && cd /tmp && curl -sL -o fla.tar.gz https://github.com/fla-org/flash-linear-attention/archive/refs/heads/main.tar.gz \
+    && pip install -q --no-deps --no-build-isolation ./fla.tar.gz \
+    && cp /tmp/fla_ppu_backup/kda.py \
+          /tmp/fla_ppu_backup/_fused_sigmoid_gating_cuda.cpython-312-x86_64-linux-gnu.so \
+          /usr/local/lib/python3.12/site-packages/fla/
+
+RUN pip install -e .
+
+RUN python -c "import torch, vllm, roll; print('torch:', torch.__version__); print('vllm:', vllm.__version__)" \
+    && python -c "import transformers, megatron.core; from transformers.models.qwen3_5 import modeling_qwen3_5; from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig; import importlib.metadata as md; print('transformers:', transformers.__version__); print('megatron_core:', md.version('megatron_core'))" \
+    && python -c "from megatron.core import DistributedDataParallel; import mcore_adapter; print('megatron DDP + mcore_adapter OK')" \
+    && python -c "from fla.modules import FusedRMSNormGated; from fla.ops.gated_delta_rule import chunk_gated_delta_rule; import fla.kda; print('FLA (fla.modules + fla.kda) OK')"
