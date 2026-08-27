@@ -8,10 +8,8 @@ from ..converter.convert_utils import (
     MCA_MTP_MOE_PREFIX,
     MCA_MTP_PREFIX,
     StackedTensors,
-    convert_to_mca_prefix,
     get_weight_prefix,
     remove_mca_mtp_weight_prefix,
-    remove_weight_prefix,
 )
 from ..converter.dist_converter import (
     DistParallelConfig,
@@ -93,6 +91,21 @@ class Qwen3_5Template(VisionTemplate):
         self.hf_ln_pattern = re.compile(r"^model\.language_model\.layers\.(\d+)\.input_layernorm\.weight$")
         self.mca_ln_pattern = re.compile(r"^decoder\.layers\.(\d+)\.self_attention\.in_proj\.layer_norm_weight$")
 
+    def _mtp_name_to_prefixes(self, hf_name: str) -> tuple[str, str, str]:
+        """Split an MTP weight name into (weight_prefix, original_name, mca_prefix).
+
+        Handles both per-expert weights (.mlp.experts.0.down_proj.weight, Qwen3.5)
+        and fused expert weights without an expert index (.mlp.experts.down_proj, Qwen3.6).
+        """
+        if self.hf_moe_prefix is not None and self.hf_moe_prefix in hf_name:
+            weight_prefix = get_weight_prefix(hf_name, "mtp.layers.", moe_prefix=self.hf_moe_prefix)
+            mca_prefix = weight_prefix.replace(self.hf_moe_prefix, MCA_MTP_MOE_PREFIX, 1)
+        else:
+            weight_prefix = "mtp.layers.0" if hf_name.startswith("mtp.layers.0") else "mtp"
+            has_transformer_layer = "self_attention" in hf_name or "mlp" in hf_name or "input_layernorm" in hf_name
+            mca_prefix = "mtp.layers.0" + (".mtp_model_layer" if has_transformer_layer else "")
+        return weight_prefix, hf_name.removeprefix(weight_prefix), mca_prefix
+
     def add_hf_weight(self, name, weight):
         match = re.match(self.hf_ln_pattern, name)
         layer_idx = int(match.group(1)) if match else None
@@ -100,10 +113,7 @@ class Qwen3_5Template(VisionTemplate):
             return {f"decoder.layers.{layer_idx}.self_attention.in_proj.layer_norm_weight": weight}
         if not name.startswith("mtp"):
             return super().add_hf_weight(name, weight)
-        weight_prefix = "mtp.layers.0" if name.startswith("mtp.layers.0") else "mtp"
-        if self.hf_moe_prefix is not None and self.hf_moe_prefix in name:
-            weight_prefix = get_weight_prefix(name, "mtp.layers.", moe_prefix=self.hf_moe_prefix)
-        original_name = name.removeprefix(weight_prefix)
+        weight_prefix, original_name, mca_prefix = self._mtp_name_to_prefixes(name)
         if weight_prefix not in self.prefix_name_to_weight:
             self.prefix_name_to_weight[weight_prefix] = {}
         self.prefix_name_to_weight[weight_prefix][original_name] = weight
@@ -120,11 +130,6 @@ class Qwen3_5Template(VisionTemplate):
             # not ready to convert
             self.prefix_name_to_weight[weight_prefix].update(name_to_weight)
             return conver_res
-        has_transformer_layer = "self_attention" in name or "mlp" in name or "input_layernorm" in name
-        mca_prefix = "mtp.layers.0" + (".mtp_model_layer" if has_transformer_layer else "")
-        if self.hf_moe_prefix is not None and self.hf_moe_prefix in name:
-            mca_prefix = convert_to_mca_prefix(weight_prefix, self.hf_layer_prefix, self.hf_moe_prefix)
-            mca_prefix = mca_prefix.replace("mtp.layers.0", "mtp.layers.0.mtp_model_layer", 1)
         return {mca_prefix + name: weight for name, weight in conver_res.items()}
 
     def add_mca_weight(self, name, weight, **kwargs):
@@ -158,8 +163,8 @@ class Qwen3_5Template(VisionTemplate):
             self.prefix_name_to_weight[weight_prefix].update(name_to_weight)
             return conver_res
         if MCA_MTP_MOE_PREFIX in name:
-            # Convert MTP MoE prefix: remove .mtp_model_layer and .local_experts.
-            hf_prefix = weight_prefix.replace(".mtp_model_layer", "").replace(".local_experts.", ".")
+            # Convert MTP MoE prefix back to the HF expert prefix (inverse of the forward mapping)
+            hf_prefix = weight_prefix.replace(MCA_MTP_MOE_PREFIX, self.hf_moe_prefix, 1)
         else:
             hf_prefix = "mtp.layers.0" if name.startswith("mtp.layers.0.mtp_model_layer") else "mtp"
         result = {hf_prefix + name: weight for name, weight in conver_res.items()}
@@ -168,15 +173,10 @@ class Qwen3_5Template(VisionTemplate):
     def hf_name_to_mca_names(self, hf_name) -> Optional[list[str]]:
         if not hf_name.startswith("mtp"):
             return super().hf_name_to_mca_names(hf_name)
-        weight_prefix = "mtp.layers.0" if hf_name.startswith("mtp.layers.0") else "mtp"
-        original_name = hf_name.removeprefix(weight_prefix)
-        if self.hf_moe_prefix is not None:
-            original_name = remove_weight_prefix(original_name, self.hf_moe_prefix)
+        _, original_name, mca_prefix = self._mtp_name_to_prefixes(hf_name)
         if original_name in self.hf_invalid_keys:
             return None
         op = self.get_conver_op(original_name, self.hf_name_to_converter)
-        has_transformer_layer = "self_attention" in hf_name or "mlp" in hf_name or "input_layernorm" in hf_name
-        mca_prefix = "mtp.layers.0" + (".mtp_model_layer" if has_transformer_layer else "")
         return [mca_prefix + name for name in op.mca_names]
 
     def get_lora_conver_op(self, name, pattern_to_conver_ops: dict[str, ConverOp], lora_rank: int):
