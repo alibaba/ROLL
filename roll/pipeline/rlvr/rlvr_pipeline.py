@@ -3,7 +3,7 @@ import json
 import os
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from datetime import datetime
 from functools import partial
 from typing import Any, Dict, List, Optional
@@ -40,6 +40,7 @@ from roll.utils.functionals import (
     compute_ref_log_probs_with_routing,
     compute_token_reward,
     get_sample_level_mask,
+    opsd_teacher_context,
     reduce_metrics,
     reward_postprocess,
     batch_balance,
@@ -576,6 +577,7 @@ class RLVRPipeline(BasePipeline):
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer, \
                         tracer.start_as_current_span("ref_log_probs"):
                     if self.pipeline_config.enable_reference:
+                        opsd_active = getattr(self.pipeline_config, "opsd_mode", False)
                         if not self.use_ref_model:
                             # LoRA branch: use actor_train with disabled adapter
                             worker_config = self.pipeline_config.actor_train
@@ -593,23 +595,29 @@ class RLVRPipeline(BasePipeline):
                                     "reference/compute_log_probs",
                                 )
                                 metrics_mgr.add_metrics(dynamic_batching_metrics)
-                            ref_log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
-                            ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
-                            batch = batch.union(ref_log_probs)
-                            metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
+                            with opsd_teacher_context(batch, self.tokenizer, self.pipeline_config) if opsd_active else nullcontext():
+                                ref_log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
+                                ref_name = list(self.pipeline_config.reference_configs.keys())[0]
+                                ref_log_probs.rename(old_keys="log_probs", new_keys=f"ref_log_probs_{ref_name}")
+                                for key in ref_log_probs.batch.keys():
+                                    if key not in batch.batch:
+                                        batch.batch[key] = ref_log_probs.batch[key]
+                                batch.batch["ref_log_probs"] = batch.batch[f"ref_log_probs_{ref_name}"]
+                                metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
                         else:
                             saved_routed_experts = batch.batch.pop("routed_experts", None)
                             domain_to_teacher_names, domain_values = build_domain_routing_context(
                                 batch, self.pipeline_config, domain_key="domain"
                             )
-                            batch = compute_ref_log_probs_with_routing(
-                                batch=batch,
-                                references=self.references,
-                                pipeline_config=self.pipeline_config,
-                                domain_to_teacher_names=domain_to_teacher_names,
-                                domain_values=domain_values,
-                                metrics_fn=metrics_mgr.add_metrics,
-                            )
+                            with opsd_teacher_context(batch, self.tokenizer, self.pipeline_config) if opsd_active else nullcontext():
+                                batch = compute_ref_log_probs_with_routing(
+                                    batch=batch,
+                                    references=self.references,
+                                    pipeline_config=self.pipeline_config,
+                                    domain_to_teacher_names=domain_to_teacher_names,
+                                    domain_values=domain_values,
+                                    metrics_fn=metrics_mgr.add_metrics,
+                                )
                             if saved_routed_experts is not None:
                                 batch.batch["routed_experts"] = saved_routed_experts
                 metrics_mgr.add_metric("time/ref_log_probs_values", cal_ref_log_probs_timer.last)

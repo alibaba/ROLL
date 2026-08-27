@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,6 +18,7 @@ import torch.nn.functional as F
 from tensordict import TensorDict
 
 from roll.configs.base_config import PPOConfig
+from roll.datasets.chat_template import get_chat_template
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.platforms import current_platform
 from roll.utils.kl_controller import AdaptiveKLController
@@ -925,6 +927,215 @@ def clusters_have_disjoint_devices(clusters: Union[Dict[str, object], List[objec
             return False
         seen_devices |= devices
     return True
+
+
+# === OPSD (On-Policy Self-Distillation) ===
+
+_DEFAULT_OPSD_TEMPLATE = (
+    "{problem}\n\n"
+    "Here is a reference solution to this problem:\n"
+    "=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n"
+    "\n\nAfter reading the reference solution above, make sure you truly understand "
+    "the reasoning behind each step — do not copy or paraphrase it. Now, using your "
+    "own words and independent reasoning, derive the same final answer to the problem above. "
+    "Think step by step, explore different approaches, and don't be afraid to backtrack "
+    "or reconsider if something doesn't work out:\n"
+)
+
+
+def _build_teacher_prompt_text(problem, solution, tokenizer, pipeline_config):
+    opsd_teacher_template = getattr(pipeline_config, "opsd_teacher_template", _DEFAULT_OPSD_TEMPLATE)
+    user_content = opsd_teacher_template.format(problem=problem, solution=solution)
+    messages = [{"role": "user", "content": user_content}]
+    template_name = (
+        getattr(pipeline_config, "global_template", None)
+        or pipeline_config.actor_train.data_args.template
+    )
+    chat_template_fn = get_chat_template(template_name, tokenizer)
+    return chat_template_fn(conversation=messages, add_generation_prompt=True)
+
+
+def _align_response_log_probs(teacher_log_probs, teacher_resp_mask, student_resp_mask):
+    bs = teacher_log_probs.shape[0]
+    student_seq_len = student_resp_mask.shape[1]
+    aligned = torch.zeros(
+        bs, student_seq_len - 1,
+        dtype=teacher_log_probs.dtype, device=teacher_log_probs.device,
+    )
+    # Shift by 1: log_probs[i] predicts token i+1, so action positions are mask[1:]
+    teacher_action = teacher_resp_mask[:, 1:].bool()
+    student_action = student_resp_mask[:, 1:].bool()
+    for i in range(bs):
+        values = teacher_log_probs[i][teacher_action[i]]
+        positions = student_action[i].nonzero(as_tuple=True)[0]
+        copy_len = min(len(values), len(positions))
+        if copy_len > 0:
+            aligned[i, positions[:copy_len]] = values[:copy_len]
+    return aligned
+
+
+def _prepare_opsd_teacher_batch(batch, tokenizer, pipeline_config):
+    # Transform batch from student format to teacher format: replace student prompt
+    # with teacher prompt (containing reference solution y*), keep response tokens unchanged.
+    device = batch.batch.device
+    input_ids = batch.batch["input_ids"]
+    response_mask = batch.batch["response_mask"]
+    attention_mask = batch.batch["attention_mask"]
+    bs, seq_len = input_ids.shape
+
+    saved = {
+        "input_ids": input_ids.clone(),
+        "attention_mask": attention_mask.clone(),
+        "response_mask": response_mask.clone(),
+        "_original_keys": set(batch.batch.keys()),
+    }
+    if "position_ids" in batch.batch:
+        saved["position_ids"] = batch.batch["position_ids"].clone()
+
+    prompts = batch.non_tensor_batch["prompt"]
+    solutions = batch.non_tensor_batch[pipeline_config.opsd_solution_key]
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+    new_input_ids = []
+    new_attention_masks = []
+    new_response_masks = []
+
+    for i in range(bs):
+        resp_mask_i = response_mask[i].bool()
+        response_ids = input_ids[i][resp_mask_i]
+        num_response = response_ids.shape[0]
+        max_prompt_len = seq_len - num_response
+
+        problem_text = prompts[i] if isinstance(prompts[i], str) else str(prompts[i])
+        solution_text = solutions[i] if isinstance(solutions[i], str) else str(solutions[i])
+
+        # Stage 1: optional hard cap on solution length (user-configured)
+        opsd_max_solution_length = getattr(pipeline_config, "opsd_max_solution_length", None)
+        if opsd_max_solution_length is not None:
+            solution_tokens = tokenizer.encode(solution_text, add_special_tokens=False)
+            if len(solution_tokens) > opsd_max_solution_length:
+                logger.warning(
+                    f"OPSD: truncated solution from {len(solution_tokens)} to "
+                    f"{opsd_max_solution_length} tokens (opsd_max_solution_length) for sample {i}."
+                )
+                solution_text = tokenizer.decode(
+                    solution_tokens[:opsd_max_solution_length], skip_special_tokens=True
+                )
+
+        # Stage 2: build teacher prompt, auto-truncate solution if still too long
+        teacher_prompt_text = _build_teacher_prompt_text(
+            problem_text, solution_text, tokenizer, pipeline_config
+        )
+        teacher_prompt_ids = torch.tensor(
+            tokenizer.encode(teacher_prompt_text, add_special_tokens=False),
+            dtype=input_ids.dtype, device=device,
+        )
+
+        if len(teacher_prompt_ids) > max_prompt_len:
+            # Measure template overhead: problem + OPSD template + chat template, no solution.
+            # This dynamically accounts for the actual template length (user-configurable).
+            empty_prompt_text = _build_teacher_prompt_text(problem_text, "", tokenizer, pipeline_config)
+            empty_ids = tokenizer.encode(empty_prompt_text, add_special_tokens=False)
+            available_for_solution = max_prompt_len - len(empty_ids)
+
+            if available_for_solution > 0:
+                solution_tokens = tokenizer.encode(solution_text, add_special_tokens=False)
+                if len(solution_tokens) > available_for_solution:
+                    logger.warning(
+                        f"OPSD: auto-truncating solution from {len(solution_tokens)} to "
+                        f"{available_for_solution} tokens to fit sequence_length for sample {i}."
+                    )
+                    solution_text = tokenizer.decode(
+                        solution_tokens[:available_for_solution], skip_special_tokens=True
+                    )
+                    teacher_prompt_text = _build_teacher_prompt_text(
+                        problem_text, solution_text, tokenizer, pipeline_config
+                    )
+                    teacher_prompt_ids = torch.tensor(
+                        tokenizer.encode(teacher_prompt_text, add_special_tokens=False),
+                        dtype=input_ids.dtype, device=device,
+                    )
+
+            # Final fallback: problem + template overhead alone exceeds max_prompt_len.
+            # Truncate the tokenized prompt — no solution to cut further.
+            if len(teacher_prompt_ids) > max_prompt_len:
+                logger.warning(
+                    f"OPSD: teacher prompt ({len(teacher_prompt_ids)} tokens) still exceeds "
+                    f"available space ({max_prompt_len}) even with empty solution. "
+                    f"Truncating tokenized prompt. Sample index: {i}."
+                )
+                teacher_prompt_ids = teacher_prompt_ids[:max_prompt_len]
+        num_teacher_prompt = teacher_prompt_ids.shape[0]
+
+        teacher_seq = torch.cat([teacher_prompt_ids, response_ids])
+        total_len = teacher_seq.shape[0]
+        pad_len = seq_len - total_len
+        if pad_len > 0:
+            teacher_seq = torch.cat([
+                teacher_seq,
+                torch.full((pad_len,), pad_token_id, dtype=input_ids.dtype, device=device),
+            ])
+
+        new_input_ids.append(teacher_seq)
+
+        attn = torch.zeros(seq_len, dtype=attention_mask.dtype, device=device)
+        attn[:total_len] = 1
+        new_attention_masks.append(attn)
+
+        resp = torch.zeros(seq_len, dtype=response_mask.dtype, device=device)
+        resp[num_teacher_prompt:num_teacher_prompt + num_response] = 1
+        new_response_masks.append(resp)
+
+    batch.batch["input_ids"] = torch.stack(new_input_ids)
+    batch.batch["attention_mask"] = torch.stack(new_attention_masks)
+    batch.batch["response_mask"] = torch.stack(new_response_masks)
+    batch.batch["position_ids"] = torch.clip(
+        torch.cumsum(batch.batch["attention_mask"], dim=-1) - 1, min=0
+    )
+    return saved
+
+
+def _restore_opsd_student_batch(batch, saved, pipeline_config):
+    teacher_resp_mask = batch.batch["response_mask"]
+    student_resp_mask = saved["response_mask"]
+    original_keys = saved["_original_keys"]
+    expected_action_len = teacher_resp_mask.shape[1] - 1
+
+    # Align keys added by teacher forward (ref_log_probs*) from teacher to student response positions.
+    # Skip keys that pre-existed (in original_keys) or are masks — they just need restoration below.
+    for key in list(batch.batch.keys()):
+        if key in original_keys:
+            continue
+        if key.endswith("_mask"):
+            continue
+        tensor = batch.batch[key]
+        if not torch.is_tensor(tensor) or tensor.dim() != 2:
+            continue
+        if tensor.shape[1] != expected_action_len:
+            continue
+        batch.batch[key] = _align_response_log_probs(
+            tensor, teacher_resp_mask, student_resp_mask
+        )
+
+    batch.batch["input_ids"] = saved["input_ids"]
+    batch.batch["attention_mask"] = saved["attention_mask"]
+    batch.batch["response_mask"] = saved["response_mask"]
+    if saved.get("position_ids") is not None:
+        batch.batch["position_ids"] = saved["position_ids"]
+
+
+@contextmanager
+def opsd_teacher_context(batch, tokenizer, pipeline_config):
+    """Transform batch to teacher format (prompt with y*) on enter,
+    restore to student format with aligned ref_log_probs on exit.
+
+    Ensures batch is restored even if teacher forward raises an exception.
+    """
+    saved = _prepare_opsd_teacher_batch(batch, tokenizer, pipeline_config)
+    try:
+        yield batch
+    finally:
+        _restore_opsd_student_batch(batch, saved, pipeline_config)
 
 
 def compute_ref_log_probs_with_routing(

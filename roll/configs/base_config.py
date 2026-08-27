@@ -626,6 +626,39 @@ class PPOConfig(BaseConfig):
                  "The OPD KL is computed as: reverse_kl = student_logp - teacher_logp, "
                  "and added to token_level_rewards as: reward - opd_kl_coef * reverse_kl"}
     )
+    opsd_mode: bool = field(
+        default=False,
+        metadata={"help": "Enable OPSD (On-Policy Self-Distillation): teacher prompt includes "
+                 "reference solution y* as privileged information before evaluating student response. "
+                 "Requires is_pure_opd=True or use_opd=True."}
+    )
+    opsd_solution_key: str = field(
+        default="reference_solution",
+        metadata={"help": "non_tensor_batch key for the reference solution (y*, full CoT). "
+                 "Must be present in the dataset JSONL."}
+    )
+    opsd_teacher_template: str = field(
+        default=(
+            "{problem}\n\n"
+            "Here is a reference solution to this problem:\n"
+            "=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n"
+            "\n\nAfter reading the reference solution above, make sure you truly understand "
+            "the reasoning behind each step — do not copy or paraphrase it. Now, using your "
+            "own words and independent reasoning, derive the same final answer to the problem above. "
+            "Think step by step, explore different approaches, and don't be afraid to backtrack "
+            "or reconsider if something doesn't work out:\n"
+        ),
+        metadata={"help": "Format string for OPSD teacher user message content. "
+                 "Placeholders: {problem} (original problem text), {solution} (reference solution y*). "
+                 "The result is wrapped via the chat template (global_template)."}
+    )
+    opsd_max_solution_length: Optional[int] = field(
+        default=None,
+        metadata={"help": "Max token length of the reference solution (y*) in OPSD teacher prompt. "
+                 "If set, solutions exceeding this are tokenized, truncated, and decoded back to text "
+                 "before building the teacher prompt — preserving the template structure. "
+                 "If None, no truncation (rely on sequence_length buffer + tokenized fallback)."}
+    )
 
     def __post_init__(self):
         super().__post_init__()
@@ -684,16 +717,49 @@ class PPOConfig(BaseConfig):
                 "or use_opd=True for mixed mode (external rewards + Teacher KL)."
             )
 
+        if self.opsd_mode and not (self.is_pure_opd or self.use_opd):
+            raise ValueError(
+                "opsd_mode=True requires is_pure_opd=True or use_opd=True. "
+                "OPSD modifies teacher forward, which requires OPD to be enabled."
+            )
+
         if has_teachers and has_teacher:
             raise ValueError("Cannot configure both multi-teacher dict and single-teacher WorkerConfig.")
 
-        # Step 1: Normalize teacher to _reference_configs dict (always Dict[str, WorkerConfig])
+        # OPSD mode: only teacher receives the OPSD transform (y* in prompt).
+        # reference would incorrectly receive y* too, so forbid coexistence.
+        if self.opsd_mode and has_reference_configured and (has_teacher or has_teachers):
+            raise ValueError(
+                "OPSD mode (opsd_mode=True) does not support configuring both 'reference' and 'teacher'. "
+                "In OPSD mode, only 'teacher' receives the reference solution y* in its prompt. "
+                "If you need a reference model without OPSD, use pure OPD mode (opsd_mode=False)."
+            )
+
+        # Step 1: Merge reference + teacher into unified _reference_configs dict.
+        # reference → "reference", single teacher → "default", dict teacher → by keys.
+        self._reference_configs = {}
+        if has_reference_configured:
+            self._reference_configs["reference"] = self.reference
         if has_teachers:
-            self._reference_configs = self.teacher
+            if has_reference_configured and "reference" in self.teacher:
+                raise ValueError(
+                    "Naming collision: 'reference' key exists in both the reference config "
+                    "and the teacher dict. Please rename the teacher dict key."
+                )
+            self._reference_configs.update(self.teacher)
         elif has_teacher:
-            self._reference_configs = {"default": self.teacher}
-        else:
-            self._reference_configs = {}
+            self._reference_configs["default"] = self.teacher
+
+        # Step 1a: LoRA auto-reference — no separate teacher/reference config needed,
+        # teacher = actor_train with adapter disabled at runtime
+        if not self._reference_configs and (self.is_pure_opd or self.use_opd):
+            is_lora = (
+                self.student_train.is_configured
+                and self.student_train.model_args.lora_target is not None
+            )
+            if is_lora:
+                logger.info("OPD + LoRA: no separate teacher, using student_train as reference")
+                self._reference_configs = {"reference": self.student_train}
 
         # Step 1.5: Build tag → teacher_names routing map for multi-teacher OPD
         self._tag_to_teacher_names: Dict[str, List[str]] = {}
@@ -711,20 +777,20 @@ class PPOConfig(BaseConfig):
         # Step 2: Pure OPD mode
         if self.is_pure_opd:
             if not self._reference_configs:
-                raise ValueError("Pure OPD requires teacher config.")
+                raise ValueError("Pure OPD requires teacher or reference config.")
             if not (self.student_train.is_configured and self.student_infer.is_configured):
                 raise ValueError(
                     "In pure OPD mode (is_pure_opd=True), 'student_train', 'student_infer' "
-                    "and teacher must be configured.\n"
+                    "and teacher/reference must be configured.\n"
                 )
             logger.info(f"Pure OPD mode: mapping student_train to actor_train, "
                         f"student_infer to actor_infer, "
-                        f"{len(self._reference_configs)} teacher(s) to reference")
+                        f"{len(self._reference_configs)} reference(s) to reference")
             self.actor_train = self.student_train
             self.actor_infer = self.student_infer
             self.reference = next(iter(self._reference_configs.values()))
             self.enable_reference = True
-            # Propagate opd_kl_coef default (1.0) to each teacher if not explicitly set
+            # Propagate opd_kl_coef default (1.0) to each reference if not explicitly set
             for ref_cfg in self._reference_configs.values():
                 if ref_cfg.opd_kl_coef is None:
                     ref_cfg.opd_kl_coef = 1.0
@@ -732,15 +798,11 @@ class PPOConfig(BaseConfig):
         # Step 3: Mixed OPD mode
         elif self.use_opd:
             if not self._reference_configs:
-                raise ValueError("Mixed OPD requires teacher config.")
-            if has_reference_configured:
-                raise ValueError(
-                    "In mixed OPD mode (use_opd=True), 'reference' should NOT be configured. "
-                )
-            logger.info(f"Mixed OPD mode: mapping {len(self._reference_configs)} teacher(s) to reference")
+                raise ValueError("Mixed OPD requires teacher or reference config.")
+            logger.info(f"Mixed OPD mode: mapping {len(self._reference_configs)} reference(s) to reference")
             self.reference = next(iter(self._reference_configs.values()))
             self.enable_reference = True
-            # Propagate opd_kl_coef default (1.0) to each teacher if not explicitly set
+            # Propagate opd_kl_coef default (1.0) to each reference if not explicitly set
             for ref_cfg in self._reference_configs.values():
                 if ref_cfg.opd_kl_coef is None:
                     ref_cfg.opd_kl_coef = 1.0
@@ -825,9 +887,10 @@ class PPOConfig(BaseConfig):
     @property
     def reference_configs(self) -> Dict[str, WorkerConfig]:
         """Always returns Dict[str, WorkerConfig] for unified pipeline usage.
-        Single teacher is normalized to {"default": cfg}, multi-teacher to {name: cfg, ...}."""
+        Single teacher is normalized to {"default": cfg}, multi-teacher to {name: cfg, ...}.
+        Reference config is named "reference"."""
         if not hasattr(self, '_reference_configs') or not self._reference_configs:
-            self._reference_configs = {"default": self.reference}
+            self._reference_configs = {"reference": self.reference}
         return self._reference_configs
 
     @property

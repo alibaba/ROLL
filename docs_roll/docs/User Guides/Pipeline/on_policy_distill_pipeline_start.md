@@ -30,6 +30,7 @@
   - [Multi-Teacher OPD](#multi-teacher-opd)
     - [Configuration Examples](#configuration-examples)
     - [Core Mechanisms](#core-mechanisms)
+  - [OPSD (On-Policy Self-Distillation)](#opsd-on-policy-self-distillation)
   - [FAQ](#faq)
   - [References](#references)
 
@@ -140,7 +141,7 @@ The main differences from standard RLVR/Agentic training are:
 
 * **Reward Computation**: Uses Teacher Model's log probabilities instead of external reward models
 * **Advantage Computation**: `advantage = teacher_log_prob - student_log_prob`
-* **Worker Mapping**: `student_train` → `actor_train`, `student_infer` → `actor_infer`, `teacher` → `reference`
+* **Worker Mapping**: `student_train` → `actor_train`, `student_infer` → `actor_infer`, `teacher` and/or `reference` → `reference` (merged into unified `_reference_configs`)
 
 **Source Code**:
 - Launcher script: `examples/start_onpolicy_distill_pipeline.py`
@@ -249,9 +250,9 @@ Configure three roles, automatically mapped to internal Workers:
 |----------|----------|------|
 | `student_train` | `actor_train` | Train student model, compute loss using Teacher KL |
 | `student_infer` | `actor_infer` | Generate trajectories, compute student log_probs |
-| `teacher` | `reference` / `references` | Compute teacher log_probs (supports single WorkerConfig or multi-teacher Dict) |
+| `teacher` and/or `reference` | `reference` / `references` | Compute teacher log_probs (supports single WorkerConfig or multi-teacher Dict) |
 
-**Note**: Config file uses `student_train`, `student_infer`, `teacher` names, system will automatically map them. For multi-teacher, `teacher` is `Dict[str, WorkerConfig]`, internally normalized to `self.references: Dict[str, Cluster]`.
+**Note**: Config file uses `student_train`, `student_infer`, `teacher` names, system will automatically map them. `reference` can be used alongside or instead of `teacher` — both are merged into a unified `_reference_configs` dict (`reference` → `"reference"`, single `teacher` → `"default"`, dict `teacher` → by keys). For multi-teacher, `teacher` is `Dict[str, WorkerConfig]`, internally normalized to `self.references: Dict[str, Cluster]`.
 
 #### Mixed Mode
 
@@ -322,14 +323,21 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 
 #### Pure OPD Mode
 
-**No additional OPD-related parameters need to be configured**. Users only need to configure the `teacher` model path, student model path, data, and Reward Workers.
+Launched via `start_onpolicy_distill_pipeline.py`, which automatically sets `is_pure_opd=True`.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `pure_opd_pipeline_type` | Pipeline type, one of `"rlvr"` or `"agentic"` | `"rlvr"` |
+| `student_train` | Student model training config (mapped to actor_train) | Required |
+| `student_infer` | Student model inference config (mapped to actor_infer) | Required |
+| `teacher` or `reference` | Teacher/reference model config (merged into _reference_configs) | Required |
 
 #### Mixed Mode (`PPOConfig` / `RLVRConfig`)
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `use_opd` | Enable mixed mode OPD (add Teacher KL to rewards) | `false` |
-| `teacher` | Teacher model config (auto-mapped to reference) | Required |
+| `teacher` or `reference` | Teacher/reference model config (merged into _reference_configs) | Required |
 
 #### Multi-Teacher Mode Parameters
 
@@ -339,6 +347,17 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 | `teacher.{name}.opd_kl_coef` | Per-teacher KL coefficient | `1.0` |
 | `teacher.{name}.tag_included` | Tags this teacher handles; empty means all | `[]` |
 | `tag_to_template` | Select different chat templates by tag | `{}` |
+
+#### OPSD Mode Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `opsd_mode` | Enable OPSD (inject reference solution y\* into teacher prompt). Requires `is_pure_opd=True` or `use_opd=True` | `false` |
+| `opsd_solution_key` | Dataset column name for the reference solution | `"reference_solution"` |
+| `opsd_teacher_template` | Format string for teacher prompt, placeholders `{problem}` and `{solution}` | Built-in default template |
+| `global_template` | Chat template name for teacher prompt formatting | — |
+| `sequence_length` | Total batch tensor length. OPSD teacher prompt (problem + y\*) is longer than student prompt — set larger than `prompt_length + response_length` to give buffer | `prompt_length + response_length` |
+| `opsd_max_solution_length` | Optional hard cap on reference solution (y\*) token length. If set, solutions exceeding this are truncated before building teacher prompt. If not set, solutions are auto-truncated to fit `sequence_length` (template overhead measured dynamically) | `None` |
 
 
 ---
@@ -560,6 +579,134 @@ Internally normalized to `{"default": WorkerConfig}`, the loop executes only onc
 
 ---
 
+## OPSD (On-Policy Self-Distillation)
+
+### Overview
+
+OPSD extends OPD: when the teacher evaluates the student's response, its prompt includes the **reference solution y\*** (privileged information) in addition to the original problem. This makes the teacher "know the answer," assigning higher probability to reasoning paths that lead to the correct answer, providing a more precise distillation signal.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    OPSD Data Flow                                 │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│   Student Infer:                                                  │
+│     prompt = original problem (no y*)                             │
+│     → generate response                                           │
+│                                                                   │
+│   Teacher Forward (OPSD transform):                                │
+│     prompt = original problem + y* + instruction (privileged)     │
+│     + same response tokens                                        │
+│     → compute ref_log_probs                                       │
+│     → align back to student layout                                │
+│                                                                   │
+│   Advantage = -KL(student || teacher)                            │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Difference from standard OPD**:
+
+| Feature | Standard OPD | OPSD |
+|---------|-------------|------|
+| Teacher prompt | Original problem only | Original problem + reference solution y\* |
+| Privileged info | None | y\* injected into teacher prompt |
+| Distillation signal | General behavior alignment | Guides reasoning toward correct answer |
+| Config | `is_pure_opd=True` or `use_opd=True` | Additionally enable `opsd_mode=True` |
+
+### Configuration Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `opsd_mode` | Enable OPSD mode (inject y\* into teacher prompt). Requires `is_pure_opd=True` or `use_opd=True` | `false` |
+| `opsd_solution_key` | Dataset column name for the reference solution | `"reference_solution"` |
+| `opsd_teacher_template` | Format string for teacher prompt, supports `{problem}` and `{solution}` placeholders | Built-in default template |
+| `global_template` | Chat template name (e.g., `qwen3`) for teacher prompt formatting | — |
+
+### Data Requirements
+
+The dataset JSONL must contain a `reference_solution` field (or the field specified by `opsd_solution_key`), containing the **full CoT reasoning process** (not just the final answer):
+
+```json
+{
+    "id": "0",
+    "prompt": "Prove that for all positive integers n, n^3 - n is divisible by 6",
+    "messages": "[{\"role\": \"user\", \"content\": \"Prove that for all positive integers n, n^3 - n is divisible by 6\"}]",
+    "ground_truth": "Proof complete",
+    "reference_solution": "n^3 - n = n(n-1)(n+1) = (n-1)n(n+1)...\nThus n^3 - n is a product of three consecutive integers, divisible by 6.",
+    "tag": "math_opsd"
+}
+```
+
+### Teacher Prompt Construction
+
+The teacher prompt is built by formatting `opsd_teacher_template`, then wrapping with the chat template specified by `global_template`:
+
+```
+opsd_teacher_template.format(problem=..., solution=...)
+  → user_content (problem + y* + instruction)
+  → [{"role": "user", "content": user_content}]
+  → get_chat_template(global_template, tokenizer)(..., add_generation_prompt=True)
+  → teacher_prompt_text (with chat format tokens)
+```
+
+The default template instructs the student to reason independently rather than copy the reference solution. When customizing, use `{problem}` and `{solution}` as placeholders.
+
+### Configuration Example
+
+```yaml
+# OPSD configuration
+is_pure_opd: true  # Set automatically by start_onpolicy_distill_pipeline.py
+opsd_mode: true
+opsd_solution_key: "reference_solution"
+global_template: qwen3  # teacher prompt uses qwen3 chat template (with thinking)
+# Optional: hard cap on solution length. If not set, auto-truncates to fit sequence_length.
+opsd_max_solution_length: 2048
+
+# OPSD teacher prompt (problem + y*) is longer than student prompt.
+# Set sequence_length > prompt_length + response_length to give buffer.
+prompt_length: 2048
+response_length: 4096
+sequence_length: 6656  # 2048 + 4096 + 512 buffer for teacher prompt
+
+student_train:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  data_args:
+    file_name:
+      - data/openthoughts_math_opsd.jsonl  # Must contain reference_solution field
+    domain_interleave_probs:
+      math_rule: 1.0
+  # ...
+
+student_infer:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  # ...
+
+teacher:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B  # Self-distillation: teacher = student initial weights
+  # ...
+```
+
+### Compatibility
+
+- **Multi-Teacher**: OPSD is compatible with multi-teacher routing. Each teacher's `ref_log_probs_{name}` is automatically aligned back to student layout
+- **Reference + Teacher**: Both `reference` and `teacher` can be configured simultaneously. They are merged into a unified `_reference_configs` dict. Each entry's KL contributes to the advantage weighted by `opd_kl_coef`
+- **Mixed Mode**: OPSD can be combined with `use_opd=True`, advantage = `rl_advantages - total_weighted_kld`
+
+### Caveats
+
+- OPSD teacher prompt (problem + y\*) is longer than student prompt. Set `sequence_length` larger than `prompt_length + response_length` to give buffer. Solutions are auto-truncated to fit: the system measures template overhead dynamically (by building an empty-solution prompt), calculates available space for the solution, and truncates the solution text — preserving the OPSD template structure. Optionally set `opsd_max_solution_length` for a hard cap on solution length.
+- Literal curly braces in `opsd_teacher_template` must be escaped as `{{` and `}}` (standard Python `.format()`)
+- OPSD mode does not support configuring both `reference` and `teacher` simultaneously
+- OPSD supports both LoRA and non-LoRA branches:
+  - **Non-LoRA branch**: teacher is a separate cluster
+  - **LoRA branch**: teacher is the actor model itself (adapter disabled), no `teacher` config needed
+
+---
+
 ## FAQ
 
 ### Q1: How to configure mixed mode?
@@ -577,7 +724,8 @@ rewards:
     worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
     tag_included: [math]
 
-# Teacher configuration (automatically mapped to reference)
+# Teacher or reference configuration (automatically mapped to reference)
+# Both can be configured simultaneously — they are merged into _reference_configs
 teacher:
   model_args:
     model_name_or_path: Qwen/Qwen3-32B

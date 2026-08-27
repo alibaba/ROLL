@@ -1,0 +1,150 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+# Global Config
+exp_name: "qwen3-8B-opsd-distill-math"
+output_dir: ./output/
+logging_dir: ./output/logs
+rollout_dump_dir: ./output/rollout_dump
+seed: 42
+system_envs:
+  USE_MODELSCOPE: '1'
+  VLLM_USE_FLASHINFER_SAMPLER: '0'
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/cpfs_0/rl_examples/models/${exp_name}
+
+track_with: tensorboard
+
+num_nodes: 1
+num_gpus_per_node: 8
+
+max_steps: 1024
+save_steps: 100
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+rollout_batch_size: 32  # paper effective batch size = 32, with G=1 → 32 prompts per rollout
+prompt_length: 2048
+response_length: 4096  # paper uses 1024/2048; 4096 gives Qwen3-8B room for math reasoning
+sequence_length: 6656  # prompt_length + response_length + 512 buffer for OPSD teacher prompt (problem + y*)
+
+num_return_sequences_in_group: 1  # G=1 per OPSD paper: single trajectory per prompt, advantage is purely per-token KL
+ppo_epochs: 1
+
+pretrain: Qwen/Qwen3-8B
+reward_pretrain: Qwen/Qwen3-8B
+
+global_template: qwen3
+
+# OPSD: teacher prompt includes reference solution y* as privileged information.
+# Dataset must contain "reference_solution" field (full CoT, not just final answer).
+opsd_mode: true
+opsd_solution_key: "reference_solution"
+opsd_max_solution_length: 2048  # Cap reference solution (y*) to 2048 tokens; preserves template structure via clean text truncation
+
+validation:
+  data_args:
+    file_name:
+      - data/math_benchmarks.jsonl
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.6
+    top_k: 50
+    num_beams: 1
+    temperature: 0.6
+    num_return_sequences: 1
+
+student_train:
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 5.0e-7
+    weight_decay: 0.1
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 8
+    warmup_steps: 20
+    num_train_epochs: 50
+  data_args:
+    file_name:
+      # OPSD dataset with reference_solution field (full CoT).
+      # Download from: https://huggingface.co/datasets/siyanzhao/Openthoughts_math_30k_opsd
+      # Convert to ROLL JSONL format with fields: prompt, messages, ground_truth, reference_solution, tag
+      - data/openthoughts_math_opsd.jsonl
+    domain_interleave_probs:
+      math_rule: 1.0
+    dataset_dir: data
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 2
+      context_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+  device_mapping: list(range(0,8))
+  infer_batch_size: 4
+
+student_infer:
+  model_args:
+    model_name_or_path: ${pretrain}
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.7
+      block_size: 16
+      load_format: dummy
+      sleep_level: 2
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+
+teacher:
+  # Self-distillation: teacher = same model as student (Qwen3-8B), independent reference cluster.
+  # Weights are fixed (not updated during training) = student's initial weights.
+  # Teacher prompt includes reference solution y* (privileged info) via opsd_teacher_context.
+  model_args:
+    model_name_or_path: ${pretrain}  # same as student
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      bf16: true
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen3
+    tag_included: [math_opsd]
+    world_size: 8
+    infer_batch_size: 1
