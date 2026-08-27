@@ -8,20 +8,20 @@ import copy
 import os
 import uuid
 from collections import defaultdict
-from typing import Dict, List, Optional, Union, Set
+from typing import Dict, List, Optional, Set, Union
 
 import numpy as np
 import ray
 import tensordict
 import torch
+from codetiming import Timer
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
-from codetiming import Timer
 
-from roll.distributed.scheduler.remote_protocol import RemoteBatch, BatchProxy
 from roll.distributed.scheduler import transfer_backend
-from roll.utils.functionals import union_two_dict, divide_by_chunk_size
+from roll.distributed.scheduler.remote_protocol import BatchProxy, RemoteBatch
 from roll.platforms import current_platform
+from roll.utils.functionals import divide_by_chunk_size, union_two_dict
 from roll.utils.logging import get_logger
 
 logger = get_logger()
@@ -128,6 +128,7 @@ def collate_fn(x: list["DataProto"]):
     data = DataProto.concat(x)
     data.meta_info = meta_info
     return data
+
 
 def move_tensors_to_device(data, device):
     if isinstance(data, dict):
@@ -351,9 +352,13 @@ class DataProto:
 
         if len(self._non_tensor_batch) != 0:
             # TODO: we can actually lift this restriction if needed
-            assert len(self._batch.batch_size) == 1, "only support num_batch_dims=1 when non_tensor_batch is not empty."
+            assert (
+                len(self._batch.batch_size) == 1
+            ), "only support num_batch_dims=1 when non_tensor_batch is not empty."
 
-            assert existing_keys.isdisjoint(self._non_tensor_batch.keys()), "batch and non_tensor_batch cannot have overlapping keys"
+            assert existing_keys.isdisjoint(
+                self._non_tensor_batch.keys()
+            ), "batch and non_tensor_batch cannot have overlapping keys"
             existing_keys.update(self._non_tensor_batch.keys())
 
             batch_size = self._batch.batch_size[0]
@@ -454,11 +459,12 @@ class DataProto:
         Create a deep copy of this DataProto, including tensors,
         non-tensor data, and meta_info.
 
-        The new DataProto will share no underlying storage with the original.
+        Local batch data is copied. A remote-backed clone keeps the same remote
+        handles and cleanup lifetime as the original.
 
         Returns:
             DataProto: A new DataProto instance with the same content but
-                       independent memory.
+                       independent local memory.
         """
         # Copy batch
         batch_copy = self._batch.clone() if self._batch is not None else None
@@ -473,10 +479,7 @@ class DataProto:
 
         # Return new DataProto instance
         return DataProto(
-            batch=batch_copy,
-            non_tensor_batch=non_tensor_copy,
-            remote_batch=remote_batch_copy,
-            meta_info=meta_copy
+            batch=batch_copy, non_tensor_batch=non_tensor_copy, remote_batch=remote_batch_copy, meta_info=meta_copy
         )
 
     def update(self, other: dict):
@@ -506,7 +509,9 @@ class DataProto:
         Returns:
             DataProto: the DataProto with the selected batch_keys and meta_info_keys
         """
-        assert set(batch_keys).isdisjoint(non_tensor_batch_keys), "batch_keys and non_tensor_batch_keys cannot be overlapping"
+        assert set(batch_keys).isdisjoint(
+            non_tensor_batch_keys
+        ), "batch_keys and non_tensor_batch_keys cannot be overlapping"
 
         if batch_keys is not None:
             batch_keys = tuple(batch_keys)
@@ -516,7 +521,9 @@ class DataProto:
             sub_batch = self._batch
 
         if non_tensor_batch_keys is not None:
-            non_tensor_batch = {key: val for key, val in self._non_tensor_batch.items() if key in non_tensor_batch_keys}
+            non_tensor_batch = {
+                key: val for key, val in self._non_tensor_batch.items() if key in non_tensor_batch_keys
+            }
         else:
             non_tensor_batch_keys = []
             non_tensor_batch = self._non_tensor_batch
@@ -638,7 +645,9 @@ class DataProto:
             remote_batch = None
 
         # Return a new DataProto object
-        return type(self)(batch=sliced_batch, non_tensor_batch=sliced_non_tensor, remote_batch=remote_batch, meta_info=self.meta_info)
+        return type(self)(
+            batch=sliced_batch, non_tensor_batch=sliced_non_tensor, remote_batch=remote_batch, meta_info=self.meta_info
+        )
 
     def pop(self, batch_keys=None, non_tensor_batch_keys=None, meta_info_keys=None) -> "DataProto":
         """Pop a subset of the DataProto via `batch_keys` and `meta_info_keys`
@@ -655,7 +664,9 @@ class DataProto:
             meta_info_keys = []
         if non_tensor_batch_keys is None:
             non_tensor_batch_keys = []
-        assert set(batch_keys).isdisjoint(non_tensor_batch_keys), "batch_keys and non_tensor_batch_keys cannot be overlapping"
+        assert set(batch_keys).isdisjoint(
+            non_tensor_batch_keys
+        ), "batch_keys and non_tensor_batch_keys cannot be overlapping"
         batch_keys = self.validate_input(batch_keys)
         non_tensor_batch_keys = self.validate_input(non_tensor_batch_keys)
         meta_info_keys = self.validate_input(meta_info_keys)
@@ -779,7 +790,9 @@ class DataProto:
         elif self._remote_batch is None:
             self._remote_batch = other._remote_batch
         if self._remote_batch is not None:
-            existing_keys = set(self._batch.keys() if self._batch is not None else []) | set(self._non_tensor_batch.keys())
+            existing_keys = set(self._batch.keys() if self._batch is not None else []) | set(
+                self._non_tensor_batch.keys()
+            )
             for key in existing_keys:
                 # use local batch as golden source when key conflict
                 if key in self._remote_batch:
@@ -804,7 +817,9 @@ class DataProto:
             Iterator: an iterator that yields a mini-batch data at a time. The total number of iteration steps is
             ``self._batch.batch_size * epochs // mini_batch_size``
         """
-        assert self._batch.batch_size[0] % mini_batch_size == 0, f"{self._batch.batch_size[0]} % {mini_batch_size} != 0"
+        assert (
+            self._batch.batch_size[0] % mini_batch_size == 0
+        ), f"{self._batch.batch_size[0]} % {mini_batch_size} != 0"
         # we can directly create a dataloader from TensorDict
         if dataloader_kwargs is None:
             dataloader_kwargs = {}
@@ -883,9 +898,9 @@ class DataProto:
 
     @staticmethod
     def concat(
-            data: List["DataProto"],
-            *,
-            global_keys: Optional[Set[str]] = None,
+        data: List["DataProto"],
+        *,
+        global_keys: Optional[Set[str]] = None,
     ) -> "DataProto":
         """
         Concatenate a list of DataProto objects.
@@ -915,9 +930,7 @@ class DataProto:
         batch_lst = [d._batch for d in data if d._batch is not None]
         new_batch = torch.cat(batch_lst, dim=0) if batch_lst else None
 
-        non_tensor_batch = list_of_dict_to_dict_of_list(
-            [d._non_tensor_batch for d in data]
-        )
+        non_tensor_batch = list_of_dict_to_dict_of_list([d._non_tensor_batch for d in data])
         for k, v in non_tensor_batch.items():
             non_tensor_batch[k] = custom_np_concatenate(v)
 
@@ -1076,9 +1089,9 @@ class DataProto:
 
     @staticmethod
     def materialize_concat(
-            data_refs: Union[List[ray.ObjectRef], ray.ObjectRef, List["ObjectRefWrap"]],
-            *,
-            global_keys: Optional[Set[str]] = None,
+        data_refs: Union[List[ray.ObjectRef], ray.ObjectRef, List["ObjectRefWrap"]],
+        *,
+        global_keys: Optional[Set[str]] = None,
     ) -> "DataProto":
         """
         Fetch a collection of DataProto objects from Ray ObjectRef(s) and concatenate
@@ -1118,36 +1131,52 @@ class DataProto:
         return DataProto.concat(data, global_keys=global_keys)
 
     @classmethod
-    def to_remote(cls, data: "DataProto", partition = "train_eval", *, ref_data = None) -> "DataProto":
+    def to_remote(cls, data: "DataProto", partition="train_eval", *, ref_data=None) -> "DataProto":
         with Timer(name="RemoteBatch to_remote", logger=None) as timer:
             batch_size = len(data)
 
             if ref_data is not None:
                 if len(ref_data) != batch_size:
-                    logger.warning(f"RemoteBatch to_remote ref_data batch size {len(ref_data)} does not match data batch size {batch_size}, {data=}")
+                    logger.warning(
+                        f"RemoteBatch to_remote ref_data batch size {len(ref_data)} does not match data batch size {batch_size}, {data=}"
+                    )
+                    return data
+                if (
+                    data._remote_batch is not None
+                    and ref_data._remote_batch is not None
+                    and data._remote_batch.partition != ref_data._remote_batch.partition
+                ):
+                    logger.warning("RemoteBatch to_remote ref_data and data have different partitions")
                     return data
                 if ref_data._remote_batch is None or ref_data._remote_batch.row_ids() is None:
-                    logger.warning(f"RemoteBatch to_remote ref_data has no row ids")
+                    logger.warning("RemoteBatch to_remote ref_data has no row ids")
                     return data
                 row_ids = ref_data._remote_batch.row_ids()
                 if len(row_ids) != batch_size:
-                    logger.warning(f"RemoteBatch to_remote ref_data row ids batch size {len(row_ids)} does not match data batch size {batch_size}")
+                    logger.warning(
+                        f"RemoteBatch to_remote ref_data row ids batch size {len(row_ids)} does not match data batch size {batch_size}"
+                    )
                     return data
                 if data._remote_batch is not None and data._remote_batch.row_ids() != row_ids:
-                    logger.warning(f"RemoteBatch to_remote ref_data and data have different row ids")
+                    logger.warning("RemoteBatch to_remote ref_data and data have different row ids")
                     return data
                 logger.info(f"RemoteBatch to_remote add to current rows, {partition=} {len(row_ids)=}")
             elif data._remote_batch is not None and data._remote_batch.row_ids() is not None:
                 row_ids = data._remote_batch.row_ids()
             else:
                 row_ids = [str(uuid.uuid4()) for _ in range(batch_size)]
-                logger.info(f"RemoteBatch to_remote add {len(row_ids)} new rows, row ids {partition=} row_ids={row_ids[:10]}...")
+                logger.info(
+                    f"RemoteBatch to_remote add {len(row_ids)} new rows, row ids {partition=} row_ids={row_ids[:10]}..."
+                )
             assert len(row_ids) == batch_size
 
             # Partition is used to group data of a step.
             # Some backend may support drop partition or delete keys using regex.
             assert isinstance(partition, str)
-            partition = data._remote_batch.partition if data._remote_batch is not None else partition
+            if data._remote_batch is not None:
+                partition = data._remote_batch.partition
+            elif ref_data is not None and ref_data._remote_batch is not None:
+                partition = ref_data._remote_batch.partition
 
             data_dict: dict = data._batch.to_dict() if data._batch is not None else {}
             data_dict.update(data._non_tensor_batch)
@@ -1155,13 +1184,22 @@ class DataProto:
             if not data_dict:
                 return data
 
+            if data._remote_batch is not None:
+                data._remote_batch._ensure_active()
             remote_batch = transfer_backend.put(partition, row_ids, data_dict, batch_size)
-            if remote_batch is None: # transfer backend is not available
+            if remote_batch is None:  # transfer backend is not available
                 assert data._remote_batch is None
                 return data
 
             if data._remote_batch is not None:
-                remote_batch = remote_batch.union(data._remote_batch)
+                try:
+                    remote_batch = remote_batch.union(data._remote_batch)
+                except Exception:
+                    try:
+                        remote_batch.drop()
+                    except Exception:
+                        logger.exception("Failed to clean up a newly written RemoteBatch after union failed")
+                    raise
 
         logger.info(f"RemoteBatch to_remote finished in {timer.last}s")
 
@@ -1188,7 +1226,9 @@ class DataProto:
             return
         with Timer(name="RemoteBatch drop", logger=None) as timer:
             partition = data._remote_batch.partition
-            logger.info(f"RemoteBatch drop {partition=} row_ids={data._remote_batch.row_ids()}")
+            row_ids = data._remote_batch.row_ids()
+            row_count = len(row_ids) if row_ids is not None else None
+            logger.info(f"RemoteBatch drop {partition=} {row_count=}")
             data._remote_batch.drop()
         logger.info(f"RemoteBatch drop {partition=} finished in {timer.last}s")
 

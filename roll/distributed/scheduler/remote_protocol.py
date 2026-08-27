@@ -1,12 +1,15 @@
 import threading
+import uuid
+import weakref
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Any, Optional
 
 import numpy as np
 import torch
+from codetiming import Timer
 from tensordict import TensorDict
 from tensordict.utils import LinkedList
-from codetiming import Timer
 
 from roll.distributed.scheduler import transfer_backend
 from roll.utils.logging import get_logger
@@ -67,6 +70,9 @@ class RemoteBatch:
         raise NotImplementedError
 
     def row_ids(self):
+        return None
+
+    def _ensure_active(self) -> None:
         return None
 
     def to(self, device) -> "RemoteBatch":
@@ -356,7 +362,9 @@ class RowRemoteBatch(RemoteBatch):
         fetch_fields = [field for field in fields if field not in existing_fields]
         if len(fetch_fields) > 0:
             with Timer(name="remote_batch_materialize", logger=None) as timer:
-                data: TensorDict = transfer_backend.get(partition=self.partition, keys=self._row_ids, fields=fetch_fields)
+                data: TensorDict = transfer_backend.get(
+                    partition=self.partition, keys=self._row_ids, fields=fetch_fields
+                )
                 assert set(data.keys()) == set(fetch_fields)
 
                 if self.cache is None:
@@ -367,7 +375,9 @@ class RowRemoteBatch(RemoteBatch):
                     self.cache = union_tensor_dict(self.cache, data)
                 if self.device is not None:
                     self.cache.to(self.device)
-            logger.info(f"RemoteBatch materialize cost {timer.last}s, partition={self.partition}, new materialized {sorted(fetch_fields)}, cached fields {sorted(list(existing_fields))}")
+            logger.info(
+                f"RemoteBatch materialize cost {timer.last}s, partition={self.partition}, new materialized {sorted(fetch_fields)}, cached fields {sorted(list(existing_fields))}"
+            )
 
         return self.cache.select(*fields)
 
@@ -499,7 +509,9 @@ class RowRemoteBatch(RemoteBatch):
 
         for field in rhs.fields:
             if field in self.fields:
-                assert set(self._row_ids) == set(rhs._row_ids), f"Row ids must be the same. Got {self._row_ids} and {rhs._row_ids}"
+                assert set(self._row_ids) == set(
+                    rhs._row_ids
+                ), f"Row ids must be the same. Got {self._row_ids} and {rhs._row_ids}"
                 continue
             self.fields.add(field)
 
@@ -636,9 +648,281 @@ class Box:
                 self.value = value
 
 
+class _ColumnRemoteState:
+    """Shared lifetime for one physical column bundle."""
+
+    def __init__(self, partition: str, keys: list[str], fields: list[Any], state_id: str | None = None):
+        self.state_id = state_id or uuid.uuid4().hex
+        self.partition = partition
+        self.keys = tuple(keys)
+        self.fields = tuple(fields)
+        self.active = True
+        self.delete_pending = True
+        self._lock = threading.Lock()
+        self._pickle_snapshot = threading.local()
+
+    def _snapshot(self):
+        return {
+            "state_id": self.state_id,
+            "partition": self.partition,
+            "keys": self.keys,
+            "fields": self.fields,
+            "active": self.active,
+            "delete_pending": self.delete_pending,
+        }
+
+    def __getstate__(self):
+        with self._lock:
+            snapshot = self._snapshot()
+            active, delete_pending = getattr(
+                self._pickle_snapshot,
+                "value",
+                (self.active, self.delete_pending),
+            )
+            if hasattr(self._pickle_snapshot, "value"):
+                del self._pickle_snapshot.value
+            snapshot["active"] = active
+            snapshot["delete_pending"] = delete_pending
+            return snapshot
+
+    def __setstate__(self, snapshot):
+        restored = self._from_snapshot(snapshot)
+        self.__dict__.update(restored.__dict__)
+
+    @classmethod
+    def _from_snapshot(cls, snapshot):
+        state = cls(
+            partition=snapshot["partition"],
+            keys=snapshot["keys"],
+            fields=snapshot["fields"],
+            state_id=snapshot["state_id"],
+        )
+        state.active = snapshot["active"]
+        state.delete_pending = snapshot["delete_pending"]
+        return state
+
+
+class _ColumnRemoteLifetimeDomain:
+    """Connected cleanup states serialized as one atomic snapshot."""
+
+    _merge_lock = threading.Lock()
+
+    def __init__(self, states: list[_ColumnRemoteState]):
+        self._parent = None
+        self._states = {state.state_id: state for state in states}
+        for state in self._states.values():
+            state._domain_ref = weakref.ref(self)
+
+    @classmethod
+    def merge(cls, left, right):
+        return cls.merge_many((left, right))
+
+    @classmethod
+    def merge_many(cls, domains):
+        with cls._merge_lock:
+            return cls._merge_many_unlocked(domains)
+
+    @classmethod
+    def _merge_many_unlocked(cls, domains):
+        roots = []
+        seen = set()
+        for domain in domains:
+            root = domain._root_unlocked()
+            if id(root) in seen:
+                continue
+            seen.add(id(root))
+            roots.append(root)
+        if not roots:
+            raise ValueError("At least one lifetime domain is required")
+        if len(roots) == 1:
+            return roots[0]
+        states = {}
+        for root in roots:
+            for state_id, state in root._states.items():
+                states.setdefault(state_id, state)
+        merged = cls(list(states.values()))
+        for root in roots:
+            root._parent = merged
+        return merged
+
+    def root(self):
+        with self._merge_lock:
+            return self._root_unlocked()
+
+    def states(self, state_ids) -> list[_ColumnRemoteState]:
+        with self._merge_lock:
+            root = self._root_unlocked()
+            missing = [state_id for state_id in state_ids if state_id not in root._states]
+            if missing:
+                raise RuntimeError("ColumnRemoteBatch was structurally modified during serialization")
+            return [root._states[state_id] for state_id in state_ids]
+
+    def __getstate__(self):
+        with self._locked_states(freeze_domain=True) as states:
+            for state in states:
+                snapshot = state._snapshot()
+                state._pickle_snapshot.value = (
+                    snapshot["active"],
+                    snapshot["delete_pending"],
+                )
+            return {"states": states}
+
+    def __setstate__(self, snapshot):
+        states = snapshot["states"]
+        connected_domains = []
+        for state in states:
+            domain_ref = getattr(state, "_domain_ref", None)
+            domain = domain_ref() if domain_ref is not None else None
+            if domain is not None:
+                connected_domains.append(domain)
+        self._parent = None
+        self._states = {state.state_id: state for state in states}
+        with self._merge_lock:
+            root = self._merge_many_unlocked((self, *connected_domains))
+            for state in root._states.values():
+                state._domain_ref = weakref.ref(root)
+
+    def _root_unlocked(self):
+        root = self
+        while root._parent is not None:
+            root = root._parent
+        current = self
+        while current._parent is not None and current._parent is not root:
+            parent = current._parent
+            current._parent = root
+            current = parent
+        return root
+
+    @contextmanager
+    def _locked_states(self, state_ids=None, freeze_domain=False):
+        while True:
+            with self._merge_lock:
+                root = self._root_unlocked()
+                selected_ids = tuple(root._states) if state_ids is None else tuple(state_ids)
+                states = [root._states[state_id] for state_id in selected_ids]
+
+            acquired = []
+            try:
+                for state in sorted(states, key=lambda state: state.state_id):
+                    state._lock.acquire()
+                    acquired.append(state)
+            except BaseException:
+                for state in reversed(acquired):
+                    state._lock.release()
+                raise
+
+            try:
+                self._merge_lock.acquire()
+            except BaseException:
+                for state in reversed(acquired):
+                    state._lock.release()
+                raise
+            current_root = self._root_unlocked()
+            valid = current_root is root
+            if valid:
+                if not freeze_domain:
+                    self._merge_lock.release()
+                break
+            self._merge_lock.release()
+            for state in reversed(acquired):
+                state._lock.release()
+        try:
+            yield states
+        finally:
+            if freeze_domain:
+                self._merge_lock.release()
+            for state in reversed(acquired):
+                state._lock.release()
+
+
+class _ColumnRemoteLifetime:
+    """Cleanup state shared by local aliases."""
+
+    def __init__(self, states: list[_ColumnRemoteState], domain=None, state_ids=None):
+        self._domain = domain or _ColumnRemoteLifetimeDomain(states)
+        self._state_ids = tuple(state_ids or (state.state_id for state in states))
+
+    def __reduce__(self):
+        return (_restore_column_remote_lifetime, (self._domain.root(), self._state_ids))
+
+    @property
+    def states(self):
+        return self._domain.states(self._state_ids)
+
+    def connect_many(self, others):
+        self._domain = _ColumnRemoteLifetimeDomain.merge_many((self._domain, *(other._domain for other in others)))
+
+    def extend(self, other, states):
+        if not states:
+            return self
+        domain = _ColumnRemoteLifetimeDomain.merge(self._domain, other._domain)
+        state_ids = dict.fromkeys((*self._state_ids, *(state.state_id for state in states)))
+        return _ColumnRemoteLifetime([], domain=domain, state_ids=state_ids)
+
+    def ensure_active(self) -> None:
+        with self._locked_states() as states:
+            if any(not state.active for state in states):
+                raise RuntimeError("RemoteBatch has already been dropped")
+
+    def drop(self) -> None:
+        first_error = None
+        with self._locked_states() as states:
+            for state in states:
+                state.active = False
+                if not state.delete_pending:
+                    continue
+                try:
+                    transfer_backend.delete(
+                        partition=state.partition,
+                        keys=list(state.keys),
+                        fields=list(state.fields),
+                    )
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    state.delete_pending = False
+        if first_error is not None:
+            raise first_error.with_traceback(first_error.__traceback__)
+
+    @contextmanager
+    def _locked_states(self):
+        with self._domain._locked_states(self._state_ids) as states:
+            yield states
+
+
+def _restore_column_remote_lifetime(domain, state_ids):
+    domain.states(state_ids)
+    return _ColumnRemoteLifetime([], domain=domain, state_ids=state_ids)
+
+
+def _restore_column_remote_batch(
+    partition,
+    device,
+    lifetime,
+    fields,
+    batch_size,
+    row_ids,
+    field_pipelines,
+):
+    return ColumnRemoteBatch(
+        partition=partition,
+        device=device,
+        fields=fields,
+        cache=None,
+        batch_size=batch_size,
+        row_ids=row_ids,
+        field_pipelines=field_pipelines,
+        lifetime=lifetime,
+    )
+
+
 class ColumnRemoteBatch(RemoteBatch):
     """
     A remote batch stored in a key-value store with column id as keys.
+
+    Structural mutations are not safe to run concurrently with serialization
+    or cleanup.
     """
 
     def __init__(
@@ -646,108 +930,149 @@ class ColumnRemoteBatch(RemoteBatch):
         partition: str,
         device,
         fields: dict[str, Any | list["ColumnRemoteBatch"]],
-        is_nested: bool,
-        cache: TensorDict,
+        cache: TensorDict | None,
         batch_size: int,
-        pipeline: tuple[PlanNode] = tuple(),
+        row_ids: list[str] | None = None,
+        field_pipelines: dict[str, tuple[PlanNode, ...]] | None = None,
+        lifetime: _ColumnRemoteLifetime | None = None,
     ):
         """
         fields contains any meta need to be hold and pass to transfer backend during get
-        or a list of ColumnRemoteBatch if is nested.
+        or a list of ColumnRemoteBatch for concatenated fields.
         """
         super().__init__("column", partition, device)
+        self._structure_lock = threading.RLock()
         self.fields = fields
-        self.is_nested = is_nested
         self.cache = cache
         self.batch_size = batch_size
-        self.pipeline = pipeline
+        self._row_ids = list(row_ids) if row_ids is not None else None
+        if self._row_ids is not None:
+            assert len(self._row_ids) == batch_size
+        self._field_pipelines = field_pipelines if field_pipelines is not None else {key: tuple() for key in fields}
+        if lifetime is None:
+            children = self._children_from_fields(fields)
+            lifetime = _ColumnRemoteLifetime(self._states_from_fields(fields, children))
+            lifetime.connect_many(child._lifetime for child in children)
+        self._lifetime = lifetime
 
     def __reduce__(self):
-        return (
-            ColumnRemoteBatch,
-            (self.partition, self.device, self.fields, self.is_nested, None, self.batch_size, self.pipeline),
-        )
+        with self._structure_lock:
+            return (
+                _restore_column_remote_batch,
+                (
+                    self.partition,
+                    self.device,
+                    self._lifetime,
+                    dict(self.fields),
+                    self.batch_size,
+                    list(self._row_ids) if self._row_ids is not None else None,
+                    dict(self._field_pipelines),
+                ),
+            )
+
+    @property
+    def _states(self) -> list[_ColumnRemoteState]:
+        return self._lifetime.states
 
     def __len__(self) -> int:
         return self.batch_size
 
     def __delitem__(self, key: str):
-        self.fields.pop(key)
-        if self.cache is not None and key in self.cache:
-            del self.cache[key]
+        with self._structure_lock:
+            self.fields.pop(key)
+            self._field_pipelines.pop(key)
+            if self.cache is not None and key in self.cache:
+                del self.cache[key]
 
     def __contains__(self, key: str) -> bool:
         return key in self.fields
 
+    def row_ids(self):
+        return self._row_ids
+
     def clone(self, recurse: bool = True):
-        if self.is_nested:
-            cloned_fields = {k: [batch.clone() for batch in v] for k, v in self.fields.items()}
-        else:
-            cloned_fields = self.fields.copy()
+        """Clone local state while retaining the remote object's shared lifetime."""
+        self._ensure_active()
+        cloned_fields = {}
+        cloned_children = {}
+        for key, value in self.fields.items():
+            if not isinstance(value, list):
+                cloned_fields[key] = value
+                continue
+            children = cloned_children.get(id(value))
+            if children is None:
+                children = [batch.clone(recurse=recurse) for batch in value]
+                cloned_children[id(value)] = children
+            cloned_fields[key] = children
         return ColumnRemoteBatch(
             partition=self.partition,
             device=self.device,
             fields=cloned_fields,
-            is_nested=self.is_nested,
             cache=self.cache.clone(recurse=recurse) if self.cache is not None else None,
             batch_size=self.batch_size,
-            pipeline=self.pipeline,
+            row_ids=self._row_ids,
+            field_pipelines={key: self._field_pipelines[key] for key in cloned_fields},
+            # A clone may copy its local cache, but it still references the same
+            # remote object and therefore shares its cleanup boundary.
+            lifetime=self._lifetime,
         )
 
     def keys(self):
         return self.fields.keys()
 
     def to(self, device) -> "ColumnRemoteBatch":
+        self._ensure_active()
         super().to(device)
         if self.cache is not None:
             self.cache = self.cache.to(device)
         return self
 
     def materialize(self, fields: list[str] = None) -> TensorDict:
+        self._ensure_active()
         if fields is None:
-            fields = self.fields.keys()
+            fields = list(self.fields)
         else:
             assert set(fields) <= set(self.fields.keys())
+        if fields == []:
+            return TensorDict({}, batch_size=[self.batch_size], device=self.device)
         existing_fields = set(self.cache.keys()) if self.cache is not None else set()
+        missing_fields = [field for field in fields if field not in existing_fields]
+        groups: dict[tuple, list[str]] = {}
+        for field in missing_fields:
+            source = self.fields[field]
+            pipeline = self._field_pipelines[field]
+            source_key = ("nested", id(source)) if isinstance(source, list) else ("direct",)
+            groups.setdefault(source_key + tuple(id(op) for op in pipeline), []).append(field)
 
-        data = None
-        if self.is_nested:
-            assert len(self.pipeline) == 1 and isinstance(self.pipeline[0], CatPlan)
-            chunks: list["ColumnRemoteBatch"] = next(iter(self.fields.values()))
-            # TODO shigao: use batch get
-            # TODO: parallel gather
-            data: list[TensorDict] = [chunk.materialize(fields) for chunk in chunks]
-        else:
-            # pass column(key) meta back to transfer backend
-            fetch_fields = {field: self.fields[field] for field in fields if field not in existing_fields}
-            if len(fetch_fields) > 0:
-                data: TensorDict = transfer_backend.get(
-                    partition=self.partition, keys=list(fetch_fields.keys()), fields=list(fetch_fields.values())
+        for group_fields in groups.values():
+            source = self.fields[group_fields[0]]
+            pipeline = self._field_pipelines[group_fields[0]]
+            if isinstance(source, list):
+                data = [chunk.materialize(group_fields) for chunk in source]
+            else:
+                data = transfer_backend.get(
+                    partition=self.partition,
+                    keys=group_fields,
+                    fields=[self.fields[field] for field in group_fields],
                 )
 
-        if data is not None:
-            for operator in self.pipeline:
+            for operator in pipeline:
                 data = operator.execute(data)
             assert len(data) == self.batch_size
-
             if self.device is not None:
-                data.to(self.device)
-
-            if self.cache is None:
-                self.cache = data
-            else:
-                from roll.distributed.scheduler.protocol import union_tensor_dict
-
-                self.cache = union_tensor_dict(self.cache, data)
+                data = data.to(self.device)
+            self._cache_data(data)
 
         return self.cache.select(*fields)
 
     def drop(self):
-        transfer_backend.delete(
-            partition=self.partition, keys=list(self.fields.keys()), fields=list(self.fields.values())
-        )
+        try:
+            self._lifetime.drop()
+        finally:
+            self.cache = None
 
     def select(self, fileds: list[str]) -> "ColumnRemoteBatch":
+        self._ensure_active()
         assert all(key in self.fields for key in fileds), f"Keys {fileds} not in {self.fields.keys()}"
         fields = {key: self.fields[key] for key in fileds}
         cache = self.cache
@@ -763,11 +1088,14 @@ class ColumnRemoteBatch(RemoteBatch):
             fields=fields,
             cache=cache,
             batch_size=self.batch_size,
-            is_nested=self.is_nested,
-            pipeline=self.pipeline,
+            row_ids=self._row_ids,
+            field_pipelines={key: self._field_pipelines[key] for key in fields},
+            lifetime=self._lifetime,
         )
 
-    def _selection(self, plan: PlanNode) -> "ColumnRemoteBatch":
+    def _selection(self, plan: PlanNode, *, ensure_active: bool = True) -> "ColumnRemoteBatch":
+        if ensure_active:
+            self._ensure_active()
         batch_size = plan.batch_size
 
         cache = self.cache
@@ -775,24 +1103,15 @@ class ColumnRemoteBatch(RemoteBatch):
             cache = plan.execute(cache)
             assert isinstance(cache, TensorDict)
 
-        if not self.pipeline:
-            pipeline = self.pipeline + (plan,)
-        else:
-            # TODO: heuristic optimization
-            # TODO: predicate pushdown
-            if isinstance(plan, SelectPlan) and isinstance(self.pipeline[-1], SelectPlan):
-                pipeline = self.pipeline + (plan,)
-            else:
-                pipeline = self.pipeline + (plan,)
-
         return ColumnRemoteBatch(
             partition=self.partition,
             device=self.device,
-            fields=self.fields,
+            fields=dict(self.fields),
             cache=cache,
             batch_size=batch_size,
-            is_nested=self.is_nested,
-            pipeline=pipeline,
+            row_ids=self._apply_row_plan(plan),
+            field_pipelines={key: field_pipeline + (plan,) for key, field_pipeline in self._field_pipelines.items()},
+            lifetime=self._lifetime,
         )
 
     def select_idxs(self, index: torch.Tensor | np.ndarray | list) -> "ColumnRemoteBatch":
@@ -803,6 +1122,11 @@ class ColumnRemoteBatch(RemoteBatch):
             index = torch.tensor(index)
             if index.dtype != torch.bool:
                 index = index.type(torch.int32)
+
+        if index.dtype == torch.bool:
+            assert (
+                len(index) == self.batch_size
+            ), f"Boolean index length {len(index)} does not match batch size {self.batch_size}"
 
         plan = SelectPlan(index)
         return self._selection(plan)
@@ -817,18 +1141,20 @@ class ColumnRemoteBatch(RemoteBatch):
         return self._selection(plan)
 
     def pop(self, fileds) -> "ColumnRemoteBatch":
-        assert len(fileds) == len(set(fileds)), "Fields must be unique"
-        assert set(fileds) <= self.fields.keys(), f"Fields {set(fileds) - self.fields.keys()} not in batch"
-        ret = self.select(fileds)
+        with self._structure_lock:
+            assert len(fileds) == len(set(fileds)), "Fields must be unique"
+            assert set(fileds) <= self.fields.keys(), f"Fields {set(fileds) - self.fields.keys()} not in batch"
+            ret = self.select(fileds)
 
-        for key in fileds:
-            del self.fields[key]
-        if self.cache is not None:
-            remaining_keys = [k for k in self.fields.keys() if k in self.cache.keys()]
-            if remaining_keys:
-                self.cache = self.cache.select(*remaining_keys)
-            else:
-                self.cache = None
+            for key in fileds:
+                del self.fields[key]
+                del self._field_pipelines[key]
+            if self.cache is not None:
+                remaining_keys = [k for k in self.fields.keys() if k in self.cache.keys()]
+                if remaining_keys:
+                    self.cache = self.cache.select(*remaining_keys)
+                else:
+                    self.cache = None
 
         return ret
 
@@ -836,10 +1162,16 @@ class ColumnRemoteBatch(RemoteBatch):
         assert sum(chunk_sizes) == len(
             self
         ), f"Sum of chunk_sizes {sum(chunk_sizes)} does not match batch size {len(self)}"
+        self._ensure_active()
         chunks = []
         offset = 0
         for size in chunk_sizes:
-            chunks.append(self.slice(offset, offset + size))
+            chunks.append(
+                self._selection(
+                    SlicePlan(offset, offset + size, None, self.batch_size),
+                    ensure_active=False,
+                )
+            )
             offset += size
         return chunks
 
@@ -848,22 +1180,57 @@ class ColumnRemoteBatch(RemoteBatch):
         return self._selection(plan)
 
     def union(self, rhs: "ColumnRemoteBatch") -> "ColumnRemoteBatch":
-        assert isinstance(rhs, RemoteBatch)
-        assert len(self) == len(rhs), f"Two tensor dict must have identical batch size. Got {len(self)} and {len(rhs)}"
-        if self.cache is not None and rhs.cache is not None:
-            from roll.distributed.scheduler.protocol import union_tensor_dict
+        assert isinstance(rhs, ColumnRemoteBatch)
+        with self._locked_structure(self, rhs):
+            self._ensure_active()
+            rhs._ensure_active()
+            assert len(self) == len(
+                rhs
+            ), f"Two tensor dict must have identical batch size. Got {len(self)} and {len(rhs)}"
+            assert self.partition == rhs.partition, "Two remote batches must have the same partition"
+            assert (self._row_ids is None) == (rhs._row_ids is None), "Both remote batches must provide row ids"
+            if self._row_ids is not None:
+                assert self._row_ids == rhs._row_ids, "Row ids must have the same order"
+            adopted_fields = {field: value for field, value in rhs.fields.items() if field not in self.fields}
+            adopted_cache_keys = [field for field in adopted_fields if rhs.cache is not None and field in rhs.cache]
+            if adopted_cache_keys:
+                adopted_cache = rhs.cache.select(*adopted_cache_keys).clone(recurse=False)
+                if self.cache is None:
+                    self.cache = adopted_cache
+                else:
+                    from roll.distributed.scheduler.protocol import union_tensor_dict
 
-            union_tensor_dict(self.cache, rhs.cache)
-        elif self.cache is None:
-            self.cache = rhs.cache.clone() if rhs.cache is not None else None
+                    self.cache = union_tensor_dict(self.cache, adopted_cache)
 
-        for field, value in rhs.fields.items():
-            if field in self.fields:
-                # assert self.cache[field].equal(rhs.cache[field]), f"{field=}"
-                continue
-            self.fields[field] = value
+            for field, value in adopted_fields.items():
+                self.fields[field] = value
+                self._field_pipelines[field] = rhs._field_pipelines[field]
+
+            self._lifetime = self._lifetime.extend(
+                rhs._lifetime,
+                rhs._states_for_fields(adopted_fields),
+            )
 
         return self
+
+    @staticmethod
+    @contextmanager
+    def _locked_structure(*batches):
+        locks = sorted({id(batch._structure_lock): batch._structure_lock for batch in batches}.values(), key=id)
+        acquired = []
+        try:
+            for lock in locks:
+                lock.acquire()
+                acquired.append(lock)
+        except BaseException:
+            for lock in reversed(acquired):
+                lock.release()
+            raise
+        try:
+            yield
+        finally:
+            for lock in reversed(acquired):
+                lock.release()
 
     @classmethod
     def _cat(cls, data: list["ColumnRemoteBatch"]) -> "ColumnRemoteBatch":
@@ -872,12 +1239,15 @@ class ColumnRemoteBatch(RemoteBatch):
         """
         assert data
         if len(data) == 1:
+            data[0]._ensure_active()
             return data[0]
 
         keys = set(data[0].fields.keys())
         assert all(set(d.fields.keys()) == keys for d in data), "All batches must have the same fields"
         partition = data[0].partition
         assert all(d.partition == partition for d in data), "All batches must have the same partition"
+        have_row_ids = [batch._row_ids is not None for batch in data]
+        assert all(have_row_ids) or not any(have_row_ids), "All batches must either provide row ids or omit them"
         device = data[0].device
 
         batch_size = sum(d.batch_size for d in data)
@@ -893,12 +1263,108 @@ class ColumnRemoteBatch(RemoteBatch):
         else:
             cache = None
 
-        return ColumnRemoteBatch(
+        result = ColumnRemoteBatch(
             partition=partition,
             device=device,
             fields={field: data for field in keys},
-            is_nested=True,
             cache=cache,
             batch_size=batch_size,
-            pipeline=(plan,),
+            row_ids=[row_id for batch in data for row_id in batch._row_ids] if all(have_row_ids) else None,
+            field_pipelines={field: (plan,) for field in keys},
         )
+        result._ensure_active()
+        return result
+
+    def _ensure_active(self) -> None:
+        self._lifetime.ensure_active()
+
+    @staticmethod
+    def _collect_states(batches: list["ColumnRemoteBatch"]) -> list[_ColumnRemoteState]:
+        states_by_domain = {}
+        lifetimes = {id(batch._lifetime): batch._lifetime for batch in batches}
+        for lifetime in lifetimes.values():
+            root = lifetime._domain.root()
+            domain, state_ids = states_by_domain.setdefault(id(root), (root, {}))
+            for state_id in lifetime._state_ids:
+                state_ids.setdefault(state_id, None)
+        return [state for domain, state_ids in states_by_domain.values() for state in domain.states(state_ids)]
+
+    def _states_from_fields(
+        self,
+        fields: dict[str, Any | list["ColumnRemoteBatch"]],
+        children: list["ColumnRemoteBatch"] | None = None,
+    ) -> list[_ColumnRemoteState]:
+        states = []
+        direct_keys = [key for key, value in fields.items() if not isinstance(value, list)]
+        if direct_keys:
+            states.append(
+                _ColumnRemoteState(
+                    self.partition,
+                    direct_keys,
+                    [fields[key] for key in direct_keys],
+                )
+            )
+        if children is None:
+            children = self._children_from_fields(fields)
+        states.extend(self._collect_states(children))
+        return self._unique_states(states)
+
+    @staticmethod
+    def _children_from_fields(fields):
+        children = []
+        seen = set()
+        for value in fields.values():
+            if not isinstance(value, list) or id(value) in seen:
+                continue
+            seen.add(id(value))
+            children.extend(value)
+        return children
+
+    def _states_for_fields(
+        self,
+        fields: dict[str, Any | list["ColumnRemoteBatch"]],
+    ) -> list[_ColumnRemoteState]:
+        direct_values = {id(value) for value in fields.values() if not isinstance(value, list)}
+        states = [state for state in self._states if any(id(value) in direct_values for value in state.fields)]
+        nested_fields = {}
+        for field, value in fields.items():
+            if not isinstance(value, list):
+                continue
+            _, child_fields = nested_fields.setdefault(id(value), (value, []))
+            child_fields.append(field)
+        for children, child_fields in nested_fields.values():
+            for child in children:
+                selected = {field: child.fields[field] for field in child_fields if field in child.fields}
+                states.extend(child._states_for_fields(selected))
+        return self._unique_states(states)
+
+    @staticmethod
+    def _unique_states(states: list[_ColumnRemoteState]) -> list[_ColumnRemoteState]:
+        unique = {}
+        for state in states:
+            unique.setdefault(state.state_id, state)
+        return list(unique.values())
+
+    def _cache_data(self, data: TensorDict) -> None:
+        if self.cache is None:
+            self.cache = data
+            return
+        from roll.distributed.scheduler.protocol import union_tensor_dict
+
+        self.cache = union_tensor_dict(self.cache, data)
+
+    def _apply_row_plan(self, plan: PlanNode) -> list[str] | None:
+        if self._row_ids is None:
+            return None
+        if isinstance(plan, SelectPlan):
+            index = plan.index.tolist()
+            if plan.index.dtype == torch.bool:
+                return [row_id for row_id, selected in zip(self._row_ids, index) if selected]
+            return [self._row_ids[i] for i in index]
+        if isinstance(plan, SlicePlan):
+            return self._row_ids[plan.slice_obj]
+        if isinstance(plan, RepeatPlan):
+            if plan.interleave:
+                return [row_id for row_id in self._row_ids for _ in range(plan.repeat_times)]
+            return self._row_ids * plan.repeat_times
+        raise TypeError(f"Unsupported row plan: {type(plan)}")
