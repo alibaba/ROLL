@@ -314,6 +314,7 @@ class AgenticPipeline(BasePipeline):
                     batch.meta_info["global_step"] = global_step
                     batch.meta_info["_broadcast_non_tensor_batch"] = True
                     batch.meta_info["loss_mask_keys"] = ["response_mask"]
+                    batch.meta_info["is_offload_optimizer_states_in_train_step"] = self.pipeline_config.is_offload_optimizer_states_in_train_step
 
                     if val_future is not None:
                         val_metrics = val_future.result()
