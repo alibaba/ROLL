@@ -3,6 +3,7 @@ from typing import List
 from packaging.version import Version
 
 import vllm
+from roll.platforms import current_platform
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -39,9 +40,33 @@ try:
 except ImportError:
     pass
 
+try:
+    from vllm.model_executor.models.qwen3_5 import Qwen3_5MoeForCausalLM
+
+    SUPPORTED_MOE_MODELS.append(Qwen3_5MoeForCausalLM)
+except ImportError:
+    pass
+
+try:
+    from vllm.model_executor.models.qwen3_5 import Qwen3_5MoeForConditionalGeneration
+
+    SUPPORTED_MOE_MODELS.append(Qwen3_5MoeForConditionalGeneration)
+except ImportError:
+    pass
+
 
 def patch_vllm_moe_model_weight_loader(model):
     if not isinstance(model, tuple(SUPPORTED_MOE_MODELS)):
+        return
+
+    if current_platform.is_npu():
+        from roll.third_party.vllm.npu.ascend_moe import patch_ascend_moe_weight_loader
+
+        patch_ascend_moe_weight_loader(model)
+        return
+
+    # vLLM 0.8.5 and newer already handle the fused MoE loader correctly.
+    if Version(vllm.__version__) >= Version("0.8.5"):
         return
 
     for layer in model.model.layers:

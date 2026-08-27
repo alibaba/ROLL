@@ -1131,6 +1131,16 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         if self.enable_router_replay:
             logger.info(f"Router Replay {self.router_replay_mode} mode: REPLAY enabled in MegatronTrainStrategy")
 
+        if (
+            current_platform.is_npu()
+            and self.use_sequence_packing
+            and getattr(self.megatron_train_args, "transformer_impl", None) == "transformer_engine"
+        ):
+            raise ValueError(
+                "Ascend Megatron Transformer Engine training does not support use_sequence_packing yet; "
+                "disable use_sequence_packing to avoid NPU varlen fused attention failures."
+            )
+
     def initialize(self, model_provider):
         self.seq_length = self.worker.pipeline_config.sequence_length
         self.weight_updaters: dict[str, MegatronWeightUpdater] = {}
@@ -1187,6 +1197,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             adam_beta1=self.megatron_train_args.adam_beta1,
             adam_beta2=self.megatron_train_args.adam_beta2,
             adam_eps=self.megatron_train_args.adam_epsilon,
+            fp8_recipe=self.megatron_train_args.fp8_recipe,
             fp16=self.megatron_train_args.fp16,
             bf16=self.megatron_train_args.bf16,
             params_dtype=params_dtype,
@@ -1345,7 +1356,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         for mini_metrics in metrics_tensors:
             append_to_dict(metrics, mini_metrics)
 
-        metrics.update({self.worker_config.name + "/" + "grad_norm": grad_norm})
+        grad_norm_value = grad_norm.detach().item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+        metrics.update({self.worker_config.name + "/" + "grad_norm": grad_norm_value})
 
         if self.model.config.num_moe_experts is not None and self.model.config.num_moe_experts > 1:
             reduce_aux_losses_tracker_across_ranks()

@@ -1,9 +1,13 @@
 from transformers.utils import is_peft_available
 
+from ..platforms import current_platform
 from ..utils import get_logger
 
 
 logger = get_logger(__name__)
+
+if current_platform.is_npu():
+    import megatron_adaptor  # noqa: F401
 
 if is_peft_available():
     from .lora_layer import apply_megatron_lora

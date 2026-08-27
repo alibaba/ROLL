@@ -289,6 +289,9 @@ def get_tensor_size(tensor: "torch.Tensor") -> int:
 
 
 def te_grouped_moe_available():
+    if current_platform.is_npu():
+        return True
+
     try:
         import transformer_engine as te
     except ImportError:

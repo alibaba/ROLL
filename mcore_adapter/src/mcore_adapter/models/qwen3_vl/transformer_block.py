@@ -83,8 +83,10 @@ class Qwen3VLTransformerBlock(TransformerBlock):
             return custom_forward
 
         def checkpoint_handler(forward_func):
-            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
+            """Use the TE-compatible checkpoint path only when FP8 is enabled."""
             if self.config.fp8:
+                if te_checkpoint is None:
+                    raise RuntimeError("FP8 activation checkpointing requires TransformerEngine support.")
                 return te_checkpoint(
                     forward_func,
                     self.config.distribute_saved_activations,
@@ -96,16 +98,16 @@ class Qwen3VLTransformerBlock(TransformerBlock):
                     context_mask,
                     rotary_pos_emb,
                 )
-            else:
-                return tensor_parallel.checkpoint(
-                    forward_func,
-                    self.config.distribute_saved_activations,
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                )
+
+            return tensor_parallel.checkpoint(
+                forward_func,
+                self.config.distribute_saved_activations,
+                hidden_states,
+                attention_mask,
+                context,
+                context_mask,
+                rotary_pos_emb,
+            )
 
         if self.config.recompute_method == "uniform":
             # Uniformly divide the total number of Transformer layers and checkpoint

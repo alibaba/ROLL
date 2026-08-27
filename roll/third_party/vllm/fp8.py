@@ -1,6 +1,6 @@
-from typing import List
-from functools import partial
 import weakref
+from functools import partial
+from typing import List
 
 import torch
 from torch.nn import Module
@@ -11,15 +11,17 @@ from vllm.model_executor.layers.quantization.fp8 import (
 from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform as vllm_platform
 from vllm.model_executor.utils import set_weight_attrs
 from vllm._custom_ops import scaled_fp8_quant as per_tensor_fp8_quant
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import requantize_with_max_scale
 
-from roll.utils.fp8 import per_block_fp8_quant
+from roll.platforms import current_platform as roll_platform
+from roll.utils.fp8 import is_mxfp8_ascend, per_block_fp8_quant, per_block_fp8_quant_ascend
 from roll.utils.logging import get_logger
 
 logger = get_logger()
+
 
 def update_quant_config(config, vllm_config):
     # Use hf_overrides arguments with weight_block_size
@@ -37,12 +39,22 @@ def update_quant_config(config, vllm_config):
     #           weight_block_size: [128, 128]
     if "hf_overrides" not in config or "quantization_config" not in config["hf_overrides"]:
         return
+    if not isinstance(vllm_config.quant_config, Fp8Config):
+        return
     assert config["hf_overrides"]["quantization_config"]["quant_method"] == "fp8"
     assert isinstance(vllm_config.quant_config, Fp8Config)
     assert vllm_config.quant_config.activation_scheme == "dynamic"
     assert vllm_config.quant_config.is_checkpoint_fp8_serialized
     vllm_config.quant_config.skip_process_weights_after_loading = True
     logger.info(f"Using custom vLLM quantization, block size {vllm_config.quant_config.weight_block_size}")
+
+
+def update_mxfp8_quant_config(vllm_config):
+    """Mark the fixed vLLM-Ascend quant config as serialized MXFP8."""
+    if not is_mxfp8_ascend(vllm_config.quant_config):
+        return
+    vllm_config.quant_config.is_checkpoint_fp8_serialized = True
+
 
 def _fp8_linear_weight_loader(layer: weakref.ReferenceType, original_weight_loader, param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs) -> None:
     layer = layer()
@@ -118,8 +130,8 @@ def _fp8_linear_create_weights(
     assert not self.use_marlin # not implement yet, because lack weight loader for chanelwise weight_scale
 
     # TODO support ROCM
-    assert not current_platform.is_rocm()
-    assert not current_platform.is_fp8_fnuz()
+    assert not vllm_platform.is_rocm()
+    assert not vllm_platform.is_fp8_fnuz()
 
     # store essential config in layer for custom weight loader
     layer.weight_block_size = self.quant_config.weight_block_size
@@ -144,14 +156,16 @@ def _fp8_linear_create_weights(
     layer.register_parameter("input_scale", None)
 
 _original_fp8_linear_create_weights = Fp8LinearMethod.create_weights
-Fp8LinearMethod.create_weights = _fp8_linear_create_weights
+if not roll_platform.is_npu():
+    Fp8LinearMethod.create_weights = _fp8_linear_create_weights
 
 def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
     if not getattr(self.quant_config, "skip_process_weights_after_loading", False):
         _original_fp8_linear_process_weights_after_loading(self, layer)
 
 _original_fp8_linear_process_weights_after_loading = Fp8LinearMethod.process_weights_after_loading
-Fp8LinearMethod.process_weights_after_loading = _fp8_linear_process_weights_after_loading
+if not roll_platform.is_npu():
+    Fp8LinearMethod.process_weights_after_loading = _fp8_linear_process_weights_after_loading
 
 def _fp8_moe_w13_weight_loader(layer: weakref.ReferenceType, original_weight_loader, param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs) -> None:
     layer = layer()
@@ -183,7 +197,7 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
                    intermediate_size_per_partition: int,
                    params_dtype: torch.dtype, **extra_weight_attrs):
     _original_fp8_moe_create_weights(self, layer, num_experts, hidden_size, intermediate_size_per_partition,
-                                     params_dtype, **extra_weight_attrs) 
+                                     params_dtype, **extra_weight_attrs)
     if not getattr(self.quant_config, "skip_process_weights_after_loading", False):
         return
 
@@ -193,9 +207,9 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
 
     # TODO support ROCM
     # https://github.com/vllm-project/vllm/blob/v0.8.4/vllm/model_executor/layers/quantization/fp8.py#L655
-    assert not current_platform.is_rocm()
-    assert not current_platform.is_fp8_fnuz()
-    assert current_platform.fp8_dtype() == torch.float8_e4m3fn
+    assert not vllm_platform.is_rocm()
+    assert not vllm_platform.is_fp8_fnuz()
+    assert vllm_platform.fp8_dtype() == torch.float8_e4m3fn
 
     self.rocm_aiter_moe_enabled = False # set in original process_weights_after_loading
 
@@ -239,7 +253,8 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
     assert type(layer.w2_weight_scale_inv) == Parameter
 
 _original_fp8_moe_create_weights = Fp8MoEMethod.create_weights
-Fp8MoEMethod.create_weights = _fp8_moe_create_weights
+if not roll_platform.is_npu():
+    Fp8MoEMethod.create_weights = _fp8_moe_create_weights
 
 def _fp8_moe_process_weights_after_loading(self, layer: Module) -> None:
     if not getattr(self.quant_config, "skip_process_weights_after_loading", False):
@@ -264,4 +279,50 @@ def _fp8_moe_process_weights_after_loading(self, layer: Module) -> None:
             assert w2_scale.data_ptr() == getattr(layer, f"w2_{self.weight_scale_name}").data_ptr()
 
 _original_fp8_moe_process_weights_after_loading = Fp8MoEMethod.process_weights_after_loading
-Fp8MoEMethod.process_weights_after_loading = _fp8_moe_process_weights_after_loading
+if not roll_platform.is_npu():
+    Fp8MoEMethod.process_weights_after_loading = _fp8_moe_process_weights_after_loading
+
+
+def _ascend_mxfp8_weight_loader(
+    layer: weakref.ReferenceType,
+    weight_loader,
+    scale_loader,
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    *args,
+    **kwargs,
+) -> None:
+    layer = layer()
+    if loaded_weight.dtype == torch.float8_e4m3fn:
+        weight_loader(param, loaded_weight.to(param.device), *args, **kwargs)
+        return
+
+    qweight, scale = per_block_fp8_quant_ascend(
+        loaded_weight.to(param.device),
+        dtype=getattr(layer, "params_dtype", torch.bfloat16),
+    )
+    weight_loader(param, qweight, *args, **kwargs)
+    scale_loader(layer.weight_scale, scale, *args, **kwargs)
+
+
+try:
+    from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+except ImportError:
+    AscendLinearMethod = None
+
+
+if AscendLinearMethod is not None:
+    _original_ascend_create_weights = AscendLinearMethod.create_weights
+
+    def _ascend_create_weights(self, layer, *args, **kwargs):
+        _original_ascend_create_weights(self, layer, *args, **kwargs)
+        if self.quant_method.__class__.__name__ != "AscendW8A8MXFP8DynamicLinearMethod":
+            return
+        layer.weight.weight_loader = partial(
+            _ascend_mxfp8_weight_loader,
+            weakref.ref(layer),
+            layer.weight.weight_loader,
+            layer.weight_scale.weight_loader,
+        )
+
+    AscendLinearMethod.create_weights = _ascend_create_weights

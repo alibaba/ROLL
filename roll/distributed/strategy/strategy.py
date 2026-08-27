@@ -349,6 +349,9 @@ class InferenceStrategy(ABC):
         gathered_logits = torch.gather(student_logits, dim=-1, index=teacher_indices)
         return gathered_logits
     
+    async def begin_model_update(self, *args, **kwargs):
+        pass
+
     async def process_weights_after_loading(self,*args, **kwargs):
         pass
 

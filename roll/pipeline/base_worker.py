@@ -457,8 +457,7 @@ class InferWorker(Worker):
 
             # Verify offloaded workers have near-zero GPU memory usage
             if self.rank_info.dp_rank in target_dp_ranks:
-                import torch
-                gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
+                gpu_memory_gb = current_platform.memory_allocated() / 1024**3
                 if gpu_memory_gb > 1.0:
                     raise RuntimeError(
                         f"GPU memory not properly offloaded for Worker {self.rank} (DP {self.rank_info.dp_rank}): "
@@ -537,7 +536,12 @@ class InferWorker(Worker):
 
     async def abort_requests(self, request_ids):
         await self.strategy.abort_requests(request_ids)
-    
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def begin_model_update(self):
+        if getattr(self, "strategy", None) is not None:
+            await self.strategy.begin_model_update()
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     async def process_weights_after_loading(self):
         if getattr(self, "strategy", None) is not None:

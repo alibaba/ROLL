@@ -29,6 +29,7 @@ from roll.utils.functionals import (
 )
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType, clear_memory
+from roll.utils.vllm_online_quantization import default_load_format_for_quantization
 from roll.platforms import current_platform
 
 
@@ -114,7 +115,9 @@ class VllmStrategy(InferenceStrategy):
                     "disable_custom_all_reduce", True
                 ),  # potentially hangs in tp>1
                 "enable_prefix_caching": vllm_config.get("enable_prefix_caching", True),
-                "load_format": vllm_config.get("load_format", "dummy"),  # use model update passed value
+                "load_format": vllm_config.get(
+                    "load_format", default_load_format_for_quantization(vllm_config)
+                ),  # use model update passed value
                 "max_num_batched_tokens": vllm_config.get("max_num_batched_tokens", 8192), # use default value of LLM class usage context
             }
         )
@@ -373,7 +376,10 @@ class VllmStrategy(InferenceStrategy):
                 await self.model.offload_states(self.sleep_level)
                 self.is_model_in_gpu = False
         clear_memory()
-    
+
+    async def begin_model_update(self, *args, **kwargs):
+        await self.model.begin_model_update()
+
     async def process_weights_after_loading(self,*args, **kwargs):
         await self.model.process_weights_after_loading()
 

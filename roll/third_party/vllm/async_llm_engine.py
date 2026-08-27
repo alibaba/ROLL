@@ -23,5 +23,8 @@ class CustomAsyncLLMEngine(AsyncLLMEngine):
     async def add_lora(self, *args, **kwargs):
         self.engine.model_executor.collective_rpc(method="custom_add_lora", args=args, kwargs=kwargs)
 
+    async def begin_model_update(self):
+        self.engine.model_executor.collective_rpc(method="begin_model_update")
+
     async def process_weights_after_loading(self):
         self.engine.model_executor.collective_rpc(method="process_weights_after_loading")

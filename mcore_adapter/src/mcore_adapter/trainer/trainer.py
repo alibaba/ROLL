@@ -507,6 +507,7 @@ class McaTrainer(Trainer):
             adam_beta1=self.args.adam_beta1,
             adam_beta2=self.args.adam_beta2,
             adam_eps=self.args.adam_epsilon,
+            fp8_recipe=self.args.fp8_recipe,
             fp16=self.args.fp16,
             bf16=self.args.bf16,
             params_dtype=params_dtype,
