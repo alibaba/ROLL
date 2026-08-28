@@ -283,6 +283,8 @@ class Qwen3_5Model(Qwen3_5McaGPTModel, MultimodalEmbeddingMixin):
     ) -> "torch.Tensor":
         force_vit_image = kwargs.pop("force_vit_image", False)
         force_vit_video = kwargs.pop("force_vit_video", False)
+        # Qwen3.5-VL's processor emits this by default; no consumer forwards it further.
+        kwargs.pop("mm_token_type_ids", None)
         packed_seq_params = kwargs.get("packed_seq_params", None)
 
         if (
