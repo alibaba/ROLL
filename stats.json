@@ -4061,5 +4061,20 @@
       "total": 240,
       "open": 26
     }
+  },
+  "2026-08-28": {
+    "stars": 3373,
+    "forks": 310,
+    "contributors": 58,
+    "commits": 499,
+    "issues": {
+      "total": 235,
+      "open": 100,
+      "fixRate": 57
+    },
+    "prs": {
+      "total": 242,
+      "open": 26
+    }
   }
 }
