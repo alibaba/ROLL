@@ -127,6 +127,7 @@ The Dynamic Batching parameters are divided into `train` and `infer`:
 
 ### Train
 - `use_dynamic_batching_in_train`: Whether to enable this feature during the `train_step`.
+- `keep_mini_batch`: Whether dynamic batching should preserve the number and sample size of static training mini-batches. It is disabled by default for backward compatibility.
 - `max_tokens_per_microbatch_in_train`: The maximum number of tokens allowed per micro-batch during training.
 - `sequence_length_round_in_train`: The sequence length of each micro-batch must be divisible by this value. It should also be divisible by `tensor_model_parallel_size * context_parallel_size`. Common values are 128 or 64.
 
@@ -168,6 +169,7 @@ actor_train:
   device_mapping: list(range(0,8))
   infer_batch_size: 2
   use_dynamic_batching_in_train: true
+  keep_mini_batch: true
   max_tokens_per_microbatch_in_train: 8192
   sequence_length_round_in_train: 128
   use_dynamic_batching_in_infer: true

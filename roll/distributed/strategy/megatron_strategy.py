@@ -1350,7 +1350,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         if self.model.config.num_moe_experts is not None and self.model.config.num_moe_experts > 1:
             reduce_aux_losses_tracker_across_ranks()
             tracker = get_moe_layer_wise_logging_tracker()
-            loss_scale = 1 / self.megatron_train_args.gradient_accumulation_steps
+            loss_scale = 1 / num_microbatches
             moe_losses = {
                 self.worker_config.name + "/" + k: (v["values"].float() * loss_scale).mean().item()
                 for k, v in tracker.items()
@@ -1363,7 +1363,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             MTPLossLoggingHelper.reduce_loss_in_tracker()
             tracker = MTPLossLoggingHelper.tracker
             if "values" in tracker:
-                loss_scale = 1 / self.megatron_train_args.gradient_accumulation_steps
+                loss_scale = 1 / num_microbatches
                 mtp_losses = tracker["values"] * loss_scale
                 mtp_num_layers = mtp_losses.shape[0]
                 for i in range(mtp_num_layers):

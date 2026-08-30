@@ -1669,6 +1669,18 @@ def batch_balance(batch: DataProto, dp_size, minibatch_size, logging_prefix="glo
     workload_lst = calculate_workload(global_seqlen_lst)
     world_size = dp_size
     if keep_minibatch:
+        if minibatch_size <= 0:
+            raise ValueError(f"minibatch_size must be positive, got {minibatch_size}")
+        if batch_size % minibatch_size != 0:
+            raise ValueError(
+                f"batch size {batch_size} must be divisible by minibatch_size {minibatch_size} "
+                "when keep_minibatch is enabled"
+            )
+        if minibatch_size % world_size != 0:
+            raise ValueError(
+                f"minibatch_size {minibatch_size} must be divisible by dp_size {world_size} "
+                "when keep_minibatch is enabled"
+            )
         # Decouple the DP balancing and mini-batching.
         minibatch_num = len(workload_lst) // minibatch_size
         global_partition_lst = [[] for _ in range(world_size)]
@@ -1698,5 +1710,4 @@ def batch_balance(batch: DataProto, dp_size, minibatch_size, logging_prefix="glo
     metrics = {}
     metrics.update(global_balance_stats)
     return metrics
-
 

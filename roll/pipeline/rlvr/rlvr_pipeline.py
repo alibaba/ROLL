@@ -776,7 +776,9 @@ class RLVRPipeline(BasePipeline):
                             batch_balance_metrics = batch_balance(batch, dp_size=self.actor_train.dp_size,
                                 minibatch_size=self.pipeline_config.actor_train.training_args.per_device_train_batch_size
                                 * self.pipeline_config.actor_train.training_args.gradient_accumulation_steps
-                                * self.actor_train.dp_size, logging_prefix="global_seqlen/actor_train")
+                                * self.actor_train.dp_size, logging_prefix="global_seqlen/actor_train",
+                                keep_minibatch=self.pipeline_config.actor_train.keep_mini_batch
+                                and self.pipeline_config.actor_train.use_dynamic_batching_in_train)
                             metrics_mgr.add_metrics(batch_balance_metrics)
                             # update actor
                             if self.pipeline_config.actor_train.use_dynamic_batching_in_train:
