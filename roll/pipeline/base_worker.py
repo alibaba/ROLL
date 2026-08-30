@@ -85,11 +85,21 @@ class ActorWorker(Worker):
                     per_device_train_batch_size * self.worker_config.training_args.gradient_accumulation_steps
             )
             if self.worker_config.use_dynamic_batching_in_train:
-                # TODO: support `keep_mini_batch`, The number of mini_batch may be smaller than original size
+                strategy_config = (
+                    self.worker_config.strategy_args.strategy_config
+                    if self.worker_config.strategy_args is not None
+                    else {}
+                )
                 dataloader = make_mini_batch_iter_for_dynamic_batching(
                     data=data,
                     epochs=self.pipeline_config.ppo_epochs,
                     ga_steps=self.worker_config.training_args.gradient_accumulation_steps,
+                    keep_mini_batch=self.worker_config.keep_mini_batch,
+                    mini_batch_size=backward_batch_size,
+                    pipeline_model_parallel_size=strategy_config.get("pipeline_model_parallel_size", 1),
+                    virtual_pipeline_model_parallel_size=strategy_config.get(
+                        "virtual_pipeline_model_parallel_size", None
+                    ),
                 )
             else:
                 dataloader = data.make_iterator(

@@ -1,5 +1,6 @@
-import bisect
-from typing import Iterator
+import copy
+from numbers import Integral
+from typing import Iterator, Optional
 
 import torch
 
@@ -8,6 +9,83 @@ from roll.utils.logging import get_logger
 
 
 logger = get_logger()
+
+
+def _normalize_pipeline_model_parallel_size(pipeline_model_parallel_size: Optional[int]) -> int:
+    if pipeline_model_parallel_size is None:
+        return 1
+    if (
+        isinstance(pipeline_model_parallel_size, bool)
+        or not isinstance(pipeline_model_parallel_size, Integral)
+        or pipeline_model_parallel_size < 1
+    ):
+        raise ValueError(
+            "pipeline_model_parallel_size must be a positive integer, "
+            f"got {pipeline_model_parallel_size!r}"
+        )
+    return int(pipeline_model_parallel_size)
+
+
+def _split_ranges_to_vpp_multiple(
+    micro_batch_indices: list[list[int]],
+    micro_batch_lengths: list[int],
+    pipeline_model_parallel_size: int,
+    logical_mini_batch_index: int,
+) -> None:
+    """Split ranges in one logical mini-batch to satisfy the VPP schedule.
+
+    Megatron's interleaved pipeline schedule requires the number of
+    micro-batches in each logical mini-batch to be a multiple of the pipeline
+    parallel size.  Splitting a range increases that count by one while
+    preserving sample order and the padded sequence length associated with the
+    range.  The lists are intentionally mutated in place so the caller can
+    retain the grouping structure it has already built.
+    """
+    if pipeline_model_parallel_size <= 0:
+        raise ValueError(
+            "pipeline_model_parallel_size must be positive, "
+            f"got {pipeline_model_parallel_size}"
+        )
+
+    current_count = len(micro_batch_indices)
+    target_count = (
+        (current_count + pipeline_model_parallel_size - 1) // pipeline_model_parallel_size
+    ) * pipeline_model_parallel_size
+    splits_needed = target_count - current_count
+
+    while splits_needed:
+        # Prefer the largest range so that repeated midpoint splits leave as
+        # much room as possible for any remaining required splits.
+        splittable_index = next(
+            (
+                index
+                for index, (start, end) in sorted(
+                    enumerate(micro_batch_indices),
+                    key=lambda item: item[1][1] - item[1][0],
+                    reverse=True,
+                )
+                if end - start > 1
+            ),
+            None,
+        )
+        if splittable_index is None:
+            raise ValueError(
+                f"logical mini-batch {logical_mini_batch_index} has {current_count} "
+                f"micro-batches and cannot be split into a multiple of "
+                f"pipeline_model_parallel_size={pipeline_model_parallel_size}; "
+                "there are not enough multi-sample ranges"
+            )
+
+        start, end = micro_batch_indices[splittable_index]
+        midpoint = start + (end - start) // 2
+        length = micro_batch_lengths[splittable_index]
+        micro_batch_indices[splittable_index : splittable_index + 1] = [
+            [start, midpoint],
+            [midpoint, end],
+        ]
+        micro_batch_lengths[splittable_index : splittable_index + 1] = [length, length]
+        splits_needed -= 1
+        current_count += 1
 
 
 def dynamic_batching_shard(
@@ -20,10 +98,11 @@ def dynamic_batching_shard(
     log_prefix: str = None,
 ) -> tuple[DataProto, dict]:
     #TODO use Karmarkar–Karp algorithm to replace the greedy implementation
+    pipeline_model_parallel_size = _normalize_pipeline_model_parallel_size(pipeline_model_parallel_size)
     attention_mask = origin_batch.batch["attention_mask"]
     batch_size = attention_mask.shape[0]
     seq_lens = attention_mask.view(batch_size, -1).sum(-1).tolist()
-    
+
     if 0 in seq_lens:
         logger.warning(f"The attention_mask is all zero in the {log_prefix} stage. Please verify the rollout stage.")
 
@@ -69,51 +148,24 @@ def dynamic_batching_shard(
         for (start, end), length in zip(global_micro_batch_indices, global_micro_batch_lengths)
     )
     if pipeline_model_parallel_size > 1 and virtual_pipeline_model_parallel_size:
-        # pad to multiple of `microbatch_group_size_per_vp_stage`
+        # Pad to a multiple of the pipeline parallel size.  A dynamic range
+        # may contain many samples, so it can be split more than once when a
+        # large token cap produces only a handful of ranges.  The old
+        # implementation considered each original range only once, which
+        # raised an assertion for e.g. one ``[0, 8)`` range needing three
+        # additional micro-batches for ``pp_size=4``.
         num_micro_batches = len(global_micro_batch_indices)
         padded_num_micro_batches = (
             (num_micro_batches + pipeline_model_parallel_size - 1) // pipeline_model_parallel_size
         ) * pipeline_model_parallel_size
         assert pipeline_model_parallel_size <= shard_size, f"The pipeline_model_size: {pipeline_model_parallel_size} should not be greater than num_seqs in one dp_rank"
         assert padded_num_micro_batches <= shard_size
-        num_micro_batches_needed = padded_num_micro_batches - num_micro_batches
-        
-        splittable_mbs = [i for i in range(num_micro_batches) if (global_micro_batch_indices[i][1] - global_micro_batch_indices[i][0]) > 1]
-        # sort by tokens
-        splittable_mbs.sort(key=lambda x: (global_micro_batch_indices[x][1] - global_micro_batch_indices[x][0]) * global_micro_batch_lengths[x], reverse=True)
-
-        assert len(splittable_mbs) >= num_micro_batches_needed
-        dropped_mbs = []
-        added_micro_batch_indices = []
-        added_micro_batch_lengths = []
-        while num_micro_batches_needed:
-            mb_to_split = splittable_mbs.pop(0)
-
-            # compute split point
-            split_start, split_end = global_micro_batch_indices[mb_to_split]
-            split_length = global_micro_batch_lengths[mb_to_split]
-            split_seqs = split_end - split_start
-            split_point = split_start + (split_seqs // 2)
-
-            # generate new mb
-            new_mb1 = [split_start, split_point]
-            new_mb2 = [split_point, split_end]
-            
-            # record dropped and added mbs
-            dropped_mbs.append(mb_to_split)
-            added_micro_batch_indices += [new_mb1, new_mb2]
-            added_micro_batch_lengths += [split_length, split_length]
-            
-            num_micro_batches_needed -= 1
-
-        global_micro_batch_indices = [global_micro_batch_indices[i] for i in range(num_micro_batches) if i not in dropped_mbs]
-        global_micro_batch_lengths = [global_micro_batch_lengths[i] for i in range(num_micro_batches) if i not in dropped_mbs]
-
-        # insert added_mbs, ensure sorted
-        for added_mbs_indices, added_mbs_length in zip(added_micro_batch_indices, added_micro_batch_lengths):
-            insert_indice = bisect.bisect_right(global_micro_batch_indices, added_mbs_indices)
-            global_micro_batch_indices.insert(insert_indice, added_mbs_indices)
-            global_micro_batch_lengths.insert(insert_indice, added_mbs_length)        
+        _split_ranges_to_vpp_multiple(
+            global_micro_batch_indices,
+            global_micro_batch_lengths,
+            pipeline_model_parallel_size,
+            logical_mini_batch_index=0,
+        )
 
     batch = DataProto.concat(aggregated_shards)
     batch.meta_info["global_micro_batch_indices"] = global_micro_batch_indices
@@ -142,10 +194,13 @@ def make_mini_batch_iter_for_dynamic_batching(
     data: DataProto,
     epochs: int,
     ga_steps: int = 1,
+    keep_mini_batch: bool = False,
+    mini_batch_size: Optional[int] = None,
+    pipeline_model_parallel_size: int = 1,
+    virtual_pipeline_model_parallel_size: Optional[int] = None,
 ) -> Iterator[DataProto]:
     """
-        Iterator that groups previously created global micro batches into mini batches
-        based on gradient accumulation steps (ga_steps).
+        Iterator that groups previously created global micro batches into mini batches.
 
         Terminology:
         - Micro batch: The smallest training unit that can fit into GPU memory
@@ -154,30 +209,133 @@ def make_mini_batch_iter_for_dynamic_batching(
           `max_tokens_per_microbatch`.
         - Mini batch: A group of several micro batches.
           During training, you iterate over each micro batch inside a mini batch,
-          perform forward/backward passes, accumulate gradients, and after `ga_steps`
-          micro batches, perform a parameter update (`optimizer.step()`).
+          perform forward/backward passes, accumulate gradients, and then perform a
+          parameter update (`optimizer.step()`).
 
         This function:
         1. Reads the global micro batch indices/lengths from `data.meta_info`.
-        2. Groups `ga_steps` consecutive micro batches into a single mini batch.
-        3. Adjusts indices so micro batches are relative to the mini batch.
-        4. Yields each mini batch for training.
+        2. By default, groups `ga_steps` consecutive micro batches into a mini batch.
+           With `keep_mini_batch`, instead preserves static sample-level mini-batch
+           boundaries and splits dynamic micro batches that cross those boundaries.
+        3. When virtual pipeline parallelism is enabled, splits ranges within
+           each logical mini-batch until its micro-batch count is a multiple of
+           ``pipeline_model_parallel_size``.
+        4. Adjusts indices so micro batches are relative to the mini batch.
+        5. Yields each mini batch for training.
         """
+    pipeline_model_parallel_size = _normalize_pipeline_model_parallel_size(pipeline_model_parallel_size)
     global_micro_batch_indices = data.meta_info["global_micro_batch_indices"]
     global_micro_batch_lengths = data.meta_info["global_micro_batch_lengths"]
+
+    assert ga_steps > 0, f"ga_steps must be positive, got {ga_steps}"
+    assert len(global_micro_batch_indices) == len(global_micro_batch_lengths), (
+        "global_micro_batch_indices and global_micro_batch_lengths must have the same length"
+    )
+
+    # The ranges are produced by ``dynamic_batching_shard`` and are local to a
+    # DP rank.  Validate them before grouping so a malformed layout cannot
+    # silently drop or duplicate samples when a range is split at a boundary.
+    batch_size = len(data)
+    validated_micro_batch_indices = []
+    validated_micro_batch_lengths = []
+    if batch_size == 0:
+        assert not global_micro_batch_indices, "an empty batch cannot have micro-batch ranges"
+    else:
+        assert global_micro_batch_indices, "a non-empty batch must have micro-batch ranges"
+        expected_start = 0
+        for range_idx, (micro_start, micro_end) in enumerate(global_micro_batch_indices):
+            assert isinstance(micro_start, Integral) and isinstance(micro_end, Integral), (
+                f"micro-batch range {range_idx} must contain integer offsets, "
+                f"got [{micro_start!r}, {micro_end!r}]"
+            )
+            micro_start = int(micro_start)
+            micro_end = int(micro_end)
+            assert micro_start == expected_start, (
+                "global micro-batch ranges must be sorted and contiguous: "
+                f"expected start {expected_start}, got {micro_start} at range {range_idx}"
+            )
+            assert micro_start < micro_end <= batch_size, (
+                f"invalid global micro-batch range [{micro_start}, {micro_end}) "
+                f"for batch size {batch_size}"
+            )
+            assert global_micro_batch_lengths[range_idx] > 0, (
+                f"micro-batch length must be positive, got {global_micro_batch_lengths[range_idx]}"
+            )
+            validated_micro_batch_indices.append([micro_start, micro_end])
+            validated_micro_batch_lengths.append(global_micro_batch_lengths[range_idx])
+            expected_start = micro_end
+        assert expected_start == batch_size, (
+            "global micro-batch ranges must cover the complete local batch: "
+            f"last end {expected_start}, batch size {batch_size}"
+        )
+    global_micro_batch_indices = validated_micro_batch_indices
+    global_micro_batch_lengths = validated_micro_batch_lengths
+
+    if keep_mini_batch:
+        assert mini_batch_size is not None and mini_batch_size > 0, (
+            f"mini_batch_size must be positive when keep_mini_batch is enabled, got {mini_batch_size}"
+        )
+        assert batch_size % mini_batch_size == 0, (
+            f"batch size {batch_size} must be divisible by mini_batch_size {mini_batch_size} "
+            "when keep_mini_batch is enabled"
+        )
+
+        grouped_indices = [[] for _ in range(batch_size // mini_batch_size)]
+        grouped_lengths = [[] for _ in grouped_indices]
+        for (start, end), length in zip(global_micro_batch_indices, global_micro_batch_lengths):
+            while start < end:
+                group_idx = start // mini_batch_size
+                group_end = min(end, (group_idx + 1) * mini_batch_size)
+                grouped_indices[group_idx].append([start, group_end])
+                grouped_lengths[group_idx].append(length)
+                start = group_end
+
+        # Every logical mini-batch must contain exactly its static sample
+        # budget.  These checks also make an accidental empty group fail at the
+        # point where the bad layout is constructed rather than at yield time.
+        for group_idx, (indices_group, lengths_group) in enumerate(zip(grouped_indices, grouped_lengths)):
+            assert indices_group and lengths_group, f"logical mini-batch {group_idx} is empty"
+            group_start = group_idx * mini_batch_size
+            group_end = group_start + mini_batch_size
+            assert indices_group[0][0] == group_start and indices_group[-1][1] == group_end, (
+                f"logical mini-batch {group_idx} does not cover [{group_start}, {group_end})"
+            )
+            assert all(
+                left[1] == right[0] for left, right in zip(indices_group, indices_group[1:])
+            ), f"micro-batch ranges in logical mini-batch {group_idx} are not contiguous"
+
+            if pipeline_model_parallel_size > 1 and virtual_pipeline_model_parallel_size:
+                _split_ranges_to_vpp_multiple(
+                    indices_group,
+                    lengths_group,
+                    pipeline_model_parallel_size,
+                    group_idx,
+                )
+    else:
+        grouped_indices = [
+            global_micro_batch_indices[i : i + ga_steps]
+            for i in range(0, len(global_micro_batch_indices), ga_steps)
+        ]
+        grouped_lengths = [
+            global_micro_batch_lengths[i : i + ga_steps]
+            for i in range(0, len(global_micro_batch_lengths), ga_steps)
+        ]
+
     for _ in range(epochs):
-        for i in range(0, len(global_micro_batch_indices), ga_steps):
-            indices_chunk = global_micro_batch_indices[i : i + ga_steps]
+        for indices_chunk, lengths_chunk in zip(grouped_indices, grouped_lengths):
             start = indices_chunk[0][0]
             end = indices_chunk[-1][-1]
             mini_batch = data.slice(start, end)
-
-            data.meta_info["micro_batch_indices"] = [[x - start for x in row] for row in indices_chunk]
-            data.meta_info["micro_batch_lengths"] = global_micro_batch_lengths[i : i + ga_steps]
-            mini_batch.meta_info["mini_batch_size"] = mini_batch.batch.batch_size[0]
+            mini_batch.meta_info = copy.deepcopy(data.meta_info)
+            mini_batch.meta_info["micro_batch_indices"] = [
+                [micro_batch_start - start, micro_batch_end - start]
+                for micro_batch_start, micro_batch_end in indices_chunk
+            ]
+            mini_batch.meta_info["micro_batch_lengths"] = list(lengths_chunk)
+            mini_batch.meta_info["mini_batch_size"] = len(mini_batch)
             mini_batch.meta_info["num_micro_batchs"] = len(indices_chunk)
 
-            yield (mini_batch)
+            yield mini_batch
 
 
 def make_micro_batch_iter_for_dynamic_batching(mini_batch: DataProto):

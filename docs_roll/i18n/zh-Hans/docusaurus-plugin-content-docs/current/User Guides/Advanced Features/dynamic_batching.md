@@ -125,6 +125,7 @@ shard1:
 与 Dynamic Batching 相关的参数如下，分为 train 和 infer 两个部分
 - Train
   - use_dynamic_batching_in_train: 是否在 `train_step` 时开启；
+  - keep_mini_batch: 是否在动态切分 micro-batch 时保留静态训练 mini-batch 的数量和样本数。默认为关闭，以兼容已有配置；
   - max_tokens_per_microbatch_in_train: 训练时每个 micro_batch 最大 token 数量；
   - sequence_length_round_in_train: 训练时每个 micro_batch 的序列长度需要能被这个参数整除，需要能够被 `tensor_model_parallel_size * context_parallel_size` 整除，一般取 128,64 即可；
 - Infer
@@ -167,6 +168,7 @@ actor_train:
   device_mapping: list(range(0,8))
   infer_batch_size: 2
   use_dynamic_batching_in_train: true
+  keep_mini_batch: true
   max_tokens_per_microbatch_in_train: 8192
   sequence_length_round_in_train: 128
   use_dynamic_batching_in_infer: true

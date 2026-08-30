@@ -152,6 +152,13 @@ class WorkerConfig:
             "minimizing padding and improving computational and memory efficiency."
         },
     )
+    keep_mini_batch: bool = field(
+        default=False,
+        metadata={
+            "help": "Keep the number and sample size of training mini-batches consistent with static batching. "
+            "Dynamic micro-batches are split at each static mini-batch boundary before optimizer updates."
+        },
+    )
     max_tokens_per_microbatch_in_train: int = field(
         default=0,
         metadata={
@@ -360,4 +367,3 @@ def is_actor_infer_overlapping_with_any_cluster(actor_infer: WorkerConfig, actor
                 return True
 
     return False
-
