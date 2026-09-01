@@ -20,6 +20,10 @@ install the three components used by the current Ascend CI and documentation:
 The refs will be Docker build arguments so image builds can override them
 without editing the Dockerfiles.
 
+The repository's local `mcore_adapter` package will also be installed after
+the external dependencies, so ROLL's Megatron strategies are importable from
+the image.
+
 ## Installation design
 
 1. Install the small build prerequisites required by the stack (`setuptools<80`,
@@ -27,14 +31,16 @@ without editing the Dockerfiles.
 2. Clone Megatron-LM, TransformerEngineNPU, and MegatronAdaptor into a
    temporary build directory with shallow clones.
 3. Install Megatron-Core first, then TransformerEngineNPU, then
-   MegatronAdaptor, all as editable packages without build isolation. This
-   follows the dependency direction used by the NPU CI.
-4. Keep the existing ROLL, vLLM, torch-npu, and triton-ascend installation
+   MegatronAdaptor from the cloned source trees without build isolation. Use
+   normal package installs so the temporary source trees can be removed after
+   validation.
+4. Install the local `mcore_adapter` package after the external stack.
+5. Keep the existing ROLL, vLLM, torch-npu, and triton-ascend installation
    flow unchanged.
-5. Run an import smoke check during image build for `megatron_adaptor`,
+6. Run an import smoke check during image build for `megatron_adaptor`,
    `megatron.core`, and `transformer_engine.pytorch` after sourcing the Ascend
    runtime environment.
-6. Remove cloned source trees and pip caches in the existing cleanup step.
+7. Remove cloned source trees and pip caches in the existing cleanup step.
 
 ## Compatibility and failure behavior
 
