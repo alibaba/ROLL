@@ -172,7 +172,10 @@ class MegatronInferStrategy(InferenceStrategy):
             # R2 mode: init router_replay_action=RouterReplayAction.RECORD
             RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
 
-        logger.info(f"{self.model.get_models()}")
+        if current_platform.is_npu():
+            logger.info("Initialized model chunks: %s", [type(model).__name__ for model in self.models_unwrapped])
+        else:
+            logger.info(f"{self.model.get_models()}")
         dist.barrier()
 
     def _validate_vlm_packing_support(self):
@@ -529,6 +532,13 @@ class MegatronInferStrategy(InferenceStrategy):
         else:
             input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
             attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
+
+            if hasattr(torch, "npu") and torch.npu.is_available() and attention_mask is not None:
+                attention_mask = attention_mask.bool()
+                B, S = attention_mask.shape
+                attention_mask = attention_mask[:, None, None, :]   # [B,1,1,S]
+                attention_mask = attention_mask.expand(B, 1, S, S)        # [B,1,S,S]
+
             if labels is not None:
                 labels = self._get_feature_on_this_cp_rank(labels, "labels")
             loss_mask = self._get_feature_on_this_cp_rank(loss_mask, "loss_mask")
@@ -1250,7 +1260,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         # if self.enable_router_replay and self.router_replay_mode == "R3":
             # RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
-        logger.info(f"{self.model.get_models()}")
+        if current_platform.is_npu():
+            logger.info("Initialized model chunks: %s", [type(model).__name__ for model in self.models_unwrapped])
+        else:
+            logger.info(f"{self.model.get_models()}")
         if self.megatron_train_args.compile_warmup and self.worker.rank_info.pp_size > 1:
             compile_warmup_pipeline_stages(self)
 

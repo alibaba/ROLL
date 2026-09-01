@@ -125,6 +125,58 @@ pip install -v -e .
 cd ..
 ```
 
+### Install Megatron on Ascend
+
+This step is optional. Install these dependencies when a ROLL configuration uses the `megatron_train` or `megatron_infer` strategy. The versions below match the combination validated by the current NPU CI:
+
+| Software | Version |
+| -------- | ------- |
+| Megatron-Core | `core_r0.17.0` |
+| TransformerEngineNPU | `main` |
+| MegatronAdaptor | `core_r0.17.0` |
+
+Install the packages in the following order. Megatron-Core 0.17 declares Python 3.12 in its package metadata, while the ROLL Ascend environment uses Python 3.11, so its editable installation must ignore the metadata Python requirement:
+
+```
+python -m pip install --upgrade pip wheel
+python -m pip install "setuptools<80" pybind11 "packaging>=24.2"
+
+# Megatron-Core 0.17
+export MEGATRON_CORE_SRC=/tmp/Megatron-LM
+rm -rf "${MEGATRON_CORE_SRC}"
+git clone --depth 1 --branch core_r0.17.0 \
+  https://github.com/NVIDIA/Megatron-LM.git "${MEGATRON_CORE_SRC}"
+python -m pip install --ignore-requires-python --no-build-isolation --no-deps \
+  -e "${MEGATRON_CORE_SRC}"
+
+# Ascend Transformer Engine and Megatron patches
+export TRANSFORMER_ENGINE_NPU_SRC=/tmp/TransformerEngineNPU
+export MEGATRON_ADAPTOR_SRC=/tmp/MegatronAdaptor
+rm -rf "${TRANSFORMER_ENGINE_NPU_SRC}" "${MEGATRON_ADAPTOR_SRC}"
+git clone --depth 1 --branch main \
+  https://gitcode.com/Ascend/TransformerEngineNPU.git \
+  "${TRANSFORMER_ENGINE_NPU_SRC}"
+git clone --depth 1 --branch core_r0.17.0 \
+  https://gitcode.com/Ascend/MegatronAdaptor.git \
+  "${MEGATRON_ADAPTOR_SRC}"
+python -m pip install --no-build-isolation -e "${TRANSFORMER_ENGINE_NPU_SRC}"
+python -m pip install --no-build-isolation -e "${MEGATRON_ADAPTOR_SRC}"
+```
+
+Verify the installation in an environment where the Ascend toolkit has been initialized:
+
+```
+python - <<'PY'
+import megatron_adaptor
+import megatron.core
+import transformer_engine.pytorch
+
+print("MegatronAdaptor NPU dependencies are available.")
+PY
+```
+
+Do not install the NVIDIA `transformer-engine[pytorch]` package for this NPU setup. TransformerEngineNPU provides the Ascend-compatible implementation.
+
 ### Install ROLL
 
 ```
@@ -143,11 +195,11 @@ cd ..
 | torch-npu                   | 2.10.0.post4  |
 | triton-ascend               | 3.2.1 (required instead of `triton`) |
 | flash_attn                  | not supported |
-| transformer-engine[pytorch] | not supported |
+| transformer-engine[pytorch] | not supported on Ascend; use TransformerEngineNPU for Megatron |
 
 1. `transformers` v4.57.6 supports enabling `--flash_attention_2`.
 2. `flash_attn` acceleration is not supported currently.
-3. `transformer-engine[pytorch]` is currently not supported.
+3. The NVIDIA `transformer-engine[pytorch]` package is not supported on Ascend. Megatron configurations use TransformerEngineNPU instead.
 
 ```
 pip install transformers==4.57.6
@@ -157,8 +209,7 @@ pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.c
 
 ## Quick Start: Single-Node Deployment
 
-Before full usage, we recommend testing the single-node pipeline to verify your environment and installation.
-Since Megatron-LM is not supported on NPU, first change `strategy_args` in the relevant files to use the `fsdp2` option.
+Before full usage, we recommend testing the single-node pipeline to verify your environment and installation. FSDP2 examples can use the base Ascend environment. Before running a configuration with `megatron_train` or `megatron_infer`, complete [Install Megatron on Ascend](#install-megatron-on-ascend).
 
 
 1. Run the single-node pipeline via shell:
@@ -167,7 +218,13 @@ Since Megatron-LM is not supported on NPU, first change `strategy_args` in the r
 bash examples/agentic_demo/run_agentic_pipeline_frozen_lake_single_node_demo.sh  
 ```
 
-2. Run the agentic pipeline using a config file:
+2. Run the Megatron DPO example:
+
+```
+bash examples/ascend_examples/run_dpo_pipeline.sh
+```
+
+3. Run the agentic pipeline using a config file:
 
 ```
 # Make sure you are in the root directory of the ROLL project
@@ -187,6 +244,7 @@ python examples/start_agentic_pipeline.py \
 | Agentic         | examples/qwen2.5-0.5B-agentic/run_agentic_pipeline_sokoban.sh | FSDP2            | vLLM              | Atlas 900 A2/A3 PODc |
 | Agentic-Rollout | examples/qwen2.5-0.5B-agentic/run_agentic_rollout_sokoban.sh | FSDP2            | vLLM              | Atlas 900 A2/A3 PODc |
 | RLVR            | examples/ascend_examples/run_rlvr_pipeline.sh                | FSDP2            | vLLM              | Atlas 900 A2/A3/Ascend 950 training series |
+| DPO             | examples/ascend_examples/run_dpo_pipeline.sh                 | Megatron         | Megatron          | Atlas 900 A2/A3 training series |
 
 ## Disclaimer
 

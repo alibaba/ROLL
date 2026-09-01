@@ -227,9 +227,12 @@ python -c "import vllm_ascend; print('vllm_ascend available')"
 
 ## 在昇腾 NPU 上运行 ROLL 流水线
 
-ROLL 的昇腾 NPU 示例使用 **FSDP2** 作为训练后端。当前昇腾配置不支持 Megatron-LM。启动流水线前，请修改模型路径，并根据 NPU 拓扑设置 `device_mapping`。
+仓库内置的 RLVR 示例采用 **FSDP2**，使用昇腾基础镜像中的依赖即可运行。A2/A3 上兼容的 Megatron 配置需要按照[在昇腾上安装 Megatron](ascend_usage.md#在昇腾上安装-megatron)补充可选依赖；A2/A3 Dockerfile 默认不会安装这些依赖。
 
-RLVR 流水线示例：
+运行内置 FSDP2 RLVR 示例时，请将 `strategy_args` 设置为 FSDP2。
+
+
+### 示例：RLVR 流水线
 
 ```bash
 python examples/start_rlvr_pipeline.py \

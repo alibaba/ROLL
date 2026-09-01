@@ -227,9 +227,11 @@ python -c "import vllm_ascend; print('vllm_ascend available')"
 
 ## Run ROLL Pipeline on Ascend NPU
 
-ROLL's Ascend NPU examples use **FSDP2** as the training backend. Megatron-LM is not supported by the current Ascend setup. Before launching a pipeline, update the model paths and set `device_mapping` according to the NPU topology.
+The bundled RLVR example uses **FSDP2** and runs with the base Ascend image dependencies. Compatible Megatron configurations on A2/A3 require the optional packages from [Install Megatron on Ascend](ascend_usage.md#install-megatron-on-ascend); the A2/A3 Dockerfiles do not install them by default.
 
-Example RLVR pipeline:
+For the bundled FSDP2 RLVR example, set `strategy_args` to use FSDP2.
+
+### Example: RLVR Pipeline
 
 ```bash
 python examples/start_rlvr_pipeline.py \

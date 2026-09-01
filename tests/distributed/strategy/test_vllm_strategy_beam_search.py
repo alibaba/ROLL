@@ -75,6 +75,7 @@ def _install_mock_vllm_modules(monkeypatch):
 
     inputs = ModuleType("vllm.inputs")
     inputs.__path__ = []
+    inputs.TokensPrompt = MockTokensPrompt
     inputs_data = ModuleType("vllm.inputs.data")
     inputs_data.TokensPrompt = MockTokensPrompt
 
