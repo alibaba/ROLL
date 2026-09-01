@@ -93,11 +93,23 @@ pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.c
 
 ## Training Configuration
 
-### Megatron Strategy Not Supported
+### Megatron Strategy Initialization Error
 
-**Symptom:** Errors when using `strategy: megatron` in configuration on NPU.
+**Symptom:** Import or initialization errors occur when using `megatron_train` or `megatron_infer` on NPU.
 
-**Solution:** Megatron-LM is not supported on Ascend NPU. Use FSDP2 as the training backend:
+**Solution:** Megatron is available for validated A2/A3 configurations, but its optional dependencies are not part of the base Ascend installation. Complete [Install Megatron on Ascend](ascend_usage.md#install-megatron-on-ascend), then verify the three packages in an environment where the Ascend toolkit has been initialized:
+
+```bash
+python - <<'PY'
+import megatron_adaptor
+import megatron.core
+import transformer_engine.pytorch
+
+print("MegatronAdaptor NPU dependencies are available.")
+PY
+```
+
+If you do not need the Megatron path, select FSDP2 instead and keep the matching FSDP2 strategy configuration:
 
 ```yaml
 strategy_args:
