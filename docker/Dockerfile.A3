@@ -65,18 +65,19 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     pip install --upgrade wheel && \
     pip install "setuptools<80" pybind11 "packaging>=24.2" && \
     git clone --depth 1 --branch core_r0.17.0 \
-        https://github.com/NVIDIA/Megatron-LM.git /tmp/Megatron-LM && \
+        https://github.com/NVIDIA/Megatron-LM.git /workspace/Megatron-LM && \
     python3 -m pip install --ignore-requires-python --no-build-isolation --no-deps \
-        /tmp/Megatron-LM && \
+        -e /workspace/Megatron-LM && \
     git clone --depth 1 --branch main \
-        https://gitcode.com/Ascend/TransformerEngineNPU.git /tmp/TransformerEngineNPU && \
+        https://gitcode.com/Ascend/TransformerEngineNPU.git /workspace/TransformerEngineNPU && \
     git clone --depth 1 --branch core_r0.17.0 \
-        https://gitcode.com/Ascend/MegatronAdaptor.git /tmp/MegatronAdaptor && \
-    python3 -m pip install --no-build-isolation /tmp/TransformerEngineNPU && \
-    python3 -m pip install --no-build-isolation /tmp/MegatronAdaptor && \
-    python3 -m pip install --no-build-isolation ./mcore_adapter && \
-    python3 -c "import megatron_adaptor; import megatron.core; import transformer_engine.pytorch; import mcore_adapter" && \
-    rm -rf /tmp/Megatron-LM /tmp/TransformerEngineNPU /tmp/MegatronAdaptor
+        https://gitcode.com/Ascend/MegatronAdaptor.git /workspace/MegatronAdaptor && \
+    python3 -m pip install --no-build-isolation \
+        -e /workspace/TransformerEngineNPU && \
+    python3 -m pip install --no-build-isolation \
+        -e /workspace/MegatronAdaptor && \
+    python3 -m pip install --no-build-isolation -e ./mcore_adapter && \
+    python3 -c "import megatron_adaptor; import megatron.core; import transformer_engine.pytorch; import mcore_adapter"
 
 RUN pip install -e .
 

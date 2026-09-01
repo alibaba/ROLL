@@ -29,19 +29,21 @@ the image.
 
 1. Install the small build prerequisites required by the stack (`setuptools<80`,
    `pybind11`, and a recent `packaging`).
-2. Clone Megatron-LM, TransformerEngineNPU, and MegatronAdaptor into a
-   temporary build directory with shallow clones.
+2. Clone Megatron-LM, TransformerEngineNPU, and MegatronAdaptor into
+   `/workspace` with shallow clones, and retain those source trees in the final
+   image for editable installation and debugging.
 3. Install Megatron-Core first, then TransformerEngineNPU, then
-   MegatronAdaptor from the cloned source trees without build isolation. Use
-   normal package installs so the temporary source trees can be removed after
-   validation.
-4. Install the local `mcore_adapter` package after the external stack.
+   MegatronAdaptor from the cloned source trees without build isolation, using
+   editable installs (`pip install -e`).
+4. Install the local `mcore_adapter` package after the external stack with an
+   editable install as well.
 5. Keep the existing ROLL, vLLM, torch-npu, and triton-ascend installation
    flow unchanged.
 6. Run an import smoke check during image build for `megatron_adaptor`,
    `megatron.core`, and `transformer_engine.pytorch` after sourcing the Ascend
    runtime environment.
-7. Remove cloned source trees and pip caches in the existing cleanup step.
+7. Keep the cloned source trees and clean only pip caches and unrelated
+   temporary files in the existing cleanup step.
 
 ## Compatibility and failure behavior
 
