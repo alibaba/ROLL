@@ -17,8 +17,9 @@ install the three components used by the current Ascend CI and documentation:
 | TransformerEngineNPU | Ascend GitCode | `main` |
 | MegatronAdaptor | Ascend GitCode | `core_r0.17.0` |
 
-The refs will be Docker build arguments so image builds can override them
-without editing the Dockerfiles.
+The compatible refs are fixed directly in the Dockerfiles to keep the image
+definition short and make the tested combination obvious. Updating the stack
+versions requires an explicit Dockerfile change.
 
 The repository's local `mcore_adapter` package will also be installed after
 the external dependencies, so ROLL's Megatron strategies are importable from

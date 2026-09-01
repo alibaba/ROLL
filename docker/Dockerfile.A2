@@ -2,13 +2,6 @@ FROM quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12-devel
 
 ARG SOC_VERSION="ascend910b1"
 
-ARG MEGATRON_CORE_REPO="https://github.com/NVIDIA/Megatron-LM.git"
-ARG MEGATRON_CORE_REF="core_r0.17.0"
-ARG TRANSFORMER_ENGINE_NPU_REPO="https://gitcode.com/Ascend/TransformerEngineNPU.git"
-ARG TRANSFORMER_ENGINE_NPU_REF="main"
-ARG MEGATRON_ADAPTOR_REPO="https://gitcode.com/Ascend/MegatronAdaptor.git"
-ARG MEGATRON_ADAPTOR_REF="core_r0.17.0"
-
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TERM=xterm-256color
 ENV PIP_ROOT_USER_ACTION=ignore
@@ -71,14 +64,14 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     pip install --upgrade wheel && \
     pip install "setuptools<80" pybind11 "packaging>=24.2" && \
-    git clone --depth 1 --branch "${MEGATRON_CORE_REF}" \
-        "${MEGATRON_CORE_REPO}" /tmp/Megatron-LM && \
+    git clone --depth 1 --branch core_r0.17.0 \
+        https://github.com/NVIDIA/Megatron-LM.git /tmp/Megatron-LM && \
     python3 -m pip install --ignore-requires-python --no-build-isolation --no-deps \
         /tmp/Megatron-LM && \
-    git clone --depth 1 --branch "${TRANSFORMER_ENGINE_NPU_REF}" \
-        "${TRANSFORMER_ENGINE_NPU_REPO}" /tmp/TransformerEngineNPU && \
-    git clone --depth 1 --branch "${MEGATRON_ADAPTOR_REF}" \
-        "${MEGATRON_ADAPTOR_REPO}" /tmp/MegatronAdaptor && \
+    git clone --depth 1 --branch main \
+        https://gitcode.com/Ascend/TransformerEngineNPU.git /tmp/TransformerEngineNPU && \
+    git clone --depth 1 --branch core_r0.17.0 \
+        https://gitcode.com/Ascend/MegatronAdaptor.git /tmp/MegatronAdaptor && \
     python3 -m pip install --no-build-isolation /tmp/TransformerEngineNPU && \
     python3 -m pip install --no-build-isolation /tmp/MegatronAdaptor && \
     python3 -m pip install --no-build-isolation ./mcore_adapter && \
