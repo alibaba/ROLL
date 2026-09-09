@@ -226,21 +226,23 @@ reward_pretrain: Qwen/Qwen2.5-7B
 
 ### 与 GPU 的关键差异
 
-将 GPU RLVR 配置适配到 NPU 时，**必须**进行以下修改：
+仓库内置的 NPU RLVR 示例采用 FSDP2。适配其他配置时，请配套选择训练和 Reference 策略，并安装对应的 NPU 依赖：
 
 | 项目 | GPU | NPU |
 | ---- | --- | --- |
-| 训练后端 | Megatron 或 FSDP2 | 仅 FSDP2（NPU 不支持 Megatron） |
+| 训练后端 | Megatron 或 FSDP2 | 内置 RLVR 示例采用 FSDP2；安装可选依赖后，兼容的 A2/A3 配置可使用 Megatron |
 | 推理后端 | vLLM | vLLM-Ascend |
-| Reference 模型策略 | `megatron_infer` | `fsdp2_infer` |
+| Reference 模型策略 | `megatron_infer` | FSDP2 路径使用 `fsdp2_infer`；Megatron 路径使用 `megatron_infer` |
 | 注意力实现 | `flash_attn` 或 `fa2` | 通过 `transformers` 使用 `fa2`（不能使用 `flash_attn` 包） |
 | 通信后端 | NCCL | HCCL |
 | 设备可见性 | `CUDA_VISIBLE_DEVICES` | `ASCEND_RT_VISIBLE_DEVICES` |
-| 分片配置 | FSDP2 或 Megatron 优化器分片 | FSDP2，7B+ 模型推荐 `offload_policy: true` |
+| 分片配置 | FSDP2 或 Megatron 优化器分片 | FSDP2 路径中 7B+ 模型推荐 `offload_policy: true`，或使用对应的 Megatron 并行配置 |
+
+选择 `megatron_train` 或 `megatron_infer` 前，请先完成[在昇腾上安装 Megatron](ascend_usage.md#在昇腾上安装-megatron)。下方配置仍是 FSDP2 示例，不需要安装可选的 Megatron 依赖。
 
 ### 完整 NPU 配置样例
 
-下面是一个完整的 NPU 适配配置（改编自 `examples/ascend_examples/qwen3_30b_rlvr_fsdp2.yaml`），关键差异使用 `# NPU` 注释标记：
+下面是一个完整的 NPU FSDP2 配置（改编自 `examples/ascend_examples/qwen3_30b_rlvr_fsdp2.yaml`），关键差异使用 `# NPU` 注释标记：
 
 ```yaml
 hydra:
@@ -328,7 +330,7 @@ actor_train:
     interleave_probs: "1.0"
     preprocessing_num_workers: 16
   strategy_args:
-    strategy_name: fsdp2_train      # NPU：必须使用 FSDP2，不能用 megatron_train
+    strategy_name: fsdp2_train      # NPU FSDP2 示例
     strategy_config:
       fsdp_size: 16                 # NPU：FSDP2 分片大小
       param_dtype: bf16
@@ -383,7 +385,7 @@ reference:
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: fsdp2_infer          # NPU：使用 fsdp2_infer，不能用 megatron_infer
+    strategy_name: fsdp2_infer          # NPU FSDP2 Reference 示例
     strategy_config:
       fsdp_size: 16
       param_dtype: bf16
@@ -409,7 +411,7 @@ rewards:
 
 ### 关键配置变更说明
 
-#### 1. 训练策略：使用 FSDP2 替代 Megatron
+#### 1. 训练策略：FSDP2 示例
 
 ```yaml
 # GPU（原始配置）
@@ -434,7 +436,7 @@ actor_train:
 
 在 4 张 NPU 上运行 7B 模型时，设置 `offload_policy: true` 可以启用 CPU offloading 避免 OOM。对于更小的模型（如 0.5B），`offload_policy: false` 可能已经足够。
 
-#### 2. Reference 模型：使用 fsdp2_infer 替代 megatron_infer
+#### 2. Reference 模型：FSDP2 示例
 
 ```yaml
 # GPU
@@ -768,17 +770,17 @@ NPU 上支持以下 RLVR Reward Worker：
 使用 `LLMJudgeRewardWorker` 时，judge 模型需要独立的 NPU 设备进行推理。请确保在 `device_mapping` 中为 judge 模型分配独立 NPU，不要与 `actor_infer` 或 `actor_train` 共享。
 :::
 
-## GPU 到 NPU 配置迁移 Checklist
+## GPU 到 NPU 的 FSDP2 迁移 Checklist
 
-将已有 GPU RLVR 配置迁移到 NPU 时，可使用以下 checklist：
+将已有 GPU RLVR 配置迁移到本文展示的 FSDP2 路径时，可使用以下 checklist。Megatron 配置应保留 Megatron 策略设置，并使用[在昇腾上安装 Megatron](ascend_usage.md#在昇腾上安装-megatron)中说明的依赖。
 
-- [ ] 将 `actor_train.strategy_args.strategy_name` 从 `megatron_train` 改为 `fsdp2_train`
+- [ ] 如果从 Megatron 配置迁移，将 `actor_train.strategy_args.strategy_name` 从 `megatron_train` 改为 `fsdp2_train`
 - [ ] 将 `actor_train.strategy_args.strategy_config` 改为 FSDP2 配置（7B+ 模型使用 `offload_policy: true`）
-- [ ] 将 `reference.strategy_args.strategy_name` 从 `megatron_infer` 改为 `fsdp2_infer`
+- [ ] 如果从 Megatron 配置迁移，将 `reference.strategy_args.strategy_name` 从 `megatron_infer` 改为 `fsdp2_infer`
 - [ ] 将 `reference.strategy_args.strategy_config` 设置为与 `actor_train` 一致的 FSDP2 配置
 - [ ] 在 `actor_train.model_args` 和 `reference.model_args` 中添加 `attn_implementation: fa2`
 - [ ] 移除所有 `flash_attn` 引用
-- [ ] 移除所有 Megatron 专属配置（如 `tensor_model_parallel_size`、`pipeline_model_parallel_size`）
+- [ ] FSDP2 路径中移除 Megatron 专属配置（如 `tensor_model_parallel_size`、`pipeline_model_parallel_size`）
 - [ ] 如果使用 `llm_judge` reward worker，确认它有独立的 NPU 分配
 
 ## 常见问题

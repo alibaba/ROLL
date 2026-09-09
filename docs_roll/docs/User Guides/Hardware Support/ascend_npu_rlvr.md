@@ -226,21 +226,23 @@ reward_pretrain: Qwen/Qwen2.5-7B
 
 ### Key Differences from GPU
 
-When adapting the GPU RLVR configuration for NPU, the following changes are **required**:
+The bundled NPU RLVR example uses FSDP2. When adapting another configuration, choose the training and reference strategies together and apply the corresponding NPU dependencies:
 
 | Item | GPU | NPU |
 | ---- | --- | --- |
-| Training backend | Megatron or FSDP2 | FSDP2 only (Megatron not supported on NPU) |
+| Training backend | Megatron or FSDP2 | FSDP2 in the bundled RLVR example; Megatron for compatible A2/A3 configurations after optional dependencies are installed |
 | Inference backend | vLLM | vLLM-Ascend |
-| Reference model strategy | `megatron_infer` | `fsdp2_infer` |
+| Reference model strategy | `megatron_infer` | `fsdp2_infer` for the FSDP2 path; `megatron_infer` for the Megatron path |
 | Attention implementation | `flash_attn` or `fa2` | `fa2` via `transformers` (not `flash_attn` package) |
 | Communication backend | NCCL | HCCL |
 | Device visibility | `CUDA_VISIBLE_DEVICES` | `ASCEND_RT_VISIBLE_DEVICES` |
-| Sharding config | FSDP2 or Megatron optimizer sharding | FSDP2 with `offload_policy: true` recommended for 7B+ models |
+| Sharding config | FSDP2 or Megatron optimizer sharding | FSDP2 with `offload_policy: true` recommended for 7B+ models, or the matching Megatron parallel configuration |
+
+Before selecting `megatron_train` or `megatron_infer`, complete [Install Megatron on Ascend](ascend_usage.md#install-megatron-on-ascend). The configuration below remains an FSDP2 example and does not require the optional Megatron dependencies.
 
 ### Complete NPU Configuration Example
 
-Below is a complete NPU-adapted configuration (adapted from `examples/ascend_examples/qwen3_30b_rlvr_fsdp2.yaml`), with key differences marked with `# NPU` comments:
+Below is a complete NPU FSDP2 configuration (adapted from `examples/ascend_examples/qwen3_30b_rlvr_fsdp2.yaml`), with key differences marked with `# NPU` comments:
 
 ```yaml
 hydra:
@@ -328,7 +330,7 @@ actor_train:
     interleave_probs: "1.0"
     preprocessing_num_workers: 16
   strategy_args:
-    strategy_name: fsdp2_train      # NPU: Must use FSDP2, NOT megatron_train
+    strategy_name: fsdp2_train      # NPU FSDP2 example
     strategy_config:
       fsdp_size: 16                 # NPU: FSDP2 sharding size
       param_dtype: bf16
@@ -383,7 +385,7 @@ reference:
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: fsdp2_infer          # NPU: Use fsdp2_infer, NOT megatron_infer
+    strategy_name: fsdp2_infer          # NPU FSDP2 reference example
     strategy_config:
       fsdp_size: 16
       param_dtype: bf16
@@ -409,7 +411,7 @@ rewards:
 
 ### Key Configuration Changes Explained
 
-#### 1. Training Strategy: FSDP2 instead of Megatron
+#### 1. Training Strategy: FSDP2 Example
 
 ```yaml
 # GPU (original)
@@ -434,7 +436,7 @@ actor_train:
 
 For 7B models on 4 NPUs, set `offload_policy: true` to enable CPU offloading and avoid OOM. For smaller models (e.g., 0.5B), `offload_policy: false` may be sufficient.
 
-#### 2. Reference Model: fsdp2_infer instead of megatron_infer
+#### 2. Reference Model: FSDP2 Example
 
 ```yaml
 # GPU
@@ -768,17 +770,17 @@ The following RLVR reward workers are supported on NPU:
 When using `LLMJudgeRewardWorker`, the judge model requires its own NPU devices for inference. Ensure you allocate separate NPUs in `device_mapping` for the judge model, and do not share them with `actor_infer` or `actor_train`.
 :::
 
-## GPU-to-NPU Configuration Migration Checklist
+## GPU-to-NPU FSDP2 Migration Checklist
 
-Use this checklist when migrating an existing GPU RLVR configuration to NPU:
+Use this checklist when migrating an existing GPU RLVR configuration to the FSDP2 path shown in this guide. Megatron configurations should retain their Megatron strategy settings and use the dependencies documented in [Install Megatron on Ascend](ascend_usage.md#install-megatron-on-ascend).
 
-- [ ] Change `actor_train.strategy_args.strategy_name` from `megatron_train` to `fsdp2_train`
+- [ ] If starting from a Megatron configuration, change `actor_train.strategy_args.strategy_name` from `megatron_train` to `fsdp2_train`
 - [ ] Change `actor_train.strategy_args.strategy_config` to FSDP2 config (with `offload_policy: true` for 7B+ models)
-- [ ] Change `reference.strategy_args.strategy_name` from `megatron_infer` to `fsdp2_infer`
+- [ ] If starting from a Megatron configuration, change `reference.strategy_args.strategy_name` from `megatron_infer` to `fsdp2_infer`
 - [ ] Set `reference.strategy_args.strategy_config` to FSDP2 config matching `actor_train`
 - [ ] Add `attn_implementation: fa2` to `actor_train.model_args` and `reference.model_args`
 - [ ] Remove any `flash_attn` references
-- [ ] Remove any Megatron-specific config (e.g., `tensor_model_parallel_size`, `pipeline_model_parallel_size`)
+- [ ] For the FSDP2 path, remove Megatron-specific config (e.g., `tensor_model_parallel_size`, `pipeline_model_parallel_size`)
 - [ ] Verify `llm_judge` reward worker has separate NPU allocation (if used)
 
 ## Troubleshooting

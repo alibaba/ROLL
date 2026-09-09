@@ -155,7 +155,7 @@ export CPU_AFFINITY_CONF=1,npu0:0-1,npu1:2-3,npu2:4-5,npu3:6-7
 | `VLLM_USE_V1` | `1` | Keep the current ROLL vLLM path enabled. ROLL sets this to `1` by default; vLLM versions >= 0.11.1 deprecate this switch |
 | `VLLM_ATTENTION_BACKEND` | `XFORMERS` | vLLM attention computation backend |
 | `VLLM_ASCEND_ENABLE_NZ` | `0` | Disable FRACTAL_NZ for ROLL reinforcement-learning weight reload flows |
-| `VLLM_ASCEND_ENABLE_FLASHCOMM` | `1` | Enable Ascend FlashComm high-speed communication optimization |
+| `VLLM_ASCEND_ENABLE_FLASHCOMM` | `0` | Enable Ascend FlashComm high-speed communication optimization |
 | `VLLM_ASCEND_ENABLE_PREFETCH_MLP` | `1` | Enable MLP layer weight prefetching. This replaces the older dense optimize toggle in current vLLM-Ascend releases. |
 | `VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE` | `1` | Enable TopK operator fusion optimization for generation decoding |
 | `VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE` | `1` | Print prefill/decode phase timing details (for debugging) |
@@ -167,7 +167,7 @@ Example:
 ```bash
 export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=XFORMERS
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM=0
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 ```
 
@@ -266,7 +266,7 @@ export OMP_NUM_THREADS=1
 
 # vLLM-Ascend inference
 export VLLM_USE_V1=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM=0
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # Operator compilation cache

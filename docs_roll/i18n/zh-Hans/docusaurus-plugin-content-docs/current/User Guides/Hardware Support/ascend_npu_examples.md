@@ -1,6 +1,6 @@
 # 昇腾 NPU 端到端配置样例
 
-最后更新：2026/04/27。
+最后更新：2026/07/16。
 
 本文档提供在华为昇腾 NPU 上运行 ROLL 的端到端配置样例，涵盖环境准备、资源切分和启动命令，适用于单机和多机场景。
 
@@ -12,19 +12,21 @@
 2. 已在容器内验证环境（参见 [验证环境](ascend_docker_usage.md#验证环境)）。
 3. 已将模型权重下载到容器可访问的目录。
 
-当前仓库在 `examples/ascend_examples` 中提供可直接运行的昇腾 RLVR 示例，包括 `qwen3_30b_rlvr_fsdp2.yaml` 和 `run_rlvr_pipeline.sh`。
+当前仓库在 `examples/ascend_examples` 中提供可直接运行的示例：FSDP2 RLVR 示例（`qwen3_30b_rlvr_fsdp2.yaml` 和 `run_rlvr_pipeline.sh`）以及 Megatron DPO 示例（`qwen3_4B_dpo_megatron.yaml` 和 `run_dpo_pipeline.sh`）。
 
 
 ## GPU 与 NPU 的关键差异
 
-将 GPU 配置适配到 NPU 时，**必须**进行以下修改：
+将 GPU 配置适配到 NPU 时，可选择下文示例采用的 FSDP2 路径，或为兼容的 Megatron 配置安装可选的 NPU 依赖：
 
 | 项目 | GPU | NPU |
 | ---- | --- | --- |
-| 训练后端 | Megatron 或 FSDP2 | 仅 FSDP2（NPU 不支持 Megatron） |
+| 训练后端 | Megatron 或 FSDP2 | 下文示例采用 FSDP2；安装可选依赖后，兼容的 A2/A3 配置可使用 Megatron |
 | 注意力实现 | `flash_attn` 或 `fa2` | 通过 `transformers` 使用 `fa2`（不能使用 `flash_attn` 包） |
 | 通信后端 | NCCL | HCCL |
 | 设备可见性 | `CUDA_VISIBLE_DEVICES` | `ASCEND_RT_VISIBLE_DEVICES` |
+
+选择 Megatron 路径时，请先完成[在昇腾上安装 Megatron](ascend_usage.md#在昇腾上安装-megatron)。下方 Agentic 示例有意保留为 FSDP2 配置。
 
 ## 样例 1：单机 Agentic 流水线（Qwen2.5-0.5B）
 
@@ -83,7 +85,7 @@ export OMP_NUM_THREADS=1
 # vLLM-Ascend 推理
 export VLLM_USE_V1=1
 export VLLM_ASCEND_ENABLE_NZ=0
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM=0
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # 算子编译缓存
@@ -176,7 +178,7 @@ actor_train:
       param_dtype: bf16
       reduce_dtype: bf16
       reshard_after_forward: true
-      offload_policy: false    # NPU: 必须使用 FSDP2，不能用 megatron_train
+      offload_policy: false    # NPU FSDP2 示例
   device_mapping: list(range(0,4))    # NPU: 训练使用 NPU 0-3
   infer_batch_size: 2
 
@@ -551,7 +553,7 @@ export OMP_NUM_THREADS=1
 # === vLLM-Ascend 推理 ===
 export VLLM_USE_V1=1
 export VLLM_ASCEND_ENABLE_NZ=0
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM=0
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # === 算子编译缓存 ===

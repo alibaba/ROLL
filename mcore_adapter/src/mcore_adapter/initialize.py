@@ -13,6 +13,19 @@ from .utils import get_logger
 logger = get_logger(__name__)
 
 
+def _load_megatron_adaptor():
+    """Activate Megatron's Ascend NPU patches before initialization."""
+    if not current_platform.is_npu():
+        return
+
+    try:
+        import megatron_adaptor  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "MegatronAdaptor is required to initialize Megatron on Ascend NPU."
+        ) from exc
+
+
 def is_distribute_initialized():
     return mpu.model_parallel_is_initialized()
 
@@ -36,6 +49,7 @@ def _set_random_seed(seed_):
 
 
 def initialize_megatron(args: "TrainingArguments"):
+    _load_megatron_adaptor()
     if not is_distribute_initialized():
         _initialize_distributed(args)
     _set_random_seed(args.seed)

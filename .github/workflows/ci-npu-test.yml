@@ -75,7 +75,7 @@ jobs:
   npu-test:
     name: NPU Integration Tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-4
     timeout-minutes: 120
     container:
       # Pre-built NPU docker image (built from docker/Dockerfile.A3) with all deps pre-installed

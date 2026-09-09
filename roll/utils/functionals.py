@@ -394,8 +394,9 @@ def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
 
     Notes:
       - The original metric key is preserved (the '@tag' or '_suffix' remains in the key).
-      - Scalar values (int, float, np.number) and torch.Tensor objects are left unchanged.
-      - Values of type list, tuple, or np.ndarray are reduced using the inferred aggregation function.
+      - Scalar values (int, float, np.number) and standalone torch.Tensor objects are left unchanged.
+      - Values of type list, tuple, or np.ndarray are reduced using the inferred aggregation function;
+        on NPU, nested tensors are copied to CPU first so NumPy can aggregate them.
       - If no aggregation tag or suffix is found, the default `reduce_func` is used.
       - Empty sequences are skipped and not modified.
     """
@@ -429,6 +430,13 @@ def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
         # No aggregation specifier found → use default
         return reduce_func
 
+    def _to_numpy_compatible(value: object) -> object:
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().tolist()
+        if isinstance(value, (list, tuple)):
+            return [_to_numpy_compatible(item) for item in value]
+        return value
+
     for key, val in list(metrics.items()):
         # Skip reduction for scalars and tensors
         if isinstance(val, (int, float, np.number)) or isinstance(val, torch.Tensor):
@@ -439,6 +447,8 @@ def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
             if len(val) == 0:
                 continue
             agg_func = _parse_aggregation_func(key)
+            if current_platform.is_npu():
+                val = _to_numpy_compatible(val)
             metrics[key] = float(agg_func(val))
         else:
             # Fallback for other types (e.g., single-element containers)
