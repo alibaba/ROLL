@@ -1,0 +1,67 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: ${oc.env:ROLL_EXPERIMENT_NAME,qwen3-27b-sft-smoke}
+seed: 42
+logging_dir: ./output/logs
+output_dir: ${oc.env:ROLL_OUTPUT_DIR,./output/qwen3-27b-sft-smoke}
+pretrain: ${oc.env:MODEL_PATH}
+
+system_envs:
+  TORCH_COMPILE_DISABLE: '1'
+  NVTE_TORCH_COMPILE: '0'
+  TOKENIZERS_PARALLELISM: 'false'
+  CUDA_DEVICE_MAX_CONNECTIONS: '1'
+
+track_with: stdout
+num_gpus_per_node: 8
+save_steps: 1
+logging_steps: 1
+eval_steps: 1
+resume_from_checkpoint: false
+sequence_length: 128
+
+prompt_key: instruction
+response_key: output
+
+validation:
+  data_args:
+    file_name: examples/qwen3-27B-sft_megatron/smoke_data.jsonl
+    template: qwen3
+
+sft_train:
+  model_args:
+    dtype: bf16
+    attn_implementation: sdpa
+    flash_attn: sdpa
+    freeze_module_prefix: vision_model
+  training_args:
+    num_train_epochs: 1
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 4
+    learning_rate: 1.0e-5
+    lr_scheduler_type: constant
+    warmup_steps: 0
+  data_args:
+    file_name: examples/qwen3-27B-sft_megatron/smoke_data.jsonl
+    template: qwen3
+    preprocessing_num_workers: 1
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 8
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: true
+      recompute_granularity: full
+      use_distributed_optimizer: true
+      bf16: true
+      save_only_model: true
+      additional_configs:
+        gdn_backend: torch
+  use_sequence_packing: false
+  use_remove_padding: false
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
