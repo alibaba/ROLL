@@ -98,3 +98,72 @@ def test_full_recompute_keeps_each_microbatch_ids(environment):
     for (name, p), (_, rp) in zip(baseline.named_parameters(), recompute.named_parameters()):
         if p.grad is not None:
             torch.testing.assert_close(p.grad, rp.grad, atol=2e-2, rtol=2e-2, msg=name)
+
+
+def test_roll_padding_mask_reaches_qsa_and_ple(environment):
+    """ROLL's public forward signature must exclude padding in both modules."""
+    model = make_model(tiny_config())
+    ids = torch.randint(1, 16, (2, 32), device="cuda")
+    valid = torch.ones_like(ids, dtype=torch.bool)
+    valid[0, :4] = False
+    valid[1, 24:] = False
+    positions = (valid.long().cumsum(-1) - 1).clamp_min(0)
+    captured = {}
+
+    def capture_ple(module, args, kwargs):
+        captured["ids"] = args[1].clone()
+        captured["ple_valid"] = kwargs["valid_mask"].clone()
+
+    def capture_indexer(module, args):
+        captured["qsa_valid"] = args[2].clone()
+
+    ple = model.decoder.layers[1].ple
+    indexer = model.decoder.layers[3].self_attention.indexer
+    handles = [ple.register_forward_pre_hook(capture_ple, with_kwargs=True),
+               indexer.register_forward_pre_hook(capture_indexer)]
+    try:
+        model(ids, positions, valid.long(), labels=ids.roll(-1, -1))
+    finally:
+        for handle in handles:
+            handle.remove()
+    torch.testing.assert_close(captured["ple_valid"], valid)
+    torch.testing.assert_close(captured["qsa_valid"], valid)
+    torch.testing.assert_close(captured["ids"], ids.masked_fill(~valid, 0))
+
+
+def test_rejects_custom_attention_mask_before_layers(environment):
+    model = make_model(tiny_config())
+    ids = torch.ones((1, 32), dtype=torch.long, device="cuda")
+    position = torch.arange(32, device="cuda").unsqueeze(0)
+    with pytest.raises(ValueError, match="token attention_mask"):
+        model(ids, position, torch.zeros(1, 1, 32, 32, device="cuda", dtype=torch.bool))
+
+
+def test_padding_token_values_do_not_change_valid_logits(environment):
+    model = make_model(tiny_config()).eval()
+    ids = torch.randint(1, 16, (1, 32), device="cuda")
+    valid = torch.ones_like(ids, dtype=torch.bool)
+    valid[:, :4] = False
+    positions = (valid.long().cumsum(-1) - 1).clamp_min(0)
+    changed = ids.clone()
+    changed[:, :4] = (changed[:, :4] % 15) + 1
+    with torch.no_grad():
+        original = model(ids, positions, valid)
+        perturbed = model(changed, positions, valid)
+    torch.testing.assert_close(original[:, 4:], perturbed[:, 4:], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("case", ["nonbinary", "conflict", "custom_with_padding"])
+def test_invalid_mask_combinations_fail_before_forward(environment, case):
+    from mcore_adapter.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpModel
+    ids = torch.ones((1, 8), dtype=torch.long, device="cuda")
+    attention = torch.ones_like(ids)
+    padding = torch.zeros_like(ids, dtype=torch.bool)
+    if case == "nonbinary":
+        attention[0, 0] = -1
+    elif case == "conflict":
+        padding[0, 0] = True
+    else:
+        attention = torch.zeros((1, 1, 8, 8), dtype=torch.bool, device="cuda")
+    with pytest.raises(ValueError, match="mask"):
+        Qwen4ExpModel._resolve_valid_mask(ids, attention, padding)

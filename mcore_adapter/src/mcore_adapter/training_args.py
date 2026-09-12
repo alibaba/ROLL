@@ -374,6 +374,17 @@ class MegatronArguments(DistributingParallelArguments):
     optimizer_offload_fraction: float = field(
         default=0.0, metadata={"help": "The fraction of optimizer states to offload from GPU memory to CPU."}
     )
+    use_torch_optimizer_for_cpu_offload: bool = field(
+        default=False, metadata={"help": "Use torch.optim for CPU optimizer offload."}
+    )
+    overlap_cpu_optimizer_d2h_h2d: bool = field(
+        default=False, metadata={"help": "Overlap CPU optimizer transfers with the update."}
+    )
+    pin_cpu_grads: bool = field(default=True, metadata={"help": "Pin gradients transferred to CPU."})
+    pin_cpu_params: bool = field(default=True, metadata={"help": "Pin parameters transferred to CPU."})
+    offload_optimizer_states: bool = field(
+        default=False, metadata={"help": "Offload distributed optimizer states after each step."}
+    )
 
     save_hf_model: bool = field(default=False, metadata={"help": "Save model as hf format."})
     save_merged_model: bool = field(default=False, metadata={"help": "Save merged model weights in LoRA training."})

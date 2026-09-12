@@ -39,13 +39,31 @@ class Qwen4ExpModel(McaGPTModel):
             raise ValueError("Qwen4 training requires original input_ids for lexical embeddings")
         if kwargs.get("packed_seq_params") is not None:
             raise NotImplementedError("Qwen4 cross-sample packing is not supported")
-        valid = torch.ones_like(input_ids, dtype=torch.bool) if padding_mask is None else ~padding_mask.bool()
+        valid = self._resolve_valid_mask(input_ids, attention_mask, padding_mask)
         ids = torch.where(valid, input_ids, self.config.eos_token_id)
+        effective_padding_mask = ~valid
         block_kwargs = dict(extra_block_kwargs or {})
         block_kwargs.update(ple_input_ids=ids, qsa_valid_mask=valid, qsa_loss_mask=loss_mask)
         return super().forward(input_ids, position_ids, attention_mask, *args,
-                               extra_block_kwargs=block_kwargs, padding_mask=padding_mask,
+                               extra_block_kwargs=block_kwargs, padding_mask=effective_padding_mask,
                                loss_mask=loss_mask, **kwargs)
+
+    @staticmethod
+    def _resolve_valid_mask(input_ids, attention_mask=None, padding_mask=None):
+        """Normalize ROLL's token mask for QSA, PLE, and masked GDN inputs."""
+        if padding_mask is not None:
+            valid = ~padding_mask.bool()
+            if valid.shape != input_ids.shape:
+                raise ValueError("Qwen4 padding_mask must match input_ids shape [batch, sequence]")
+            return valid
+        if attention_mask is None:
+            return torch.ones_like(input_ids, dtype=torch.bool)
+        if attention_mask.ndim != 2 or attention_mask.shape != input_ids.shape:
+            raise ValueError(
+                "Qwen4 requires a [batch, sequence] token attention_mask or explicit padding_mask"
+            )
+        valid = attention_mask.to(device=input_ids.device, dtype=torch.bool)
+        return valid
 
     def attach_ngram_assets(self, checkpoint, manifests=None):
         loaded = {}
@@ -55,6 +73,20 @@ class Qwen4ExpModel(McaGPTModel):
                 loaded[str(index)] = layer.ple.ple_embedding.attach_checkpoint(
                     checkpoint, index, expected_manifest=(manifests or {}).get(str(index)))
         return loaded
+
+    def load_external_assets(self, model_name_or_path, external_asset_path=None):
+        from .asset_lifecycle import restore_ngram_assets
+
+        return restore_ngram_assets(
+            self,
+            model_name_or_path,
+            external_asset_path=external_asset_path,
+        )
+
+    def save_external_assets(self, save_directory):
+        from .asset_lifecycle import persist_ngram_assets
+
+        return persist_ngram_assets(self, save_directory)
 
     @staticmethod
     def validate_training_capabilities(sequence_length: int, qsa_training_kernel: bool = False) -> dict[str, object]:

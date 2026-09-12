@@ -21,6 +21,10 @@ from megatron.core import DistributedDataParallel
 from megatron.core.distributed.param_and_grad_buffer import BufferType
 from megatron.core.optimizer import MegatronOptimizer, ChainedOptimizer, FP32Optimizer, DistributedOptimizer, \
     Float16OptimizerWithFloat16Params
+try:
+    from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
+except ImportError:  # Older Megatron versions have no CPU optimizer.
+    HybridDeviceOptimizer = ()
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher, MoEAllGatherTokenDispatcher
@@ -29,6 +33,10 @@ from torch import Tensor
 
 from roll.platforms import current_platform
 from roll.utils.offload_states import move_tensors_to_device_buffer, move_device_buffer_to_tensors, clear_memory
+from roll.third_party.megatron.optimizer_lifecycle import (
+    cpu_optimizer_offload_states,
+    cpu_optimizer_reload_states,
+)
 
 
 def bind_megatron_offload_states_func(optimizer: MegatronOptimizer):
@@ -46,6 +54,9 @@ def bind_megatron_offload_states_func(optimizer: MegatronOptimizer):
     elif isinstance(optimizer, FP32Optimizer):
         optimizer.offload_states = types.MethodType(fp32_optimizer_offload_states, optimizer)
         optimizer.reload_states = types.MethodType(fp32_optimizer_reload_states, optimizer)
+    elif isinstance(optimizer, HybridDeviceOptimizer):
+        optimizer.offload_states = types.MethodType(cpu_optimizer_offload_states, optimizer)
+        optimizer.reload_states = types.MethodType(cpu_optimizer_reload_states, optimizer)
     else:
         raise RuntimeError(f'optimizer {optimizer} does not support offload_states func')
 
@@ -549,5 +560,4 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
         move_device_buffer_to_tensors(tensors=state_tensors,
                                       device_buffer=getattr(optimizer, "optimizer_states_cpu_buffers").to(device, non_blocking=non_blocking),)
         optimizer.optimizer_states_cpu_buffers = None
-
 

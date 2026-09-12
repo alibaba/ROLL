@@ -112,6 +112,17 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         qsa_kwargs = {}
         if hasattr(self.self_attention, "indexer"):
             qsa_kwargs = {"qsa_valid_mask": qsa_valid_mask, "qsa_loss_mask": qsa_loss_mask}
+        elif qsa_valid_mask is not None and hasattr(self.self_attention, "in_proj"):
+            # The HF GDN masks its input before the bias-free projection/conv.
+            # Megatron's GDN currently ignores attention_mask. Mask the local
+            # sequence shard here so left padding starts from a zero state.
+            local_valid = qsa_valid_mask.transpose(0, 1)
+            if self.config.sequence_parallel:
+                rank = torch.distributed.get_rank(self.pg_collection.tp)
+                local_valid = local_valid.narrow(0, rank * attn_input.shape[0], attn_input.shape[0])
+            if local_valid.shape != attn_input.shape[:2]:
+                raise ValueError("GDN token validity must match its sequence shard")
+            attn_input = attn_input * local_valid.unsqueeze(-1)
         attn_out = self.self_attention(
             attn_input, attention_mask=attention_mask,
             inference_context=inference_context, rotary_pos_emb=rotary_pos_emb,

@@ -60,6 +60,7 @@ from roll.third_party.megatron.offload_states_patch import (
     reload_megatron_no_grad_module,
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
+from roll.third_party.megatron.optimizer_config import build_optimizer_config
 from roll.third_party.megatron.router_replay_utils import (
     RouterReplayHelper,
     merge_router_topk_indices,
@@ -1179,19 +1180,23 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             if self.megatron_train_args.fp16
             else torch.bfloat16 if self.megatron_train_args.bf16 else torch.float32
         )
-        optimizer_config = OptimizerConfig(
-            optimizer=self.megatron_train_args.optimizer,
-            lr=self.megatron_train_args.learning_rate,
-            min_lr=self.megatron_train_args.lr_scheduler_kwargs.get("min_lr", 0.0),
-            weight_decay=self.megatron_train_args.weight_decay,
-            adam_beta1=self.megatron_train_args.adam_beta1,
-            adam_beta2=self.megatron_train_args.adam_beta2,
-            adam_eps=self.megatron_train_args.adam_epsilon,
-            fp16=self.megatron_train_args.fp16,
-            bf16=self.megatron_train_args.bf16,
-            params_dtype=params_dtype,
-            use_distributed_optimizer=self.megatron_train_args.use_distributed_optimizer,
-            clip_grad=self.megatron_train_args.max_grad_norm,
+        optimizer_config = build_optimizer_config(
+            OptimizerConfig,
+            {
+                "optimizer": self.megatron_train_args.optimizer,
+                "lr": self.megatron_train_args.learning_rate,
+                "min_lr": self.megatron_train_args.lr_scheduler_kwargs.get("min_lr", 0.0),
+                "weight_decay": self.megatron_train_args.weight_decay,
+                "adam_beta1": self.megatron_train_args.adam_beta1,
+                "adam_beta2": self.megatron_train_args.adam_beta2,
+                "adam_eps": self.megatron_train_args.adam_epsilon,
+                "fp16": self.megatron_train_args.fp16,
+                "bf16": self.megatron_train_args.bf16,
+                "params_dtype": params_dtype,
+                "use_distributed_optimizer": self.megatron_train_args.use_distributed_optimizer,
+                "clip_grad": self.megatron_train_args.max_grad_norm,
+            },
+            self.megatron_train_args,
         )
         self.optimizer: MegatronOptimizer = get_megatron_optimizer(optimizer_config, self.models_wrapped)
 
