@@ -291,3 +291,40 @@ def test_peft_adapter_save_preserves_external_asset_sidecar(tmp_path, monkeypatc
     assert adapter_sidecar.is_file()
     record = json.loads(adapter_sidecar.read_text(encoding="utf-8"))
     assert record["manifests"]["1"] == base_model.embedding.store.manifest
+
+
+@pytest.mark.skipif(importlib.util.find_spec("megatron") is None, reason="requires mcore_adapter runtime")
+def test_hf_export_preserves_external_asset_sidecar(tmp_path, monkeypatch):
+    from mcore_adapter.models import model_factory
+
+    lifecycle = load_qwen4_module("asset_lifecycle")
+    source = tmp_path / "hf-source"
+    checkpoint_fixture(source)
+
+    class TinyConfig:
+        moe_parallel_folding = False
+
+    class ExportAssetModel(TinyAssetModel):
+        def __init__(self):
+            super().__init__()
+            lifecycle.restore_ngram_assets(self, source)
+
+    class EmptyConverter:
+        def __init__(self, config, to_hf=False):
+            pass
+
+        def save_model_as_hf_inflight(self, *args, **kwargs):
+            Path(kwargs.get("save_directory", args[1] if len(args) > 1 else tmp_path / "unused")).mkdir(
+                parents=True, exist_ok=True
+            )
+
+    virtual = object.__new__(model_factory.VirtualModels)
+    virtual.models = [ExportAssetModel()]
+    virtual.config = TinyConfig()
+    monkeypatch.setattr(model_factory, "ModelConverter", EmptyConverter)
+
+    saved = tmp_path / "hf-export"
+    virtual.save_pretrained_as_hf(saved)
+    sidecar = saved / lifecycle.EXTERNAL_ASSET_METADATA_NAME
+    assert sidecar.is_file()
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["manifests"]["1"]

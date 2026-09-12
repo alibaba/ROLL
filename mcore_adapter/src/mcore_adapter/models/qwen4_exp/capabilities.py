@@ -26,4 +26,34 @@ def validate_training_capabilities(
     }
 
 
-__all__ = ["validate_training_capabilities"]
+def estimate_full_parameter_memory(
+    trainable_parameters: int,
+    *,
+    parameter_dtype_bytes: int = 2,
+    gradient_dtype_bytes: int = 4,
+    optimizer_state_bytes: int = 8,
+    optimizer_cpu_offload: bool = False,
+) -> dict[str, int]:
+    """Estimate peak model/gradient/Adam bytes before a full-parameter run.
+
+    The estimate is intentionally conservative: BF16 parameters remain on GPU,
+    gradients use FP32 accumulation, and Adam keeps two FP32 moments. When CPU
+    optimizer offload is enabled, moments are accounted on host memory rather
+    than silently omitted from the budget.
+    """
+    if trainable_parameters <= 0:
+        raise ValueError("trainable_parameters must be positive")
+    model_bytes = trainable_parameters * parameter_dtype_bytes
+    gradient_bytes = trainable_parameters * gradient_dtype_bytes
+    optimizer_bytes = trainable_parameters * optimizer_state_bytes
+    return {
+        "gpu_parameter_bytes": model_bytes,
+        "gpu_gradient_bytes": gradient_bytes,
+        "gpu_optimizer_state_bytes": 0 if optimizer_cpu_offload else optimizer_bytes,
+        "cpu_optimizer_state_bytes": optimizer_bytes if optimizer_cpu_offload else 0,
+        "gpu_peak_bytes": model_bytes + gradient_bytes + (0 if optimizer_cpu_offload else optimizer_bytes),
+        "cpu_peak_bytes": optimizer_bytes if optimizer_cpu_offload else 0,
+    }
+
+
+__all__ = ["estimate_full_parameter_memory", "validate_training_capabilities"]

@@ -97,6 +97,22 @@ class VirtualModels:
                 loaded.append(hook(model_name_or_path, external_asset_path=external_asset_path))
         return loaded
 
+    def save_external_assets(self, save_directory: str):
+        """Persist external model assets for every virtual pipeline stage.
+
+        HF export and MCA checkpoint save both need to retain the identity of
+        assets that are intentionally excluded from the state dict (for
+        example Flash-Next's frozen N-gram tables).  Keep the hook at the
+        VirtualModels boundary so callers do not need to know how many virtual
+        stages are active.
+        """
+        saved = []
+        for model in self.models:
+            hook = getattr(model, "save_external_assets", None)
+            if hook is not None:
+                saved.append(hook(save_directory))
+        return saved
+
     def load_state_dict(self, state_dict: Dict[str, torch.Tensor], strict: bool = True):
         if len(self.models) == 1:
             if "model" in state_dict:
@@ -203,6 +219,9 @@ class VirtualModels:
                 max_shard_size=max_shard_size,
                 move_to_cpu=True,
             )
+        # The large frozen N-gram table stays external to HF weight shards;
+        # preserve its validated manifest beside the exported model.
+        self.save_external_assets(save_directory)
 
     def get_batch_on_this_cp_rank(self, *args, **kwargs):
         return self.models[0].get_batch_on_this_cp_rank(*args, **kwargs)
