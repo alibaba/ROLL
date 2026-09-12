@@ -139,6 +139,7 @@ class HyperConnection(nn.Module):
         use_combine: bool = True,
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
+        sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -158,6 +159,13 @@ class HyperConnection(nn.Module):
             self.block_inject_weight = nn.Linear(w, hc_count, bias=False, **kw)
         else:
             self.block_inject_weight = None
+
+        # These matrices are replicated across TP ranks. With sequence
+        # parallelism each rank sees different tokens, so Megatron's final grad
+        # reduction must SUM every GR parameter, including the mixing matrices.
+        for parameter in self.parameters():
+            parameter.sequence_parallel = sequence_parallel
+            parameter.tensor_model_parallel = False
 
     @property
     def hyper_hidden_size(self) -> int:
@@ -225,6 +233,7 @@ class HyperConnectionMixer(nn.Module):
         eps: float = 1e-6,
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
+        sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.hc = HyperConnection(
@@ -235,6 +244,7 @@ class HyperConnectionMixer(nn.Module):
             use_combine=False,
             dtype=dtype,
             device=device,
+            sequence_parallel=sequence_parallel,
         )
 
     @property
