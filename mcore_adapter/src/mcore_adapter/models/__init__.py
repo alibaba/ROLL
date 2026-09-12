@@ -16,6 +16,7 @@ from . import (
     qwen3_omni,
     qwen3_vl,
     qwen3_vl_moe,
+    qwen4_exp,
     seed_oss,
 )
 from .auto import AutoConfig, AutoModel
