@@ -198,6 +198,12 @@ _qwen4_exp_extra_dist_config = DistParallelConfig(
         ".ple.norm_key",
         ".ple.norm_query",
         ".ple.norm_conv",
+        ".ple.ple_embedding.layer_multipliers",
+        ".ple.ple_embedding.ngram_heads_vocab_sizes",
+        ".ple.ple_embedding.ngram_heads_offsets",
+        ".self_attention.indexer.index_qk_proj.weight",
+        ".self_attention.indexer.q_layernorm.weight",
+        ".self_attention.indexer.k_layernorm.weight",
         # full names: the mixer sits outside the layer stack (see the note below)
         "decoder.hyper_connection_mixer.hc.hc_norm",
         "decoder.hyper_connection_mixer.hc.input_mix_weight_down.weight",
@@ -405,6 +411,7 @@ register_template(
         "text_config.partial_rotary_factor": "rotary_percent",
         # MoE
         "text_config.moe_intermediate_size": "moe_ffn_hidden_size",
+        "text_config.shared_expert_intermediate_size": "moe_shared_expert_intermediate_size",
         "text_config.num_experts": "num_moe_experts",
         "text_config.num_experts_per_tok": "moe_router_topk",
         # GDN linear attention
@@ -427,6 +434,7 @@ register_template(
         "text_config.ple_embed_dim": "ple_embed_dim",
         "text_config.ple_conv_kernel_size": "ple_conv_kernel_size",
         "text_config.ngram_size": "ngram_size",
+        "text_config.eos_token_id": "eos_token_id",
         "text_config.heads_per_ngram": "heads_per_ngram",
         "text_config.ngram_vocab_size_base": "ngram_vocab_size_base",
         "text_config.make_ngram_vocab_size_divisible_by": "make_ngram_vocab_size_divisible_by",
@@ -454,10 +462,6 @@ register_template(
         RenameConverOp(
             hf_names="model.language_model.embed_tokens.weight",
             mca_names="embedding.word_embeddings.weight",
-        ),
-        RenameConverOp(
-            hf_names="model.language_model.norm.weight",
-            mca_names="decoder.final_layernorm.weight",
         ),
         # --- per-layer norms ----------------------------------------------
         RenameConverOp(
@@ -549,7 +553,12 @@ register_template(
         RenameConverOp(hf_names=".ple.norm_query.weight", mca_names=".ple.norm_query"),
         RenameConverOp(hf_names=".ple.norm_conv.weight", mca_names=".ple.norm_conv"),
         # The table itself and its hash buffers: loaded outside the converter.
-        DropConverOp(hf_names=".*\\.ple\\.ple_embedding\\..*", mca_names=[]),
+        # The large n-gram table is an external frozen asset. Its hash constants
+        # are preserved in the external manifest, not silently dropped.
+        DropConverOp(hf_names=".*\\.ple\\.ple_embedding\\.ngram_embedding\\.shard_.*", mca_names=[]),
+        RenameConverOp(hf_names=".ple.ple_embedding.layer_multipliers", mca_names=".ple.ple_embedding.layer_multipliers"),
+        RenameConverOp(hf_names=".ple.ple_embedding.ngram_heads_vocab_sizes", mca_names=".ple.ple_embedding.ngram_heads_vocab_sizes"),
+        RenameConverOp(hf_names=".ple.ple_embedding.ngram_heads_offsets", mca_names=".ple.ple_embedding.ngram_heads_offsets"),
         # M7: hyperconnection. Names were chosen to match the checkpoint, so these
         # are plain renames (verified in P17: load_state_dict reports no missing or
         # unexpected keys). Two groups per layer: attn_ and mlp_.
@@ -600,7 +609,9 @@ register_template(
             mca_names="decoder.hyper_connection_mixer.hc.input_mix_weight_up.weight",
         ),
         # M8: QSA sparse indexer -- mcore's dsa has an incompatible weight layout.
-        DropConverOp(hf_names=".*\\.self_attn\\.indexer\\..*", mca_names=[]),
+        RenameConverOp(hf_names=".self_attn.indexer.index_qk_proj.weight", mca_names=".self_attention.indexer.index_qk_proj.weight"),
+        RenameConverOp(hf_names=".self_attn.indexer.q_layernorm.weight", mca_names=".self_attention.indexer.q_layernorm.weight"),
+        RenameConverOp(hf_names=".self_attn.indexer.k_layernorm.weight", mca_names=".self_attention.indexer.k_layernorm.weight"),
         # MTP: not supported by mca yet (same as qwen3_next).
         DropConverOp(hf_names=".*mtp\\..*", mca_names=[]),
         # Vision tower: this is language_model_only training.

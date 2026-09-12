@@ -45,6 +45,8 @@ class Qwen4ExpConfig(McaModelConfig):
     indexer_head_dim: Optional[int] = None
     indexer_budget: Optional[int] = None
     indexer_compress_ratio: Optional[int] = None
+    qsa_indexer_kl_coef: float = 0.0
+    qsa_indexer_temperature: float = 1.0
 
     # --- hyperconnection (replaces the ordinary residual stream) -------------
     # 398 checkpoint tensors; residual width is hidden_size * hc_count.
@@ -60,9 +62,20 @@ class Qwen4ExpConfig(McaModelConfig):
     heads_per_ngram: Optional[int] = None
     ngram_vocab_size_base: Optional[int] = None
     make_ngram_vocab_size_divisible_by: Optional[int] = None
+    eos_token_id: int = 0
 
     def __post_init__(self):
         super().__post_init__()
+        if self.pipeline_model_parallel_size > 1 or self.virtual_pipeline_model_parallel_size:
+            raise ValueError("Qwen4Exp training currently requires PP=1 and VPP disabled")
+        if self.context_parallel_size > 1:
+            raise ValueError("Qwen4Exp training currently requires CP=1")
+        if self.fp8 or self.fp4 or self.mtp_num_layers:
+            raise ValueError("Qwen4Exp text training currently requires BF16/FP32 without MTP")
+        if self.cpu_offloading or self.fine_grained_activation_offloading:
+            raise ValueError("Qwen4Exp activation offloading is not yet validated")
+        if self.qsa_indexer_kl_coef < 0 or self.qsa_indexer_temperature <= 0:
+            raise ValueError("QSA indexer KL coefficient must be nonnegative and temperature positive")
 
         # GDN asserts activation in {silu, swish} with a bare assert and no
         # message (gated_delta_net.py). TransformerConfig defaults to gelu, so

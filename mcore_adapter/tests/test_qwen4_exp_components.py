@@ -1,13 +1,18 @@
 import importlib.util
 from pathlib import Path
+import sys
+import types
 
 import torch
 
 _ROOT = Path(__file__).parents[1] / "src/mcore_adapter/models/qwen4_exp"
+_package = types.ModuleType("_qwen4_components_test")
+_package.__path__ = [str(_ROOT)]
+sys.modules[_package.__name__] = _package
 
 
 def _load(name):
-    spec = importlib.util.spec_from_file_location(name, _ROOT / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"{_package.__name__}.{name}", _ROOT / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -19,12 +24,6 @@ hc_combine = _hc.hc_combine
 hc_gate_mix = _hc.hc_gate_mix
 grouped_gemma_rmsnorm = _hc.grouped_gemma_rmsnorm
 PLELayer = _ple.PLELayer
-
-
-def test_hyperconnection_spec_replaces_each_decoder_layer():
-    source = (_ROOT / "hyperconnection_layer.py").read_text()
-    assert "for layer_spec in spec.layer_specs" in source
-    assert "layer_spec.module = HyperConnectionTransformerLayer" in source
 
 
 def test_zero_block_hyperconnection_is_identity():

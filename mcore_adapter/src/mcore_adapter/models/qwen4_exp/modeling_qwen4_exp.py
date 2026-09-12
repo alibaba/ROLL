@@ -1,10 +1,13 @@
 from typing import Optional
+import torch
 
 from ..auto.modeling_auto import register_model
 from ..model_factory import McaGPTModel
 from .config_qwen4_exp import Qwen4ExpConfig
 from .capabilities import validate_training_capabilities
 from .hyperconnection_layer import make_hc_layer_spec
+from .transformer_block import Qwen4ExpTransformerBlock
+from .qsa_attention import Qwen4ExpQSAAttention
 
 
 @register_model("qwen4_exp")
@@ -23,6 +26,35 @@ class Qwen4ExpModel(McaGPTModel):
     """
 
     config_class = Qwen4ExpConfig
+    transformer_block_class = Qwen4ExpTransformerBlock
+
+    def __init__(self, config, **kwargs):
+        super().__init__(config, **kwargs)
+        if not isinstance(self.decoder, Qwen4ExpTransformerBlock):
+            raise RuntimeError("Megatron GPTModel needs the Qwen4 decoder factory patch; run scripts/qwen38/patch_megatron_block_factory.py on the isolated dependency checkout")
+
+    def forward(self, input_ids, position_ids, attention_mask, *args,
+                extra_block_kwargs=None, padding_mask=None, loss_mask=None, **kwargs):
+        if input_ids is None:
+            raise ValueError("Qwen4 training requires original input_ids for lexical embeddings")
+        if kwargs.get("packed_seq_params") is not None:
+            raise NotImplementedError("Qwen4 cross-sample packing is not supported")
+        valid = torch.ones_like(input_ids, dtype=torch.bool) if padding_mask is None else ~padding_mask.bool()
+        ids = torch.where(valid, input_ids, self.config.eos_token_id)
+        block_kwargs = dict(extra_block_kwargs or {})
+        block_kwargs.update(ple_input_ids=ids, qsa_valid_mask=valid, qsa_loss_mask=loss_mask)
+        return super().forward(input_ids, position_ids, attention_mask, *args,
+                               extra_block_kwargs=block_kwargs, padding_mask=padding_mask,
+                               loss_mask=loss_mask, **kwargs)
+
+    def attach_ngram_assets(self, checkpoint, manifests=None):
+        loaded = {}
+        for layer in self.decoder.layers:
+            if hasattr(layer, "ple"):
+                index = layer.layer_number - 1
+                loaded[str(index)] = layer.ple.ple_embedding.attach_checkpoint(
+                    checkpoint, index, expected_manifest=(manifests or {}).get(str(index)))
+        return loaded
 
     @staticmethod
     def validate_training_capabilities(sequence_length: int, qsa_training_kernel: bool = False) -> dict[str, object]:
@@ -63,6 +95,9 @@ class Qwen4ExpModel(McaGPTModel):
         self._assert_layer_pattern(config, block_spec)
         if getattr(config, "hc_count", None) and config.hc_count > 1:
             block_spec = make_hc_layer_spec(block_spec)
+        for spec, kind in zip(block_spec.layer_specs, config.layer_types):
+            if kind == "full_attention":
+                spec.submodules.self_attention.module = Qwen4ExpQSAAttention
         return block_spec
 
     @staticmethod

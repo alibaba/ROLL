@@ -1,101 +1,193 @@
-"""M6: frozen PLE n-gram lookup for training.
+"""Frozen, CPU-resident Qwen4 n-gram assets and checkpoint-exact hashing.
 
-The checkpoint carries a 95 GiB n-gram embedding table (128 shards of
-``(2500012, 160)`` bf16) on layer 1. It is frozen during post-training, so for RL
-we need the *lookup*, not the training, of that table.
-
-Design (validated by P7e before this was written):
-
-  * the table is a **buffer, not a Parameter**. That keeps it out of the optimizer
-    state, out of distributed checkpointing, and out of weight sync. Using
-    ``Parameter(requires_grad=False)`` instead would still put a 95 GiB tensor
-    through all three.
-  * the lookup output is an ordinary tensor, so autograd still flows *through* the
-    PLE block into shallower layers -- the table simply receives no gradient.
-  * the small PLE projections (``key_proj`` / ``value_proj`` / ``conv1d`` and their
-    norms) stay trainable.
-
-P7e also pinned down the failure mode to avoid: detaching the residual stream
-(``hidden.detach() + ple_out``) leaves the loss numerically **unchanged** while
-silently zeroing gradients for every layer below. There is no error and no NaN.
-``forward`` below never detaches the stream, and P21 asserts gradients still reach
-a lower layer.
-
-The n-gram id computation mirrors the reference implementation:
-
-    shifted_k = tokens shifted by k, clamped at segment (EOS) boundaries
-    mixed     = XOR over k of (shifted_k * layer_multipliers[k])
-    ids       = mixed % ngram_heads_vocab_sizes + ngram_heads_offsets
-
-``layer_multipliers``, ``ngram_heads_vocab_sizes`` and ``ngram_heads_offsets`` are
-checkpoint buffers, so the hashing does not need to be re-derived -- it is loaded.
-That matters: the ids must match the table the weights were trained against, and
-re-deriving splitmix64 constants by hand is an easy place to differ silently.
+Safetensors shards are mapped read-only. OS page cache is shared across ranks;
+only requested rows are copied. The storage object is neither a module buffer
+nor a parameter and therefore never follows ``Module.to`` onto an accelerator.
 """
-
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import struct
+from pathlib import Path
+
+import numpy as np
 import torch
 from torch import nn
 
 
-class FrozenNGramEmbedding(nn.Module):
-    """Frozen n-gram table plus the id hashing, as a buffer-backed lookup.
+class TensorNGramStore:
+    """Small in-memory store, primarily for numerical reference fixtures."""
+    def __init__(self, table):
+        if table.ndim != 2 or table.device.type != "cpu":
+            raise ValueError("frozen n-gram table must be a two-dimensional CPU tensor")
+        self.table = table.detach()
+        self.shape = tuple(table.shape)
+        self.dtype = table.dtype
 
-    ``shard_paths`` lets the table stay on disk / CPU and be paged in, which is how
-    a 95 GiB table is used on 80 GiB cards. For tests and small models the table can
-    be provided directly.
+    def lookup(self, ids):
+        flat = ids.detach().to(device="cpu", dtype=torch.long).reshape(-1)
+        return self.table.index_select(0, flat).reshape(*ids.shape, self.shape[1]).to(ids.device)
+
+
+class MMapNGramStore:
+    """A numerically ordered list of safetensors table shards.
+
+    The manifest authenticates metadata/geometry, not every weight payload byte.
+    Callers must retain immutable checkpoint assets. ``expected_manifest`` permits
+    relocation while rejecting a different index, header, geometry or file size.
     """
+    _DTYPES = {"BF16": (np.uint16, torch.bfloat16), "F16": (np.float16, torch.float16),
+               "F32": (np.float32, torch.float32), "I64": (np.int64, torch.int64)}
 
-    def __init__(
-        self,
-        embedding_dim: int,
-        ngram_size: int,
-        heads_per_ngram: int,
-        vocab_size: int,
-        eos_token_id: int,
-        table: torch.Tensor | None = None,
-        device: torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
+    def __init__(self, checkpoint, layer_idx=1, *, expected_manifest=None, staging_rows=4096):
+        if staging_rows < 1:
+            raise ValueError("staging_rows must be positive")
+        self.staging_rows = staging_rows
+        self.checkpoint = Path(checkpoint)
+        index_path = self.checkpoint / "model.safetensors.index.json"
+        index_bytes = index_path.read_bytes()
+        index = json.loads(index_bytes)["weight_map"]
+        prefix = f"model.language_model.layers.{layer_idx}.ple.ple_embedding."
+        pattern = re.compile(re.escape(prefix) + r"ngram_embedding\.shard_(\d+)\.weight$")
+        shards = sorted((int(m.group(1)), key) for key in index if (m := pattern.fullmatch(key)))
+        if not shards or [i for i, _ in shards] != list(range(len(shards))):
+            raise ValueError("n-gram checkpoint shards must be contiguous and start at zero")
+        self._headers = {}
+        self._maps = []
+        self._ends = []
+        tensors = []
+        rows, width, dtype_name = 0, None, None
+        for _, key in shards:
+            entry, offset, file = self._entry(index[key], key)
+            if len(entry["shape"]) != 2 or min(entry["shape"]) <= 0:
+                raise ValueError(f"invalid n-gram table shape: {key}")
+            n, d = entry["shape"]
+            width = d if width is None else width
+            dtype_name = entry["dtype"] if dtype_name is None else dtype_name
+            if d != width or entry["dtype"] != dtype_name or dtype_name not in ("BF16", "F16", "F32"):
+                raise ValueError("n-gram shard widths and floating dtypes must match")
+            storage_dtype, self.dtype = self._DTYPES[dtype_name]
+            self._maps.append(np.memmap(file, mode="r", dtype=storage_dtype, offset=offset, shape=(n, d)))
+            rows += n
+            self._ends.append(rows)
+            tensors.append({"key": key, "file": index[key], "shape": [n, d], "dtype": dtype_name,
+                            "data_offsets": entry["data_offsets"]})
+        self.shape = (rows, width)
+        self.constants = {}
+        for name in ("layer_multipliers", "ngram_heads_vocab_sizes", "ngram_heads_offsets"):
+            key = prefix + name
+            if key not in index:
+                raise ValueError(f"missing n-gram hash constant: {key}")
+            entry, offset, file = self._entry(index[key], key)
+            if entry["dtype"] != "I64" or len(entry["shape"]) != 1:
+                raise ValueError(f"n-gram hash constant must be int64 vector: {key}")
+            values = np.memmap(file, mode="r", dtype=np.int64, offset=offset, shape=tuple(entry["shape"]))
+            self.constants[name] = torch.from_numpy(np.array(values))
+        self.manifest = {
+            "format": 1, "identity_kind": "index_and_header_sha256", "layer_idx": layer_idx,
+            "index_sha256": hashlib.sha256(index_bytes).hexdigest(), "tensors": tensors,
+            "files": {name: {"header_sha256": data[2], "size": data[3]}
+                      for name, data in sorted(self._headers.items())},
+            "hash_constants": {k: v.tolist() for k, v in self.constants.items()},
+        }
+        if expected_manifest is not None and self.manifest != expected_manifest:
+            raise ValueError("n-gram external asset manifest mismatch")
+
+    def _entry(self, filename, key):
+        file = (self.checkpoint / filename).resolve()
+        if not file.is_relative_to(self.checkpoint.resolve()):
+            raise ValueError("checkpoint index path escapes checkpoint directory")
+        if filename not in self._headers:
+            with file.open("rb") as source:
+                raw_len = source.read(8)
+                if len(raw_len) != 8:
+                    raise ValueError(f"truncated safetensors header: {filename}")
+                length = struct.unpack("<Q", raw_len)[0]
+                if not 2 <= length <= 64 * 1024 * 1024:
+                    raise ValueError(f"invalid safetensors header length: {filename}")
+                raw = source.read(length)
+                if len(raw) != length:
+                    raise ValueError(f"truncated safetensors header: {filename}")
+            self._headers[filename] = (json.loads(raw), length + 8, hashlib.sha256(raw).hexdigest(), file.stat().st_size)
+        header, begin, _, size = self._headers[filename]
+        entry = header[key]
+        start, end = entry["data_offsets"]
+        itemsize = np.dtype(self._DTYPES[entry["dtype"]][0]).itemsize
+        if start < 0 or end - start != int(np.prod(entry["shape"])) * itemsize or begin + end > size:
+            raise ValueError(f"invalid safetensors tensor extent: {key}")
+        return entry, begin + start, file
+
+    def lookup(self, ids):
+        flat = ids.detach().to(device="cpu", dtype=torch.long).reshape(-1)
+        if flat.numel() and (flat.min() < 0 or flat.max() >= self.shape[0]):
+            raise ValueError("n-gram row ID is outside mapped table")
+        result = torch.empty((flat.numel(), self.shape[1]), dtype=self.dtype)
+        ends = np.asarray(self._ends)
+        starts = np.concatenate(([0], ends[:-1]))
+        for begin in range(0, flat.numel(), self.staging_rows):
+            requested = flat[begin:begin+self.staging_rows].numpy()
+            unique, inverse = np.unique(requested, return_inverse=True)
+            shard_ids = np.searchsorted(ends, unique, side="right")
+            gathered = torch.empty((len(unique), self.shape[1]), dtype=self.dtype)
+            for shard in np.unique(shard_ids):
+                positions = np.flatnonzero(shard_ids == shard)
+                values = np.array(self._maps[shard][unique[positions] - starts[shard]], copy=True)
+                tensor = torch.from_numpy(values)
+                if self.dtype == torch.bfloat16:
+                    tensor = tensor.view(torch.bfloat16)
+                gathered[torch.from_numpy(positions)] = tensor
+            result[begin:begin+len(requested)] = gathered[torch.from_numpy(inverse)]
+        return result.reshape(*ids.shape, self.shape[1]).to(ids.device)
+
+
+class FrozenNGramEmbedding(nn.Module):
+    """Hash original IDs and fetch frozen rows without registering the table."""
+    def __init__(self, embedding_dim, ngram_size, heads_per_ngram, vocab_size,
+                 eos_token_id, table=None, device=None, dtype=None):
         super().__init__()
-        self.embedding_dim = embedding_dim
-        self.ngram_size = ngram_size
-        self.heads_per_ngram = heads_per_ngram
-        self.eos_token_id = eos_token_id
-
-        if ngram_size < 2:
-            raise ValueError(f"ngram_size must be >= 2, got {ngram_size}")
+        if ngram_size < 2 or heads_per_ngram < 1:
+            raise ValueError("ngram_size must be >=2 and heads_per_ngram positive")
+        self.embedding_dim, self.ngram_size = embedding_dim, ngram_size
+        self.heads_per_ngram, self.eos_token_id = heads_per_ngram, eos_token_id
         self.ngram_heads = (ngram_size - 1) * heads_per_ngram
         if embedding_dim % self.ngram_heads:
-            raise ValueError(
-                f"ple_embed_dim ({embedding_dim}) must be divisible by total ngram "
-                f"heads ({self.ngram_heads})"
-            )
+            raise ValueError("ple_embed_dim must be divisible by n-gram heads")
         self.head_dim = embedding_dim // self.ngram_heads
+        # Default constants support explicit small table fixtures only. Production
+        # attaches checkpoint-provided constants before the first forward.
+        self.register_buffer("layer_multipliers", torch.ones(ngram_size, dtype=torch.long, device=device))
+        self.register_buffer("ngram_heads_vocab_sizes", torch.full((self.ngram_heads,), vocab_size, dtype=torch.long, device=device))
+        self.register_buffer("ngram_heads_offsets", torch.zeros(self.ngram_heads, dtype=torch.long, device=device))
+        self.store = TensorNGramStore(table) if table is not None else None
 
-        # Hash constants come from the checkpoint, not from re-deriving splitmix64.
-        # Registered non-persistent so load_state_dict supplies them.
-        self.register_buffer(
-            "layer_multipliers", torch.ones(ngram_size, dtype=torch.long, device=device)
-        )
-        self.register_buffer(
-            "ngram_heads_vocab_sizes",
-            torch.full((self.ngram_heads,), max(vocab_size, 1), dtype=torch.long,
-                       device=device),
-        )
-        self.register_buffer(
-            "ngram_heads_offsets",
-            torch.zeros(self.ngram_heads, dtype=torch.long, device=device),
-        )
+    def attach_checkpoint(self, checkpoint, layer_idx=1, *, expected_manifest=None, staging_rows=4096):
+        store = MMapNGramStore(checkpoint, layer_idx, expected_manifest=expected_manifest, staging_rows=staging_rows)
+        if store.shape[1] != self.head_dim:
+            raise ValueError("checkpoint n-gram head dimension differs from model config")
+        for name, value in store.constants.items():
+            target = getattr(self, name)
+            if value.shape != target.shape:
+                raise ValueError(f"checkpoint n-gram hash shape mismatch: {name}")
+        sizes, offsets = store.constants["ngram_heads_vocab_sizes"], store.constants["ngram_heads_offsets"]
+        if (sizes <= 0).any() or (offsets < 0).any() or int((offsets + sizes).max()) > store.shape[0]:
+            raise ValueError("checkpoint hash slots exceed n-gram table")
+        for name, value in store.constants.items():
+            getattr(self, name).copy_(value)
+        self.store = store
+        return store.manifest
 
-        # THE table: a buffer, so it stays out of the optimizer / DCP / weight sync.
-        if table is not None:
-            tbl = table
-        else:
-            tbl = torch.zeros(1, self.head_dim, device=device, dtype=dtype)
-        self.register_buffer("table", tbl, persistent=False)
-
+    def forward(self, tokens):
+        if self.store is None:
+            raise RuntimeError("attach the frozen n-gram checkpoint before model forward")
+        if tokens.ndim != 2 or tokens.shape[1] == 0:
+            raise ValueError("input_ids must have shape [batch, nonempty_sequence]")
+        with torch.no_grad():
+            ids = self.compute_ngram_ids(tokens.long())
+            if ids.numel() and (ids.min() < 0 or ids.max() >= self.store.shape[0]):
+                raise ValueError("n-gram hash ID exceeds frozen table rows")
+            return self.store.lookup(ids).flatten(-2)
     # -------------------------------------------------------------- id hashing
     @staticmethod
     def _segment_positions(tokens: torch.Tensor, eos_token_id: int):
@@ -146,136 +238,3 @@ class FrozenNGramEmbedding(nn.Module):
             offsets = self.ngram_heads_offsets[start:end]
             blocks.append(torch.remainder(mixed.unsqueeze(-1), sizes) + offsets)
         return torch.cat(blocks, dim=-1)
-
-    # ------------------------------------------------------------------ lookup
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        """Return ``[batch, seq, embedding_dim]``.
-
-        The lookup runs under ``no_grad``: the ids are integers and the table is
-        frozen, so nothing here needs a graph. The *result* is still an ordinary
-        tensor, so downstream ops (and therefore layers below) remain trainable.
-        """
-        with torch.no_grad():
-            ids = self.compute_ngram_ids(tokens)
-            # Range-check before the lookup. An out-of-range id surfaces as a CUDA
-            # device-side assert inside F.embedding, which gives no hint about
-            # which tensor was wrong or by how much; this says so directly.
-            rows = self.table.shape[0]
-            hi = int(ids.max())
-            if hi >= rows:
-                need = int((self.ngram_heads_offsets + self.ngram_heads_vocab_sizes).max())
-                raise ValueError(
-                    f"n-gram id {hi} exceeds the table's {rows} rows. The table must "
-                    f"cover every head's slot: max(offset + vocab_size) = {need} rows. "
-                    "Check that all 128 checkpoint shards are loaded."
-                )
-            flat = torch.nn.functional.embedding(ids.reshape(-1), self.table)
-        return flat.reshape(*ids.shape[:-1], self.embedding_dim)
-
-
-class PLELayer(nn.Module):
-    """PLE block: frozen n-gram lookup plus small trainable projections.
-
-    Weight names match the checkpoint (``ple.key_proj`` / ``ple.value_proj`` /
-    ``ple.conv1d`` / ``ple.norm_*``) so conversion is a rename.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        ple_embed_dim: int,
-        conv_kernel_size: int,
-        ngram_size: int,
-        heads_per_ngram: int,
-        vocab_size: int,
-        eos_token_id: int,
-        eps: float = 1e-6,
-        table: torch.Tensor | None = None,
-        device: torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
-        super().__init__()
-        kw = {"device": device, "dtype": dtype}
-
-        self.ple_embedding = FrozenNGramEmbedding(
-            embedding_dim=ple_embed_dim,
-            ngram_size=ngram_size,
-            heads_per_ngram=heads_per_ngram,
-            vocab_size=vocab_size,
-            eos_token_id=eos_token_id,
-            table=table,
-            device=device,
-            dtype=dtype,
-        )
-
-        # Trainable parts -- small, so these DO go in the optimizer.
-        self.key_proj = nn.Linear(ple_embed_dim, hidden_size, bias=False, **kw)
-        self.value_proj = nn.Linear(ple_embed_dim, hidden_size, bias=False, **kw)
-        self.conv1d = nn.Conv1d(
-            hidden_size, hidden_size, conv_kernel_size,
-            groups=hidden_size, bias=False, **kw,
-        )
-        self.norm_key = nn.Parameter(torch.zeros(hidden_size, **kw))
-        self.norm_query = nn.Parameter(torch.zeros(hidden_size, **kw))
-        self.norm_conv = nn.Parameter(torch.zeros(hidden_size, **kw))
-        self.eps = eps
-        self.conv_kernel_size = conv_kernel_size
-
-    @staticmethod
-    def _gemma_rmsnorm(x, weight, eps):
-        """Gemma-style RMSNorm: ``x*rrms*(1+w)``.
-
-        Same convention as the hyperconnection norms (M7) -- the reference PLE uses
-        ``normalized * (1.0 + weight)`` too, so plain ``* w`` would be wrong here as
-        well.
-        """
-        xf = x.float()
-        out = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
-        return (out * (1.0 + weight.float())).to(x.dtype)
-
-    def forward(self, hidden_states: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
-        """Compute the PLE contribution for ``hidden_states``.
-
-        Returns a tensor to be ADDED to the residual stream by the caller. This
-        function does not touch the stream itself -- keeping the add outside makes
-        it obvious at the call site that the stream is not detached (see P7e).
-        """
-        ngram = self.ple_embedding(tokens)               # frozen lookup
-        ngram = ngram.to(hidden_states.dtype)
-
-        key = self._gemma_rmsnorm(self.key_proj(ngram), self.norm_key, self.eps)
-        value = self.value_proj(ngram)
-        query = self._gemma_rmsnorm(hidden_states, self.norm_query, self.eps)
-
-        # depthwise causal conv over time; conv1d wants [batch, channels, time]
-        b, s, h = key.shape
-        pad = self.conv_kernel_size - 1
-        conv_in = key.transpose(1, 2)
-        conv_out = self.conv1d(torch.nn.functional.pad(conv_in, (pad, 0)))
-        conv_out = conv_out[..., :s].transpose(1, 2)
-        conv_out = self._gemma_rmsnorm(conv_out, self.norm_conv, self.eps)
-
-        gate = torch.sigmoid((query * conv_out).sum(-1, keepdim=True))
-        return gate * value
-
-    # ------------------------------------------------------------- diagnostics
-    def frozen_buffer_report(self) -> dict:
-        """Confirm the table is excluded from optimizer / checkpoint / weight sync.
-
-        Cheap to call, and worth asserting in tests: if the table ever becomes a
-        Parameter, everything still runs -- it just silently adds ~285 GiB of
-        optimizer state (Adam keeps two moments per parameter).
-        """
-        tbl = self.ple_embedding.table
-        param_names = {n for n, _ in self.named_parameters()}
-        return {
-            "table_is_parameter": isinstance(tbl, nn.Parameter),
-            "table_requires_grad": bool(tbl.requires_grad),
-            "table_in_named_parameters": any("table" in n for n in param_names),
-            "table_in_state_dict": "ple_embedding.table" in self.state_dict(),
-            "table_numel": tbl.numel(),
-            "trainable_params": sum(p.numel() for p in self.parameters()),
-        }
-
-
-__all__ = ["FrozenNGramEmbedding", "PLELayer"]

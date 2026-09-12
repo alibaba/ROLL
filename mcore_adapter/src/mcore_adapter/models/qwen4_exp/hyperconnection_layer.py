@@ -87,6 +87,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         rotary_pos_cos_sin=None, attention_bias=None, inference_context=None,
         packed_seq_params=None, sequence_len_offset=None, padding_mask=None,
         *, inference_params=None, dynamic_inference_decode_only=None,
+        qsa_valid_mask=None, qsa_loss_mask=None,
     ):
         if not self.hc_enabled:
             return super().forward(
@@ -108,12 +109,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # Base _forward_attention/_forward_mlp apply ordinary residual BDA.
         # GR must call the raw blocks, fold bias/dropout once, and write once.
         stream, attn_input, attn_inj = self.attn_hyper_connection.mix(hidden_states)
+        qsa_kwargs = {}
+        if hasattr(self.self_attention, "indexer"):
+            qsa_kwargs = {"qsa_valid_mask": qsa_valid_mask, "qsa_loss_mask": qsa_loss_mask}
         attn_out = self.self_attention(
             attn_input, attention_mask=attention_mask,
             inference_context=inference_context, rotary_pos_emb=rotary_pos_emb,
             rotary_pos_cos=rotary_pos_cos, rotary_pos_sin=rotary_pos_sin,
             rotary_pos_cos_sin=rotary_pos_cos_sin, attention_bias=attention_bias,
             packed_seq_params=packed_seq_params, sequence_len_offset=sequence_len_offset,
+            **qsa_kwargs,
         )
         stream = self.attn_hyper_connection.combine(
             stream, self._block_output(attn_out), attn_inj
