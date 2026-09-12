@@ -106,6 +106,8 @@ class VirtualModels:
         VirtualModels boundary so callers do not need to know how many virtual
         stages are active.
         """
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+            return []
         saved = []
         for model in self.models:
             hook = getattr(model, "save_external_assets", None)
