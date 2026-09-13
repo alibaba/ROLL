@@ -34,7 +34,7 @@ from sglang.srt.utils import kill_process_tree
 from roll.utils.functionals import concatenate_input_and_output, gather_unpadded_input_ids
 from roll.utils.logging import get_logger
 from roll.utils.network_utils import collect_free_port
-from roll.utils.offload_states import OffloadStateType
+from roll.utils.offload_states import OffloadStateType, clear_memory
 from roll.platforms import current_platform
 
 try:
@@ -94,6 +94,13 @@ class SgLangStrategy(InferenceStrategy):
         else:
             dtype = "auto"
 
+        self.enable_rollout_routing_replay = self.worker_config.router_replay.mode != "disable"
+        if self.enable_rollout_routing_replay:
+            from sglang import __version__ as sglang_version
+            from packaging import version
+            assert version.parse(sglang_version) >= version.parse("0.5.6.post3"), "Enable router replay requires sglang >= 0.5.6.post3"
+            logger.info(f"{self.enable_rollout_routing_replay=} and {self.worker_config.router_replay.mode=}")
+
         sglang_config.setdefault("enable_memory_saver", True)
         sglang_config.update(
             {
@@ -112,6 +119,8 @@ class SgLangStrategy(InferenceStrategy):
                 "disable_custom_all_reduce": sglang_config.get("disable_custom_all_reduce", True),
                 'nnodes': nnodes,
                 'node_rank': 0,
+                # new：router replay
+                "enable_return_routed_experts": self.enable_rollout_routing_replay,
             }
         )
 
@@ -139,18 +148,18 @@ class SgLangStrategy(InferenceStrategy):
             from roll.utils.constants import RAY_NAMESPACE
             for i in range(1, nnodes):
                 sglang_ray_option = {
-                    'scheduling_strategy': PlacementGroupSchedulingStrategy(sglang_pg_list[i]), 
+                    'scheduling_strategy': PlacementGroupSchedulingStrategy(sglang_pg_list[i]),
                     'name': f'sglang-slave-{node_index_list[i]}',
                     'namespace': RAY_NAMESPACE,
-                    'runtime_env': 
-                    {'env_vars': 
-                        {'WORLD_SIZE': str(nnodes), 
-                        'RANK': str(i), 
+                    'runtime_env':
+                    {'env_vars':
+                        {'WORLD_SIZE': str(nnodes),
+                        'RANK': str(i),
                         'WORKER_NAME': f'sglang-slave-{node_index_list[i]}',
-                        'CUDA_VISIBLE_DEVICES': ','.join(map(str, list(range(gpu_per_worker)))), 'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES': '1', 
+                        'CUDA_VISIBLE_DEVICES': ','.join(map(str, list(range(gpu_per_worker)))), 'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES': '1',
                         'ROLL_LOG_DIR': os.getenv("ROLL_LOG_DIR", "./output/logs/")
                         }
-                    }, 
+                    },
                     'num_cpus': 0.01,
                     'num_gpus': 0.01
                 }
@@ -188,11 +197,49 @@ class SgLangStrategy(InferenceStrategy):
         from sglang import __version__ as version
         if version < '0.5' and payload["sampling_params"]["n"] > 1: # fixed in https://github.com/sgl-project/sglang/pull/7508
             payload["rid"] = None
+
+        # new：If enable router replay，set return_routed_experts config
+        if self.enable_rollout_routing_replay:
+            payload["return_routed_experts"] = True
+        else:
+            payload["return_routed_experts"] = False
+
+        if "multi_modal_data" in payload:
+            multi_modal_data = payload["multi_modal_data"]
+            input_ids = multi_modal_data["prompt_token_ids"]
+            if (
+                "multi_modal_data" not in multi_modal_data
+                or "image" not in multi_modal_data["multi_modal_data"]
+                or not multi_modal_data["multi_modal_data"]["image"]
+            ):
+                image_data = None
+            else:
+                image_data = multi_modal_data["multi_modal_data"]["image"]
+
+            if (
+                "multi_modal_data" not in multi_modal_data
+                or "video" not in multi_modal_data["multi_modal_data"]
+                or not multi_modal_data["multi_modal_data"]["video"]
+            ):
+                video_data = None
+            else:
+                video_data = [dict(
+                    multi_modal_data["multi_modal_data"]["video"],
+                    format="processor_output"
+                )]
+        else:
+            input_ids = payload["input_ids"]
+            image_data = None
+            video_data = None
+
         obj = GenerateReqInput(
-            input_ids=payload["input_ids"],
+            input_ids=input_ids,
             sampling_params=payload["sampling_params"],
             rid=payload["rid"],
             return_logprob=payload["return_logprob"],
+            return_routed_experts=payload["return_routed_experts"],
+            image_data=image_data,
+            video_data=video_data
         )
         generator = self.model.engine.tokenizer_manager.generate_request(obj, None)
         chunks = None
@@ -212,38 +259,47 @@ class SgLangStrategy(InferenceStrategy):
         input_ids = batch.batch["input_ids"]  # (bs, prompt_length)
         attention_mask = batch.batch["attention_mask"]  # left-padded attention_mask
 
-        image_data = None
+        image_data = []
+        video_data = []
         if "multi_modal_data" in batch.non_tensor_batch:
             prompt_token_ids = []
-            image_data = []
-            # sglang enforce str(path or url)/bytes image data currently
-            # TODO: path image_processor.load_image with hash according to:
-            # https://github.com/sgl-project/sglang/pull/4915
-            for data in batch.non_tensor_batch["multi_modal_data"]:
-                # bug exists in sglang, it only puts image str (standing for path
-                # or url) into list and leaves out image bytes. Thus when using
-                # image bytes, put it into list mannully
+            for i, data in enumerate(batch.non_tensor_batch["multi_modal_data"]):
                 prompt_token_ids.append(data["prompt_token_ids"])
-                # for text and multi-modal mixed data
                 if (
                     "multi_modal_data" not in data
                     or "image" not in data["multi_modal_data"]
                     or not data["multi_modal_data"]["image"]
                 ):
                     image_data.append(None)
-                    continue
-                image_per_sample = []
-                for image in data["multi_modal_data"]["image"]:
-                    byte_stream = io.BytesIO()
-                    image.save(byte_stream, "png")
-                    image_per_sample.append(byte_stream.getvalue())
-                    byte_stream.close()
-                image_data.append(image_per_sample)
+                else:
+                    image_data.append(data["multi_modal_data"]["image"])
+
+                if (
+                    "multi_modal_data" not in data
+                    or "video" not in data["video"]
+                    or not data["multi_modal_data"]["video"]
+                ):
+                    video_data.append(None)
+                else:
+                    video_data.append([dict(
+                        batch.non_tensor_batch["multi_modal_data"][i],
+                        format="processor_output"
+                    )])
+                    cur_input_ids = cur_input_ids[i].unsqueeze(0)
+                    cur_attention_mask = attention_mask[i].unsqueeze(0)
+                    input_ids = gather_unpadded_input_ids(input_ids=cur_input_ids, attention_mask=cur_attention_mask)
+                    prompt_token_ids[-1] = input_ids[0]
         else:
             prompt_token_ids = gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
         return_logprob = sampling_params.pop("return_logprob", False)
+
+        if all(not x for x in image_data):
+            image_data = None
+        if all(not x for x in video_data):
+            video_data = None
+
         sglang_outputs = await self.model.engine.async_generate(
-            input_ids=prompt_token_ids, image_data=image_data, sampling_params=sampling_params, return_logprob=return_logprob
+            input_ids=prompt_token_ids, image_data=image_data, video_data=video_data, sampling_params=sampling_params, return_logprob=return_logprob
         )
 
         # (bs * num_return_sequences, max_response_len)
@@ -321,8 +377,7 @@ class SgLangStrategy(InferenceStrategy):
                 # always release all
                 self.is_model_in_gpu, self.is_kv_cache_in_gpu = False, False
 
-        gc.collect()
-        current_platform.empty_cache()
+        clear_memory()
 
 class SglangEngine:
     def __init__(self):
@@ -554,12 +609,35 @@ def postprocess_generate(chunks):
         )
     output_data["output_token_ids"] = output_token_ids
     output_data["finish_reasons"] = []
+
+    output_routed_experts = [chunk["meta_info"].get("routed_experts", None) for chunk in chunks]
+    has_routed_experts = any(routed_experts is not None for routed_experts in output_routed_experts)
+    if has_routed_experts:
+        output_data["routed_experts"] = output_routed_experts
+
+    # Speculative decoding metrics keys from sglang
+    spec_metric_keys = [
+        "spec_accept_rate",
+        "spec_accept_length",
+        "spec_accept_token_num",
+        "spec_draft_token_num",
+    ]
+
     for chunk in chunks:
-        finish_reason = chunk["meta_info"]["finish_reason"]
+        meta_info = chunk["meta_info"]
+
+        finish_reason = meta_info["finish_reason"]
         if isinstance(finish_reason, dict):
             finish_reason = finish_reason["type"]
             output_data["finish_reasons"].append(finish_reason)
         else:
             output_data["finish_reasons"].append(finish_reason)
+
+        # Extract speculative decoding metrics
+        for key in spec_metric_keys:
+            if key in meta_info:
+                output_data.setdefault("metrics", {}).setdefault(key, []).append(meta_info[key])
+
     assert len(output_data["finish_reasons"]) == len(output_data["output_token_ids"])
     return output_data
+

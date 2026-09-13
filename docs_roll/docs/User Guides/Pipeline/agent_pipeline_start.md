@@ -117,7 +117,7 @@ The `AgenticConfig` (defined in `roll/pipeline/agentic/agentic_config.py`) is a 
   * `model_args` – Model architecture, dtype (e.g., bf16), attention type (e.g., flash_attn).  
   * `training_args` – Learning rate, batch size, gradient accumulation.  
   * `generating_args` – `max_new_tokens`, `top_p`, `temperature` for inference.  
-  * `strategy_args` – Distributed strategy (e.g., `deepspeed_train`, `vllm`, `sglang`, `hf_infer`) and its specific configuration.  
+  * `strategy_args` – Distributed strategy (e.g., `fsdp2_train`, `vllm`, `sglang`, `hf_infer`) and its specific configuration.  
   * `device_mapping` – GPU allocation for the worker.
 
 ---
@@ -265,7 +265,7 @@ python examples/start_agentic_pipeline.py \
   * YAML syntax – lint your YAML.  
   * Hydra path/name – verify `--config-path` and `--config-name`.  
   * Pydantic validation – check `roll/pipeline/agentic/agentic_config.py` field definitions.  
-* **Model Loading Issues** – Confirm paths, model types, and strategies (vLLM, SGLang, DeepSpeed, Megatron-Core).  
+* **Model Loading Issues** – Confirm paths, model types, and strategies (vLLM, SGLang, FSDP2, Megatron-Core).  
 * **CUDA/GPU Issues** – Adjust `CUDA_VISIBLE_DEVICES`, batch sizes, or `gpu_memory_utilization`.  
 * **Ray Issues** – Ensure Ray is started and resource requests match hardware.  
 * **Environment Registration** – Verify `env_type` values correspond to registered env classes.
@@ -277,7 +277,7 @@ python examples/start_agentic_pipeline.py \
 * Full configuration definitions: `roll/pipeline/agentic/agentic_config.py` and related dataclasses.  
 * Environment implementations: `roll/agentic/env/` (e.g., `frozen_lake/env.py`).  
 * Core pipeline logic: `roll/pipeline/agentic/agentic_pipeline.py`.  
-* The project `README.md` provides additional high-level details on features like GRPO, Reasoning Pipeline, and integrations with Ray, DeepSpeed, Megatron-Core, vLLM, and SGlang.
+* The project `README.md` provides additional high-level details on features like GRPO, Reasoning Pipeline, and integrations with Ray, FSDP2, Megatron-Core, vLLM, and SGlang.
 
 ---
 

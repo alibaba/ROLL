@@ -65,5 +65,7 @@ class Qwen3OmniMoeConfig(McaModelConfig):
             * vision_config_obj.in_channels
             * vision_config_obj.temporal_patch_size
         )  # 1536
-        assert "mrope_section" in self.rope_scaling, "mrope_section is required"
+
         self.mrope_section = self.rope_scaling.get("mrope_section")
+        if self.mrope_section is None:
+            self.mrope_section = self.rope_parameters.get("mrope_section")

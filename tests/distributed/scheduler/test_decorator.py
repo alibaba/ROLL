@@ -84,7 +84,9 @@ def test_collect_dp_mp_compute():
     cluster = Mock()
     cluster.world_size = 4
 
-    cluster.get_rank_info = Mock(side_effect=lambda rank: Mock(tp_rank=rank % 2))
+    cluster.get_rank_info = Mock(
+        side_effect=lambda rank: Mock(tp_rank=rank % 2, cp_rank=0, is_pipeline_last_stage=True)
+    )
 
     output = [[0], [1], [2], [3]]
     collected_output = collect_dp_mp_compute(cluster, output)

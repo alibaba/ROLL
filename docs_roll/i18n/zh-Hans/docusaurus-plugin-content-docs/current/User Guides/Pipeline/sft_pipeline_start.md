@@ -109,7 +109,7 @@
      * `dataloader_num_workers`
      * ...
    * **策略参数**（`strategy_args`）
-     * `strategy_name`：如 `megatron_train` / `deepspeed_train` 等
+     * `strategy_name`：如 `megatron_train` / `fsdp2_train` 等
      * 并行相关参数（tensor/pipeline 并行大小等）
    * **设备映射**（`device_mapping`）
      * 指定该 worker 使用哪些 GPU

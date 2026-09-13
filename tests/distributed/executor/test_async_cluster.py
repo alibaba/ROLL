@@ -33,34 +33,39 @@ class TestWorker(Worker):
     async def test_dp_mp_dispatch_first(self):
         return 1
 
+async def _assert_async_cluster_calls(cluster):
+    ret = await asyncio.gather(*cluster.test_one_to_all(blocking=False))
+    assert ret == [1, 1]
+
+    ret = await asyncio.gather(*[ref.obj_ref for ref in cluster.test_one_to_all_one(blocking=False)])
+    assert ret == [1, 1]
+
+    ret = await asyncio.gather(*cluster.test_all_to_all(blocking=False))
+    assert ret == [1, 1]
+
+    ret = await asyncio.gather(*[ref.obj_ref for ref in cluster.test_dp_mp_compute(blocking=False)])
+    assert ret == [1, 1]
+
+    ret = await asyncio.gather(*[ref.obj_ref for ref in cluster.test_dp_mp_dispatch_first(blocking=False)])
+    assert ret == [1, 1]
+
 def test_async_cluster():
+    ray.shutdown()
     ray.init()
-    resource_manager = ResourceManager(0, 1)
-    worker_config = WorkerConfig(name="test_worker", world_size=2)
+    try:
+        resource_manager = ResourceManager(0, 1)
+        worker_config = WorkerConfig(name="test_worker", world_size=2)
 
-    cluster: Any = Cluster(
-        name=worker_config.name,
-        resource_manager=resource_manager,
-        worker_cls=TestWorker,
-        worker_config=worker_config,
-    )
+        cluster: Any = Cluster(
+            name=worker_config.name,
+            resource_manager=resource_manager,
+            worker_cls=TestWorker,
+            worker_config=worker_config,
+        )
 
-    loop = asyncio.get_event_loop()
-
-    ret = loop.run_until_complete(asyncio.gather(*cluster.test_one_to_all(blocking=False)))
-    assert ret == [1, 1]
-
-    ret = loop.run_until_complete(asyncio.gather(*[ref.obj_ref for ref in cluster.test_one_to_all_one(blocking=False)]))
-    assert ret == [1, 1]
-
-    ret = loop.run_until_complete(asyncio.gather(*cluster.test_all_to_all(blocking=False)))
-    assert ret == [1, 1]
-
-    ret = loop.run_until_complete(asyncio.gather(*[ref.obj_ref for ref in cluster.test_dp_mp_compute(blocking=False)]))
-    assert ret == [1, 1]
-
-    ret = loop.run_until_complete(asyncio.gather(*[ref.obj_ref for ref in cluster.test_dp_mp_dispatch_first(blocking=False)]))
-    assert ret == [1, 1]
+        asyncio.run(_assert_async_cluster_calls(cluster))
+    finally:
+        ray.shutdown()
 
 if __name__ == "__main__":
     test_async_cluster()

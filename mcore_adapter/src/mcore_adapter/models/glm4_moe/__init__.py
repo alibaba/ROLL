@@ -24,6 +24,10 @@ from ..model_factory import McaGPTModel
 class Glm4MoeTemplate(Template):
     def convert_hf_to_mca_config_kws(self, hf_config, **kw_args):
         partial_rotary_factor = getattr(hf_config, "partial_rotary_factor", None)
+        rope_parameters = getattr(hf_config, "rope_parameters", None)
+        if rope_parameters is not None:
+            partial_rotary_factor = rope_parameters.get("partial_rotary_factor", partial_rotary_factor)
+
         if partial_rotary_factor is not None:
             kw_args["rotary_percent"] = partial_rotary_factor
 
@@ -169,6 +173,7 @@ register_template(
         "vocab_size": "padded_vocab_size",
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
+        "rope_parameters": "rope_parameters",
         "intermediate_size": "ffn_hidden_size",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
         # MoE related

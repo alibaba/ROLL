@@ -18,6 +18,12 @@ from roll.pipeline.agentic.agentic_config import EnvManagerConfig
 from roll.utils.functionals import append_to_dict
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
+from roll.utils.telemetry import (
+    attach_trace_context,
+    extract_trace_context,
+    inject_trace_context,
+    get_tracer,
+)
 
 logger = get_logger()
 
@@ -636,12 +642,27 @@ class RolloutScheduler(RolloutMockMixin):
         if self._should_load_mock(global_step):
             return await self._load_mock_batch(global_step)
 
+        with (
+            attach_trace_context(data.meta_info),
+            get_tracer("scheduler").start_as_current_span(
+                "get_batch",
+                attributes={
+                    "global_step": global_step,
+                    "batch_size": batch_size,
+                },
+            ),
+        ):
+            return await self._get_batch_impl(data, batch_size)
+
+    async def _get_batch_impl(self, data: DataProto, batch_size):
+        global_step = data.meta_info["global_step"]
+
         # start env manager
         if self.rollout_task is None:
             seed = random.randint(0, 1000000) if self.mode == "train" else self.config.seed
             self.rollout_task = asyncio.create_task(self._run_rollout_loop(seed))
 
-        await asyncio.gather(*self.es_manager.update_step(global_step, blocking=False))
+        await asyncio.gather(*self.es_manager.update_step(global_step, inject_trace_context({}), blocking=False))
         await self.env_output_queue.advance_step.remote(global_step)
         await self.router_manager.resume.remote()
 
@@ -673,6 +694,9 @@ class RolloutScheduler(RolloutMockMixin):
         # DUMP MODE: Save merged batch (from mixin)
         await self._maybe_dump_batch(batch, global_step)
 
+        with get_tracer("scheduler").start_as_current_span("to_remote"):
+            loop = asyncio.get_running_loop()
+            batch = await loop.run_in_executor(None, DataProto.to_remote, batch)
         return batch
 
     async def shrink_sampler(self, target_gpus: List[int]) -> Dict[str, Any]:

@@ -1,0 +1,160 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "video-r1"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+checkpoint_config:
+  type: file_system
+  output_dir: /data/cpfs_0/yuzhao/roll/vlm-video/models
+
+
+track_with: ml_tracker
+tracker_kwargs:
+  project: video-r1
+  notes: ${exp_name}
+  tags:
+    - roll
+    - rlvr
+    - video
+
+offload_nccl: false
+
+save_steps: 20
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+rollout_batch_size: 8
+num_return_sequences_in_group: 8
+is_num_return_sequences_expand: true
+prompt_length: 16384
+response_length: 4096
+
+ppo_epochs: 1
+value_clip: 0.5
+reward_clip: 10
+advantage_clip: 10.0
+whiten_advantages: false
+init_kl_coef: 0.0
+adv_estimator: "grpo"
+use_kl_loss: true
+kl_loss_coef: 1.0e-2
+
+pretrain: Qwen/Qwen2.5-VL-7B-Instruct
+
+actor_train:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+    # freeze_module_prefix: "vision_model.blocks,vision_model.patch_embed"
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 1.0e-2
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
+    warmup_steps: 0
+    num_train_epochs: 50
+  data_args:
+    # we use video-r1 116k video data with adjusted format, case for training data:
+    #   {
+    #     "modality_type": "video",
+    #     "problem": "Why does the video conclude with a red screen displaying text?Options:\nA. To promote the BBC one program 'Super Cute Animals'\nB. To provide a warning message\nC. To show the credits of the video\nD. To indicate a change in scene\n",
+    #     "solution": "<answer>A</answer>",
+    #     "video": "videos/youtube_video_2024/ytb_HBxn56l9WcU.mp4",
+    #     "problem_type": "multiple choice"
+    #   }
+    custom_data_kwargs_func: roll.datasets.vlm_dataset_utils.video_r1_get_data_kwargs
+    file_name:
+      - /data/oss_bucket_0/yinchao/dataset/LMMS/Video-R1-116k-video.json
+    domain_interleave_probs:
+        videor1: 1.0
+    dataset_dir: ./
+    messages: prompt
+    preprocessing_num_workers: 32
+    # settings same with RewatchR1 and VideoR1
+    video_total_pixels: 9633792  # 12288 * 28 * 28, max_video_token=12k
+    video_min_pixels: 100352  # 128 * 28 * 28
+    video_max_pixels: 100352  # 128 * 28 * 28
+    video_fps: 2.0
+    video_max_frames: 192
+    video_folder: /data/oss_bucket_0/
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      sequence_parallel: true
+      tensor_model_parallel_size: 2
+      context_parallel_size: 2
+      expert_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      overlap_grad_reduce: true
+      use_distributed_optimizer: true
+      recompute_granularity: full
+      bf16: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 4
+  offload_nccl: ${offload_nccl}
+
+actor_infer:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      tensor_parallel_size: 2
+      max_num_batched_tokens: 32768
+      gpu_memory_utilization: 0.8
+      block_size: 16
+      disable_mm_preprocessor_cache: true
+      enable_prefix_caching: false
+  device_mapping: list(range(0,16))
+  infer_batch_size: 32
+  offload_nccl: ${offload_nccl}
+
+reference:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      sequence_parallel: true
+      tensor_model_parallel_size: 2
+      context_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      bf16: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 4
+  offload_nccl: ${offload_nccl}
+
+reward_system_config:
+  skip_special_tokens: true
+
+rewards:
+  videor1:
+    # NOTE: `re.fullmatch(pattern)` in format_reward seems not suitable for qwen3-vl
+    # thinking model, `<think>` is the prompt ending suffix thus adjust format_reward 
+    worker_cls: roll.pipeline.rlvr.rewards.video_r1_reward_worker.VideoR1RewardWorker
+    model_args:
+      model_name_or_path: ${pretrain}
+    tag_included: ["video"]
+    world_size: 2
+    infer_batch_size: 1

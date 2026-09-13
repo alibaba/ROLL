@@ -1,11 +1,12 @@
 -r requirements_common.txt
 
+quack-kernels==0.2.4
+
 torch==2.8.0.*
 torchvision==0.23.0.* 
 torchaudio==2.8.0.*
 
 transformers==4.57.0
-deepspeed==0.16.4
 accelerate==0.34.2
 
 flash-attn

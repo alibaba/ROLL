@@ -1,6 +1,9 @@
 import os
 import multiprocessing as mp
+import warnings
+from packaging.version import Version
 
+import sglang
 import sglang.srt.entrypoints.engine as engine_module
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
@@ -36,8 +39,17 @@ def _set_envs_and_config(server_args: ServerArgs):
     mp.set_start_method("spawn", force=True)
 
 def run_scheduler_process(*args, **kwargs):
-    from roll.third_party.sglang import fp8
-    fp8.monkey_patch_fp8()
+    sglang_version = Version(sglang.__version__)
+    if sglang_version >= Version("0.4.6.post4"):
+        from roll.third_party.sglang import fp8
+        fp8.monkey_patch_fp8()
+    else:
+        warnings.warn(
+            f"sglang version {sglang.__version__} < 0.4.6.post4, "
+            "fp8 monkey patch is not supported. "
+            "Please upgrade sglang to 0.4.6.post4 or later to use fp8.",
+            stacklevel=2,
+        )
 
     from sglang.srt.managers.scheduler import run_scheduler_process
     return run_scheduler_process(*args, **kwargs)

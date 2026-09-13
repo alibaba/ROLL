@@ -8,22 +8,30 @@ logger = get_logger()
 
 
 @dataclass
+class RouterReplayConfig:
+    """Configuration for router replay functionality."""
+    mode: Literal["disable", "R2", "R3"] = field(
+        default="disable",
+        metadata={
+            "help": "Router replay mode. Options: 'disable' (no replay), 'R2' (Megatron infer + Megatron train), 'R3' (sglang infer + Megatron train)."
+        },
+    )
+
+
+@dataclass
 class StrategyArguments:
     strategy_name: Literal[
-        "deepspeed_train",
         "hf_infer",
-        "deepspeed_infer",
         "vllm",
         "sglang",
         "megatron_infer",
         "megatron_train",
-        "diffusion_deepspeed_train",
         "fsdp2_train",
         "fsdp2_infer",
     ] = field(
-        default="deepspeed_train",
+        default="fsdp2_train",
         metadata={
-            "help": "The name of the strategy. Options: 'deepspeed_train', 'diffusion_deepspeed_train', 'hf_infer', 'deepspeed_infer', 'vllm', 'sglang', "
+            "help": "The name of the strategy. Options: 'hf_infer', 'vllm', 'sglang', "
             "'megatron_infer', 'megatron_train', 'fsdp2_train', 'fsdp2_infer'."
         },
     )
@@ -205,9 +213,17 @@ class WorkerConfig:
 
 
     logits_in_fp32: bool = field(
-        default=True,
+        default=False,
         metadata={
             "help": "Force logits dtype to Float"
+        }
+    )
+
+    # Router Replay Configuration
+    router_replay: RouterReplayConfig = field(
+        default_factory=RouterReplayConfig,
+        metadata={
+            "help": "Configuration for router replay in training. Only supported for Megatron strategy."
         }
     )
 
@@ -225,8 +241,39 @@ class WorkerConfig:
         }
     )
 
-    def __post_init__(self):
+    # MTP training configuration
+    mtp_training_mode: Optional[Literal["disabled", "standalone", "joint"]] = field(
+        default="disabled",
+        metadata={
+            "help": "MTP training mode for this worker. "
+            "'disabled': MTP is loaded but not trained (default). "
+            "'standalone': MTP is trained independently with truncated gradients (no gradient flow to main model). "
+            "'joint': MTP participates in main model updates with full gradient flow."
+        },
+    )
 
+    # OPD (On-Policy Distillation) KL coefficient for teacher workers
+    opd_kl_coef: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "KL coefficient for this teacher in OPD mode. "
+            "Defaults to 1.0 if not set."
+        },
+    )
+
+    # Tags this teacher handles for multi-teacher OPD routing
+    tag_included: List[str] = field(
+        default_factory=list,
+        metadata={
+            "help": "Tags this teacher handles in multi-teacher OPD mode. "
+            "Empty list means this teacher handles all tags (default). "
+            "Used to route data to specific teachers based on domain/tag."
+        },
+    )
+
+    def __post_init__(self):
+        self.offload_nccl = False
+        logger.info(f"force set offload_nccl=False.")
         if self.strategy_args is not None:
             if self.strategy_args.strategy_name not in ["hf_infer", "vllm", "sglang"] and self.num_gpus_per_worker > 1:
                 logger.info(
@@ -243,6 +290,23 @@ class WorkerConfig:
                     f"tensor_parallel_size: {tensor_parallel_size}, "
                     f"pipeline_parallel_size: {pipeline_parallel_size}"
                 )
+
+            # Validate router_replay configuration
+            if self.router_replay.mode == "R2":
+                raise NotImplementedError("Not support R2 now")
+                if self.strategy_args.strategy_name not in ["megatron_train", "megatron_infer"]:
+                    logger.warning(
+                        f"router_replay [R2] is only supported for megatron_train and megatron_infer strategy, "
+                        f"but current strategy is {self.strategy_args.strategy_name}. "
+                        f"router_replay will be ignored."
+                    )
+            elif self.router_replay.mode == "R3":
+                if self.strategy_args.strategy_name not in ["megatron_train", "sglang"]:
+                    logger.warning(
+                        f"router_replay [R3] is only supported for megatron_train and sgalng strategy, "
+                        f"but current strategy is {self.strategy_args.strategy_name}. "
+                        f"router_replay will be ignored."
+                    )
 
         if self.device_mapping is not None:
             self.device_mapping = eval(self.device_mapping)
@@ -266,7 +330,6 @@ class WorkerConfig:
                 self.training_args.bf16 = True
             elif self.model_args.dtype == "fp16":
                 self.training_args.fp16 = True
-
 
 
 def is_actor_infer_overlapping_with_any_cluster(actor_infer: WorkerConfig, actor_train: WorkerConfig = None, reference: WorkerConfig = None, critic: WorkerConfig = None) -> bool:

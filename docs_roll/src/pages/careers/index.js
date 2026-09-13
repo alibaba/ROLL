@@ -85,6 +85,14 @@ const projects = [
     enDesc: 'An open-source RL training framework for efficient distributed RL post-training at scale.',
   },
   {
+    name: 'ROCK',
+    tags: ['RL Env', 'Agent'],
+    href: 'https://github.com/alibaba/ROCK',
+    zhDesc: '开源的强化学习环境开发框架，旨在简化强化学习环境的开发、部署和管理流程。',
+    enDesc:
+      'An open-source reinforcement learning environment development framework that simplifies environment development, deployment, and management.',
+  },
+  {
     name: 'Euler',
     tags: ['GNN', 'Graph'],
     href: 'https://github.com/alibaba/euler',
@@ -129,6 +137,10 @@ const roles = [
     title: '智能引擎-机器学习系统工程师',
     href: 'https://talent-holding.alibaba.com/off-campus/position-detail?positionId=100008460012&shareCode=tGPVe1DNf9wWpBko553DpNTPm%2Fiu5lvdKCHPRUEo1fUXrexro24t6i77UdIPkYZ2',
   },
+  {
+    title: '智能引擎-大模型平台研发工程师-Agent Infra',
+    href: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh&positionId=100018640014&spm=a1z8x.8270853.0.0.454b6c5ck9LKl0',
+  },
 ];
 
 const copy = {
@@ -138,7 +150,7 @@ const copy = {
       '阿里控股集团智能引擎事业部算法平台团队负责构建阿里集团模型训练基础设施，承担HappyHorse、HappyOyster系列模型的数据和训练Infra建设。',
     heroTitle: '阿里巴巴智能引擎算法平台团队',
     heroDesc:
-      '阿里控股集团智能引擎事业部算法平台团队负责构建阿里集团模型训练基础设施，承担HappyHorse、HappyOyster系列模型的数据和训练Infra建设。团队建设了业界一流的大语言模型、多模态模型、生成模型的预训练、后训练框架以及样本存储和计算系统。开源项目包括Megatron-LLaMA、ROLL、RecIS 等，在NSDI、OSDI、SIGMOD等顶级会议发布了多篇工作，并获得 26 年 NSDI Outstanding Paper Award。团队致力于通过分布式优化、软硬件结合、模型-Infra Codesign等手段，从数据处理到训练全面优化大模型迭代效率，提升模型效果上限，打造行业前沿大模型基础设施。',
+      '阿里控股集团智能引擎事业部算法平台团队负责构建阿里集团模型训练基础设施，承担HappyHorse、HappyOyster系列模型的数据和训练Infra建设。团队建设了业界一流的大语言模型、多模态模型、生成模型的预训练、后训练框架以及样本存储和计算系统。开源项目包括Megatron-LLaMA、ROLL、ROCK、RecIS 等，在NSDI、OSDI、SIGMOD等顶级会议发布了多篇工作，并获得 26 年 NSDI Outstanding Paper Award。团队致力于通过分布式优化、软硬件结合、模型-Infra Codesign等手段，从数据处理到训练全面优化大模型迭代效率，提升模型效果上限，打造行业前沿大模型基础设施。',
     aboutTag: '关于团队',
     aboutTitle: '使命与职责',
     aboutDesc:
@@ -158,7 +170,7 @@ const copy = {
       "Building Alibaba Group's model training infrastructure for the HappyHorse and HappyOyster model families.",
     heroTitle: 'Alibaba Intelligent Engine Algorithm Platform Team',
     heroDesc:
-      "The Algorithm Platform team of Alibaba Holding Group's Intelligent Engine Business Unit builds Alibaba Group's model training infrastructure and is responsible for data and training Infra for the HappyHorse and HappyOyster model families. The team maintains industry-leading pre-training and post-training frameworks for large language models, multimodal models, and generative models, together with sample storage and compute systems. Open source projects include Megatron-LLaMA, ROLL, and RecIS. The team has published multiple works at top conferences including NSDI, OSDI, and SIGMOD, and received the 2026 NSDI Outstanding Paper Award. Through distributed optimization, software-hardware co-design, and model-Infra codesign, the team optimizes large model iteration efficiency from data processing through training, expands the ceiling of model quality, and builds frontier infrastructure for large models.",
+      "The Algorithm Platform team of Alibaba Holding Group's Intelligent Engine Business Unit builds Alibaba Group's model training infrastructure and is responsible for data and training Infra for the HappyHorse and HappyOyster model families. The team maintains industry-leading pre-training and post-training frameworks for large language models, multimodal models, and generative models, together with sample storage and compute systems. Open source projects include Megatron-LLaMA, ROLL, ROCK, and RecIS. The team has published multiple works at top conferences including NSDI, OSDI, and SIGMOD, and received the 2026 NSDI Outstanding Paper Award. Through distributed optimization, software-hardware co-design, and model-Infra codesign, the team optimizes large model iteration efficiency from data processing through training, expands the ceiling of model quality, and builds frontier infrastructure for large models.",
     aboutTag: 'About Us',
     aboutTitle: 'Mission & Responsibilities',
     aboutDesc:

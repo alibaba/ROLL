@@ -28,7 +28,7 @@ from megatron.core.fp8_utils import is_float8tensor
 from torch import Tensor
 
 from roll.platforms import current_platform
-from roll.utils.offload_states import move_tensors_to_device_buffer, move_device_buffer_to_tensors
+from roll.utils.offload_states import move_tensors_to_device_buffer, move_device_buffer_to_tensors, clear_memory
 
 
 def bind_megatron_offload_states_func(optimizer: MegatronOptimizer):
@@ -124,9 +124,7 @@ def float16_optimizer_with_float16_params_offload_states(self: Float16OptimizerW
         offload_adam_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
         self.offloaded_states.add(MegatronOffloadStateType.optimizer_states)
 
-    current_platform.synchronize()
-    gc.collect()
-    current_platform.empty_cache()
+    clear_memory()
 
 
 def float16_optimizer_with_float16_params_reload_states(self: Float16OptimizerWithFloat16Params,
@@ -142,12 +140,16 @@ def float16_optimizer_with_float16_params_reload_states(self: Float16OptimizerWi
             move_device_buffer_to_tensors(tensors=float16_weights,
                                           device_buffer=getattr(self, "float16_groups_cpu_buffer").to(device,
                                                                                                       non_blocking=non_blocking))
+            self.float16_groups_cpu_buffer = None
+
         fp32_weights: List[Tensor] = [param for sub_group in self.fp32_from_fp32_groups for param in sub_group]
 
         if getattr(self, "float32_groups_cpu_buffer") is not None:
             move_device_buffer_to_tensors(tensors=fp32_weights,
                                           device_buffer=getattr(self, "float32_groups_cpu_buffer").to(device,
                                                                                                       non_blocking=non_blocking))
+            self.float32_groups_cpu_buffer = None
+
         self.offloaded_states.remove(MegatronOffloadStateType.model_params)
 
     if needs_reload(MegatronOffloadStateType.other_params, include, self.offloaded_states):
@@ -161,6 +163,7 @@ def float16_optimizer_with_float16_params_reload_states(self: Float16OptimizerWi
             move_device_buffer_to_tensors(tensors=fp32_from_float16_weights,
                                           device_buffer=getattr(self, "fp32_from_float16_groups_cpu_buffer").to(device,
                                                                                                                 non_blocking=non_blocking))
+            self.fp32_from_float16_groups_cpu_buffer = None
 
             self.offloaded_states.remove(MegatronOffloadStateType.other_params)
 
@@ -325,9 +328,7 @@ def distributed_optimizer_offload_states(self: DistributedOptimizer,
         offload_adam_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
         self.offloaded_states.add(MegatronOffloadStateType.optimizer_states)
 
-    current_platform.synchronize()
-    gc.collect()
-    current_platform.empty_cache()
+    clear_memory()
 
 
 def distributed_optimizer_reload_states(self: DistributedOptimizer,
@@ -354,6 +355,7 @@ def distributed_optimizer_reload_states(self: DistributedOptimizer,
             move_device_buffer_to_tensors(tensors=shard_fp32_from_float16_weights,
                                           device_buffer=getattr(self, "shard_fp32_from_float16_groups_cpu_buffer").to(device,
                                                                                                                 non_blocking=non_blocking), )
+            self.shard_fp32_from_float16_groups_cpu_buffer = None
 
         self.offloaded_states.remove(MegatronOffloadStateType.other_params)
 
@@ -396,9 +398,7 @@ def fp32_optimizer_offload_states(self: FP32Optimizer,
         # offload optimizer states
         offload_adam_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
         self.offloaded_states.add(MegatronOffloadStateType.optimizer_states)
-    current_platform.synchronize()
-    gc.collect()
-    current_platform.empty_cache()
+    clear_memory()
 
 
 def fp32_optimizer_reload_states(self: FP32Optimizer,
@@ -415,6 +415,7 @@ def fp32_optimizer_reload_states(self: FP32Optimizer,
             move_device_buffer_to_tensors(tensors=float32_weights,
                                           device_buffer=getattr(self, "optimizer_param_groups_cpu_buffer").to(device,
                                                                                                               non_blocking=non_blocking), )
+            self.optimizer_param_groups_cpu_buffer = None
 
         self.offloaded_states.remove(MegatronOffloadStateType.model_params)
 
@@ -505,10 +506,11 @@ def reload_megatron_no_grad_module(model_chunks: List[Union[DistributedDataParal
                         offloaded_states=model_chunk.offloaded_states):
             param_dtype_to_params = getattr(model_chunk, "param_dtype_to_params", {})
             for param_dtype, params in param_dtype_to_params.items():
-                if getattr(model_chunk, f"{param_dtype}_ddp_no_grad_groups_cpu_buffer") is not None:
+                buffer_attr = f"{param_dtype}_ddp_no_grad_groups_cpu_buffer"
+                if getattr(model_chunk, buffer_attr, None) is not None:
                     move_device_buffer_to_tensors(tensors=params,
-                                                  device_buffer=getattr(model_chunk,
-                                                                        f"{param_dtype}_ddp_no_grad_groups_cpu_buffer").to(device, non_blocking=non_blocking))
+                                                  device_buffer=getattr(model_chunk, buffer_attr).to(device, non_blocking=non_blocking))
+                    setattr(model_chunk, buffer_attr, None)
 
             model_chunk.offloaded_states.remove(MegatronOffloadStateType.model_params)
 
@@ -523,7 +525,7 @@ def needs_reload(target, include, offloaded_states):
 
 
 def offload_adam_states(optimizer, device, pin_memory: bool = False, non_blocking: bool = False):
-    """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
+    """Move optimizer states to device."""
     state_tensors = []
     for _, state in optimizer.state.items():
         if "exp_avg" in state:
@@ -536,7 +538,7 @@ def offload_adam_states(optimizer, device, pin_memory: bool = False, non_blockin
 
 
 def reload_adam_states(optimizer, device, non_blocking: bool = False):
-    """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
+    """Move optimizer states to device."""
     state_tensors = []
     for _, state in optimizer.state.items():
         if "exp_avg" in state:
@@ -546,3 +548,6 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
     if getattr(optimizer, "optimizer_states_cpu_buffers", None) is not None:
         move_device_buffer_to_tensors(tensors=state_tensors,
                                       device_buffer=getattr(optimizer, "optimizer_states_cpu_buffers").to(device, non_blocking=non_blocking),)
+        optimizer.optimizer_states_cpu_buffers = None
+
+

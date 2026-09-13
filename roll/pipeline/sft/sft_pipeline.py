@@ -165,8 +165,8 @@ class SFTPipeline(BasePipeline):
                 self.pipeline_config.sequence_length,
                 encode_function,
                 num_proc=self.pipeline_config.sft_train.data_args.preprocessing_num_workers)
-            
-            global_val_batch_size = dp_size * self.pipeline_config.sft_train.infer_batch_size
+
+            global_val_batch_size = dp_size * ga_steps * self.pipeline_config.sft_train.infer_batch_size
             self.val_dataloader = DataLoader(
                 dataset=self.val_dataset,
                 batch_size=global_val_batch_size,
@@ -225,7 +225,7 @@ class SFTPipeline(BasePipeline):
                 logger.info(f"metrics: {metrics}")
 
                 # Update tqdm progress bar
-                loss = metrics.get("sft_train/loss", 0)
+                loss = metrics.get("sft_train/loss@sum", 0)
                 pbar.set_postfix({"loss": f"{loss:.4f}", "step": f"{global_step}/{total_steps}"})
 
                 self.state.step = global_step

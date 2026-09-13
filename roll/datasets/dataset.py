@@ -30,7 +30,7 @@ def register_dataset(key: str):
     return decorator
 
 
-def get_dataset(data_args: "DataArguments"):
+def get_dataset(data_args: "DataArguments", **kwargs):
     # TODO: refactor get_dataset and create_local_dataset
     data_path = None
     data_name = data_args.file_name
@@ -41,7 +41,7 @@ def get_dataset(data_args: "DataArguments"):
         local_path = ""
     else:
         local_path: str = os.path.join(dataset_dir, data_name)
-    if dataset_type in ("odps",):
+    if dataset_type in ("odps", "ailake"):
         data_path = dataset_type
         data_files.extend(data_name)
     elif os.path.isdir(local_path):
@@ -71,7 +71,9 @@ def get_dataset(data_args: "DataArguments"):
     logger.info(f"load_data_files: {chr(10)} {chr(10).join(data_files)}")
     logger.info(f"prompt column: {data_args.prompt}  label column: {data_args.response}")
 
-    return REGISTERED_DATASETS[data_path](data_files, split="train")
+    dataset_kwargs = {"num_proc": data_args.preprocessing_num_workers}
+    dataset_kwargs.update(kwargs)
+    return REGISTERED_DATASETS[data_path](data_files, split="train", **dataset_kwargs)
 
 
 def create_local_dataset(

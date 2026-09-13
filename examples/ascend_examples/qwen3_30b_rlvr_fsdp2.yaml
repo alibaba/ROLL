@@ -1,0 +1,163 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen3-30BA3B-rlvr-256bs-2kto4k"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+system_envs:
+  USE_MODELSCOPE: '1'
+
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./rl_examples/models/${exp_name}
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ./rl_examples/llm/tensorboard/roll_exp/rlvr
+rpc_timeout: 72000
+
+num_gpus_per_node: 16
+
+max_steps: 500
+save_steps: 100
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+
+rollout_batch_size: 32
+prompt_length: 2048
+response_length: 4096
+
+num_return_sequences_in_group: 8
+ppo_epochs: 1
+adv_estimator: "reinforce"
+
+value_clip: 0.5
+reward_clip: 10
+advantage_clip: 2.0
+dual_clip_loss: true
+
+norm_mean_type: ~
+norm_std_type: ~
+
+max_len_mask: true
+difficulty_mask: true
+difficulty_low_threshold: 0.1
+difficulty_high_threshold: 0.95
+error_max_len_clip: false
+
+difficulty_loss_weight: false
+length_loss_weight: false
+
+add_token_level_kl: false
+
+whiten_advantages: true
+
+pretrain: Qwen/Qwen3-30B-A3B
+reward_pretrain: Qwen/Qwen3-30B-A3B
+
+actor_train:
+  model_args:
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 8
+    warmup_steps: 20
+    num_train_epochs: 50
+  data_args:
+    template: qwen2_5
+    file_name:
+      - data/math_deepmath_deal.jsonl
+    domain_interleave_probs:
+      math_rule: 1
+    dataset_dir: data
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+  strategy_args:
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: bf16
+      offload_policy: true
+      apply_expert_patch: true
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      wrap_policy:
+        wrap_embeddings: true
+        wrap_lm_output: true
+        moe_experts:
+          - Qwen3MoeMLP
+        transformer_layer_cls_to_wrap:
+          - Qwen3MoeAttention
+          - Qwen3MoeSparseMoeBlock
+  use_remove_padding: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 2
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.8
+      block_size: 16
+      max_model_len: 6144
+      tensor_parallel_size: 2
+      enforce_eager: true
+      load_format: dummy
+  device_mapping: list(range(0,16))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: bf16
+      apply_tiled_mlp: true
+      tiled_num_shards: 8
+      reshard_after_forward: true
+      offload_policy: true
+  device_mapping: list(range(0,16))
+  infer_batch_size: 2
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen2_5
+    tag_included: [deepmath_103k, aime]
+    world_size: 8
+    infer_batch_size: 1

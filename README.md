@@ -43,6 +43,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 
 | 📣   Updates                                                                                                                                                                                                                                                                                                                                                        |
 |:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **[16/06/2026]** 🎉 Our OSDI’26 RollArt paper is now available on [arxiv](https://arxiv.org/abs/2512.22560).   
 | **[03/06/2026]** 🎉 We support Qwen3.5 [Dense](examples/qwen3.5-35BA3-rlvr_megatron/rlvr_megatron_80GB.yaml) and [MoE](examples/qwen3.5-35BA3-rlvr_megatron/rlvr_megatron_80GB.yaml) series models and [on-policy distill](docs_roll/i18n/zh-Hans/docusaurus-plugin-content-docs/current/User%20Guides/Pipeline/on_policy_distill_pipeline_start.md). Welcome to use! |
 | **[02/03/2026]** 🎉 We released FSDP2 Strategy, Megatron with LoRA, GPU partial overlapping, Qwen3-Omni supports and other features. For more details, please refer to the release notes. Welcome to use!                                                                                                                                                           |
 | **[01/01/2026]** 🎉 Our [Let It Flow: Agentic Crafting on Rock and Roll](https://arxiv.org/abs/2512.24873) report released! Introducing ALE ecosystem and ROME, an open-source agentic model with novel IPA algorithm.                                                                                                                                              |
@@ -107,7 +108,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [RewardFL](https://alibaba.github.io/ROLL/docs/User%20Guides/Algorithms/Reward_FL)
 
 #### Backend
-[DeepSpeed](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/deepspeed)  
+[FSDP2](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/fsdp2) 
 [Megatron](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/megatron)   
 [vLLM](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/vllm)  
 [SGLang](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/sglang)
@@ -140,7 +141,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
     *   Out-of-the-box support for reinforcement learning algorithms, such as **PPO, GRPO, Reinforce++, TOPR, RAFT++, GSPO**, etc.
 *   **Rich Training and Inference Engine:** Ray-based multi-role distributed architecture; Strategy abstraction unifies various backends, enabling easy operation from single machines to thousands-of-GPU clusters.
     *   Inference/Generation supports vLLM, SGLang.
-    *   Training supports DeepSpeed (ZeRO), Megatron-LM 5D parallelism (mcore-adapter, dp/tp/pp/cp/ep), FSDP under implementation.
+    *   Training supports FSDP2, Megatron-LM 5D parallelism (mcore-adapter, dp/tp/pp/cp/ep).
     *   Extreme offload/reload capabilities.
     *   Supports [LoRA](https://alibaba.github.io/ROLL/docs/User%20Guides/Configuration/lora) training.
     *   Supports FP8 rollout (FP8 inference for LLM as judge, FP8 rollout with BF16 training under development).
@@ -160,6 +161,7 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 - [ComplementaryRL](https://arxiv.org/abs/2603.17621): Complementary RL is a learning framework that enables agents to effectively learn from experience through the seamless co-evolution of an experience extractor and a policy actor within the RL optimization loop.
 - [RLix](https://github.com/rlops/rlix): RLix is an RL job manager that lets more RL jobs run concurrently with less waiting by sharing GPU capacity across jobs, while preserving each pipeline’s training behavior and improving GPU utilization.
 - [TurningPoint-GRPO](https://arxiv.org/abs/2602.06422): A GRPO framework for Flow Matching models in text-to-image generation that alleviates step-wise reward sparsity by modeling step-level incremental rewards and explicitly captures long-term effects via turning points detection, providing dense learning signals for each denoising action.
+- [SocioReasoner](https://github.com/AMAP-ML/SocioReasoner): A vision-language method for urban socio-semantic segmentation that employs a render-and-refine mechanism optimized by RL to identify abstract social entities using satellite and map data.
 - [STAgent](https://arxiv.org/abs/2512.24957): An agentic LLM specialized for spatio-temporal understanding and complex tasks like constrained POI discovery and itinerary planning, featuring hierarchical data curation with 1:10,000 filter ratio and cascaded training (seed SFT + difficulty-aware SFT + RL), achieving strong performance on TravelBench while preserving general capabilities.
 - [IPRO](https://arxiv.org/abs/2510.14255): A novel video diffusion framework using reinforcement learning to enhance identity preservation in human-centric I2V generation, optimizing diffusion models with face identity scorer and KL-divergence regularization.
 - [TaoSR-SHE](https://arxiv.org/abs/2510.07972): Stepwise Hybrid Examination Reinforcement Learning Framework for Taobao Search Relevance, with SRPO (hybrid reward model + offline verifier), diversified data filtering, and multi-stage curriculum learning.

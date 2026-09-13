@@ -17,6 +17,8 @@ import asyncio
 from roll.distributed.scheduler.protocol import DataProto, ObjectRefWrap
 from roll.utils.logging import get_logger
 from roll.platforms import current_platform
+from roll.utils.offload_states import clear_memory
+from roll.utils.telemetry import get_tracer, inject_trace_context, attach_trace_context
 
 logger = get_logger()
 
@@ -150,6 +152,8 @@ def dispatch_dp_mp_compute(cluster, *args, **kwargs):
 def dispatch_dp_mp_dispatch_first(cluster, *args, **kwargs):
     return _dispatch_dp_mp_compute(cluster, True, *args, **kwargs)
 
+def need_collect_dp_mp_compute(rank_info):
+    return rank_info.tp_rank == 0 and rank_info.is_pipeline_last_stage and rank_info.cp_rank == 0
 
 def collect_dp_mp_compute(cluster, output):
     """
@@ -159,7 +163,7 @@ def collect_dp_mp_compute(cluster, output):
     output_in_dp = []
     for global_rank in range(cluster.world_size):
         local_rank_info = cluster.get_rank_info(rank=global_rank)
-        if local_rank_info.tp_rank == 0 and local_rank_info.is_pipeline_last_stage and local_rank_info.cp_rank == 0:
+        if need_collect_dp_mp_compute(local_rank_info):
             output_in_dp.append(output[global_rank])
     if isinstance(output[0], list):
         return list(chain.from_iterable(output_in_dp))
@@ -171,11 +175,7 @@ def collect_dp_mp_compute(cluster, output):
         for global_rank in range(cluster.world_size):
             local_rank_info = cluster.get_rank_info(rank=global_rank)
             collected = False
-            if (
-                local_rank_info.tp_rank == 0
-                and local_rank_info.is_pipeline_last_stage
-                and local_rank_info.cp_rank == 0
-            ):
+            if need_collect_dp_mp_compute(local_rank_info):
                 collected = True
             output_in_dp.append(ObjectRefWrap(output[global_rank], collected=collected))
         return output_in_dp
@@ -234,6 +234,14 @@ def func_generator(cls, method_name, dispatch_fn, collect_fn, execute_fn):
         if method_name == "initialize":
             setattr(cls, "initialized", True)
 
+        # Inject trace context into DataProto.meta_info before dispatch
+        for arg in args:
+            if isinstance(arg, DataProto):
+                inject_trace_context(arg.meta_info)
+        for v in kwargs.values():
+            if isinstance(v, DataProto):
+                inject_trace_context(v.meta_info)
+
         args, kwargs = dispatch_fn(cls, *args, **kwargs)
         output = execute_fn(method_name, *args, **kwargs)
         if blocking:
@@ -261,7 +269,14 @@ def _check_execute_mode(execute_mode):
     assert isinstance(execute_mode, Execute), f"execute_mode must be a Execute. Got {execute_mode}"
 
 
-def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, clear_cache=True):
+def register(
+    dispatch_mode=Dispatch.ALL_TO_ALL,
+    execute_mode=Execute.ALL,
+    clear_cache=True,
+    trace=False,
+    prefetch: bool=False,  # TODO shigao: support selective prefetching
+    to_remote: bool=False,
+):
     _check_dispatch_mode(dispatch_mode)
     _check_execute_mode(execute_mode)
 
@@ -272,12 +287,18 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, clear_
             @wraps(func)
             async def inner_async(*args, **kwargs):
                 try:
+                    has_remote_batch = any(
+                        arg._remote_batch is not None
+                        for arg in (args + tuple(kwargs.values()))
+                        if isinstance(arg, DataProto)
+                    )
+                    assert not has_remote_batch, f"Remote data is not allowed for async function {func.__name__}"
+
                     result = await func(*args, **kwargs)
                     if clear_cache:
                         try:
                             current_platform.clear_cublas_workspaces()
-                            gc.collect()
-                            current_platform.empty_cache()
+                            clear_memory()
                         except Exception as oe:
                             pass
 
@@ -292,20 +313,56 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, clear_
         else:
             @wraps(func)
             def inner(*args, **kwargs):
-                try:
-                    result = func(*args, **kwargs)
-                    if clear_cache:
-                        try:
-                            current_platform.clear_cublas_workspaces()
-                            gc.collect()
-                            current_platform.empty_cache()
-                        except Exception as oe:
-                            pass
+                from roll.distributed.executor.worker import Worker
 
-                except Exception as e:
-                    logger.error(str(e))
-                    logger.error(traceback.format_exc())
-                    raise e
+                combined_args = args + tuple(kwargs.values())
+                has_remote_batch = any(arg._remote_batch is not None for arg in combined_args if isinstance(arg, DataProto))
+
+                # Extract trace context from DataProto.meta_info
+                # When trace=False, _otel_meta stays {} → attach_trace_context
+                # suppresses all get_tracer() calls to no-op.
+                _otel_meta = {}
+                if trace:
+                    for arg in combined_args:
+                        if isinstance(arg, DataProto):
+                            _otel_meta = arg.meta_info
+                            break
+
+                with (
+                    attach_trace_context(_otel_meta),
+                    get_tracer("worker").start_as_current_span(f"worker.{func.__name__}"),
+                ):
+                    try:
+                        if prefetch and has_remote_batch:
+                            with get_tracer("worker").start_as_current_span(f"prefetch"):
+                                assert len(combined_args) == 2
+                                self, data = combined_args[0], combined_args[1]
+                                assert isinstance(self, Worker) and isinstance(data, DataProto)
+                                data.prefetch()
+
+                        with get_tracer("worker").start_as_current_span(f"exec"):
+                            result = func(*args, **kwargs)
+
+                        if to_remote and has_remote_batch:
+                            assert dispatch_mode in [Dispatch.DP_MP_COMPUTE, Dispatch.DP_MP_DISPATCH_FIRST]
+                            with get_tracer("worker").start_as_current_span(f"to_remote"):
+                                assert len(combined_args) == 2
+                                self, data = combined_args[0], combined_args[1]
+                                assert isinstance(self, Worker) and isinstance(data, DataProto)
+                                if need_collect_dp_mp_compute(self.get_rank_info()):
+                                    result = DataProto.to_remote(result, ref_data=data)
+
+                        if clear_cache:
+                            try:
+                                current_platform.clear_cublas_workspaces()
+                                clear_memory()
+                            except Exception as oe:
+                                pass
+
+                    except Exception as e:
+                        logger.error(str(e))
+                        logger.error(traceback.format_exc())
+                        raise e
                 return result
 
             setattr(inner, BIND_WORKER_METHOD_FLAG, attrs)

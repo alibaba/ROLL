@@ -18,6 +18,7 @@ from roll.utils.functionals import (
     postprocess_generate,
     concatenate_input_and_output,
 )
+from roll.utils.telemetry import get_tracer
 from roll.utils.logging import get_logger
 
 
@@ -71,6 +72,16 @@ def postprocess_paused_data(pre_data, data: DataProto, sequence_length, prompt_l
         pre_value = [pre_value[i] + cur_value[i] for i in range(len(pre_value))]
         data.meta_info[f"pre_{key}"] = pre_value
     new_batch = {**pre_data.batch}
+
+    if "routed_experts" in data.meta_info:
+        cur_routed_experts = data.meta_info.pop("routed_experts")
+        pre_routed_experts = pre_data.meta_info.get("pre_routed_experts", None)
+        if pre_routed_experts is not None:
+            # 在序列维度拼接
+            data.meta_info["pre_routed_experts"] = torch.cat([pre_routed_experts, cur_routed_experts], dim=0)
+        else:
+            data.meta_info["pre_routed_experts"] = cur_routed_experts
+    new_batch["routed_experts"] = pre_data.batch.get("pre_routed_experts")
 
     init_attention_mask = pre_data.batch.get("init_attention_mask", pre_data.batch["attention_mask"])
     new_batch["init_attention_mask"] = init_attention_mask
@@ -128,6 +139,15 @@ def postprocess_output_data(request, data: DataProto, sequence_length) -> DataPr
         pre_output_logprobs = request.meta_info.get("pre_output_logprobs", [[]] * len(output_token_ids))
         output_logprobs = [pre_output_logprobs[i] + output_logprobs[i] for i in range(len(pre_output_logprobs))]
 
+    # new: process routed_experts
+    routed_experts = data.meta_info.get("routed_experts", None)
+    if routed_experts is not None:
+        # routed_experts : [B*S, num_expert, topk]
+        pre_routed_experts = request.meta_info.get("pre_routed_experts", None)
+        if pre_routed_experts is not None:
+            # B*S1, num_expert, topk] + [B*S2, num_expert, topk] -> [B*(S1+S2), num_expert, topk]
+            routed_experts = torch.cat([pre_routed_experts, routed_experts], dim=0)
+
     output_tokens = [torch.tensor(token_ids) for token_ids in output_token_ids]
     output_tensor = pad_sequence(output_tokens, batch_first=True, padding_value=pad_token_id)
     output_tensor = concatenate_input_and_output(
@@ -141,10 +161,14 @@ def postprocess_output_data(request, data: DataProto, sequence_length) -> DataPr
         eos_token_id=eos_token_id,
         pad_token_id=pad_token_id,
         output_logprobs=output_logprobs,
+        routed_experts=routed_experts,
     )
     request_repeat = request.repeat(repeat_times=len(output_tokens))
     output.non_tensor_batch = request_repeat.non_tensor_batch
     output.meta_info = request_repeat.meta_info
+    # Preserve metrics from data (e.g., speculative decoding metrics)
+    if "metrics" in data.meta_info:
+        output.meta_info.setdefault("metrics", {}).update(data.meta_info["metrics"])
     return output
 
 # ================= example of user defined rollout loop =================
@@ -171,7 +195,7 @@ class UserDefinedRolloutLoop:
         The framework will only raise asyncio.CancelledError exception. (process_new_prompt will be called by scheduler
         as an asyncio.Task and scheduler may cancel this task if needed. User should not suppress asyncio.CancelledError
         exception and should handle clean up by themself.)
-    
+
         User should catch all other exceptions, any other exceptions will be treat as sys.exit by framework.
     """
     def __init__(self):
@@ -219,6 +243,15 @@ class UserDefinedRolloutLoop:
         req: DataProto,
         domain: str,
     ):
+        with get_tracer("scheduler").start_as_current_span("generate_and_reward"):
+            return await self._generate_and_reward_impl(context=context, req=req, domain=domain)
+
+    async def _generate_and_reward_impl(
+        self,
+        context: RolloutContext,
+        req: DataProto,
+        domain: str,
+    ):
         responses: List[DataProto] = []
 
         for _ in range(5): # limit max retry times, otherwise may cause dead loop
@@ -252,7 +285,10 @@ class UserDefinedRolloutLoop:
                         req = postprocess_paused_data(req, data, context.sequence_length, context.prompt_length)
 
             rewards = await context.compute_rewards(req=req, domain=domain)
+            metrics = req.meta_info.pop("metrics", {})
             req.union(rewards)
+            req_metrics = req.meta_info.pop("metrics", {})
+            req.meta_info['metrics'] = {**metrics, **req_metrics}
 
             output_count = req.batch.batch_size[0]
             assert output_count == req.meta_info["generation_config"]["num_return_sequences"]

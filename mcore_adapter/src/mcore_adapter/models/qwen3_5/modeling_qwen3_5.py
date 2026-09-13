@@ -10,6 +10,7 @@ from ...platforms import current_platform
 from ..auto.modeling_auto import register_model
 from ..model_factory import McaGPTModel
 from ..qwen3_vl.rope_utils import Qwen3VLMultimodalRotaryEmbedding, get_rope_index
+from ..sequence_packing_mixin import MultimodalEmbeddingMixin
 from .config_qwen3_5 import Qwen3_5Config
 
 
@@ -41,7 +42,7 @@ class Qwen3_5McaGPTModel(McaGPTModel):
 
 
 @register_model("qwen3_5")
-class Qwen3_5Model(Qwen3_5McaGPTModel):
+class Qwen3_5Model(Qwen3_5McaGPTModel, MultimodalEmbeddingMixin):
     config_class = Qwen3_5Config
 
     def __init__(self, config: "Qwen3_5Config", **kwargs):
@@ -55,7 +56,9 @@ class Qwen3_5Model(Qwen3_5McaGPTModel):
                 Qwen3_5VisionConfig(**config.vision_config),
                 attn_implementation="sdpa",
                 torch_dtype=self.config.params_dtype,
-            ).to(current_platform.current_device())
+            )
+            if not config.init_model_with_meta_device:
+                self.vision_model = self.vision_model.to(current_platform.current_device())
             # TODO: use_reentrant=True might cause error by twice forward/backward when
             # training images and videos simultaneously, https://github.com/pytorch/pytorch/issues/81296
             if config.recompute_granularity == "full" and self.training:
@@ -124,14 +127,24 @@ class Qwen3_5Model(Qwen3_5McaGPTModel):
         image_embeds = self.gather_encoder_outputs(image_embeds, split_plan, image_output_lengths)
         image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
-        selected_mask = torch.cat([image_mask[:, start:end] for start, end in input_ranges], dim=1)
-        selected_indices = torch.cat([image_indices[:, start:end] for start, end in input_ranges], dim=1)
-        selected_indices = selected_indices[selected_indices != -1]
+        full_sequence_output = input_ranges is None
+        if full_sequence_output:
+            # Packing mode: inputs_embeds is the full sequence (not sliced).
+            all_selected_indices = image_indices[image_mask]
+            inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
+            full_selected_mask = image_mask.unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(full_selected_mask, image_embeds[all_selected_indices])
+            inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
+        else:
+            # Normal mode: slice mask & indices to current rank's input_ranges.
+            selected_mask = torch.cat([image_mask[:, start:end] for start, end in input_ranges], dim=1)
+            selected_indices = torch.cat([image_indices[:, start:end] for start, end in input_ranges], dim=1)
+            selected_indices = selected_indices[selected_indices != -1]
 
-        inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
-        selected_mask = selected_mask.unsqueeze(-1).expand_as(inputs_embeds)
-        inputs_embeds = inputs_embeds.masked_scatter(selected_mask, image_embeds[selected_indices])
-        inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
+            inputs_embeds = inputs_embeds.transpose(0, 1)  # [s, b, h] -> [b, s, h]
+            selected_mask = selected_mask.unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(selected_mask, image_embeds[selected_indices])
+            inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
         return inputs_embeds
 
     def build_encoder_inputs(
@@ -216,43 +229,44 @@ class Qwen3_5Model(Qwen3_5McaGPTModel):
         return encoder_small_batch_size_gather(output_features)
 
     def get_batch_on_this_cp_rank(self, batch, dim3_keys: list[str] = ["attention_mask"]):
-        # VLM need to view all input_ids and media features
-        loss_needed_items = {
-            "labels": batch.pop("labels", None),
-        }
-        loss_needed_items = super().get_batch_on_this_cp_rank(loss_needed_items, dim3_keys=dim3_keys)
-        batch.update(loss_needed_items)
+        # VLM forward() handles input_ids and attention_mask splitting internally
+        skipped = {}
+        for key in ("input_ids", "attention_mask"):
+            if key in batch:
+                skipped[key] = batch.pop(key)
+        batch = super().get_batch_on_this_cp_rank(batch, dim3_keys=dim3_keys)
+        batch.update(skipped)
         return batch
 
-    def get_input_ranges(self, total_seqlen):
-        # context parallel 的计算有问题
-        slice_rank, slice_size = 0, 1
-        if self.config.sequence_parallel:
-            slice_rank = mpu.get_tensor_model_parallel_rank()
-            slice_size = mpu.get_tensor_model_parallel_world_size()
-
-        def get_sequence_range(start, end, rank, size):
-            return start + (end - start) * rank // size, start + (end - start) * (rank + 1) // size
-
-        if self.config.context_parallel_size <= 1:
-            return [list(get_sequence_range(0, total_seqlen, slice_rank, slice_size))]
-        cp_rank = mpu.get_context_parallel_rank()
-        cp_size = mpu.get_context_parallel_world_size()
-        left_start = (total_seqlen // cp_size // 2) * cp_rank
-        left_end = (total_seqlen // cp_size // 2) * (cp_rank + 1)
-        right_start = total_seqlen - left_end
-        right_end = total_seqlen - left_start
-        slice_len = (left_end - left_start + right_end - right_start) // slice_size
-        start = left_start + slice_len * slice_rank
-        end = start + slice_len
-        if start >= left_end:
-            start = start - left_end + right_start
-            end = start + slice_len
-            return [[start, end]]
-        if end <= left_end:
-            return [[start, end]]
-        end = end - left_end + right_start
-        return [[start, left_end], [right_start, end]]
+    def construct_multimodal_inputs(
+        self,
+        input_ids,
+        inputs_embeds,
+        inputs_ranges,
+        *,
+        pixel_values=None,
+        pixel_values_videos=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        force_vit_image=False,
+        force_vit_video=False,
+        **kwargs,
+    ):
+        if pixel_values is not None:
+            inputs_embeds = self.construct_inputs_embeds(
+                input_ids, inputs_embeds, pixel_values, image_grid_thw,
+                inputs_ranges, self.config.image_token_id,
+            )
+        elif force_vit_image:
+            inputs_embeds = self._handle_missing_visual(inputs_embeds)
+        if pixel_values_videos is not None:
+            inputs_embeds = self.construct_inputs_embeds(
+                input_ids, inputs_embeds, pixel_values_videos, video_grid_thw,
+                inputs_ranges, self.config.video_token_id,
+            )
+        elif force_vit_video:
+            inputs_embeds = self._handle_missing_visual(inputs_embeds)
+        return inputs_embeds
 
     def forward(
         self,
@@ -269,49 +283,35 @@ class Qwen3_5Model(Qwen3_5McaGPTModel):
     ) -> "torch.Tensor":
         force_vit_image = kwargs.pop("force_vit_image", False)
         force_vit_video = kwargs.pop("force_vit_video", False)
-        if position_ids is None and input_ids is not None:
+        packed_seq_params = kwargs.get("packed_seq_params", None)
+
+        if (
+                position_ids is None or (self.config.mtp_num_layers is not None and self.config.mtp_num_layers > 0)
+        ) and input_ids is not None:
             position_ids, _ = get_rope_index(self.config, input_ids, image_grid_thw, video_grid_thw)
 
-        cp_batch = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
-        if self.config.context_parallel_size > 1:
-            cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
-            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=[])
+        state = self.prepare_packing_state(
+            input_ids, position_ids, attention_mask, packed_seq_params,
+        )
 
         if not self.pre_process or decoder_input is not None:
             return super().forward(
-                decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
+                decoder_input=decoder_input, labels=labels,
+                position_ids=state.position_ids,
+                **state.cp_batch, **kwargs
             )
 
-        inputs_ranges = self.get_input_ranges(input_ids.shape[1])
-
-        inputs_embeds = self.embedding(input_ids=cp_batch["input_ids"], position_ids=None)
-        if pixel_values is not None:
-            inputs_embeds = self.construct_inputs_embeds(
-                input_ids,
-                inputs_embeds,
-                pixel_values,
-                image_grid_thw,
-                inputs_ranges,
-                self.config.image_token_id,
-            )
-        elif force_vit_image:
-            inputs_embeds = self._handle_missing_visual(inputs_embeds)
-        if pixel_values_videos is not None:
-            inputs_embeds = self.construct_inputs_embeds(
-                input_ids,
-                inputs_embeds,
-                pixel_values_videos,
-                video_grid_thw,
-                inputs_ranges,
-                self.config.video_token_id,
-            )
-        elif force_vit_video:
-            inputs_embeds = self._handle_missing_visual(inputs_embeds)
-        decoder_input = inputs_embeds
+        result = self.build_multimodal_embeddings(
+            input_ids, attention_mask, packed_seq_params, state,
+            multimodal_kwargs=dict(
+                pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
+                image_grid_thw=image_grid_thw, video_grid_thw=video_grid_thw,
+                force_vit_image=force_vit_image, force_vit_video=force_vit_video,
+            ),
+        )
 
         return super().forward(
-            decoder_input=decoder_input, labels=labels, position_ids=position_ids, **cp_batch, **kwargs
+            decoder_input=result.inputs_embeds, labels=labels,
+            position_ids=result.position_ids,
+            **result.cp_batch, **kwargs
         )

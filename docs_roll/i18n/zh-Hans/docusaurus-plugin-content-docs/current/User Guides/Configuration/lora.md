@@ -15,7 +15,7 @@ LoRA 通过以下方式实现参数高效微调：
 
 ### 配置示例
 
-以下是一个典型的 LoRA 配置示例（来自 `examples/qwen2.5-7B-rlvr_megatron/rlvl_lora_zero3.yaml`）：
+以下是一个典型的 LoRA 配置示例（来自 `examples/qwen2.5-7B-rlvr_megatron/rlvr_lora_fsdp2.yaml`）：
 
 ```yaml
 # LoRA 全局配置
@@ -40,8 +40,13 @@ actor_train:
     warmup_steps: 20
     num_train_epochs: 50
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 16
+      param_dtype: bf16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      offload_policy: false
   device_mapping: list(range(0,16))
   infer_batch_size: 4
 
@@ -93,15 +98,16 @@ actor_infer:
 
 ## LoRA 与训练后端的兼容性
 
-目前，LoRA 微调仅支持 DeepSpeed 训练后端：
+目前，LoRA 微调支持 FSDP2 和 Megatron 训练后端，两者在 LoRA 相关配置上的差异进存在于 `lora_target` 中，如下：
 
-```yaml
-actor_train:
-  strategy_args:
-    strategy_name: deepspeed_train  # LoRA 仅支持 deepspeed_train
-```
+ - FSDP2 可以使用 `o_proj,q_proj,k_proj,v_proj` 作为 `lora_target`. 这是因为 FSDP2 提供了与 LoRA 良好集成的优化功能.
+ - Megatron 可以使用 `all-linear`，这包括了 `linear_qkv,linear_proj,linear_fc1,linear_fc2`，其中:
+   - `linear_qkv` 表示 HF 中的 `q_proj,k_proj,v_proj`
+   - `linear_proj` 表示 HF 中的 `o_proj`
+   - `linear_fc1` 表示 HF 中的 `gate_proj,up_proj`
+   - `linear_fc2` 表示 HF 中的 `down_proj`
 
-这是因为 DeepSpeed 提供了与 LoRA 良好集成的优化功能。
+此外，使用 Megatron 训练后端时，LoRA 微调不支持 vision model weights (vit), vpp 和 tp+ep（[文档](https://alibaba.github.io/ROLL/zh-Hans/docs/User%20Guides/Configuration/megatron)）
 
 ## 性能优化建议
 
@@ -119,7 +125,7 @@ actor_train:
 
 ## 注意事项
 
-1. LoRA 微调目前仅支持 DeepSpeed 训练后端
+1. LoRA 微调目前支持 FSDP2 和 Megatron 训练后端
 2. 需要确保模型支持 LoRA 微调
 3. 在使用梯度检查点时需要注意与 LoRA 的兼容性
 4. LoRA 微调的性能可能与全参数微调有所不同，需要根据具体任务进行评估

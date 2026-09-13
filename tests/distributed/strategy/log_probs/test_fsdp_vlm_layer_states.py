@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional
 
 import ray
 import torch
@@ -24,10 +24,18 @@ from roll.distributed.scheduler.initialize import init
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_processor_provider, get_extra_data_provider
 from roll.pipeline.base_pipeline import BasePipeline
-from roll.pipeline.base_worker import ActorWorker, InferWorker
+from roll.pipeline.base_worker import ActorWorker
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.utils.logging import get_logger
 from tests.distributed.strategy.log_probs.analyze_layer_divergence import analyze_divergence
+from tests.distributed.strategy.log_probs.test_fsdp_log_probs import (
+    _data_files_exist,
+    _make_synthetic_vlm_dataset,
+    _reset_model_download_cache_actor,
+    _run_pipeline_and_cleanup,
+    _skip_if_cluster_insufficient,
+    _skip_if_local_model_unavailable,
+)
 from tests.distributed.strategy.make_baseline_config import make_baseline_config
 
 logger = get_logger()
@@ -68,14 +76,6 @@ def _set_capture_env_on_cluster(cluster: Cluster, save_dir: Path, prefix: str, s
     ray.get([w.set_capture_env.remote(env) for w in cluster.workers])
 
 
-def _as_list(x: Union[str, List[str], None]) -> List[str]:
-    if x is None:
-        return []
-    if isinstance(x, str):
-        return [x]
-    return list(x)
-
-
 def save_inputs_and_embeddings(data: DataProto, save_dir: Path, prefix: str, global_step: int, batch_idx: int = 0):
     """Save input tensors for comparison."""
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -104,7 +104,7 @@ def save_inputs_and_embeddings(data: DataProto, save_dir: Path, prefix: str, glo
             json.dump(mm_metadata, f, indent=2)
 
 
-class TestFSDPVLMLayerStatesPipeline(BasePipeline):
+class FSDPVLMLayerStatesPipeline(BasePipeline):
     def __init__(self, pipeline_config: RLVRConfig, output_dir: str = "./layer_states_output"):
         super().__init__(pipeline_config)
         self.pipeline_config = pipeline_config
@@ -135,6 +135,7 @@ class TestFSDPVLMLayerStatesPipeline(BasePipeline):
                 self.pipeline_config.actor_train.model_args.model_name_or_path,
                 processor=self.processor,
             ),
+            image_key="images",
             max_length=self.pipeline_config.prompt_length,
             padding="max_length",
         )
@@ -156,12 +157,6 @@ class TestFSDPVLMLayerStatesPipeline(BasePipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.actor_train,
         )
-        self.actor_infer: Any = Cluster(
-            name=self.pipeline_config.actor_infer.name,
-            worker_cls=InferWorker,
-            resource_manager=self.resource_manager,
-            worker_config=self.pipeline_config.actor_infer,
-        )
         self.reference: Any = Cluster(
             name=self.pipeline_config.reference.name,
             worker_cls=ActorWorker,
@@ -170,28 +165,15 @@ class TestFSDPVLMLayerStatesPipeline(BasePipeline):
         )
 
         self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=True)
-        self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=True)
         self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True)
 
     def _build_dataset_or_skip(self):
         data_args = self.pipeline_config.actor_train.data_args
-        file_names = _as_list(getattr(data_args, "file_name", None))
+        if _data_files_exist(data_args):
+            from roll.pipeline.rlvr.rlvr_vlm_pipeline import encode_function, get_vlm_dataset
 
-        if file_names and all(os.path.exists(p) for p in file_names):
-            import datasets
-
-            from roll.pipeline.rlvr.rlvr_math_vlm_pipeline import encode_function, get_dataset
-
-            features = datasets.Features(
-                {
-                    "image": datasets.Sequence(feature=datasets.Image(decode=True)),
-                    "prompt": datasets.Value("string"),
-                    "ground_truth": datasets.Value("string"),
-                    "image_flag": datasets.Value("bool"),
-                    "tag": datasets.Value("string"),
-                }
-            )
-            return get_dataset(data_args, encode_function, self.processor, features)
+            return get_vlm_dataset(data_args, encode_function, self.processor)
+        return _make_synthetic_vlm_dataset(self.processor, size=self.pipeline_config.rollout_batch_size)
 
     @torch.no_grad()
     def run(self, max_batches: Optional[int] = None):
@@ -218,22 +200,15 @@ class TestFSDPVLMLayerStatesPipeline(BasePipeline):
             logger.info(f"vlm layer states pipeline step {global_step} batch {batch_idx} start...")
 
             batch: DataProto = DataProto.from_single_dict(batch_dict)
-            batch.meta_info = {"global_step": global_step, "_broadcast_non_tensor_batch": True}
+            batch.meta_info = {
+                "global_step": global_step,
+                "_broadcast_non_tensor_batch": True,
+                "loss_mask_keys": ["response_mask"],
+            }
+            batch.batch["response_mask"] = batch.batch["attention_mask"].clone()
 
             # Save inputs and embeddings
             save_inputs_and_embeddings(batch, inputs_dir, "input", global_step, batch_idx)
-
-            # Generate responses using actor_infer (vLLM)
-            gen_batch = batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["multi_modal_data"],
-            )
-            gen_batch.meta_info = {"global_step": global_step}
-            generate_output: DataProto = self.actor_infer.generate(data=gen_batch)
-
-            # Merge generated full sequences back
-            batch.batch = generate_output.batch
-            batch = batch.union(generate_output)
 
             _set_capture_env_on_cluster(
                 self.actor_train,
@@ -297,9 +272,12 @@ class TestFSDPVLMLayerStatesPipeline(BasePipeline):
 
 def test_fsdp_vlm_layer_states_cp2():
     init()
+    _reset_model_download_cache_actor()
     config = make_baseline_config(config_path="./log_probs", config_name="log_probs_fsdp_vlm_cp2_config")
-    pipeline = TestFSDPVLMLayerStatesPipeline(config, output_dir="./layer_states_output")
-    results = pipeline.run(max_batches=1)  # Start with 1 batch for testing
+    _skip_if_cluster_insufficient(config, "test_fsdp_vlm_layer_states_cp2")
+    _skip_if_local_model_unavailable(config, "test_fsdp_vlm_layer_states_cp2")
+    pipeline = FSDPVLMLayerStatesPipeline(config, output_dir="./layer_states_output")
+    results = _run_pipeline_and_cleanup(pipeline, max_batches=1)  # Start with 1 batch for testing
 
     logger.info(f"Test FSDP VLM layer states (CP2) completed, results saved to {pipeline.output_dir}")
 

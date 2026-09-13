@@ -37,10 +37,10 @@ class RocmPlatform(Platform):
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             # These VLLM related enviroment variables are related to backend. maybe used afterwards.
             # "VLLM_USE_TRITON_FLASH_ATTN":"0",
-            "VLLM_ROCM_USE_AITER":"1",
-            "VLLM_ROCM_USE_AITER_MOE":"1",
+            "VLLM_ROCM_USE_AITER":"0",
+            "VLLM_ROCM_USE_AITER_MOE":"0",
             # "VLLM_ROCM_USE_AITER_ASMMOE":"1",
-            "VLLM_ROCM_USE_AITER_PAGED_ATTN":"1",
+            "VLLM_ROCM_USE_AITER_PAGED_ATTN":"0",
             # "RAY_DEBUG": "legacy",
             "VLLM_USE_V1": "0",
             "TORCHINDUCTOR_COMPILE_THREADS": "2",

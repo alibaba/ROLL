@@ -39,7 +39,6 @@ class ResourceManager:
 
         if self.gpu_per_node > 0:
             assert self.num_gpus <= available_gpu, f"num_gpus {self.num_gpus} > available_gpu {available_gpu}"
-            
             bundles = []
             for i in range(self.num_nodes):
                 node = nodes_maybe_used[i]
@@ -48,7 +47,6 @@ class ResourceManager:
 
             self.placement_groups = [ray.util.placement_group([bundle]) for bundle in bundles]
             ray.get([pg.ready() for pg in self.placement_groups])
-
             gpu_ranks = ray.get([
                 get_visible_gpus.options(
                     placement_group=pg,
@@ -91,8 +89,7 @@ class ResourceManager:
         return self.node2pg[node_rank]
 
     def destroy_placement_group(self):
-        for pg in self.placement_groups:
-            ray.util.remove_placement_group(pg)
+        [ray.util.remove_placement_group(pg) for pg in self.placement_groups]
 
     def allocate_placement_group(self, world_size, device_mapping: List[int] = None) -> List[List[Dict]]:
         """

@@ -92,7 +92,7 @@ class StudentWorker(Worker):
                 data.batch['teacher_inf_mask'] = self.inf_mask_cache.pop_full_logits()
             if "labels" in data.batch.keys():
                 # rename key: labels -> labels_for_loss
-                data.batch.rename_key_("labels", "labels_for_loss")
+                data.rename("labels", "labels_for_loss")
             self.logger.info(f"global_step: {data.meta_info.get('global_step',0)}")
 
             student_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
@@ -150,7 +150,7 @@ class StudentWorker(Worker):
         data = self.strategy.get_data_input(data)
         if "labels" in data.batch.keys():
             # rename key: labels -> labels_for_loss
-            data.batch.rename_key_("labels", "labels_for_loss")
+            data.rename("labels", "labels_for_loss")
         metrics = self.strategy.forward_step(batch=data, forward_func=self.loss_func_for_eval)
         output = DataProto(meta_info={"metrics": metrics}).to("cpu")
         return output
@@ -479,7 +479,7 @@ class TeacherWorker(Worker):
         data = self.strategy.get_data_input(data)
         if "labels" in data.batch.keys():
             # rename key: labels -> labels_for_loss
-            data.batch.rename_key_("labels", "labels_for_loss")
+            data.rename("labels", "labels_for_loss")
         is_offload_states = data.meta_info.get("is_offload_states", False)
         metrics = {}
         with state_offload_manger(

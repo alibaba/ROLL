@@ -14,9 +14,11 @@ from roll.distributed.executor.cluster import Cluster
 from roll.distributed.executor.model_update_group import ModelUpdateGroup
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.scheduler.resource_manager import ResourceManager
-from roll.utils.checkpoint_manager import CheckpointManager, download_model
+from roll.distributed.scheduler.transfer_backend import init_transfer_backend
+from roll.utils.checkpoint_manager import CheckpointManager, download_model, get_latest_ckpt
 from roll.utils.functionals import reduce_metrics
 from roll.utils.logging import get_logger
+from roll.utils.telemetry import init_telemetry, shutdown_telemetry, start_otel_collector
 from roll.utils.tracking import create_tracker
 from roll.utils.worker_state import WorkerState
 
@@ -40,13 +42,36 @@ class BasePipeline:
             config=self.pipeline_config.to_dict(),
             **self.pipeline_config.tracker_kwargs,
         )
+
+        # Initialize OpenTelemetry tracing on driver if enabled
+        if os.environ.get("ROLL_OTEL_ENABLED") == "1":
+            otlp_endpoint = os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"]
+            start_otel_collector(
+                endpoint=otlp_endpoint,
+                output_dir=self.pipeline_config.otlp_output_dir,
+            )
+            init_telemetry(
+                service_name="driver",
+                otlp_endpoint=otlp_endpoint,
+            )
+
+        init_transfer_backend(pipeline_config.transfer_backend)
+
         self.resume_from_checkpoint = False
         self.executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=5)
         self.resume_futures = []
 
         if self.pipeline_config.resume_from_checkpoint:
-            self.resume_from_checkpoint = download_model(self.pipeline_config.resume_from_checkpoint)
+            if self.pipeline_config.resume_from_checkpoint is True:
+                latest_ckpt = get_latest_ckpt(self.pipeline_config.checkpoint_config)
+                if latest_ckpt:
+                    self.resume_from_checkpoint = download_model(latest_ckpt)
+                else:
+                    self.resume_from_checkpoint = False
+            elif isinstance(self.pipeline_config.resume_from_checkpoint, str):
+                self.resume_from_checkpoint = download_model(self.pipeline_config.resume_from_checkpoint)
 
+        if self.resume_from_checkpoint:
             logger.info(f"resume_from_checkpoint: {self.resume_from_checkpoint}")
             load_dir = os.path.join(self.resume_from_checkpoint, "pipeline")
             self.state = WorkerState.load_from_json(load_dir=load_dir, tag="pipeline")
@@ -99,7 +124,11 @@ class BasePipeline:
             save_dir = os.path.join(self.pipeline_config.output_dir, "pipeline", ckpt_id, "pipeline")
             self.state.save_to_json(save_dir=save_dir, tag="pipeline")
             self.state.save_rng_state(save_dir=save_dir, tag="pipeline")
-            self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=pipeline_save_dir)
+            
+            if self.pipeline_config.checkpoint_config.get("async_upload", True) and not is_last_step:
+                self.executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=pipeline_save_dir)
+            else:
+                self.checkpoint_manager.upload(ckpt_id=ckpt_id, local_state_path=pipeline_save_dir)
 
             # Clean up old checkpoints if max_ckpt_to_keep is set
             self._cleanup_old_checkpoints()

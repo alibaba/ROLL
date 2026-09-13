@@ -1,3 +1,4 @@
+from ...utils import is_megatron_llama
 from ..auto.config_auto import register_config
 from ..auto.modeling_auto import register_model
 from ..converter.dist_converter import default_dist_config, register_dist_config, shared_moe_dist_config
@@ -10,7 +11,6 @@ from ..converter.template import (
 )
 from ..model_config import McaModelConfig
 from ..model_factory import McaGPTModel
-from ...utils import is_megatron_llama
 
 
 register_config("qwen3_moe", McaModelConfig)
@@ -34,6 +34,7 @@ register_template(
         "vocab_size": "padded_vocab_size",
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
+        "rope_parameters": "rope_parameters",
         "intermediate_size": "ffn_hidden_size",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
         # MoE related

@@ -166,7 +166,7 @@ actor_train:
     file_name: xxx/train.json
     prompt: instruction
   strategy_args:
-    strategy_name: megatron_train  # 训练策略：deepspeed_train 或 megatron_train
+    strategy_name: megatron_train  # 训练策略：fsdp2_train 或 megatron_train
     strategy_config:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
@@ -207,7 +207,7 @@ reference:
 ### 模型参数 (**model_args**)
 
 - `model_args.dtype`: 设置模型的数据类型，可以是 fp32 (单精度浮点数), bf16 (BFloat16), 或 fp16 (半精度浮点数)。如果不设置，则使用配置的 torch_dtype。选择合适的数据类型可以平衡计算速度、内存消耗和精度。
-- `model_args.disable_gradient_checkpointing`: 禁用梯度检查点。仅当 `actor_train` 的 `strategy_name` 为 `deepspeed_train` 时适用。梯度检查点是一种内存优化技术，通过在反向传播时重新计算部分激活值来减少显存占用。禁用它会增加内存消耗但可能略微加速计算。
+- `model_args.disable_gradient_checkpointing`: 禁用梯度检查点。仅当 `actor_train` 的 `strategy_name` 为 `fsdp2_train` 时适用。梯度检查点是一种内存优化技术，通过在反向传播时重新计算部分激活值来减少显存占用。禁用它会增加内存消耗但可能略微加速计算。
 
 ### 数据参数 (**data_args**)
 
@@ -228,7 +228,7 @@ reference:
 ### 策略参数 (**strategy_args**)
 
 - `strategy_args.strategy_name`: 训练/推理策略的名称。
-    - 用于训练的策略有：`deepspeed_train`（使用 DeepSpeed）或 `megatron_train`（使用 Megatron-LM）。
+    - 用于训练的策略有：`fsdp2_train`（使用 FSDP2）或 `megatron_train`（使用 Megatron-LM）。
     - 用于推理的策略有：`vllm`、`sglang` 或 `hf_infer`（使用 Hugging Face 的默认推理）。
 - `strategy_args.strategy_config`: 训练/推理策略的详细配置，它将作为参数传递给 `strategy_name`对应的构造函数。例如，`strategy_config.tensor_model_parallel_size` 用于 `megatron_train` 策略，`strategy_config.gpu_memory_utilization` 用于 `vllm` 策略。
 
@@ -263,23 +263,21 @@ reference:
 - `mem_fraction_static`: 用于模型权重和 KV 缓存等静态内存的 GPU 内存占比。 如果 KV 缓存构建失败，请增加此值；如果 CUDA 内存不足，请减小此值。
 - `load_format`: 加载模型权重的格式。（同 VLLM，可设为 dummy）
 
-#### DeepSpeed 策略配置
+#### FSDP2 策略配置
 
-在`./examples/config/` 中有 DeepSpeed 配置文件，可以在默认列表中重写以进行策略配置。
-例如，要使用 deepspeed_zero2 策略，请将以下内容添加到您的配置中：
+- `fsdp_size`：FSDP 分片数量
+  - 如果 `fsdp_size >= world_size` 或 `fsdp_size <= 1`：纯 FSDP2 模式
+  - 如果 `fsdp_size < world_size`：带有 DDP 副本的 HSDP 模式
+- `param_dtype`：参数数据类型（例如 `bf16`、`fp16`、`float32`）
+- `reduce_dtype`：梯度归约的数据类型（例如 `float32`）
+- `reshard_after_forward`：是否在前向传播后重新分片参数
+  - `true`：前向传播后重新分片
+  - `false`：保持参数gathered
+- `offload_policy`：是否启用 CPU 卸载
+  - `true`：在不使用时将参数卸载到 CPU（节省 GPU 内存）
+  - `false`：将所有参数保留在 GPU 上（更快但使用更多内存）
 
-```yaml
-defaults:
-  - ../config/envs@_here_
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_   # 引入 deepspeed_zero2 策略配置
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
-actor_train:
-  strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero2}
-```
+此外，使用 FSDP2 策略时可以通过在 `model_args` 配置 `ulysses_size` 设置上下文并行。
 
 ### 训练参数 (**training_args**)
 
@@ -288,7 +286,7 @@ actor_train:
 - `training_args.per_device_train_batch_size`: 在每个设备上进行训练时使用的批次大小。
 - `training_args.gradient_accumulation_steps`: 梯度累积的步数。
 
-在 DeepSpeed 训练中，全局训练批次大小是`per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size (即`actor_train`/`critic`的`device_mapping`长度)。
+在 FSDP2 训练中，全局训练批次大小是`per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size / `ulysses_size`  (其中 world_size 即`actor_train`/`critic`的`device_mapping`长度)。
 
 在 Megatron 训练中，全局训练批次大小是`per_device_train_batch_size` \* `gradient_accumulation_steps` \* world_size / `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `context_parallel_size` (不需要除以`expert_model_parallel_size`)。
 

@@ -32,11 +32,15 @@ from megatron.core.transformer.moe.moe_utils import (
     get_moe_layer_wise_logging_tracker,
     reduce_aux_losses_tracker_across_ranks,
 )
+from megatron.core.transformer.moe.router_replay import (
+    RouterReplay,
+    RouterReplayAction,
+)
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from transformers.utils import is_peft_available
 
 from mcore_adapter import TrainingArguments
-from mcore_adapter.checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
+from mcore_adapter.checkpointing import generate_model_state_dict, get_checkpoint_dir, load_state_dict_from_checkpoint
 from mcore_adapter.parallel_functions import context_parallel_gather, vocab_parallel_logprobs
 from mcore_adapter.patcher import patch_torch_find_nd_overlapping_shards, patch_torch_validate_global_plan
 from mcore_adapter.trainer.utils import build_sharded_state_dict_metadata, get_megatron_lr_scheduler
@@ -46,7 +50,9 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
 from roll.platforms import current_platform
+from roll.third_party.megatron.compile_warmup import compile_warmup_pipeline_stages
 from roll.third_party.megatron.model_update import MegatronWeightUpdater
+from roll.third_party.megatron.mtp_patcher import patch_mtp_functions
 from roll.third_party.megatron.offload_states_patch import (
     MegatronOffloadStateType,
     bind_megatron_offload_states_func,
@@ -54,7 +60,13 @@ from roll.third_party.megatron.offload_states_patch import (
     reload_megatron_no_grad_module,
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
+from roll.third_party.megatron.router_replay_utils import (
+    RouterReplayHelper,
+    merge_router_topk_indices,
+    set_router_replay_data,
+)
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
+from roll.third_party.megatron.util import unwrap_model
 from roll.utils.constants import (
     DIST_OPTIMIZER_DIR,
     IGNORE_INDEX,
@@ -66,7 +78,7 @@ from roll.utils.context_managers import disable_gradients
 from roll.utils.dynamic_batching import make_micro_batch_iter_for_dynamic_batching
 from roll.utils.functionals import adjust_sequence_length, append_to_dict, reduce_metrics
 from roll.utils.logging import get_logger
-from roll.utils.offload_states import OffloadStateType
+from roll.utils.offload_states import OffloadStateType, clear_memory
 from roll.utils.sequence_packing import make_micro_batch_iter_for_sequence_packing, restore_results_order
 
 
@@ -85,6 +97,8 @@ class MegatronInferStrategy(InferenceStrategy):
     strategy_name = "megatron_infer"
 
     def __init__(self, worker: Worker):
+        # Apply MTP patches BEFORE model instantiation
+        patch_mtp_functions()
         #TODO remove the patches when the latest pytorch version > v2.9.1
         patch_torch_find_nd_overlapping_shards()
         patch_torch_validate_global_plan()
@@ -104,8 +118,24 @@ class MegatronInferStrategy(InferenceStrategy):
         # hard to impl with offload states
         assert not self.megatron_train_args.overlap_param_gather, "overlap_param_gather is not supported"
 
+        # Router Replay config
+        self.router_replay_config = self.worker_config.router_replay
+        self.enable_router_replay = (self.router_replay_config.mode in ["R2", "R3"])
+        self.router_replay_mode = self.router_replay_config.mode
+
+        # Force enable moe_enable_routing_replay when router replay is enabled,
+        # so that RouterReplay instances are created in Megatron MoE layers.
+        if self.enable_router_replay:
+            self.megatron_train_args.moe_enable_routing_replay = True
+
+        # store router replay data
+        if self.enable_router_replay and self.router_replay_mode == "R2":
+            self.router_topk_indices_list = []
+            logger.info("Router Replay R2 mode: RECORD enabled in MegatronInferStrategy")
+
     def initialize(self, model_provider):
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
+        self.processor = default_processor_provider(model_args=self.worker_config.model_args)
         self.model: "VirtualModels" = model_provider(
             tokenizer=self.tokenizer,
             model_args=self.worker_config.model_args,
@@ -114,8 +144,14 @@ class MegatronInferStrategy(InferenceStrategy):
         )
         self.model.config.finalize_model_grads_func = finalize_model_grads
 
+        # Inject mtp_training_mode from WorkerConfig to model config
+        if hasattr(self.worker_config, "mtp_training_mode"):
+            self.model.config.mtp_training_mode = self.worker_config.mtp_training_mode
+
         self.models_unwrapped = self.model.get_models()
         self.forward_backward_func = get_forward_backward_func()
+        self.is_multimodal = self.processor is not None
+        self._validate_vlm_packing_support()
 
         self.seq_length = self.worker.pipeline_config.sequence_length
 
@@ -132,8 +168,32 @@ class MegatronInferStrategy(InferenceStrategy):
             self.model.config.variable_seq_lengths = True
             logger.info("Set variable_seq_lengths to True when use dynamic batching and pipeline parallel.")
 
+        if self.enable_router_replay and self.router_replay_mode == "R2":
+            # R2 mode: init router_replay_action=RouterReplayAction.RECORD
+            RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
+
         logger.info(f"{self.model.get_models()}")
         dist.barrier()
+
+    def _validate_vlm_packing_support(self):
+        """Check if the VLM model supports sequence packing via MultimodalEmbeddingMixin.
+
+        If use_sequence_packing is enabled but the multimodal model does not
+        inherit MultimodalEmbeddingMixin, automatically disable packing and
+        log a warning.
+        """
+        if not (self.use_sequence_packing and self.is_multimodal):
+            return
+        from mcore_adapter.models.sequence_packing_mixin import MultimodalEmbeddingMixin
+        model_supports_packing = isinstance(self.models_unwrapped[0], MultimodalEmbeddingMixin)
+        if not model_supports_packing:
+            logger.warning(
+                "use_sequence_packing is enabled but the multimodal model does not "
+                "inherit MultimodalEmbeddingMixin. Disabling sequence packing for "
+                "this model. To enable packing, the model must inherit "
+                "MultimodalEmbeddingMixin."
+            )
+            self.use_sequence_packing = False
 
     def get_data_input(self, batch: DataProto):
         def broadcast_obj(obj, group):
@@ -170,6 +230,15 @@ class MegatronInferStrategy(InferenceStrategy):
         forward_func: Callable[[DataProto, torch.Tensor], Tuple[torch.Tensor, Dict[str, torch.Tensor]]],
     ) -> Dict[str, torch.Tensor]:
         self.model.eval()
+
+        # R3 mode: set router replay action for compute_log_probs forward
+        if self.enable_router_replay and self.router_replay_mode == "R3":
+            if "routed_experts" in batch.batch:
+                RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+            else:
+                # ref model or no routed_experts in batch, skip router replay
+                RouterReplay.clear_global_router_replay_action()
+
         batch.meta_info['batch_num_tokens'] = self._get_batch_num_tokens(batch, dp_group=mpu.get_data_parallel_group())
         batch.meta_info['global_valid_samples'] = self._get_global_valid_samples(batch, dp_group=mpu.get_data_parallel_group())
 
@@ -225,6 +294,11 @@ class MegatronInferStrategy(InferenceStrategy):
             results = restore_results_order(results, micro_batches_list[0].meta_info['partition_indices_list'],
                                   self.worker_config.sequence_packing_args)
 
+
+        # R3 mode: clear router replay action and indices after compute_log_probs forward
+        if self.enable_router_replay and self.router_replay_mode == "R3":
+            RouterReplay.clear_global_router_replay_action()
+            RouterReplay.clear_global_indices()
 
         if not (
                 ((self.worker.rank_info.tp_rank == 0
@@ -412,30 +486,55 @@ class MegatronInferStrategy(InferenceStrategy):
         labels = data.batch["labels"] if "labels" in data.batch else None  # labels is only used for sft
         packed_seq_params = None
 
+        # Get loss_mask early, priority: final_response_mask > response_mask > (labels != IGNORE_INDEX) > ones
+        # For MTP training, loss_mask must match input_ids length
+        if "final_response_mask" in data.batch:
+            loss_mask = data.batch["final_response_mask"].float()
+        elif "response_mask" in data.batch:
+            loss_mask = data.batch["response_mask"].float()
+        elif labels is not None:
+            loss_mask = (labels != IGNORE_INDEX).float()
+        else:
+            loss_mask = torch.ones_like(input_ids)
+
+        # Ensure loss_mask length matches input_ids length
+        # This is important for MTP training where mtp_labels has the same length as input_ids
+        if loss_mask.shape[1] != input_ids.shape[1]:
+            if loss_mask.shape[1] < input_ids.shape[1]:
+                # loss_mask is shorter (e.g., sliced with [:, 1:]), pad to match
+                pad_length = input_ids.shape[1] - loss_mask.shape[1]
+                # Pad at the beginning (position 0) since slicing was [:, 1:]
+                loss_mask = torch.nn.functional.pad(loss_mask, (pad_length, 0), value=0.0)
+            else:
+                # loss_mask is longer, truncate to match
+                loss_mask = loss_mask[:, :input_ids.shape[1]]
+
         if self.use_sequence_packing:
-            input_ids, packed_seq_params, cu_seqlens, cu_seqlens_padded = self._pack_sequences(
+            # Pack input_ids to get packed_seq_params (cu_seqlens, etc.)
+            packed_input_ids, packed_seq_params, cu_seqlens, cu_seqlens_padded = self._pack_sequences(
                 input_ids, attention_mask,
             )
             if labels is not None:
                 labels, _, _, _ = self._pack_sequences(labels, attention_mask, pad_val=IGNORE_INDEX)
-            attention_mask = None
+            loss_mask, _, _, _ = self._pack_sequences(loss_mask, attention_mask, pad_val=0)
+            # Multimodal models handle CP+packing internally (similar to mbridge) via
+            # MultimodalEmbeddingMixin, so pass the original un-packed input_ids andattention_mask.
+            # Non-multimodal models use the pre-packed input_ids.
+            if self.is_multimodal:
+                # Keep original input_ids and attention_mask for model-internal packing
+                pass
+            else:
+                input_ids = packed_input_ids
+                attention_mask = None
         else:
             input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
             attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
             if labels is not None:
                 labels = self._get_feature_on_this_cp_rank(labels, "labels")
+            loss_mask = self._get_feature_on_this_cp_rank(loss_mask, "loss_mask")
         position_ids = None
-        # attention_mask: SelfAttention defalt to te DotProductAttention with
-        # AttnMaskType.causal in which attention_mask would not be used, pass
-        # it mainly for moe aux loss without pad token and it is 2D
-        # position_ids: not used in LLM
-        # While MCA Qwen2VlModel requires 4D attention_mask, and
-        # attention_mask and position_ids would be chunked for cp with dim 2 as
-        # seq dim in it if they are provided
         forward_args = data.meta_info.get("forward_args", {})
-        if "position_ids" in data.batch.keys() and data.batch["position_ids"].dim() == 3:  # qwen2vl mrope
-            # not support MoE VLM, not used temperarily
-            attention_mask = None
+        if "position_ids" in data.batch and data.batch["position_ids"].dim() == 3:  # qwen-vl/omni mrope
             position_ids = data.batch["position_ids"]
             if position_ids.size(1) == 4:
                 position_ids = position_ids[:, 1:, :].contiguous()  # (bsz, 4, seqlen) -> (bsz, 3, seqlen)
@@ -450,21 +549,68 @@ class MegatronInferStrategy(InferenceStrategy):
                     multi_modal_data[key].append(sample_mm_inputs[key])
             for key in multi_modal_data.keys():
                 assert key not in forward_args
+                mm_data = multi_modal_data[key]
+                # All mm fields are not padded in collator currently and some should be padded first
+                # pixel_values/pixel_values_videos for images/videos are concated for packing
+                # input_features for audios with shape `(bs, freqs, frames)` should be padded before concat
+                need_padding = any(t.shape[-1] != mm_data[0].shape[-1] for t in mm_data[1:])
+                if need_padding:  # input_features/feature_attention_mask
+                    max_mm_len = max(t.shape[-1] for t in mm_data)
+                    for i, t in enumerate(mm_data):
+                        mm_data[i] = torch.nn.functional.pad(t, (0, max_mm_len - t.shape[-1]), "constant", 0)
                 # DataProto.to('cuda') in upper frame not work for non_tensor_batch
                 forward_args[key] = torch.concat(multi_modal_data[key], dim=0).to(input_ids.device)
             forward_args.update({"force_vit_image": True})
 
-        # megatron_llama_core need loss_mask to compute aux loss
-        if "loss_mask" not in forward_args:
-            if labels is not None:
-                forward_args["loss_mask"] = (labels != IGNORE_INDEX).float()
+        if self.enable_router_replay:
+            unwrapped_model = unwrap_model(model)
+            if hasattr(unwrapped_model, "vp_stage"):
+                vp_rank = unwrapped_model.vp_stage
             else:
-                forward_args["loss_mask"] = torch.ones_like(input_ids)
+                vp_rank = 0
+
+            # If the current router_replay_action is REPLAY_BACKWARD for the local router instances,
+            # set the action to REPLAY_FORWARD for next micro batch.
+            if RouterReplayHelper.is_replay_backward_action(self.model.config, vp_rank):
+                router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.model.config, vp_rank)
+                for router in router_instance_list:
+                    router.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+
+            # If the current router_replay_action is REPLAY_FORWARD, set_router_replay_data.
+            if RouterReplayHelper.is_replay_forward_action(self.model.config, vp_rank):
+                layers_topk_idx = data.batch["routed_experts"]
+                set_router_replay_data(layers_topk_idx, attention_mask, self.model.config, vp_rank)
+
+        # megatron_llama_core need loss_mask to compute aux loss
+        forward_args["loss_mask"] = loss_mask
 
         output_tensor = model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, labels=labels,
             packed_seq_params=packed_seq_params, **forward_args
         )
+
+        # # 新增：R2 模式下在推理后收集 router replay 数据
+        # # TODO
+        # if self.enable_router_replay and self.router_replay_mode == "R2":
+        #     # 合并并收集 router topk indices
+        #     merge_router_topk_indices(
+        #         attention_mask=attention_mask,
+        #         input_ids=input_ids,
+        #         mini_layer_topk_idx_list=self.router_topk_indices_list,
+        #         tf_config=self.megatron_train_args,
+        #         vp_rank=None
+        #     )
+
+        # if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
+        #     merge_router_topk_indices(
+        #         attention_mask, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank
+        #     )
+
+        if self.enable_router_replay and RouterReplayHelper.is_replay_forward_action(self.model.config, vp_rank):
+            router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.model.config, vp_rank)
+            # Ensured the correctness of router replay during the recomputation in backward.
+            for router in router_instance_list:
+                router.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
 
         if self.use_sequence_packing:
             cp_size = mpu.get_context_parallel_world_size()
@@ -539,16 +685,21 @@ class MegatronInferStrategy(InferenceStrategy):
         labels = torch.cat([labels, torch.zeros_like(labels[:, :1])], dim=1)
         labels = self._get_feature_on_this_cp_rank(labels, "labels")
         # compute logprobs in remove padding token
-        log_probs = vocab_parallel_logprobs(logits, labels)
+        log_probs = vocab_parallel_logprobs(
+            logits, labels,
+            use_fused_kernel=self.megatron_train_args.cross_entropy_loss_fusion
+        )
         if mpu.get_context_parallel_world_size() > 1:
             log_probs = context_parallel_gather(log_probs, parallel_dim=1)
         log_probs = log_probs[:, :-1] * attention_mask[:, 1:]
         return log_probs
 
     def op_compute_entropy(self, logits: torch.Tensor, attention_mask: torch.Tensor):
-        if self.worker_config.logits_in_fp32:
-            logits = logits.float()
-        entropy = vocab_parallel_entropy(logits)
+        entropy = vocab_parallel_entropy(
+            logits,
+            used_fp32=self.worker_config.logits_in_fp32,
+            use_fused_kernel=self.megatron_train_args.cross_entropy_loss_fusion
+        )
         if mpu.get_context_parallel_world_size() > 1:
             entropy = context_parallel_gather(entropy, parallel_dim=1)
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
@@ -971,6 +1122,15 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.processor = None
         self._validate_access_integrity = True
 
+        # 新增：Router Replay 配置（用于 R2 和 R3 的 REPLAY）
+        # 注意：这里会覆盖父类的配置，因为训练阶段的行为不同
+        self.router_replay_config = self.worker_config.router_replay
+        self.enable_router_replay = (self.router_replay_config.mode in ["R2", "R3"])
+        self.router_replay_mode = self.router_replay_config.mode
+
+        if self.enable_router_replay:
+            logger.info(f"Router Replay {self.router_replay_mode} mode: REPLAY enabled in MegatronTrainStrategy")
+
     def initialize(self, model_provider):
         self.seq_length = self.worker.pipeline_config.sequence_length
         self.weight_updaters: dict[str, MegatronWeightUpdater] = {}
@@ -986,6 +1146,11 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         )
         self.forward_backward_func = get_forward_backward_func()
         self.model.config.finalize_model_grads_func = finalize_model_grads
+
+        # Inject mtp_training_mode from WorkerConfig to model config
+        if hasattr(self.worker_config, "mtp_training_mode"):
+            self.model.config.mtp_training_mode = self.worker_config.mtp_training_mode
+
         ddp_config = DistributedDataParallelConfig(
             grad_reduce_in_fp32=self.megatron_train_args.accumulate_allreduce_grads_in_fp32,
             overlap_grad_reduce=self.megatron_train_args.overlap_grad_reduce,
@@ -1006,6 +1171,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         ]
         self.models_unwrapped = self.model.get_models()
         self.model.models = self.models_wrapped
+        self.is_multimodal = self.processor is not None
+        self._validate_vlm_packing_support()
 
         params_dtype = (
             torch.float16
@@ -1079,11 +1246,22 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             self.model.config.variable_seq_lengths = True
             logger.info("Set variable_seq_lengths to True when use dynamic batching and pipeline parallel.")
 
+        # # In train mode, init router replay action to REPLAY_FORWARD
+        # if self.enable_router_replay and self.router_replay_mode == "R3":
+            # RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+
         logger.info(f"{self.model.get_models()}")
+        if self.megatron_train_args.compile_warmup and self.worker.rank_info.pp_size > 1:
+            compile_warmup_pipeline_stages(self)
+
         dist.barrier()
 
     def train_step(self, batch: DataProto, loss_func: Callable):
         self.model.train()
+
+        if self.enable_router_replay:
+            assert "routed_experts" in batch.batch
+            RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
         global_step = batch.meta_info.get("global_step", 0)
         is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
@@ -1129,9 +1307,13 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             forward_only=False,
         )
 
+        # clear global router replay action
+        if self.enable_router_replay:
+            RouterReplay.clear_global_router_replay_action()
+            RouterReplay.clear_global_indices()
+
         # 只有step的时候需要load optimizer states
         self.load_states(include=[OffloadStateType.optimizer_states])
-
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
         if is_offload_optimizer_states_in_train_step:
             self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
@@ -1142,6 +1324,13 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             raise NotImplementedError("megatron optimizer step failed!")
 
         for model in self.model:
+            for bucket_group in model.bucket_groups + model.expert_parallel_bucket_groups:
+                if hasattr(bucket_group, "per_param_grad_ready_counts") and hasattr(bucket_group, "is_first_batch"):
+                    if bucket_group.is_first_batch and len(bucket_group.per_param_grad_ready_counts) > 0:
+                        # Fill in any missing params with count=1 so the assertion passes.
+                        for param in bucket_group.params:
+                            if param not in bucket_group.per_param_grad_ready_counts:
+                                bucket_group.per_param_grad_ready_counts[param] = 1
             model.zero_grad_buffer()
             # Offload/reload does not update cached_param_buffer_shard_list/cached_grad_buffer_shard_list,
             # resulting using old params in `start_param_sync`, which leads to wrong results. So we clear the cache.
@@ -1232,11 +1421,17 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         with Timer("load") as load_timer:
             self.load_states()
 
+        # Only during checkpoint: release pinned memory cache to free CPU memory
+        # for the upcoming serialization. Normal training keeps the cache for reuse.
+        clear_memory(clear_host_memory=True)
+
         is_last_step = kwargs.get("is_last_step", False)
 
         if self.megatron_train_args.save_hf_model:
             self.model.save_pretrained_as_hf(save_dir)
+            clear_memory(clear_host_memory=True)
 
+        ckpt_format = self.megatron_train_args.ckpt_format
         # save model and tokenizer
         if len(self.models_unwrapped) == 1:
             if is_peft_available() and isinstance(self.models_unwrapped[0], PeftModel):
@@ -1251,58 +1446,61 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     )
                 self.models_unwrapped[0].config.save_pretrained(save_dir)
             else:
-                self.models_unwrapped[0].save_pretrained(save_dir)
+                self.models_unwrapped[0].save_pretrained(save_dir, ckpt_format=ckpt_format)
         else:
-            state_dict = {f"model{i}": model.state_dict_for_save_checkpoint() for i, model in
-                          enumerate(self.models_unwrapped)}
-            self.models_unwrapped[0].save_pretrained(save_dir, state_dict=state_dict)
+            state_dict = {f"model{i}": generate_model_state_dict(model, ckpt_format=ckpt_format) for i, model in enumerate(self.models_unwrapped)}
+            self.models_unwrapped[0].save_pretrained(save_dir, state_dict=state_dict, ckpt_format=ckpt_format)
+            del state_dict
         if dist.get_rank() == 0:
             if self.tokenizer is not None:
                 self.tokenizer.save_pretrained(save_dir)
             if self.processor is not None:
                 self.processor.save_pretrained(save_dir)
+        clear_memory(clear_host_memory=True)
 
         # save optimizer
-        checkpoint_dir = get_checkpoint_dir(save_dir,
-                                            return_base_dir=self.megatron_train_args.use_distributed_optimizer)
-        if self.megatron_train_args.use_distributed_optimizer:
-            checkpoint_dir = os.path.join(checkpoint_dir, DIST_OPTIMIZER_DIR)
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        if self.megatron_train_args.use_distributed_optimizer:
-            model_shared_state_dict = self.model.sharded_state_dict()
-            optimizer_state_dict = self.optimizer.sharded_state_dict(
-                model_shared_state_dict, metadata=self.ckpt_sharding_metadata
-            )
-            dist_checkpointing.save(
-                optimizer_state_dict,
-                checkpoint_dir=checkpoint_dir,
-                sharded_strategy=self.save_strategy,
-                async_sharded_save=False,
-                validate_access_integrity=self._validate_access_integrity,
-            )
-            self._validate_access_integrity = False
-        elif not dist.is_initialized() or mpu.get_expert_data_parallel_rank() == 0:
-            torch.save(self.optimizer.state_dict(), os.path.join(checkpoint_dir, OPTIMIZER_NAME))
-            logger.info(f"Saving optimizer state to {os.path.join(checkpoint_dir, OPTIMIZER_NAME)}")
+        if not self.megatron_train_args.save_only_model:
+            checkpoint_dir = get_checkpoint_dir(save_dir,
+                                                return_base_dir=self.megatron_train_args.use_distributed_optimizer)
+            if self.megatron_train_args.use_distributed_optimizer:
+                checkpoint_dir = os.path.join(checkpoint_dir, DIST_OPTIMIZER_DIR)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            if self.megatron_train_args.use_distributed_optimizer:
+                model_shared_state_dict = self.model.sharded_state_dict()
+                optimizer_state_dict = self.optimizer.sharded_state_dict(
+                    model_shared_state_dict, metadata=self.ckpt_sharding_metadata
+                )
+                dist_checkpointing.save(
+                    optimizer_state_dict,
+                    checkpoint_dir=checkpoint_dir,
+                    sharded_strategy=self.save_strategy,
+                    async_sharded_save=False,
+                    validate_access_integrity=self._validate_access_integrity,
+                )
+                del model_shared_state_dict, optimizer_state_dict
+                self._validate_access_integrity = False
+            elif not dist.is_initialized() or mpu.get_data_modulo_expert_parallel_rank() == 0:
+                torch.save(self.optimizer.state_dict(), os.path.join(checkpoint_dir, OPTIMIZER_NAME))
+                logger.info(f"Saving optimizer state to {os.path.join(checkpoint_dir, OPTIMIZER_NAME)}")
 
-        if dist.is_initialized():
-            dist.barrier()
+            if dist.is_initialized():
+                dist.barrier()
 
-        # save lr_scheduler
-        if dist.get_rank() == 0:
-            torch.save(self.scheduler.state_dict(), os.path.join(save_dir, SCHEDULER_NAME))
+            # save lr_scheduler
+            if dist.get_rank() == 0:
+                torch.save(self.scheduler.state_dict(), os.path.join(save_dir, SCHEDULER_NAME))
 
-        # save rng state
-        rng_states = {
-            "random_rng_state": random.getstate(),
-            "np_rng_state": np.random.get_state(),
-            "torch_rng_state": torch.get_rng_state(),
-            "cuda_rng_state": current_platform.get_rng_state(),
-            "rng_tracker_states": tensor_parallel.get_cuda_rng_tracker().get_states(),
-        }
-        rgn_path = os.path.join(save_dir, RNG_STATE_DIR, f"rng_state_{dist.get_rank()}.pth")
-        os.makedirs(os.path.dirname(rgn_path), exist_ok=True)
-        torch.save(rng_states, rgn_path)
+            # save rng state
+            rng_states = {
+                "random_rng_state": random.getstate(),
+                "np_rng_state": np.random.get_state(),
+                "torch_rng_state": torch.get_rng_state(),
+                "cuda_rng_state": current_platform.get_rng_state(),
+                "rng_tracker_states": tensor_parallel.get_cuda_rng_tracker().get_states(),
+            }
+            rng_path = os.path.join(save_dir, RNG_STATE_DIR, f"rng_state_{dist.get_rank()}.pth")
+            os.makedirs(os.path.dirname(rng_path), exist_ok=True)
+            torch.save(rng_states, rng_path)
 
         if self.worker_config.checkpoint_config.get("async_upload", True) and not is_last_step:
             self.thread_executor.submit(self.checkpoint_manager.upload, ckpt_id=ckpt_id, local_state_path=local_state_path)
@@ -1312,6 +1510,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         metrics = {
             "load": load_timer.last,
         }
+        clear_memory(clear_host_memory=True)
         return metrics
 
     def load_checkpoint(self, load_dir, tag="checkpoint", **kwargs):
@@ -1326,8 +1525,6 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         logger.info(
             f"Loading optimizer from {optimizer_checkpoint}, process_index: {self.megatron_train_args.process_index}"
         )
-
-        self.offload_states()
 
         if self.megatron_train_args.use_distributed_optimizer:
             model_shared_state_dict = self.model.sharded_state_dict()
@@ -1371,5 +1568,3 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             tensor_parallel.get_cuda_rng_tracker().set_states(checkpoint_rng_state["rng_tracker_states"])
         else:
             logger.info(f"not load rng state, not found file: {rng_file}")
-
-        self.load_states()

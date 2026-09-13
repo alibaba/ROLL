@@ -39,7 +39,7 @@ In RLVR scenarios, `RLVRConfig` inherits from `BaseConfig` and serves as the con
 ### 4. Strategy - Strategy Configuration
 
 Strategy configuration defines the training/inference strategy used by each worker node, including:
-- Strategy name (such as `megatron_train`, `vllm`, `sglang`, `deepspeed_train`, etc.)
+- Strategy name (such as `megatron_train`, `vllm`, `sglang`, `fsdp2_train`, etc.)
 - Strategy-specific parameters (such as tensor parallel size, pipeline parallel size, etc.)
 
 ### 5. Arguments Classes

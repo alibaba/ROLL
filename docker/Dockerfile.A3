@@ -1,4 +1,4 @@
-FROM quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12-devel
 
 ARG SOC_VERSION="ascend910_9391"
 
@@ -9,6 +9,7 @@ ENV PIP_CONSTRAINT=""
 
 ENV LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/add-ons:/usr/local/Ascend/ascend-toolkit/latest/fwkacllib/lib64:/usr/local/Ascend/ascend-toolkit/latest/acllib/lib64:/usr/local/Ascend/ascend-toolkit/latest/atc/lib64:${LD_LIBRARY_PATH}
 ENV ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
+ENV HCCL_NPU_SOCKET_PORT_RANGE=auto
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
@@ -26,41 +27,49 @@ RUN pip config set global.index-url https://mirrors.huaweicloud.com/repository/p
 
 WORKDIR /workspace
 
-RUN git clone --depth 1 -b v0.13.0 https://github.com/vllm-project/vllm.git && \
-    git clone --depth 1 -b releases/v0.13.0 https://github.com/vllm-project/vllm-ascend.git
+RUN git clone --depth 1 -b v0.23.0 https://github.com/vllm-project/vllm.git && \
+    git clone --depth 1 -b v0.23.0rc1 https://github.com/vllm-project/vllm-ascend.git
 
 RUN cd vllm && \
-    pip install -r requirements/build.txt && \
     VLLM_TARGET_DEVICE=empty pip install -v -e . && \
     pip uninstall -y triton && \
     pip cache purge && \
     cd ..
 
-RUN pip install torch==2.8.0+cpu torchvision==0.23.0 torchaudio==2.8.0 \
-    --index-url https://download.pytorch.org/whl/cpu
+RUN pip install \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
+        torch==2.10.0+cpu torchvision==0.25.0 torchaudio==2.10.0;
 
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     cd vllm-ascend && \
-    pip install -r requirements.txt && \
-    SOC_VERSION=${SOC_VERSION} pip install -v -e . --extra-index-url https://download.pytorch.org/whl/cpu
+    git submodule update --init --recursive && \
+    pip install -r requirements.txt --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    SOC_VERSION=${SOC_VERSION} pip install -v -e . --no-build-isolation --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+RUN python3 -m pip install --index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
+        --no-deps torch-npu==2.10.0.post4
 
 WORKDIR /workspace/ROLL
 COPY . .
 
-RUN pip install -r requirements_common.txt
+RUN grep -v '^gem-llm' requirements_common.txt > requirements_npu.txt && \
+    pip install -r requirements_npu.txt && \
+    rm -f requirements_npu.txt
 
-RUN pip install "deepspeed==0.16.4" "transformers==4.57.6" "tensorboard==2.20.0"
+RUN pip install "transformers==4.57.6" "tensorboard==2.20.0" "hydra-core==1.3.5" "sympy==1.14.0"
 
 RUN pip install -e .
 
 RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     pip uninstall -y triton && \
     pip uninstall -y triton-ascend && \
-    pip install triton-ascend==3.2.0 && \
+    pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     pip cache purge
 
 RUN echo "source /usr/local/Ascend/ascend-toolkit/set_env.sh" >> /root/.bashrc && \
-    echo "source /usr/local/Ascend/nnal/atb/set_env.sh" >> /root/.bashrc
+    echo "source /usr/local/Ascend/nnal/atb/set_env.sh" >> /root/.bashrc && \
+    echo "export HCCL_NPU_SOCKET_PORT_RANGE=auto" >> /root/.bashrc
 
 CMD ["/bin/bash"]

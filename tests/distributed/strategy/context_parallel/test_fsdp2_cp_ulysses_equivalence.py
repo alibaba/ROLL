@@ -1,7 +1,10 @@
 import os
 
+import pytest
 import torch
 import torch.distributed as dist
+
+pytest.importorskip("flash_attn")
 
 from roll.utils.context_parallel.globals import get_ulysses_group, get_ulysses_size, set_upg_manager
 from roll.utils.context_parallel.hf_flash_attention_patch import make_ulysses_flash_attention_forward

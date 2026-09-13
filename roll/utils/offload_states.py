@@ -1,3 +1,4 @@
+import gc
 from enum import Enum
 from typing import List, Tuple, Union
 
@@ -5,6 +6,20 @@ import torch
 from torch import Tensor
 from transformers import PreTrainedModel
 from roll.platforms import current_platform
+
+
+def clear_memory(clear_host_memory: bool = False):
+    """Clear GPU and CPU memory caches.
+
+    Synchronizes CUDA, runs Python GC, and clears the GPU memory cache.
+    Optionally releases pinned host memory cached by PyTorch's CachingHostAllocator
+    back to the OS.
+    """
+    current_platform.synchronize()
+    gc.collect()
+    current_platform.empty_cache()
+    if clear_host_memory:
+        torch._C._host_emptyCache()
 
 
 class OffloadStateType(str, Enum):

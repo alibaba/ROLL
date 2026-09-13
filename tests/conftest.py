@@ -27,6 +27,8 @@ def pytest_configure(config):
     config.option.durations = 0
     config.option.durations_min = 1
     config.option.verbose = True
+    config.addinivalue_line("markers", "skip_on_npu: skip test when running on Ascend NPU")
+    config.addinivalue_line("markers", "skip_on_github_ci: skip test when running on GitHub Actions CI")
 
 
 def pytest_addoption(parser):
@@ -63,6 +65,18 @@ def check_environment(pytestconfig):
             returncode=2,
         )
 
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    if item.get_closest_marker("skip_on_github_ci") is not None:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.skip("skip_on_github_ci: skipped on GitHub Actions CI")
+
+    if item.get_closest_marker("skip_on_npu") is not None:
+        from roll.platforms import current_platform
+
+        if current_platform.is_npu():
+            pytest.skip("skip_on_npu: skipped on Ascend NPU")
 
 # Override of pytest "runtest" for DistributedTest class
 # This hook is run before the default pytest_runtest_call

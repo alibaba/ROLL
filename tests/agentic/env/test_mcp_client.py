@@ -2,6 +2,7 @@ import pytest
 import json
 from roll.pipeline.agentic.env.mcp.mcp_client import MCPClient
 
+@pytest.mark.skip_on_github_ci
 @pytest.mark.asyncio
 async def test_sokoban_mcp_server_interaction():
     async with MCPClient("http://sokoban-mcp.alibaba-inc.com/sse") as client: 

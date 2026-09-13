@@ -1,34 +1,23 @@
-from roll.pipeline.agentic.env import FrozenLakeEnvConfig, FrozenLakeEnv
-from roll.pipeline.agentic.utils import dump_frames_as_gif
+from numbers import Real
+
+from roll.pipeline.agentic.env.frozen_lake import FrozenLakeEnv
 
 
 def test_frozen_lake():
-    config = FrozenLakeEnvConfig(size=4, p=0.8, is_slippery=False, map_seed=42)
-    env = FrozenLakeEnv(config)
-    frames = []
-    print(env.reset(seed=42))
-    while True:
-        keyboard = input("Enter action: ")
-        if keyboard.lower() == "q":
-            break
-        try:
-            action = int(keyboard)
-        except Exception as e:
-            print("Invalid action, please enter a number")
-            continue
-        if action not in env.ACTION_LOOKUP:
-            print(f"Invalid action {action}, please enter a number between 1 and 4")
-            continue
-        obs, reward, done, info = env.step(action)
-        print()
-        print(obs, reward, done, info)
-        if action in env.ACTION_LOOKUP:
-            frames.append(env.render(mode="rgb_array"))
-        if done:
-            break
+    env = FrozenLakeEnv(size=4, p=0.8, is_slippery=False, map_seed=42)
 
-    # save the image
-    dump_frames_as_gif(filename="./frozen_lake_result.gif", frames=frames)
+    obs, info = env.reset(seed=42)
+    assert isinstance(obs, str)
+    assert "env_instruction" in info
+
+    action_text = f"<answer>{env.ACTION_LOOKUP[0]}</answer>"
+    obs, reward, terminated, truncated, info = env.step(action_text)
+    assert isinstance(obs, str)
+    assert isinstance(reward, Real)
+    assert not isinstance(reward, bool)
+    assert isinstance(terminated, bool)
+    assert isinstance(truncated, bool)
+    assert info["metrics"]["action_is_valid"]
 
 
 if __name__ == "__main__":

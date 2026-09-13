@@ -16,7 +16,7 @@ from megatron.core.transformer.module import MegatronModule
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import is_peft_available
 
-from ..checkpointing import load_state_dict_from_checkpoint, save_config_and_state_dict
+from ..checkpointing import find_dist_ckpt, generate_model_state_dict, load_state_dict_from_checkpoint, save_config_and_state_dict
 from ..platforms import current_platform
 from ..utils import get_logger
 from .converter.convert_utils import MAX_SHARD_SIZE
@@ -55,9 +55,11 @@ class VirtualModels:
                 kwargs["vp_stage"] = i
             self.models.append(cls(config, *args, **kwargs))
 
-    def save_pretrained(self, save_directory: str, save_merged_model: bool = False):
+    def save_pretrained(self, save_directory: str, save_merged_model: bool = False, ckpt_format: str = "legacy"):
         if len(self.models) == 1:
             if is_peft_available() and isinstance(self.models[0], PeftModel):
+                if ckpt_format == "torch_dist":
+                    raise ValueError(f"lora only support legacy ckpt format, got {ckpt_format}")
                 if save_merged_model:
                     self.models[0].merge_adapter()
                     model_state_dict = self.models[0].state_dict_for_save_checkpoint()
@@ -68,10 +70,11 @@ class VirtualModels:
                         elif ".base_layer" in k:
                             k = k.replace(".base_layer", "")
                         state_dict[k] = v
-                    self.models[0].unmerge_adapter()
-                    return self.models[0].base_model.model.save_pretrained(
+                    self.models[0].base_model.model.save_pretrained(
                         save_directory, state_dict={"model": state_dict}
                     )
+                    self.models[0].unmerge_adapter()
+                    return self.config.save_pretrained(save_directory)
                 for adapter_name, peft_config in self.models[0].peft_config.items():
                     adapter_save_directory = os.path.join(save_directory, adapter_name)
                     peft_config.save_pretrained(adapter_save_directory)
@@ -82,9 +85,9 @@ class VirtualModels:
                         adapter_save_directory, state_dict={"model": peft_state_dict}
                     )
                 return self.config.save_pretrained(save_directory)
-            return self.models[0].save_pretrained(save_directory)
-        state_dict = {f"model{i}": model.state_dict_for_save_checkpoint() for i, model in enumerate(self.models)}
-        return self.models[0].save_pretrained(save_directory, state_dict=state_dict)
+            return self.models[0].save_pretrained(save_directory, ckpt_format=ckpt_format)
+        state_dict = {f"model{i}": generate_model_state_dict(model, ckpt_format) for i, model in enumerate(self.models)}
+        return self.models[0].save_pretrained(save_directory, state_dict=state_dict, ckpt_format=ckpt_format)
 
     def load_state_dict(self, state_dict: Dict[str, torch.Tensor], strict: bool = True):
         if len(self.models) == 1:
@@ -176,13 +179,22 @@ class VirtualModels:
     ):
         os.makedirs(save_directory, exist_ok=True)
         converter = ModelConverter(self.config, to_hf=True)
-        converter.save_model_as_hf_inflight(
-            self.models,
-            save_directory,
-            save_safetensors=save_safetensors,
-            max_shard_size=max_shard_size,
-            move_to_cpu=True,
-        )
+        if not self.config.moe_parallel_folding:
+            converter.save_model_as_hf_inflight(
+                self.models,
+                save_directory,
+                save_safetensors=save_safetensors,
+                max_shard_size=max_shard_size,
+                move_to_cpu=True,
+            )
+        else:
+            converter.save_separate_model_as_hf_inflight(
+                self.models,
+                save_directory,
+                save_safetensors=save_safetensors,
+                max_shard_size=max_shard_size,
+                move_to_cpu=True,
+            )
 
     def get_batch_on_this_cp_rank(self, *args, **kwargs):
         return self.models[0].get_batch_on_this_cp_rank(*args, **kwargs)
@@ -231,7 +243,11 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
         dist_config_match = False
         if mca_ckpt_exist:
             old_mca_config = cls.config_class.from_pretrained(model_name_or_path)
-            dist_config_match = config.distribute_config_match(old_mca_config)
+            if find_dist_ckpt(model_name_or_path):
+                # dist ckpt do not need dist_config_match
+                dist_config_match = True
+            else:
+                dist_config_match = config.distribute_config_match(old_mca_config)
 
         if mca_ckpt_exist and dist_config_match:
             if resized_vocab_size:
@@ -239,7 +255,7 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                     "The tokenizer length is longer than the vocab embedding size, and the resize embedding"
                     "layer is not supported loading mca ckpt. Please check the tokenizer and ckpt."
                 )
-            state_dict = load_state_dict_from_checkpoint(model_name_or_path)
+            state_dict = load_state_dict_from_checkpoint(model_name_or_path, models=models)
         else:
             if not exists_hf_config(model_name_or_path):
                 raise ValueError(
@@ -264,10 +280,10 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
         logger.info(f"End loading, cost: {time.time() - load_start_time:0.3f}s")
         return models
 
-    def save_pretrained(self, save_directory: str, state_dict=None):
+    def save_pretrained(self, save_directory: str, state_dict=None, ckpt_format: str = "legacy"):
         os.makedirs(save_directory, exist_ok=True)
-        state_dict = state_dict if state_dict is not None else {"model": self.state_dict_for_save_checkpoint()}
-        save_config_and_state_dict(save_directory, self.config, state_dict)
+        state_dict = state_dict if state_dict is not None else {"model": generate_model_state_dict(self, ckpt_format)}
+        save_config_and_state_dict(save_directory, self.config, state_dict, ckpt_format=ckpt_format)
 
     def get_batch_on_this_cp_rank(self, batch: Dict[str, "torch.Tensor"], dim3_keys: List[str] = ["attention_mask"]):
         # copy from Megatron-LM
@@ -352,7 +368,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
         )
         for param in self.parameters():
             tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
-        if not config.use_cpu_initialization:
+        if not config.use_cpu_initialization and not config.init_model_with_meta_device:
             self.to(current_platform.current_device())
 
         if self.post_process or self.mtp_process:
@@ -371,10 +387,6 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 if not use_te and config.normalization == "RMSNorm":
                     transformer_layer_spec.submodules.input_layernorm = RMSNorm
                     transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
-                if getattr(transformer_layer_spec.submodules.mlp.submodules, "shared_experts", None):
-                    transformer_layer_spec.submodules.mlp.submodules.shared_experts.params["gate"] = (
-                        config.moe_use_shared_expert_gate
-                    )
             return transformer_block_spec
         if use_te:
             return get_gpt_layer_with_transformer_engine_spec(
@@ -398,3 +410,28 @@ class McaGPTModel(GPTModel, PretrainedModel):
             return spec
         else:
             return None
+
+    def compute_language_model_loss(self, labels: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        """Computes the language model loss (Cross entropy across vocabulary)
+
+        Args:
+            labels (torch.Tensor): The labels of dimension [batch size, seq length]
+            logits (torch.Tensor): The final logits returned by the output layer of the transformer model
+
+        Returns:
+            Tensor: Loss tensor of dimensions [batch size, sequence_length]
+        """
+
+        if self.config.cross_entropy_loss_fusion and self.config.tensor_model_parallel_size == 1:
+            from ..parallel_functions.fused_cross_entropy import cross_entropy
+
+            s, b, d = logits.shape
+
+            # [b, s]
+            labels = labels.transpose(0, 1).contiguous().view(-1)
+            logits = logits.view(-1, d)
+            # loss = fused_vocab_parallel_cross_entropy(logits, labels)
+            loss = cross_entropy(logits, labels, reduction="none", ignore_index=-100)
+            loss = loss.view(s, b).transpose(0, 1).contiguous()
+            return loss
+        return super().compute_language_model_loss(labels, logits)

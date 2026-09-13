@@ -93,7 +93,7 @@ class ModelArguments(LoraArguments):
         default="bf16", metadata={"help": "Set model dtype as fp32, bf16, or fp16, otherwise use config's torch_dtype"}
     )
     model_type: Optional[
-        Literal["auto_sequence_classification", "auto_token_classification", "trl", "diffusion_module"]
+        Literal["auto_sequence_classification", "auto_token_classification", "trl"]
     ] = field(
         default=None,
         metadata={"help": "reward model type."},

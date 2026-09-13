@@ -93,7 +93,7 @@ actor_train.model_args.dtype: fp16
 actor_infer.model_args.dtype: fp16
 reference.model_args.dtype: fp16
 
-# Switch the large model training framework from DeepSpeed to Megatron-LM, where parameters can be sent in batches for faster execution
+# Switch the large model training framework from FSDP2 to Megatron-LM, where parameters can be sent in batches for faster execution
 strategy_name: megatron_train
 strategy_config:
   tensor_model_parallel_size: 1

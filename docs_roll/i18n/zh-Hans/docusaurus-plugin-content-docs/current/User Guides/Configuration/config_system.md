@@ -39,7 +39,7 @@ ROLL 的配置系统主要由以下几个核心组件构成：
 ### 4. Strategy - 策略配置
 
 策略配置定义了每个工作节点使用的训练/推理策略，包括：
-- 策略名称（如 `megatron_train`, `vllm`, `sglang`, `deepspeed_train`等）
+- 策略名称（如 `megatron_train`, `vllm`, `sglang`, `fsdp2_train`等）
 - 策略特定参数（如张量并行大小、流水线并行大小等）
 
 ### 5. Arguments 类

@@ -27,6 +27,9 @@
     - [Step 3: Launch the Pipeline](#step-3-launch-the-pipeline)
     - [Step 4: Monitoring](#step-4-monitoring)
     - [Step 5: Outputs and Results](#step-5-outputs-and-results)
+  - [Multi-Teacher OPD](#multi-teacher-opd)
+    - [Configuration Examples](#configuration-examples)
+    - [Core Mechanisms](#core-mechanisms)
   - [FAQ](#faq)
   - [References](#references)
 
@@ -246,9 +249,9 @@ Configure three roles, automatically mapped to internal Workers:
 |----------|----------|------|
 | `student_train` | `actor_train` | Train student model, compute loss using Teacher KL |
 | `student_infer` | `actor_infer` | Generate trajectories, compute student log_probs |
-| `teacher` | `reference` | Compute teacher log_probs |
+| `teacher` | `reference` / `references` | Compute teacher log_probs (supports single WorkerConfig or multi-teacher Dict) |
 
-**Note**: Config file uses `student_train`, `student_infer`, `teacher` names, system will automatically map them.
+**Note**: Config file uses `student_train`, `student_infer`, `teacher` names, system will automatically map them. For multi-teacher, `teacher` is `Dict[str, WorkerConfig]`, internally normalized to `self.references: Dict[str, Cluster]`.
 
 #### Mixed Mode
 
@@ -326,7 +329,16 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `use_opd` | Enable mixed mode OPD (add Teacher KL to rewards) | `false` |
-| `opd_kl_coef` | OPD KL coefficient, controls distillation signal weight relative to external rewards | `1.0` |
+| `teacher` | Teacher model config (auto-mapped to reference) | Required |
+
+#### Multi-Teacher Mode Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `teacher` | `Dict[str, WorkerConfig]` multi-teacher config | — |
+| `teacher.{name}.opd_kl_coef` | Per-teacher KL coefficient | `1.0` |
+| `teacher.{name}.tag_included` | Tags this teacher handles; empty means all | `[]` |
+| `tag_to_template` | Select different chat templates by tag | `{}` |
 
 
 ---
@@ -379,6 +391,172 @@ python examples/start_onpolicy_distill_pipeline.py \
 * **Trained Model** – Checkpoints saved in `output_dir`
 * **Evaluation Metrics** – Logged in TensorBoard and console
 * **Generation Examples** – The pipeline periodically outputs generation examples for you to visually evaluate model improvements.
+
+---
+
+## Multi-Teacher OPD
+
+### Overview
+
+Multi-Teacher OPD allows multiple specialized teacher models to simultaneously guide a single student model. Data is routed to the appropriate teacher by domain/tag, avoiding unnecessary computation and enabling more precise distillation.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              Multi-Teacher OPD Data Flow                           │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│   Student Infer rollout → batch (with tag/domain field)           │
+│          │                                                        │
+│          ├── [math_dapo data] ──▶  Teacher-32B (math specialist)  │
+│          │                          compute ref_log_probs_32B     │
+│          │                                                        │
+│          └── [KodCode data]  ──▶  Teacher-14B (code specialist)   │
+│                                     compute ref_log_probs_14B     │
+│          │                                                        │
+│          ▼                                                        │
+│   Compute Advantage:                                              │
+│     For each sample, only accumulate KL from routed teachers:     │
+│     advantage = -Σ(opd_kl_coef_i * KL_i) (routed teachers only)  │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration Examples
+
+#### Multi-Teacher Pure OPD Mode
+
+```yaml
+is_pure_opd: true
+global_template: qwen3
+
+# Select different chat templates by tag (optional)
+tag_to_template:
+  math_dapo: qwen3        # Math data uses qwen3 template (with thinking)
+  KodCode: qwen3_nothink  # Code data uses qwen3_nothink template
+
+student_train:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  data_args:
+    file_name:
+      - data/dapo_math_17k_simple_boxed.jsonl
+      - data/code_KodCode_data.jsonl
+    domain_interleave_probs:
+      math_rule: 0.6
+      code_rule: 0.4
+  device_mapping: list(range(0,8))
+  # ...
+
+student_infer:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  device_mapping: list(range(0,8))
+  # ...
+
+# teacher configured as Dict[str, WorkerConfig]
+teacher:
+  teacher_32B:
+    model_args:
+      model_name_or_path: Qwen/Qwen3-32B  # Math specialist teacher
+    opd_kl_coef: 1.0
+    tag_included: [math_dapo]  # Only processes math data
+    device_mapping: list(range(8,16))
+    strategy_args:
+      strategy_name: megatron_infer
+      strategy_config:
+        tensor_model_parallel_size: 2
+        pipeline_model_parallel_size: 4
+
+  teacher_14B:
+    model_args:
+      model_name_or_path: Qwen/Qwen3-14B  # Code specialist teacher
+    opd_kl_coef: 1.0
+    tag_included: [KodCode]  # Only processes code data
+    device_mapping: list(range(16,24))
+    strategy_args:
+      strategy_name: megatron_infer
+      strategy_config:
+        tensor_model_parallel_size: 2
+        pipeline_model_parallel_size: 2
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    tag_included: [math_dapo]
+  code_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.code_sandbox_reward_worker.CodeSandboxRewardWorker
+    tag_included: [KodCode]
+```
+
+#### Mixed Routing Config (General Teacher + Specialist Teacher)
+
+```yaml
+teacher:
+  teacher_general:
+    model_args:
+      model_name_or_path: Qwen/Qwen3-72B
+    opd_kl_coef: 0.3
+    tag_included: []  # Empty = handles all tags (general teacher)
+
+  teacher_math_specialist:
+    model_args:
+      model_name_or_path: DeepSeek-Math-67B
+    opd_kl_coef: 0.7
+    tag_included: [math_dapo, aime]  # Only handles math
+```
+
+In this configuration, math data will have KL computed by both `teacher_general` (coef 0.3) and `teacher_math_specialist` (coef 0.7), with both weighted KL values contributing to the advantage. Non-math data only has `teacher_general` participating.
+
+### Core Mechanisms
+
+#### 1. Tag Routing
+
+Each training sample has a `tag` field (e.g., `math_dapo`, `KodCode`). Each teacher declares the tags it handles via `tag_included`:
+
+- `tag_included: [math_dapo]` — only processes samples with tag `math_dapo`
+- `tag_included: []` (empty list) — processes all data (general teacher)
+
+Routing happens at the ref_log_probs computation stage (pipeline layer). Teachers only run forward on their routed data, avoiding unnecessary inference cost.
+
+#### 2. Per-Teacher KL Coefficient
+
+Each teacher has its own `opd_kl_coef`, controlling the weight of that teacher's distillation signal:
+
+```
+advantage = -Σ(opd_kl_coef_i * KL(student || teacher_i))
+```
+
+Only routed teachers participate in the KL accumulation for each sample.
+
+#### 3. Parallel Inference Optimization
+
+When multiple teachers use different GPUs (non-overlapping `device_mapping`), the system automatically uses multi-threaded parallel execution for each teacher's forward pass, reducing total inference time.
+
+#### 4. tag_to_template
+
+Different domains may require different chat template encoding. With `tag_to_template`, you can use different tokenization templates for specific tags:
+
+```yaml
+tag_to_template:
+  math_dapo: qwen3         # With thinking token
+  KodCode: qwen3_nothink   # Without thinking token
+```
+
+Tags not configured in `tag_to_template` fall back to `global_template`.
+
+### Single Teacher Backward Compatibility
+
+Single teacher configuration (`teacher` as WorkerConfig rather than Dict) maintains identical behavior to before:
+
+```yaml
+# This config behaves exactly the same as before multi-teacher support
+teacher:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-32B
+  device_mapping: list(range(0,16))
+```
+
+Internally normalized to `{"default": WorkerConfig}`, the loop executes only once.
 
 ---
 
@@ -452,6 +630,23 @@ Whether in pure OPD mode or mixed mode, Reward Workers must be configured:
 1. **Validation Evaluation**: Validation phase needs Reward Workers to evaluate model performance
 2. **Training Monitoring**: Observe reward statistics to monitor training quality
 3. **Mixed Mode Additional Role**: External rewards are part of the training signal
+
+### Q4: How to choose between modes?
+
+- **Pure OPD Mode**: Best for pure distillation training, only needs Teacher KL signal, use `start_onpolicy_distill_pipeline.py`
+- **Mixed Mode**: Best for RL + distillation joint training, use `start_rlvr_pipeline.py` with `use_opd: true`
+
+### Q5: In Multi-Teacher mode, what happens if no teacher is routed to a sample?
+
+That sample's `total_weighted_kld = 0`:
+- In pure OPD mode: `advantage = 0` (sample produces no gradient)
+- In mixed mode: `advantage = rl_advantages` (RL signal only, no distillation signal)
+
+### Q6: Can multiple teachers' device_mapping overlap?
+
+Yes, but not recommended:
+- **Non-overlapping** (recommended): System automatically parallelizes each teacher's forward pass, significantly reducing inference time
+- **Overlapping**: System will execute sequentially, no conflicts but total time equals sum of all teachers
 
 ---
 

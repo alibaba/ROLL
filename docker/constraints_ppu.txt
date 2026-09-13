@@ -1,0 +1,14 @@
+# Pin the PPU-custom components in the base image (torch/vllm/flash-attn etc. with the
+# +vX.X.X.ppu suffix) via PIP_CONSTRAINT so public-index versions cannot override them
+# while installing ROLL's dependencies.
+torch==2.10.0+v0.1.0.ppu2.1.1
+vllm==0.17.1+v0.1.0.ppu2.1.1
+flash-attn==2.7.4.post1+v0.1.0.ppu2.1.1
+flash-attn-3==2.8.2+v0.1.0.ppu2.1.1
+flash_mla==2.0.0+v0.1.0.ppu2.1.1
+flashinfer-python==0.6.4+v0.1.0.ppu2.1.1
+xformers==0.0.30+v0.1.0.ppu2.1.1
+triton==3.6.0+v0.2.0.ppu2.1.1
+deepspeed==0.14.4
+# omegaconf 2.3.1 requires antlr4 4.9.x; keep later-installed packages like gem-llm from bumping it to 4.11+
+antlr4-python3-runtime==4.9.3

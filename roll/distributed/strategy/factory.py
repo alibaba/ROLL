@@ -15,13 +15,7 @@ def create_strategy(worker: Worker, sync_wrapper: bool = False) -> Union[Inferen
     strategy_name = worker.worker_config.strategy_args.strategy_name
 
     # Lazy import strategy to avoid cuda initialized
-    if strategy_name == "deepspeed_infer":
-        from roll.distributed.strategy.deepspeed_strategy import DeepSpeedInferStrategy as strategy_cls
-    elif strategy_name == "deepspeed_train":
-        from roll.distributed.strategy.deepspeed_strategy import DeepSpeedTrainStrategy as strategy_cls
-    elif strategy_name == "diffusion_deepspeed_train":
-        from roll.distributed.strategy.diffusion_strategy import DeepSpeedTrainStrategy as strategy_cls
-    elif strategy_name == "hf_infer":
+    if strategy_name == "hf_infer":
         from roll.distributed.strategy.hf_strategy import HfInferStrategy as strategy_cls
     elif strategy_name == "vllm":
         from roll.distributed.strategy.vllm_strategy import VllmStrategy as strategy_cls

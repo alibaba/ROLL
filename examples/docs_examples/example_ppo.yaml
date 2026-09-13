@@ -1,9 +1,3 @@
-defaults:
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
-
 hydra:
   run:
     dir: .
@@ -64,7 +58,7 @@ loss_agg_mode: "seq-mean-token-mean"
 
 whiten_advantages: true
 advantage_clip: 2.0
-reward_clip: ~
+reward_clip: 10
 dual_clip_loss: true
 lambd: 0.95
 gamma: 1
@@ -184,8 +178,15 @@ critic:
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero3}
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bf16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      offload_policy: false
+      wrap_policy:  # trl wrapped model should specify this
+        transformer_layer_cls_to_wrap: ["Qwen2DecoderLayer"]
   device_mapping: list(range(8,16))
   infer_batch_size: 4
 

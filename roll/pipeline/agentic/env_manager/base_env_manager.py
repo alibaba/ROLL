@@ -25,6 +25,7 @@ class BaseEnvManager:
         self.current_step = -1
         self.running = False
         self.env: gem.Env
+        self.trace_meta = None
 
     @abstractmethod
     def run_rollout_loop(self, data: DataProto):
@@ -57,8 +58,9 @@ class BaseEnvManager:
     def formulate_rollouts(self, rollout_cache: RolloutCache) -> DataProto:
         pass
 
-    def update_step(self, global_step):
+    def update_step(self, global_step, trace_meta=None):
         self.current_step = global_step
+        self.trace_meta = trace_meta
 
     def stop(self):
         self.running = False

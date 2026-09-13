@@ -1,6 +1,6 @@
 # Ascend NPU FAQ
 
-Last updated: 04/27/2026.
+Last updated: 08/17/2026.
 
 This document compiles common issues encountered when running ROLL on Huawei Ascend NPU and their solutions.
 
@@ -51,10 +51,32 @@ These commands are automatically added to `/root/.bashrc` during the Docker imag
 
 **Solution:** Make sure you are using the correct pre-built image for your hardware:
 
-- **Atlas 900 A2 PODc** → Use `roll:ascend-a2` (`ascend910b1`)
-- **Atlas 900 A3 PODc** → Use `roll:ascend-a3` (`ascend910_9391`)
+- **Atlas 900 A2 PODc** → Use `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` (`ascend910b1`)
+- **Atlas 900 A3 PODc** → Use `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` (`ascend910_9391`)
 
-The current repository does not include `Dockerfile.A2` or `Dockerfile.A3`. If you maintain a custom image, ensure its SOC version matches the target hardware.
+The current repository includes `docker/Dockerfile.A2` and `docker/Dockerfile.A3` for building custom images. If you maintain a custom image, ensure its SOC version matches the target hardware.
+
+### Disable FRACTAL_NZ Mode
+
+**Symptom:** Enabling NZ optimization mode during reinforcement learning is likely to cause precision issues. vLLM-Ascend includes a check for this, and if NZ mode is enabled, it may raise the following error: `ValueError: FRACTAL_NZ mode is enabled. This may cause model parameter precision issues in the RL scenarios.`
+
+**Solution:** Before running the startup script, add the following environment variable to disable NZ mode:
+
+```bash
+export VLLM_ASCEND_ENABLE_NZ=0
+```
+
+### HCCL Parameter Plane Port Binding Failure
+
+**Symptom:** When the current rank or process establishes a communication operator on the parameter plane, binding the device-side NIC port fails because the port is already occupied. The error may look like: `The IP address XXXX and port XXXX have already been bound`.
+
+**Solution:**
+
+1. HCCL uses the device-side NIC port and binds to port 16666 by default. Therefore, if multiple processes run on the same device and all call HCCL communication operator APIs, the port may already be bound by another process, causing the failure.
+2. First check whether running multiple processes on the same device is expected for your workload. If it is expected, enable multi-process scenarios by configuring the `HCCL_NPU_SOCKET_PORT_RANGE` environment variable, for example:
+   ```bash
+   export HCCL_NPU_SOCKET_PORT_RANGE="auto"
+   ```
 
 ## Dependency Conflicts
 
@@ -66,33 +88,20 @@ The current repository does not include `Dockerfile.A2` or `Dockerfile.A3`. If y
 
 ```bash
 pip uninstall -y triton triton-ascend
-pip install triton-ascend==3.2.0
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
 
 ## Training Configuration
-
-### Colocated Mode Not Supported
-
-**Symptom:** Training fails when `actor_train` and `actor_infer` share the same NPU devices.
-
-**Solution:** NPU does not support colocated mode. You must configure `device_mapping` so that training and inference run on separate NPUs. For example:
-
-```yaml
-actor_train:
-  device_mapping: list(range(0, 4))
-actor_infer:
-  device_mapping: list(range(4, 8))
-```
 
 ### Megatron Strategy Not Supported
 
 **Symptom:** Errors when using `strategy: megatron` in configuration on NPU.
 
-**Solution:** Megatron-LM training is not yet supported on Ascend NPU in the provided examples. Use DeepSpeed as the training backend:
+**Solution:** Megatron-LM is not supported on Ascend NPU. Use FSDP2 as the training backend:
 
 ```yaml
 strategy_args:
-  strategy_name: deepspeed_train
+  strategy_name: fsdp2_train
 ```
 
 ### HCCL Communication Timeout or Failure
@@ -252,13 +261,6 @@ To make it persistent, add the following line to `/etc/security/limits.conf` ins
 * hard nofile 65536
 ```
 
-You can also configure it globally in your ROLL YAML config:
-
-```yaml
-system_envs:
-  RAY_ULIMIT_NOFILE: "65536"
-```
-
 ### Out of NPU Memory
 
 **Symptom:** Training or inference crashes with OOM (Out of Memory) errors.
@@ -267,11 +269,12 @@ system_envs:
 
 1. Reduce `rollout_batch_size` or `num_return_sequences_in_group` in your configuration file.
 2. Reduce `per_device_train_batch_size` and increase `gradient_accumulation_steps` accordingly.
-3. Enable DeepSpeed ZeRO-3 with CPU offloading in your config:
+3. Enable FSDP2 with CPU offloading in your config:
    ```yaml
    strategy_args:
-     strategy_name: deepspeed_train
-     strategy_config: ${deepspeed_zero3_cpuoffload}
+     strategy_name: fsdp2_train
+     strategy_config:
+       offload_policy: true
    ```
 4. Use a smaller model or apply LoRA to reduce memory footprint.
 
@@ -281,7 +284,7 @@ system_envs:
 
 **Solution:**
 
-1. Ensure CANN and vLLM-Ascend versions are compatible (both should be v0.13.0).
+1. Ensure CANN and the Ascend software stack are compatible. The current ROLL A2/A3 images use CANN 9.1.0, PyTorch 2.10.0, torch-npu 2.10.0.post4, vLLM 0.23.0, and vLLM-Ascend v0.23.0rc1.
 2. Check that the SOC version matches your hardware.
 3. Adjust vLLM parameters such as `gpu_memory_utilization` and `max_model_len` in your config.
 4. Verify that `triton-ascend` is installed (not `triton`), as the wrong triton backend can cause kernel compilation fallbacks.

@@ -17,12 +17,11 @@ from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import (
     default_actor_model_provider,
-    default_diffusion_module_provider,
     default_reward_model_provider,
     default_value_model_provider,
 )
 from roll.platforms import current_platform
-from roll.utils.checkpoint_manager import download_model
+from roll.utils.checkpoint_manager import download_model, get_latest_ckpt
 from roll.utils.context_managers import state_offload_manger, log_gpu_memory_usage
 from roll.utils.dynamic_batching import make_mini_batch_iter_for_dynamic_batching
 from roll.utils.functionals import agg_loss, append_to_dict, compute_approx_kl, flatten_sum, masked_mean, postprocess_generate, reduce_metrics
@@ -43,20 +42,24 @@ class ActorWorker(Worker):
 
         self.strategy = create_strategy(worker=self)
 
-        if self.worker_config.model_args.model_type == "diffusion_module":
-            self.strategy.initialize(model_provider=default_diffusion_module_provider)
-        else:
-            self.strategy.initialize(model_provider=default_actor_model_provider)
+        self.strategy.initialize(model_provider=default_actor_model_provider)
 
         self.tokenizer = self.strategy.tokenizer
         if self.pipeline_config.resume_from_checkpoint:
-            load_dir = download_model(self.pipeline_config.resume_from_checkpoint)
-            self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
+            load_dir = None
+            if self.pipeline_config.resume_from_checkpoint is True:
+                latest_ckpt = get_latest_ckpt(self.pipeline_config.checkpoint_config)
+                if latest_ckpt:
+                    load_dir = download_model(latest_ckpt)
+            elif isinstance(self.pipeline_config.resume_from_checkpoint, str):
+                load_dir = download_model(self.pipeline_config.resume_from_checkpoint)
+            if load_dir:
+                self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
         self.logger.info(f"{self.worker_name} initialized")
 
         self.strategy.offload_states()
 
-    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST)
+    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, trace=True, prefetch=False, to_remote=False)
     def train_step(self, data: DataProto):
         """
         return DataProto(meta_info={'metrics': metrics})
@@ -75,6 +78,8 @@ class ActorWorker(Worker):
         ):
             data = data.to(current_platform.device_type)
             data = self.strategy.get_data_input(data)
+            data.prefetch()
+            data = data.to(current_platform.device_type)
             per_device_train_batch_size = self.worker_config.training_args.per_device_train_batch_size
             backward_batch_size = (
                     per_device_train_batch_size * self.worker_config.training_args.gradient_accumulation_steps
@@ -121,7 +126,7 @@ class ActorWorker(Worker):
         output = DataProto(meta_info={"metrics": metrics})
         return output
 
-    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST)
+    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, trace=True, prefetch=False, to_remote=True)
     def compute_log_probs(self, data: DataProto):
         """
         return DataProto.from_dict(tensors={'log_probs': output})
@@ -137,6 +142,7 @@ class ActorWorker(Worker):
             load_kwargs={"include": [OffloadStateType.model_params]},
         ):
             data = self.strategy.get_data_input(data)
+            data.prefetch()
             data = data.to(current_platform.device_type)
             data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
 
@@ -501,7 +507,7 @@ class InferWorker(Worker):
         global_step = data.meta_info.get("global_step", 0)
         self.logger.info(f"{self.worker_name} generate global step {global_step}")
 
-        data = data.to(current_platform.device_type)
+        data = data.to("cuda")
         data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
 
         output = await self.strategy.generate(batch=data, generation_config=generation_config)
@@ -555,14 +561,23 @@ class CriticWorker(Worker):
         self.tokenizer = self.strategy.tokenizer
 
         if self.pipeline_config.resume_from_checkpoint:
-            load_dir = os.path.join(download_model(self.pipeline_config.resume_from_checkpoint), self.cluster_name)
-            self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
+            load_dir = None
+            if self.pipeline_config.resume_from_checkpoint is True:
+                latest_ckpt = get_latest_ckpt(self.pipeline_config.checkpoint_config)
+                if latest_ckpt:
+                    load_dir = download_model(latest_ckpt)
+            elif isinstance(self.pipeline_config.resume_from_checkpoint, str):
+                load_dir = download_model(self.pipeline_config.resume_from_checkpoint)
+            load_dir = os.path.join(load_dir, self.cluster_name)
+
+            if load_dir:
+                self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
 
         self.logger.info(f"{self.worker_name} initialized")
 
         self.strategy.offload_states()
 
-    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE)
+    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, trace=True, prefetch=True, to_remote=True)
     def compute_values(self, data: DataProto):
         """
         return DataProto.from_dict(tensors={'values': values})
@@ -591,7 +606,7 @@ class CriticWorker(Worker):
         output.meta_info = {"metrics": metrics}
         return output
 
-    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE)
+    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, trace=True, prefetch=True, to_remote=True)
     def train_step(self, data: DataProto):
         """
         return DataProto(meta_info={'metrics': metrics})

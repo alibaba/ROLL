@@ -31,6 +31,7 @@ register_template(
         "vocab_size": "padded_vocab_size",
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
+        "rope_parameters": "rope_parameters",
         "moe_intermediate_size": "ffn_hidden_size",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
         # MoE related

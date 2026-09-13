@@ -5,9 +5,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional
 
-from codetiming import Timer
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
+from roll.pipeline.agentic.proxy.router import create_proxy_router
 from roll.utils.context_managers import local_profiler
 
 from roll.pipeline.agentic.env_manager.base_env_manager import BaseEnvManager
@@ -18,6 +18,7 @@ from roll.models.model_providers import default_tokenizer_provider, default_proc
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig
 from roll.utils.checkpoint_manager import download_model
 from roll.utils.import_utils import safe_import_class
+from roll.pipeline.agentic.proxy.proxy_server import ProxyServer
 
 
 class EnvironmentWorker(Worker):
@@ -40,6 +41,7 @@ class EnvironmentWorker(Worker):
         self.thread_lock = threading.Lock()
         self.output_queue = None
         self.mode = "train"
+        self.proxy_server: Optional[ProxyServer] = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
     async def initialize(self,
@@ -52,6 +54,38 @@ class EnvironmentWorker(Worker):
 
         self.output_queue = output_queue
         self.mode = mode
+        
+        needs_proxy = any(
+            "proxy_env_manager" in cfg.get('env_manager_cls', '') for cfg in self.env_configs.values()
+        )
+        has_rocknative = any(cfg.get('env_type') == "rocknative" for cfg in self.env_configs.values())
+        # Pull-mode runners poll the sandbox directly and do not need ALB/ingress registration.
+        needs_proxy_router = has_rocknative and not any(
+            "PullModeRunner" in cfg.get('agent_runner_cls', '') for cfg in self.env_configs.values()
+        )
+
+        if needs_proxy:
+            # Create and start proxy server for any env that uses ProxyEnvManager
+            proxy_port = self.get_free_port()
+            self.proxy_server = ProxyServer(host="0.0.0.0", port=proxy_port)
+            self.proxy_server.start(timeout=30)
+            self.logger.info(f"Proxy server started at: {self.proxy_server.url}")
+
+            for env_id, env_config in self.env_configs.items():
+                env_config['proxy_port'] = proxy_port
+
+        if needs_proxy_router:
+            # Register proxy router only for push-mode rocknative environments
+            proxy_url = self.proxy_server.url if self.proxy_server else None
+            if proxy_url is None:
+                raise RuntimeError("rocknative env_type requires a proxy server, but no ProxyEnvManager is configured")
+            backend = create_proxy_router()
+            result = backend.register_servers(
+                addresses=[proxy_url],
+                job_id=os.environ.get('TASK_ID'),
+                port=proxy_port,
+            )
+            self.logger.info(f'[Network Register] Auto registration result: {result}')
         model_name_or_path = download_model(self.worker_config.model_args.model_name_or_path)
         self.tokenizer = default_tokenizer_provider(self.worker_config.model_args, model_name_or_path)
         self.processor = default_processor_provider(self.worker_config.model_args, model_name_or_path)
@@ -91,6 +125,15 @@ class EnvironmentWorker(Worker):
                     self.logger.error(f"Failed to initialize env_manager: {e}", exc_info=True)
                     raise e
 
+        # Register handlers for each env_manager
+        if self.proxy_server:
+            for env_id, env_manager in self.env_managers.items():
+                if hasattr(env_manager, 'process_request'):
+                    self.proxy_server.register_handler(env_id, env_manager.process_request)
+                    self.logger.info(f"Registered env_id={env_id} with proxy server")
+                else:
+                    self.logger.warning(f"env_manager for env_id={env_id} does not have process_request method")
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
     async def run_rollout_loop(self, seed):
         # Set environment variables for profiler context
@@ -119,11 +162,16 @@ class EnvironmentWorker(Worker):
         pool.shutdown()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
-    async def update_step(self, global_step):
+    async def update_step(self, global_step, trace_meta):
         for env_manager in self.env_managers.values():
-            env_manager.update_step(global_step)
+            env_manager.update_step(global_step, trace_meta)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
     async def stop(self):
         for env_manager in self.env_managers.values():
             env_manager.stop()
+
+        # Stop proxy server
+        if self.proxy_server:
+            self.proxy_server.stop()
+            self.logger.info("Proxy server stopped")

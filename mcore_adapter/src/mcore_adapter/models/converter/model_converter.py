@@ -54,6 +54,7 @@ class ModelConverter:
         tensor_model_parallel_rank: Optional[int] = None,
         pipeline_model_parallel_rank: Optional[int] = None,
         expert_model_parallel_rank: Optional[int] = None,
+        expert_tensor_parallel_rank: Optional[int] = None,
         to_hf: bool = False,
         verbose=False,
         efficient_mode: bool = False,
@@ -69,11 +70,14 @@ class ModelConverter:
             pipeline_model_parallel_rank = mpu.get_pipeline_model_parallel_rank()
         if expert_model_parallel_rank is None:
             expert_model_parallel_rank = mpu.get_expert_model_parallel_rank()
+        if expert_tensor_parallel_rank is None:
+            expert_tensor_parallel_rank = mpu.get_expert_tensor_parallel_rank()
         self.dist_converter = DistConverter(
             self.mca_config,
             tensor_model_parallel_rank=tensor_model_parallel_rank,
             pipeline_model_parallel_rank=pipeline_model_parallel_rank,
             expert_model_parallel_rank=expert_model_parallel_rank,
+            expert_tensor_parallel_rank=expert_tensor_parallel_rank,
             revert=to_hf,
             efficient_mode=efficient_mode,
         )
@@ -158,7 +162,7 @@ class ModelConverter:
         self.template.release()
         return mca_state_dict
 
-    def _mca_named_params_with_vp_stage(self, models):
+    def _mca_named_params_with_vp_stage(self, models, params_group=None):
         for vp_stage, model in enumerate(models):
             if is_peft_available() and isinstance(model, PeftModel):
                 for adapter_name in model.peft_config.keys():
@@ -171,6 +175,13 @@ class ModelConverter:
             else:
                 mca_state_dict = model.state_dict_for_save_checkpoint()
                 mca_state_dict = {k: v for k, v in mca_state_dict.items() if not k.endswith("._extra_state")}
+
+                if params_group is not None:
+                    if params_group == "dense":
+                        mca_state_dict = {k: v for k, v in mca_state_dict.items() if not self.dist_converter.is_expert_parallel_weight(k)}
+                    elif params_group == "moe":
+                        mca_state_dict = {k: v for k, v in mca_state_dict.items() if self.dist_converter.is_expert_parallel_weight(k)}
+
                 for mca_name, weight in sorted(mca_state_dict.items()):
                     yield None, vp_stage, mca_name, weight
 
@@ -214,10 +225,49 @@ class ModelConverter:
                 converted_state_dict = self.template.add_mca_weight(merged_name, merged_weight, **kwargs)
                 if converted_state_dict is not None:
                     converted.update(converted_state_dict)
-                else:
-                    self.log(f"mca_name: {merged_name} added but not converted")
             hf_state_dict.update(converted or {})
         return hf_state_dict
+
+    def _needs_moe_allgather(self, mca_name: str, ep_world_size: int) -> bool:
+        return (
+            self.mca_config.hf_model_type in ["qwen3_vl_moe", "qwen3_5_moe"]
+            and ep_world_size > 1
+            and self.dist_converter.is_expert_parallel_weight(mca_name)
+        )
+
+    def _convert_moe_weight_with_allgather(
+        self,
+        mca_name: str,
+        weight: "Tensor",
+        vp_stage: int,
+        ep_group,
+        ep_world_size: int,
+        move_to_cpu: bool = False,
+        only_need_expert: bool = False,
+    ) -> Optional[Dict[str, "Tensor"]]:
+        gathered_weights = [torch.empty_like(weight) for _ in range(ep_world_size)]
+        dist.all_gather(gathered_weights, weight, group=ep_group)
+        
+        if only_need_expert:
+            return None
+        
+        if move_to_cpu:
+            gathered_weights = [w.cpu() for w in gathered_weights]
+        
+        def _extract_suffix_number(s: str):
+            import re
+            match = re.search(r"\d+$", s)
+            return match.group() if match else None
+
+        converted_state_dict = {}
+        local_moe_index = _extract_suffix_number(mca_name)
+        for ep_rank, moe_weight in enumerate(gathered_weights):
+            global_moe_index = self.dist_converter.num_layers_for_expert * ep_rank + int(local_moe_index)
+            converted_name = mca_name[: -len(local_moe_index)] + str(global_moe_index)
+            converted_state_dict.update(
+                self.convert_to_hf(mca_state_dict={converted_name: [moe_weight]}, vp_stage=vp_stage)
+            )
+        return converted_state_dict
 
     def save_model_as_hf_inflight(
         self,
@@ -243,14 +293,23 @@ class ModelConverter:
         only_need_expert = expert_parallel and mpu.get_expert_model_parallel_rank() > 0
         last_adapter_name = None
         for adapter_name, vp_stage, mca_name, weight in self._mca_named_params_with_vp_stage(models):
-            if only_need_expert and not self.dist_converter.is_expert_parallel_weight(mca_name):
-                continue
-            weights = gather_tensor_parallel(weight, async_op=False)
-            if weights is None:  # only tp_rank0 need to convert and save
-                continue
-            if move_to_cpu and isinstance(weights, list):
-                weights = [w.cpu() for w in weights]
-            converted_state_dict = self.convert_to_hf(mca_state_dict={mca_name: weights}, vp_stage=vp_stage)
+            ep_group = mpu.get_expert_model_parallel_group()
+            ep_world_size = dist.get_world_size(ep_group)
+            if self._needs_moe_allgather(mca_name, ep_world_size):
+                converted_state_dict = self._convert_moe_weight_with_allgather(
+                    mca_name, weight, vp_stage, ep_group, ep_world_size, move_to_cpu, only_need_expert
+                )
+                if converted_state_dict is None:
+                    continue
+            else:
+                if only_need_expert and not self.dist_converter.is_expert_parallel_weight(mca_name):
+                    continue
+                weights = gather_tensor_parallel(weight, async_op=False)
+                if weights is None:  # only tp_rank0 need to convert and save
+                    continue
+                if move_to_cpu and isinstance(weights, list):
+                    weights = [w.cpu() for w in weights]
+                converted_state_dict = self.convert_to_hf(mca_state_dict={mca_name: weights}, vp_stage=vp_stage)
             self.save_hf_shard_state_dict(
                 shard_state,
                 os.path.join(save_directory, adapter_name) if adapter_name is not None else save_directory,
@@ -270,6 +329,83 @@ class ModelConverter:
 
         if mpu.get_tensor_model_parallel_rank() == 0:
             self.save_shard_state_meta(shard_state, save_directory, save_safetensors)
+
+    def save_separate_model_as_hf_inflight(
+        self,
+        models,
+        save_directory: str,
+        save_safetensors: bool = True,
+        max_shard_size: Union[int, str] = MAX_SHARD_SIZE, 
+        move_to_cpu: bool = False,
+    ):
+        assert self.dist_converter.revert, "save_separate_model_as_hf_inflight only support to_hf ModelConverter"
+        if not mpu.model_parallel_is_initialized():
+            raise RuntimeError("Model parallelism must be initialized before save as hf inflight.")
+
+        self.save_hf_config(save_directory, mca_config=models[0].config)
+
+        shard_state = StateDictSplitState(max_shard_size=max_shard_size)
+        if isinstance(max_shard_size, str):
+            max_shard_size = parse_size_to_int(max_shard_size)
+        
+        self._save_dense_hf_state_dict(models, shard_state, save_directory, save_safetensors=save_safetensors, move_to_cpu=move_to_cpu)
+        self._save_moe_hf_state_dict(models, shard_state, save_directory, save_safetensors=save_safetensors, move_to_cpu=move_to_cpu)
+
+        if mpu.get_tensor_model_parallel_rank() == 0 or mpu.get_expert_tensor_parallel_rank() == 0:
+            self.save_shard_state_meta(shard_state, save_directory, save_safetensors)
+
+    def _save_dense_hf_state_dict(
+        self,
+        models,
+        shard_state: StateDictSplitState,
+        save_directory: str,
+        save_safetensors: bool = True,
+        move_to_cpu: bool = False,
+    ):
+        if not mpu.get_data_parallel_rank(with_context_parallel=True) == 0:
+            return
+        
+        for _, vp_stage, mca_name, weight in self._mca_named_params_with_vp_stage(models, params_group="dense"):
+            weights = gather_tensor_parallel(weight, async_op=False)
+            if weights is None:  # only tp_rank0 need to convert and save
+                continue
+            if move_to_cpu and isinstance(weights, list):
+                weights = [w.cpu() for w in weights]
+            converted_state_dict = self.convert_to_hf(mca_state_dict={mca_name: weights}, vp_stage=vp_stage)
+            self.save_hf_shard_state_dict(shard_state, save_directory, converted_state_dict, save_safetensors)
+
+    def _save_moe_hf_state_dict(
+        self,
+        models,
+        shard_state: StateDictSplitState,
+        save_directory: str,
+        save_safetensors: bool = True,
+        move_to_cpu: bool = False,
+    ):
+        dist.barrier()
+        if not mpu.get_expert_data_parallel_rank() == 0:
+            return
+
+        ep_group = mpu.get_expert_model_parallel_group()
+        ep_world_size = dist.get_world_size(ep_group)
+        expert_parallel = self.mca_config.expert_model_parallel_size > 1
+        only_need_expert = expert_parallel and mpu.get_expert_model_parallel_rank() > 0
+
+        for _, vp_stage, mca_name, weight in self._mca_named_params_with_vp_stage(models, params_group="moe"):
+            if self._needs_moe_allgather(mca_name, ep_world_size):
+                converted_state_dict = self._convert_moe_weight_with_allgather(
+                    mca_name, weight, vp_stage, ep_group, ep_world_size, move_to_cpu, only_need_expert
+                )
+                if converted_state_dict is None:
+                    continue
+            else:
+                weights = gather_tensor_parallel(weight, async_op=False, is_expert_parallel=True)
+                if weights is None:  # only tp_rank0 need to convert and save
+                    continue
+                if move_to_cpu and isinstance(weights, list):
+                    weights = [w.cpu() for w in weights]
+                converted_state_dict = self.convert_to_hf(mca_state_dict={mca_name: weights}, vp_stage=vp_stage)
+            self.save_hf_shard_state_dict(shard_state, save_directory, converted_state_dict, save_safetensors)
 
     def _auto_bucket_size(self):
         # TODO: optimize this by max weight size

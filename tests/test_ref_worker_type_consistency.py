@@ -18,40 +18,70 @@ import textwrap
 
 
 def test_ref_worker_uses_cluster_not_config():
-    """When use_ref_model=False, `worker` must be `self.actor_train` (Cluster), not `self.pipeline_config.actor_train` (WorkerConfig)."""
+    """When use_ref_model=False, log-prob computation must use `self.actor_train` (Cluster), not WorkerConfig."""
     import roll.pipeline.rlvr.rlvr_pipeline as mod
 
     source = inspect.getsource(mod.RLVRPipeline)
-
-    # The buggy pattern: `self.pipeline_config.actor_train` used where `self.actor_train` is needed
-    # The fix ensures `worker = ... else self.actor_train` (without pipeline_config prefix)
-    #
-    # We check: in the line that assigns `worker = ...`, the else-branch must NOT
-    # reference `self.pipeline_config.actor_train`
     tree = ast.parse(textwrap.dedent(source))
 
-    found_worker_assign = False
+    def is_self_attr(node: ast.AST, *attrs: str) -> bool:
+        expected = ("self", *attrs)
+        current = node
+        actual = []
+        while isinstance(current, ast.Attribute):
+            actual.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            actual.append(current.id)
+        return tuple(reversed(actual)) == expected
+
+    def is_not_self_use_ref_model(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.Not)
+            and is_self_attr(node.operand, "use_ref_model")
+        )
+
+    lora_ref_branch = None
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        # Look for: worker = <ternary>
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "worker":
-                if isinstance(node.value, ast.IfExp):
-                    found_worker_assign = True
-                    # Check the orelse (else branch) of the ternary
-                    orelse = node.value.orelse
-                    # It should be self.actor_train, NOT self.pipeline_config.actor_train
-                    source_segment = ast.dump(orelse)
-                    assert "pipeline_config" not in source_segment, (
-                        "Bug: `worker` assignment else-branch references "
-                        "`self.pipeline_config.actor_train` (WorkerConfig) instead of "
-                        "`self.actor_train` (Cluster). WorkerConfig has no `dp_size` property."
+        if isinstance(node, ast.If) and is_not_self_use_ref_model(node.test):
+            lora_ref_branch = node
+            break
+
+    assert lora_ref_branch is not None, (
+        "Could not find the `if not self.use_ref_model` branch in RLVRPipeline. "
+        "The reference log-prob code structure may have changed."
+    )
+
+    found_actor_train_dp_size = False
+    found_actor_train_compute_log_probs = False
+    for node in ast.walk(lora_ref_branch):
+        if isinstance(node, ast.Attribute) and node.attr == "dp_size":
+            assert is_self_attr(node.value, "actor_train"), (
+                "`dp_size` in the LoRA reference branch must come from "
+                "`self.actor_train` (Cluster), not WorkerConfig or another alias."
+            )
+            found_actor_train_dp_size = True
+
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "compute_log_probs":
+                assert is_self_attr(node.func.value, "actor_train"), (
+                    "`compute_log_probs` in the LoRA reference branch must be called on "
+                    "`self.actor_train` (Cluster), not WorkerConfig."
+                )
+                found_actor_train_compute_log_probs = True
+
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "worker":
+                    assert "pipeline_config" not in ast.dump(node.value), (
+                        "Bug: `worker` is assigned from `self.pipeline_config.actor_train` "
+                        "(WorkerConfig) instead of `self.actor_train` (Cluster)."
                     )
 
-    assert found_worker_assign, (
-        "Could not find `worker = ... if ... else ...` ternary assignment in RLVRPipeline. "
-        "The code structure may have changed."
+    assert found_actor_train_dp_size, "LoRA reference branch should use `self.actor_train.dp_size`."
+    assert found_actor_train_compute_log_probs, (
+        "LoRA reference branch should call `self.actor_train.compute_log_probs`."
     )
 
 

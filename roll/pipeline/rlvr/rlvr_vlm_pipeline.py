@@ -1,39 +1,41 @@
+import asyncio
 import copy
 import json
 import os
 import uuid
+from contextlib import ExitStack
 from functools import partial
-from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
 
 import datasets
 import numpy as np
-import PIL.Image as Image
 import ray
 import torch
 from codetiming import Timer
-from datasets import load_from_disk
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.util.timer import _Timer
-from transformers import AutoConfig, ProcessorMixin
-from transformers.image_utils import load_images
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from roll.configs import GeneratingArguments
 from roll.datasets.collator import DataCollatorWithPaddingForMM
-from roll.datasets.dataset import get_dataset
+from roll.datasets.vlm_dataset_utils import create_pipeline_data_kwargs
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.generate_scheduler import DynamicSamplingScheduler
+from roll.distributed.scheduler.user_defined_rollout_loop import (
+    UserDefinedRolloutLoop,
+    RolloutContext,
+    expand_requests,
+    query_filter,
+)
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_processor_provider, get_extra_data_provider
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.rlvr_pipeline import update_dataset_domain
 from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
-from roll.utils.checkpoint_manager import download_model
 from roll.utils.functionals import (
     RunningMoments,
     agg_loss,
+    batch_balance,
     compute_advantage,
     compute_token_reward,
     get_sample_level_mask,
@@ -44,325 +46,104 @@ from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.telemetry import get_tracer, inject_trace_context
 from roll.utils.train_infer_corrections import apply_train_infer_correction_to_batch
 
 
 logger = get_logger()
 
 
-def format_prompt(prompt, processor, use_image=True, prompt_image_token=None):
-    question_template = "{Question}"
-    if isinstance(prompt, list):
-        messages = prompt
-    else:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": question_template.format(Question=prompt)},
-                ]
-                if use_image and not prompt_image_token
-                else [
-                    {"type": "text", "text": question_template.format(Question=prompt)}
-                ],  # image_token has been included in prompt
-            }
-        ]
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    if prompt_image_token:
-        text = text.replace(prompt_image_token, "<|vision_start|><|image_pad|><|vision_end|>")
-    return text
-
-
-def process_image(image: Image.Image, processor: ProcessorMixin):
-    # same as qwen2-vl image processor
-    image_processor = processor.image_processor
-    factor = (
-        image_processor.patch_size * image_processor.merge_size
-        if "Qwen" in image_processor.image_processor_type
-        else 28
-    )
-    height, width = image.height, image.width
-    resized_height, resized_width = smart_resize(
-        height,
-        width,
-        factor=factor,
-        min_pixels=image_processor.min_pixels,
-        max_pixels=image_processor.max_pixels,
-    )
-    resized_image = image.resize((resized_width, resized_height), resample=image_processor.resample)
-    return resized_image
-
-
-def process_images(
-    images: Union[List, Tuple, str, Image.Image], processor: ProcessorMixin
-) -> Union[Image.Image, List[Image.Image], List[List[Image.Image]]]:
-    """Process images, handling different levels of nesting.
-
-    Args:
-      images: A single image, a list of images, or a list of lists of images to load.
-      timeout: Timeout for loading images.
-
-    Returns:
-      A single image, a list of images, a list of lists of images.
+class FiltDataRolloutLoop(UserDefinedRolloutLoop):
     """
-    if isinstance(images, (list, tuple)):
-        if len(images) and isinstance(images[0], (list, tuple)):
-            return [[process_image(image, processor=processor) for image in image_group] for image_group in images]
-        else:
-            return [process_image(image, processor=processor) for image in images]
-    else:
-        return process_image(images, processor=processor)
-
-
-def encode_function(
-    data, processor, prompt_getter, ground_truth_getter, image_getter, tag_getter, prompt_image_token=None
-):
-    image_flag = [True] * len(prompt_getter(data))
-    image_list = []
-    for idx, image in enumerate(image_getter(data)):
-        if not image:
-            image_flag[idx] = False
-        try:
-            if isinstance(image, bytes):  # bytes data
-                # TODO: support multiple images
-                image_out = Image.open(BytesIO(image))
-            else:
-                image_out = load_images(image if isinstance(image, (list, tuple)) else [image], timeout=None)
-        except Exception as e:
-            if isinstance(image, bytes):
-                image_out = [Image.new("RGB", (224, 224), (255, 255, 255))]
-                logger.error(f"Failed to get image with type: {type(image)}")
-            else:
-                image_out = [Image.new("RGB", (224, 224), (255, 255, 255))] * len(image)
-                logger.error(f"Failed to get image: {image}")
-        # since infer-image use pil image as input while train-engine use
-        # processed data, process image here to make them use same image
-        # refer to the following for Spatial Understanding with Qwen2.5-VL
-        # https://github.com/QwenLM/Qwen2.5-VL/blob/main/cookbooks/spatial_understanding.ipynb
-        # NOTE: process_image from qwen2.5-vl keeps aspect ratio almostly and
-        # bboxes would be normalized in detection verifier, thus nearly no need
-        # to change ground-truth bboxes
-        image_out = process_images(image_out, processor)
-        image_list.append(image_out)
-    text_list = []
-    for idx, instruct in enumerate(prompt_getter(data)):
-        # provide prompt_image_token if image_token in prompt
-        text = format_prompt(instruct, processor, use_image=image_flag[idx], prompt_image_token=prompt_image_token)
-        text_list.append(text)
-    encodings = {
-        "tag": tag_getter(data),
-        "images": image_list,
-        "prompt": text_list,
-        "ground_truth": ground_truth_getter(data),
-        "reward_model": data["reward_model"],
-        # for text and multi-modal mixed data usage, indicating valid image
-        "image_flag": image_flag,
-    }
-    return encodings
-
-
-def filter_overlong_prompts(
-    dataset: datasets.Dataset,
-    processor: ProcessorMixin,
-    max_prompt_length: int,
-    prompt_key: str = "prompt",
-    image_key: str = "images",
-    image_flag_key: str = "image_flag",
-    num_workers: Optional[int] = None,
-) -> datasets.Dataset:
-    """Filter out samples where text + image tokens exceed max_prompt_length.
-
-    Note: Returns a new filtered dataset; the original dataset is not modified.
-
-    Args:
-        dataset: The dataset to filter (already encoded with formatted prompts and processed images).
-        processor: The processor to use for tokenization.
-        max_prompt_length: Maximum allowed token length (inclusive).
-        prompt_key: Key for the prompt text in the dataset.
-        image_key: Key for the images in the dataset.
-        image_flag_key: Key for the image flag indicating valid images.
-        num_workers: Number of processes for parallel filtering. Defaults to max(1, cpu_count // 4).
-
-    Returns:
-        Filtered dataset with samples within the token length limit.
+    custom to filter data whose length is larger than prompt_length
     """
-    # Default num_workers similar to verl's approach
-    if num_workers is None:
-        num_workers = max(1, (os.cpu_count() or 4) // 4)
+    async def process_new_prompt(self, context: RolloutContext) -> Optional[DataProto | List[DataProto]]:
+        num_return_sequences = context.meta_info["generation_config"]["num_return_sequences"]
+        is_num_return_sequences_expand = context.is_num_return_sequences_expand
 
-    original_len = len(dataset)
-    if original_len == 0:
-        logger.info("Dataset is empty, skipping filtering")
-        return dataset
-
-    def compute_token_count(example) -> int:
-        """Compute token count for a sample. Returns max_prompt_length + 1 on parse failure."""
-        try:
-            # Prompt is already formatted by encode_function, use directly
-            prompt = example[prompt_key]
-            if not isinstance(prompt, str):
-                # Fallback: apply chat template only if prompt is not already a string
-                prompt = processor.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
-
-            # Use already-processed images from encode_function
-            images = None
-            if example.get(image_flag_key) and example.get(image_key):
-                images = example[image_key]
-                # Handle single image or list of images
-                if not isinstance(images, list):
-                    images = [images]
-
-            # Calculate token length (same path as DataCollatorWithPaddingForMM)
-            inputs = processor(text=prompt, images=images)
-            input_ids = inputs["input_ids"][0]
-
-            return len(input_ids)
-
-        except Exception as e:
-            # Return max_prompt_length + 1 on any error to filter out the sample
-            logger.error(f"Error processing sample during filter, skipping: {e}")
-            return max_prompt_length + 1
-
-    filtered_dataset = dataset.filter(
-        lambda example: compute_token_count(example) <= max_prompt_length,
-        num_proc=num_workers,
-        desc=f"Keeping prompts with length <= {max_prompt_length} tokens",
-    )
-
-    filtered_len = len(filtered_dataset)
-    filtered_count = original_len - filtered_len
-    if filtered_count > 0:
-        logger.info(
-            f"Filtered {filtered_count}/{original_len} samples ({100 * filtered_count / original_len:.1f}%) "
-            f"exceeding max_prompt_length={max_prompt_length}. Remaining: {filtered_len}"
-        )
-    else:
-        logger.info(f"All {original_len} samples within max_prompt_length={max_prompt_length}")
-
-    return filtered_dataset
-
-
-def get_vlm_dataset(
-    data_args,
-    encode_function,
-    processor,
-    get_eval=False,
-    max_prompt_length: Optional[int] = None,
-    vlm_filter: Optional["VLMFilterConfig"] = None,
-):
-    """Load and encode VLM dataset with optional filtering.
-
-    Args:
-        data_args: Data arguments containing dataset path and preprocessing settings.
-        encode_function: Function to encode the dataset.
-        processor: Processor for tokenization and image processing.
-        get_eval: Whether to load evaluation dataset.
-        max_prompt_length: Maximum prompt length for filtering. If None, filtering is disabled.
-        vlm_filter: VLMFilterConfig for filtering settings. If None, uses default values.
-    """
-    # Import here to avoid circular import
-    from roll.pipeline.rlvr.rlvr_config import VLMFilterConfig
-
-    if vlm_filter is None:
-        vlm_filter = VLMFilterConfig()
-
-    cache_path = getattr(data_args, "cache_path", None)
-    if cache_path:
-        cache_path = os.path.join(cache_path, "val" if get_eval else "train")
-
-    # When filtering is enabled with max_prompt_length, skip cache to ensure correct filtering.
-    # The cached dataset may have been filtered with a different max_prompt_length.
-    # Filtering is always done after loading/encoding, and we don't cache filtered results.
-    should_filter = vlm_filter.enable and max_prompt_length is not None
-    use_cache = cache_path and os.path.exists(cache_path) and not should_filter
-    if use_cache:
-        dataset = load_from_disk(cache_path)
-        logger.info(f"Loaded dataset from cache: {cache_path}")
-        return dataset
-
-    dataset = get_dataset(data_args=data_args)
-    # regularized data filed
-    features = datasets.Features(
-        {
-            "tag": datasets.Value(dtype="string"),  # from data_source
-            "images": datasets.Sequence(feature=datasets.Image(mode=None, decode=True)),
-            "prompt": datasets.Value(dtype="string"),
-            "ground_truth": datasets.Value(dtype="string"),
-            "reward_model": dataset.features["reward_model"],
-            # for text and multi-modal mixed data usage, indicating valid image
-            "image_flag": datasets.Value("bool"),
-        }
-    )
-    remove_columns = list(dataset.features.keys() - features.keys())
-    # suit to both VLM-RL/Ocean-R1 and MiniMax-AI/One-RL-to-See-Them-All data
-    prompt_getter = lambda data: data["prompt"]
-    ground_truth_getter = lambda data: [x["ground_truth"] for x in data["reward_model"]]
-    image_getter = lambda data: data["images"]
-    tag_getter = lambda data: data["data_source"]
-    print(f"Begin : {dataset}")
-    dataset = dataset.map(
-        lambda data: encode_function(
-            data, processor, prompt_getter, ground_truth_getter, image_getter, tag_getter, prompt_image_token="<image>"
-        ),
-        batched=True,
-        batch_size=100,
-        num_proc=data_args.preprocessing_num_workers,
-        features=features,
-        remove_columns=remove_columns,
-        desc="Encoding dataset",
-    )
-    print(f"Encoding: {dataset}")
-
-    # Filter out samples where text + image tokens exceed max_prompt_length
-    # This is done AFTER encoding but BEFORE saving to cache
-    # Uses vlm_filter config for filtering settings
-    if should_filter:
-        dataset = filter_overlong_prompts(
-            dataset=dataset,
-            processor=processor,
-            max_prompt_length=max_prompt_length,
-            prompt_key=vlm_filter.prompt_key,
-            image_key=vlm_filter.image_key,
-            image_flag_key=vlm_filter.image_flag_key,
-            num_workers=vlm_filter.num_workers,
+        ################# STEP 1: get and filter dataset
+        request_data, domain = context.get_request_data(meta_info=context.meta_info)
+        if request_data.batch["input_ids"].shape[1] > context.prompt_length:
+            logger.error(
+                f"prompt_id {context.prompt_id} is filtered, "
+                f"since input length={request_data.batch['input_ids'].shape[1]} is larger than prompt_length={context.prompt_length}"
+            )
+            return
+        request_data_list = expand_requests(
+            data=request_data,
+            num_return_sequences=num_return_sequences,
+            is_num_return_sequences_expand=is_num_return_sequences_expand,
         )
 
-    # Only cache if no filtering was applied
-    # This prevents caching filtered datasets which may have different max_prompt_length
-    if cache_path and not should_filter:
-        dataset.save_to_disk(cache_path)
-        logger.info(f"Saved dataset to cache: {cache_path}")
-    elif cache_path and should_filter:
-        logger.info(
-            f"Skipping cache save because max_prompt_length={max_prompt_length} filtering was applied. "
-            "Next run will re-encode and re-filter with the same max_prompt_length."
-        )
-    return dataset
+        ################# STEP 2: spawn tasks to process requests, including generate, reward, and filter at response level
+        # Must run inside RolloutContext.do_generate_and_reward context.
+        # RolloutContext.do_generate_and_reward will wait until can send new request (controlled by LoadBalancer).
+        # And at exit, RolloutContext will enforce there is no running requests.
+        async with context.do_generate_and_reward(max_concurrency=num_return_sequences):
+            responses_list: List[List[DataProto]] = await asyncio.gather(
+                *[self._generate_and_reward(context=context, req=req, domain=domain) for req in request_data_list]
+            )
+            responses: List[DataProto] = [item for sublist in responses_list for item in sublist]
+            # some quick methods to reduce store and transfer overhead of multi-modal data by ray
+            # 1. remove multi_modal_inputs which is for training before generate and add it back after reward
+            # 2. remove multi_modal_data which is for inference after generate
+            # 3. change dtype of features in multi_modal_inputs to model dtype which uses lower bytes
+            for response in responses:
+                response.non_tensor_batch.pop("multi_modal_data", None)
+            # User can call RolloutContext.abort_running_requests to abort any running generate requests (generate will return a response
+            # with finish_reason=="abort", user should distinguish this from partial rollout to avoid dead loop).
+        # assert there is no running requests outside do_generate_and_reward context.
+
+        ################# STEP 3: prompt level filter
+        if not context.is_val and not query_filter(responses, context.pipeline_config):
+            # TODO add metrics (query_filter_count)
+            logger.debug(f"prompt_id {context.prompt_id} is filtered")
+            return
+
+        ################# STEP 4: return responses to commit to ReplayBuffer
+        return responses
 
 
 class RLVRVLMPipeline(BasePipeline):
     def __init__(self, pipeline_config: RLVRConfig):
         super().__init__(pipeline_config)
         self.pipeline_config = pipeline_config
+        pipeline_config.user_defined_rollout_loop_cls = f"{self.__class__.__module__}.FiltDataRolloutLoop"
 
         self.processor = default_processor_provider(self.pipeline_config.actor_train.model_args)
-        # set max_pixels to avoid image token num is larger than prompt length
-        self.processor.image_processor.max_pixels, self.processor.image_processor.min_pixels = (
-            getattr(self.pipeline_config.actor_train.model_args, "max_pixels", 1024 * 1024),
-            getattr(self.pipeline_config.actor_train.model_args, "min_pixels", 56 * 56),
-        )
         self.tokenizer = self.processor.tokenizer
         self.tokenizer.padding_side = "left"
 
-        dataset = get_vlm_dataset(
+        # prepare dataset and collect_fn_kwargs
+        train_data_kwargs = create_pipeline_data_kwargs(
             self.pipeline_config.actor_train.data_args,
-            encode_function,
-            self.processor,
-            get_eval=False,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
             max_prompt_length=self.pipeline_config.prompt_length,
             vlm_filter=self.pipeline_config.vlm_filter,
         )
+        # pipeline related data args
+        def _data_kwargs_helper(data_kwargs):
+            dataset, collect_fn_kwargs = data_kwargs["dataset"], data_kwargs["collect_fn_kwargs"]
+            assert "tag" in dataset.features, "dataset should include tag field to get domain"
+            collect_fn_kwargs["extra_unpadded_keys"] = list(
+                set(collect_fn_kwargs.get("extra_unpadded_keys", []) + ["domain"])
+            )
+            collect_fn_kwargs["extra_data_provider"] = collect_fn_kwargs.get(
+                "extra_data_provider",
+                get_extra_data_provider(
+                    self.pipeline_config.actor_train.model_args.model_name_or_path, processor=self.processor
+                ),
+            )
+            collect_fn_kwargs["max_length"] = collect_fn_kwargs.get("max_length", self.pipeline_config.prompt_length)
+            collect_fn_kwargs["padding"] = collect_fn_kwargs.get("padding", "max_length")
+            collect_fn_kwargs["mm_feature_dtype"] = collect_fn_kwargs.get(
+                "mm_feature_dtype", self.pipeline_config.actor_train.model_args.dtype
+            )
+            return data_kwargs
+
+        train_data_kwargs = _data_kwargs_helper(train_data_kwargs)
+        dataset, collect_fn_kwargs = train_data_kwargs["dataset"], train_data_kwargs["collect_fn_kwargs"]
         # update domain field, DynamicSamplingScheduler requires
         dataset = dataset.map(
             partial(update_dataset_domain, self.pipeline_config.tag_2_domain),
@@ -382,14 +163,17 @@ class RLVRVLMPipeline(BasePipeline):
 
         self.val_dataset = None
         if self.pipeline_config.validation and self.pipeline_config.validation.data_args:
-            self.val_dataset = get_vlm_dataset(
+            val_data_kwargs = create_pipeline_data_kwargs(
                 self.pipeline_config.validation.data_args,
-                encode_function,
-                self.processor,
-                get_eval=True,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                is_val=True,
                 max_prompt_length=self.pipeline_config.prompt_length,
                 vlm_filter=self.pipeline_config.vlm_filter,
             )
+            val_data_kwargs = _data_kwargs_helper(val_data_kwargs)
+            val_dataset, val_collect_fn_kwargs = val_data_kwargs["dataset"], val_data_kwargs["collect_fn_kwargs"]
+            self.val_dataset = val_dataset
             self.val_dataset = self.val_dataset.map(
                 partial(update_dataset_domain, self.pipeline_config.tag_2_domain),
                 num_proc=self.pipeline_config.actor_train.data_args.preprocessing_num_workers,
@@ -460,11 +244,9 @@ class RLVRVLMPipeline(BasePipeline):
             else:
                 domain_batch_size = int(domain_ratios[domain] * self.pipeline_config.rollout_batch_size)
             accumulated += domain_batch_size
-            generate_scheduler = (
-                ray.remote(DynamicSamplingScheduler).options(
-                    scheduling_strategy=NodeAffinitySchedulingStrategy(
-                        node_id=ray.get_runtime_context().get_node_id(), soft=False
-                    )
+            generate_scheduler = ray.remote(DynamicSamplingScheduler).options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=ray.get_runtime_context().get_node_id(), soft=False
                 )
             ).remote(
                 pipeline_config=self.pipeline_config,
@@ -472,21 +254,10 @@ class RLVRVLMPipeline(BasePipeline):
                 reward_clusters={domain: self.rewards[domain]},
                 dataset=self.domain_datasets[domain],
                 collect_fn_cls=DataCollatorWithPaddingForMM,
-                collect_fn_kwargs=dict(
-                    # tokenizer passed by DynamicSamplingScheduler.set_scheduler
-                    # tokenizer=self.tokenizer,
-                    extra_unpadded_keys=["domain", "reward_model"],
-                    extra_data_provider=get_extra_data_provider(
-                        self.pipeline_config.actor_train.model_args.model_name_or_path, processor=self.processor
-                    ),
-                    prompt_key="prompt",
-                    answer_key="ground_truth",
-                    image_key="images",
-                    image_flag_key="image_flag",
-                    max_length=self.pipeline_config.prompt_length,
-                    padding="max_length",
-                ),
+                collect_fn_kwargs=collect_fn_kwargs,
                 state=self.state.kv.get(f"scheduler_state_{domain}", None),
+                # enable the following line to use dataloader to speedup video loading
+                get_data_item_kwargs=train_data_kwargs.get("get_data_item_kwargs", None),
             )
             self.generate_schedulers[domain] = generate_scheduler
             self.domain_batch_size[domain] = domain_batch_size
@@ -499,11 +270,9 @@ class RLVRVLMPipeline(BasePipeline):
         if self.val_dataset:
             val_pipeline_config = copy.deepcopy(self.pipeline_config)
             val_pipeline_config.is_use_additional_prompts = False
-            self.val_generate_scheduler = (
-                ray.remote(DynamicSamplingScheduler).options(
-                    scheduling_strategy=NodeAffinitySchedulingStrategy(
-                        node_id=ray.get_runtime_context().get_node_id(), soft=False
-                    )
+            self.val_generate_scheduler = ray.remote(DynamicSamplingScheduler).options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=ray.get_runtime_context().get_node_id(), soft=False
                 )
             ).remote(
                 pipeline_config=val_pipeline_config,
@@ -511,22 +280,10 @@ class RLVRVLMPipeline(BasePipeline):
                 reward_clusters=self.rewards,
                 dataset=self.val_dataset,
                 collect_fn_cls=DataCollatorWithPaddingForMM,
-                collect_fn_kwargs=dict(
-                    # tokenizer passed by DynamicSamplingScheduler.set_scheduler
-                    # tokenizer=self.tokenizer,
-                    # val metrics are grouped by tag rather than domain
-                    extra_unpadded_keys=["domain", "reward_model", "tag"],
-                    extra_data_provider=get_extra_data_provider(
-                        self.pipeline_config.actor_train.model_args.model_name_or_path, processor=self.processor
-                    ),
-                    prompt_key="prompt",
-                    answer_key="ground_truth",
-                    image_key="images",
-                    image_flag_key="image_flag",
-                    max_length=self.pipeline_config.prompt_length,
-                    padding="max_length",
-                ),
+                collect_fn_kwargs=val_collect_fn_kwargs,
                 is_val=True,
+                # enable the following line to use dataloader to speedup video loading
+                get_data_item_kwargs=val_data_kwargs.get("get_data_item_kwargs", None),
             )
 
         refs = []
@@ -577,6 +334,7 @@ class RLVRVLMPipeline(BasePipeline):
     @torch.no_grad()
     def run(self):
         metrics_mgr = MetricsManager()
+        tracer = get_tracer("driver")
 
         tps_timer = _Timer(window_size=5)
         actor_infer_timer = _Timer(window_size=5)
@@ -601,7 +359,10 @@ class RLVRVLMPipeline(BasePipeline):
             logger.info(f"pipeline step {global_step} start...")
 
             metrics_mgr.clear_metrics()
-            with tps_timer, Timer(name="step_total", logger=None) as step_total_timer:
+            with (tps_timer, Timer(name="step_total", logger=None) as step_total_timer,
+                tracer.start_as_current_span("pipeline_step", attributes={"global_step": global_step}),
+                ExitStack() as defer,
+            ):
                 logger.info(f"pre_step_total_time: {pre_step_total_time}")
                 metrics_mgr.add_metric("time/step_total", pre_step_total_time)
                 batch: DataProto = DataProto(
@@ -617,13 +378,15 @@ class RLVRVLMPipeline(BasePipeline):
                     self.critic.offload_states(blocking=True)
                 self.actor_train.offload_states(blocking=True)
 
-                with Timer(name="step_stop_server", logger=None) as step_stop_server_timer:
+                with Timer(name="step_stop_server", logger=None) as step_stop_server_timer, \
+                        tracer.start_as_current_span("stop_server"):
                     if self.pipeline_config.async_pipeline:
                         ray.get([scheduler.pause_sampling.remote() for scheduler in self.generate_schedulers.values()])
                         self.actor_infer.offload_states(include=OffloadStateType.other_params)
                 metrics_mgr.add_metric("time/step_stop_server", step_stop_server_timer.last)
 
-                with Timer(name="step_model_update", logger=None) as step_model_update_timer:
+                with Timer(name="step_model_update", logger=None) as step_model_update_timer, \
+                        tracer.start_as_current_span("model_update"):
                     model_update_metrics: Dict = self.model_update(global_step)
                     metrics_mgr.add_metrics(model_update_metrics)
                     batch.meta_info["generation_config"] = self.get_generation_config()
@@ -636,20 +399,20 @@ class RLVRVLMPipeline(BasePipeline):
                         reward_cluster.load_states()
 
                 if self.val_dataset and global_step % self.pipeline_config.eval_steps == 0:
-                    with Timer(name="val_step", logger=None) as val_step_timer:
+                    with Timer(name="val_step", logger=None) as val_step_timer, \
+                            tracer.start_as_current_span("validation"):
                         val_metrics = self.val(global_step=global_step)
                     metrics_mgr.add_metrics(val_metrics)
                     metrics_mgr.add_metric("time/val_step", val_step_timer.last)
 
                 # 要按domain group by生成对应的batch
-                with (
-                    actor_infer_timer,
-                    actor_infer_response_timer,
-                    Timer(name="step_generate", logger=None) as step_generate_timer,
-                ):
+                with actor_infer_timer, actor_infer_response_timer, Timer(
+                    name="step_generate", logger=None
+                ) as step_generate_timer, tracer.start_as_current_span("generate"):
                     domain_batches = {}
                     scheduler_refs = {}
                     for domain, scheduler in self.generate_schedulers.items():
+                        inject_trace_context(batch.meta_info)
                         scheduler_refs[domain] = scheduler.get_batch.remote(
                             data=batch, global_step=global_step, batch_size=self.domain_batch_size[domain]
                         )
@@ -673,30 +436,33 @@ class RLVRVLMPipeline(BasePipeline):
                 metrics_mgr.add_metric("time/step_generate", step_generate_timer.last)
 
                 batch = generate_output
+                defer.callback(lambda b=batch: DataProto.drop(b))
+
                 # mark here to make megatron get_data_input broadcast with non_batch_tensor
                 batch.meta_info["_broadcast_non_tensor_batch"] = True
                 batch.meta_info["loss_mask_keys"] = ["response_mask", "final_response_mask"]
+                batch.non_tensor_batch['sample_uuid'] = np.array([str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object)
+                batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
 
-                batch.non_tensor_batch["sample_uuid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object
-                )
-                with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
+                with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer, \
+                        tracer.start_as_current_span("cal_ref_log_probs"):
                     if self.pipeline_config.enable_reference:
+                        batch_balance(batch, dp_size=self.reference.dp_size, minibatch_size=len(batch))
                         ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
                         metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
                         ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
                         batch = batch.union(ref_log_probs)
                 metrics_mgr.add_metric("time/ref_log_probs_values", cal_ref_log_probs_timer.last)
 
-                with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
+                with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer, \
+                        tracer.start_as_current_span("cal_old_log_probs_values"):
                     batch.meta_info["is_offload_states"] = False
                     if self.pipeline_config.adv_estimator == "gae":
                         values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
 
                     if self.pipeline_config.enable_old_logprobs_recompute:
-                        old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(
-                            batch, blocking=False
-                        )
+                        batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
+                        old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
                         old_log_probs = DataProto.materialize_concat(data_refs=old_log_probs_refs)
                         agg_entropy = agg_loss(
                             loss_mat=old_log_probs.batch["entropy"],
@@ -722,18 +488,22 @@ class RLVRVLMPipeline(BasePipeline):
                 metrics_mgr.add_metric("time/old_log_probs", cal_old_logpb_timer.last)
 
                 # group by domain to process reward
-                batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
+                # Restore original generate order before group_by, so that same-prompt responses
+                # remain contiguous for correct GRPO group reward normalization (reshape by n_sample).
+                batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
                 batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
                 batch_list = []
                 for domain, domain_batch in batch_grouped.items():
                     # 1. get sample level mask
-                    with Timer(name="get_sample_level_mask", logger=None) as get_sample_level_mask_timer:
+                    with Timer(name="get_sample_level_mask", logger=None) as get_sample_level_mask_timer, \
+                            tracer.start_as_current_span("get_sample_level_mask"):
                         domain_batch, mask_metrics = get_sample_level_mask(domain_batch, self.pipeline_config)
                         metrics_mgr.add_domain_metrics(domain, mask_metrics)
                     metrics_mgr.add_metric("time/get_sample_level_mask", get_sample_level_mask_timer.last)
 
                     # 2. process reward
-                    with Timer(name="reward_postprocess", logger=None) as reward_postprocess_timer:
+                    with Timer(name="reward_postprocess", logger=None) as reward_postprocess_timer, \
+                            tracer.start_as_current_span("reward_postprocess"):
                         domain_batch, response_level_metrics = reward_postprocess(
                             domain_batch, self.pipeline_config, self.running
                         )
@@ -741,7 +511,8 @@ class RLVRVLMPipeline(BasePipeline):
                     metrics_mgr.add_domain_metrics(domain, {"time/reward_postprocess": reward_postprocess_timer.last})
 
                     # 3. compute token level rewards
-                    with Timer(name="get_token_reward", logger=None) as get_token_reward_timer:
+                    with Timer(name="get_token_reward", logger=None) as get_token_reward_timer, \
+                            tracer.start_as_current_span("get_token_reward"):
                         domain_batch, token_level_metrics = compute_token_reward(
                             domain_batch, self.pipeline_config, self.kl_ctrl
                         )
@@ -750,7 +521,8 @@ class RLVRVLMPipeline(BasePipeline):
 
                     # 4. compute advantage
                     final_response_mask = domain_batch.batch["final_response_mask"].clone()
-                    with Timer(name="compute_advantage", logger=None) as compute_advantage_timer:
+                    with Timer(name="compute_advantage", logger=None) as compute_advantage_timer, \
+                            tracer.start_as_current_span("compute_advantage"):
                         domain_batch = compute_advantage(
                             data=domain_batch,
                             gamma=self.pipeline_config.gamma,
@@ -801,13 +573,24 @@ class RLVRVLMPipeline(BasePipeline):
                     batch, corr_metrics = apply_train_infer_correction_to_batch(self.pipeline_config, batch)
                     metrics_mgr.add_metrics(corr_metrics)
 
-                with Timer(name="step_train", logger=None) as step_train_timer:
+                with Timer(name="step_train", logger=None) as step_train_timer, \
+                        tracer.start_as_current_span("train"):
                     if self.pipeline_config.adv_estimator == "gae":
                         critic_train_metrics_refs: List[ray.ObjectRef] = self.critic.train_step(batch, blocking=False)
 
                     with actor_train_timer:
                         # implement critic warmup
                         if self.pipeline_config.critic_warmup <= global_step:
+                            # Reorder data for DP rank load balancing
+                            batch_balance_metrics = batch_balance(
+                                batch,
+                                dp_size=self.actor_train.dp_size,
+                                minibatch_size=self.pipeline_config.actor_train.training_args.per_device_train_batch_size
+                                * self.pipeline_config.actor_train.training_args.gradient_accumulation_steps
+                                * self.actor_train.dp_size,
+                                logging_prefix="global_seqlen/actor_train",
+                            )
+                            metrics_mgr.add_metrics(batch_balance_metrics)
                             # update actor
                             actor_train_metrics_refs = self.actor_train.train_step(batch, blocking=False)
                             actor_train_metrics: DataProto = DataProto.materialize_concat(
@@ -867,25 +650,29 @@ class RLVRVLMPipeline(BasePipeline):
 
     @torch.no_grad()
     def val(self, global_step):
+        defer = ExitStack()
         val_metrics_mgr = MetricsManager()
+        tracer = get_tracer("driver")
         batch = DataProto()
 
-        with Timer(name="step_generate", logger=None) as step_generate_timer:
+        with Timer(name="step_generate", logger=None) as step_generate_timer, \
+                tracer.start_as_current_span("val_generate"):
+            inject_trace_context(batch.meta_info)
             batch.meta_info["is_offload_states"] = False
             batch.meta_info["generation_config"] = self.pipeline_config.validation.generating_args.to_dict()
             batch.meta_info.update(
                 {"global_step": self.global_step, "max_steps": self.pipeline_config.max_steps, "is_training": False}
             )
             generate_output: DataProto = ray.get(
-                self.val_generate_scheduler.get_batch.remote(
-                    data=batch, global_step=global_step, batch_size=len(self.val_dataset)
-                ),
+                self.val_generate_scheduler.get_batch.remote(data=batch, global_step=global_step, batch_size=len(self.val_dataset)),
                 timeout=self.pipeline_config.rpc_timeout,
             )
             generate_output.meta_info.pop("is_offload_states", None)
             val_metrics_mgr.add_metric("time/step_generate", step_generate_timer.last)
 
         batch = generate_output
+        defer.callback(lambda b=batch: DataProto.drop(b))
+
         val_score_mean = batch.batch["scores"].detach().float().mean().item()
         val_metrics_mgr.add_metric("val_score/all/mean", val_score_mean)
         logger.info(json.dumps({"val_score/all/mean": val_score_mean}, ensure_ascii=False))
@@ -900,4 +687,5 @@ class RLVRVLMPipeline(BasePipeline):
                 "val_score", {f"{group_key}/mean": group_batch.batch["scores"].detach().float().mean().item()}
             )
 
+        defer.close()
         return val_metrics_mgr.get_metrics()

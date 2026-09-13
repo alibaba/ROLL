@@ -235,8 +235,6 @@ class LogMonitorListener:
         subprocess.run(cmd, shell=True, capture_output=True)
 
     def start(self):
-        atexit.register(self.stop)
-
         if self.rank == 0:
             self.exception_monitor = ExceptionMonitor.options(
                 name=EXCEPTION_MONITOR_ACTOR_NAME, get_if_exists=True, namespace=RAY_NAMESPACE

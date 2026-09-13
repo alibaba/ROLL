@@ -1,6 +1,6 @@
 # Ascend NPU Environment Configuration Guide
 
-Last updated: 04/27/2026.
+Last updated: 08/17/2026.
 
 This document describes the key environment variables for running ROLL on Huawei Ascend NPU, covering device management, HCCL communication, memory optimization, CPU scheduling, vLLM-Ascend inference, and debugging.
 
@@ -24,6 +24,7 @@ The pre-built Ascend images described in [Ascend NPU Docker Usage Guide](ascend_
 | -------- | ----- | ----------- |
 | `ASCEND_HOME_PATH` | `/usr/local/Ascend/ascend-toolkit/latest` | CANN toolkit root path |
 | `LD_LIBRARY_PATH` | Includes multiple Ascend `lib64` paths | Dynamic library search path, ensures `libascendcl.so` etc. can be loaded |
+| `HCCL_NPU_SOCKET_PORT_RANGE` | `auto` | Allows HCCL to allocate non-default device-side NIC ports for same-device multi-process workloads |
 
 The following CANN environment scripts are automatically sourced via `/root/.bashrc` in the pre-built images:
 
@@ -79,6 +80,7 @@ These variables control the behavior of HCCL (Huawei Collective Communication Li
 | `HCCL_DETERMINISTIC` | `false` | Disable deterministic computation. Enabling it significantly reduces communication performance |
 | `HCCL_OP_EXPANSION_MODE` | `"AIV"` | Communication algorithm dispatch location. `AIV` uses Vector Core, outperforms `AI_CPU`/`HOST`/`HOST_TS` |
 | `HCCL_BUFFSIZE` | e.g. `"2147483648"` | HCCL communication buffer size in bytes. Increase for large data volume scenarios |
+| `HCCL_NPU_SOCKET_PORT_RANGE` | `auto` | Allow HCCL to allocate non-default device-side NIC ports when multiple worker processes run on the same NPU |
 | `HCCL_IF_IP` | Node's IP address | Specify the IP address used by HCCL for inter-node communication. Required for multi-node training |
 | `HCCL_SOCKET_IFNAME` | e.g. `"enp194s0f0"` | Network interface name for HCCL socket communication. Must be consistent across all nodes |
 | `HCCL_IF_BASE_PORT` | e.g. `23456` | Base port for HCCL inter-node communication. Ensure ports are not blocked by firewall |
@@ -90,6 +92,7 @@ Example (single-node):
 export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 ```
 
 Example (multi-node):
@@ -99,6 +102,7 @@ export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_EXEC_TIMEOUT=3600
 export HCCL_DETERMINISTIC=false
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_NPU_SOCKET_PORT_RANGE="auto"
 export HCCL_IF_IP=$(hostname -I | awk '{print $1}')
 export HCCL_SOCKET_IFNAME="enp194s0f0"
 export HCCL_IF_BASE_PORT=23456
@@ -148,11 +152,11 @@ export CPU_AFFINITY_CONF=1,npu0:0-1,npu1:2-3,npu2:4-5,npu3:6-7
 
 | Variable | Recommended Value | Description |
 | -------- | ----------------- | ----------- |
-| `VLLM_USE_V1` | `1` | Enable vLLM V1 architecture. Required for vLLM-Ascend |
+| `VLLM_USE_V1` | `1` | Keep the current ROLL vLLM path enabled. ROLL sets this to `1` by default; vLLM versions >= 0.11.1 deprecate this switch |
 | `VLLM_ATTENTION_BACKEND` | `XFORMERS` | vLLM attention computation backend |
+| `VLLM_ASCEND_ENABLE_NZ` | `0` | Disable FRACTAL_NZ for ROLL reinforcement-learning weight reload flows |
 | `VLLM_ASCEND_ENABLE_FLASHCOMM` | `1` | Enable Ascend FlashComm high-speed communication optimization |
-| `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE` | `1` | Enable dense computation optimization for large model inference |
-| `VLLM_ASCEND_ENABLE_PREFETCH_MLP` | `1` | Enable MLP layer weight prefetching |
+| `VLLM_ASCEND_ENABLE_PREFETCH_MLP` | `1` | Enable MLP layer weight prefetching. This replaces the older dense optimize toggle in current vLLM-Ascend releases. |
 | `VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE` | `1` | Enable TopK operator fusion optimization for generation decoding |
 | `VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE` | `1` | Print prefill/decode phase timing details (for debugging) |
 | `VLLM_ASCEND_TRACE_RECOMPILES` | `1` | Trace operator recompilation for debugging performance issues |
@@ -164,8 +168,28 @@ Example:
 export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
+```
+
+:::note
+The memory and task-queue recommendations above apply to FSDP2 training and general NPU workloads. ROLL's vLLM workers override `TASK_QUEUE_ENABLE` to `1`, clear `PYTORCH_NPU_ALLOC_CONF`, and set `VLLM_ASCEND_ENABLE_NZ=0` for vLLM runtime stability.
+:::
+
+## vLLM-Ascend Build Variables
+
+The following variable is used when building vLLM-Ascend from source. Set it before `pip install -e .`; it does not need to be exported for every ROLL run.
+
+| Variable | Recommended Value | Description |
+| -------- | ----------------- | ----------- |
+| `COMPILE_CUSTOM_KERNELS` | `1` for Ascend 950 | Compile vLLM-Ascend custom kernels. Required by the Ascend 950 installation profile that uses vLLM-Ascend `main`. |
+
+Example (Ascend 950):
+
+```bash
+git clone -b main --depth 1 https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+export COMPILE_CUSTOM_KERNELS=1
+pip install -v -e .
 ```
 
 ## CANN Logging & Debugging Variables
@@ -243,7 +267,6 @@ export OMP_NUM_THREADS=1
 # vLLM-Ascend inference
 export VLLM_USE_V1=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # Operator compilation cache

@@ -1,8 +1,9 @@
 import asyncio
 import random
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import ray
+import pytest
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from roll.distributed.scheduler.rollout_scheduler import (
@@ -12,11 +13,12 @@ from roll.distributed.scheduler.rollout_scheduler import (
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.agentic.agentic_pipeline import GroupFilter
+from roll.pipeline.agentic.agentic_config import EnvMonitorConfig
 
 
 FULL_DATASET_ITER=4
 
-class TestGroupFilter(GroupFilter):
+class MockGroupFilter(GroupFilter):
     def filter(self, group_id: int, episode_id: int, group: list[DataProto]):
         return episode_id % 3 == 0
 
@@ -24,6 +26,7 @@ class TestGroupFilter(GroupFilter):
 class MockAgenticConfig:
     async_generation_ratio: int
     rollout_batch_size: int
+    env_monitor: EnvMonitorConfig = field(default_factory=lambda: EnvMonitorConfig(enable=False))
 
 class MockEnvManagerConfig:
     def __init__(
@@ -42,7 +45,7 @@ class MockEnvManagerConfig:
         self.group_size_redundancy = group_size_redundancy if enable_redundancy else 0
         self.final_group_size = group_size + self.group_size_redundancy
         if enable_filter:
-            self.group_filter_cls = "tests.distributed.scheduler.test_rollout_scheduler.TestGroupFilter"
+            self.group_filter_cls = "tests.distributed.scheduler.test_rollout_scheduler.MockGroupFilter"
         else:
             self.group_filter_cls = "roll.pipeline.agentic.agentic_pipeline.GroupFilter"
 
@@ -76,8 +79,8 @@ class MockEnvironmentWorker:
             else:
                 start_step = self.current_step
             assert start_step is not None
-            DataProto(meta_info={"global_step": start_step})
-            ray.get(self.output_queue.put.remote(self.group_id, episode_id, start_step, (start_step, episode_id)))
+            rollout = DataProto(meta_info={"rollout": (start_step, episode_id)})
+            ray.get(self.output_queue.put.remote(self.group_id, episode_id, start_step, rollout))
         ray.get(self.output_queue.put.remote(self.group_id, episode_id, start_step, None))
 
 class MockEnvManager(Worker):
@@ -157,6 +160,17 @@ class MockRolloutScheduler(RolloutScheduler):
 
         self.rollout_task = None
 
+    async def suspend(self):
+        await self.generate_scheduler.suspend.remote()
+
+    async def shutdown(self):
+        if self.rollout_task is None:
+            return
+        await asyncio.gather(*self.es_manager.stop(blocking=False))
+        await self.env_output_queue.shutdown.remote()
+        await self.rollout_task
+        self.rollout_task = None
+
     # FIXME use RolloutScheduler.get_batch
     async def get_batch(self, data: DataProto, batch_size):
         global_step = data.meta_info["global_step"]
@@ -204,51 +218,56 @@ async def async_test_GroupQueueManager(rollout_batch_size, async_generation_rati
         await scheduler.suspend.remote()
         batch = await scheduler.get_batch.remote(data=data, batch_size=rollout_batch_size)
 
-        print(f"batch on step({current_step}): {[rollout[0] for rollout in batch]}")
+        rollout_steps = [rollout.meta_info["rollout"][0] for rollout in batch]
+        print(f"batch on step({current_step}): {rollout_steps}")
         expected = FULL_DATASET_ITER * env_manager_config.env_groups * env_manager_config.group_size if rollout_batch_size <= 0 else rollout_batch_size
         assert len(batch) == expected, f"{len(batch)=} expected={expected}"
-        assert all(rollout[0] == batch[0][0] for rollout in batch), "Not all start_step are equal"
+        assert all(step == rollout_steps[0] for step in rollout_steps), "Not all start_step are equal"
         assert (
-            all(max(0, current_step - async_generation_ratio) == rollout[0] for rollout in batch)
-        ), f"current_step({current_step}) - rollout_step({batch[0][0]}) exceed async_generation_ratio"
+            all(max(0, current_step - async_generation_ratio) == step for step in rollout_steps)
+        ), f"current_step({current_step}) - rollout_step({rollout_steps[0]}) exceed async_generation_ratio"
 
         await asyncio.sleep(1)
     await scheduler.shutdown.remote()
 
-def test_GroupQueueManager():
-    loop = asyncio.get_event_loop()
-
+async def _run_GroupQueueManager():
     # default_setting:
     #   env_num=16
 
     # batch_size = -1
-    loop.run_until_complete(async_test_GroupQueueManager(-1, 0, enable_filter=False, enable_redundancy=False))
+    await async_test_GroupQueueManager(-1, 0, enable_filter=False, enable_redundancy=False)
 
     # sync training
-    loop.run_until_complete(async_test_GroupQueueManager(16, 0))
-    loop.run_until_complete(async_test_GroupQueueManager(8, 0))
-    loop.run_until_complete(async_test_GroupQueueManager(24, 0))
-    loop.run_until_complete(async_test_GroupQueueManager(32, 0))
-    loop.run_until_complete(async_test_GroupQueueManager(64, 0))
+    await async_test_GroupQueueManager(16, 0)
+    await async_test_GroupQueueManager(8, 0)
+    await async_test_GroupQueueManager(24, 0)
+    await async_test_GroupQueueManager(32, 0)
+    await async_test_GroupQueueManager(64, 0)
 
     # async training: 2
-    loop.run_until_complete(async_test_GroupQueueManager(16, 2))
-    loop.run_until_complete(async_test_GroupQueueManager(8, 2))
+    await async_test_GroupQueueManager(16, 2)
+    await async_test_GroupQueueManager(8, 2)
     # do not test batch_size 12, because 12 % group_size != 0
-    loop.run_until_complete(async_test_GroupQueueManager(24, 2))
-    loop.run_until_complete(async_test_GroupQueueManager(32, 2))
-    loop.run_until_complete(async_test_GroupQueueManager(64, 2))
+    await async_test_GroupQueueManager(24, 2)
+    await async_test_GroupQueueManager(32, 2)
+    await async_test_GroupQueueManager(64, 2)
 
     # async training: 7
-    loop.run_until_complete(async_test_GroupQueueManager(16, 7))
-    loop.run_until_complete(async_test_GroupQueueManager(8, 7))
+    await async_test_GroupQueueManager(16, 7)
+    await async_test_GroupQueueManager(8, 7)
 
     # async training: 1
-    loop.run_until_complete(async_test_GroupQueueManager(16, 1))
-    loop.run_until_complete(async_test_GroupQueueManager(8, 1))
-    loop.run_until_complete(async_test_GroupQueueManager(24, 1))
-    loop.run_until_complete(async_test_GroupQueueManager(32, 1))
-    loop.run_until_complete(async_test_GroupQueueManager(64, 1))
+    await async_test_GroupQueueManager(16, 1)
+    await async_test_GroupQueueManager(8, 1)
+    await async_test_GroupQueueManager(24, 1)
+    await async_test_GroupQueueManager(32, 1)
+    await async_test_GroupQueueManager(64, 1)
+
+
+# Takes about 10 minutes in NPU CI, so skip this full queue-manager matrix there.
+@pytest.mark.skip_on_npu
+def test_GroupQueueManager():
+    asyncio.run(_run_GroupQueueManager())
 
 if __name__ == "__main__":
     test_GroupQueueManager()

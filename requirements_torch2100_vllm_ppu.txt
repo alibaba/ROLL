@@ -1,0 +1,9 @@
+-r requirements_common.txt
+
+# torch==2.10.0+ppu / vllm==0.17.1+ppu / flash-attn / transformer-engine / deepspeed are
+# preinstalled in the PPU base image (custom builds) and pinned by docker/constraints_ppu.txt;
+# do not install them again here.
+
+# Qwen3.5 (qwen3_5) model support requires transformers >= 5.2.0
+transformers==5.2.0
+accelerate==1.14.0

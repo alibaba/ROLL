@@ -370,7 +370,7 @@ class VLTrajEnvManager(TrajEnvManager):
         assert messages, f"empty messages with {history=}"
         add_generation_prompt = False if messages[-1]["role"] == "assistant" else True
         lm_input_texts = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=add_generation_prompt, tokenize=False
+            messages, add_generation_prompt=add_generation_prompt, tokenize=False, return_dict=False
         )
         feature = {
             self.collator.prompt_key: lm_input_texts,

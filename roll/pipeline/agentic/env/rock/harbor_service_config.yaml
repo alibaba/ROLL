@@ -1,0 +1,59 @@
+experiment_id: "rock_swe_test"
+
+datasets:
+  - name: "SWE-Env/SWE-Env"
+    registry:
+      split: ""
+    task_names:
+      - ""
+
+environment:
+  env:
+    INSTANCE_ID: ""
+    DATASET: "SWE-Env/SWE-Env"
+    SPLIT: ""
+  base_url: ""
+  xrl_authorization: ""
+  user_id: ""
+  image: ""
+  memory: "18g"
+  override_memory_mb: 16384
+  cpus: 4
+  startup_timeout: 1800
+  cluster: ""
+  auto_clear_seconds: 300
+  oss_deps:
+    "xxx": "xxx"
+  oss_mirror:
+    enabled: true
+    oss_bucket: ""
+    oss_access_key_id: ""
+    oss_access_key_secret: ""
+    oss_region: ""
+    oss_endpoint: ""
+
+agents:
+  - name: "swe-agent"
+    model_name: "openai/GLM"
+    kwargs:
+      api_key: ""
+      api_base: ""
+      sweagent_config: "anthropic"
+      max_iterations: 200
+      temperature: "1.0"
+      max_tokens: 8192
+      num_retries: 4
+      tools_parse_function: "function_calling"
+      max_observation_length: 10000
+      full_history: true
+
+orchestrator:
+  n_concurrent_trials: 1
+
+agent_setup_timeout_multiplier: 3
+
+verifier:
+  mode: native
+  native_config:
+    template:
+      name: swe-agent/SWE-Gym/SWE-Gym

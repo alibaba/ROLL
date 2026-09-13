@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 
 
 # force each expert to participate in computation graph so FSDP could gather all expert outputs
@@ -34,3 +35,55 @@ def qwen3_moe_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
     final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
     return final_hidden_states, router_logits
+
+
+def _iter_convert_fsdps_moe_weights(named_params):
+    """
+    Lazily convert FSDP MoE weights from FSDP format to HF/vLLM expected format.
+
+    Yields (name, tensor, full_tensor_size) one at a time so that the caller can
+    control memory by batching into buffers. For expert parameters stored as
+    DTensors (EP mode), full_tensor() is called here to gather the shards, but
+    because this is a generator the full tensor is only materialized when the
+    caller consumes the item.
+
+    FSDP format:
+        - layers.0.mlp.experts.gate_up_proj: [num_experts, 2 * intermediate_dim, hidden_dim]
+        - layers.0.mlp.experts.down_proj: [num_experts, hidden_dim, intermediate_dim]
+
+    Expected format:
+        - layers.0.mlp.experts.0.gate_proj.weight: [intermediate_dim, hidden_dim]
+        - layers.0.mlp.experts.0.up_proj.weight:   [intermediate_dim, hidden_dim]
+        - layers.0.mlp.experts.0.down_proj.weight: [hidden_dim, intermediate_dim]
+    """
+    for name, param in named_params:
+        if "experts.gate_up_proj" in name:
+            if isinstance(param, DTensor):
+                param = param.full_tensor()
+
+            gate_proj, up_proj = torch.chunk(param, 2, dim=1)
+            num_experts = gate_proj.shape[0]
+
+            for expert_idx in range(num_experts):
+                gate_name = name.replace("gate_up_proj", f"{expert_idx}.gate_proj.weight")
+                up_name = name.replace("gate_up_proj", f"{expert_idx}.up_proj.weight")
+                yield gate_name, gate_proj[expert_idx]
+                yield up_name, up_proj[expert_idx]
+
+            # Allow GC to reclaim the full tensor once all slices are yielded
+            del param, gate_proj, up_proj
+
+        elif "experts.down_proj" in name:
+            if isinstance(param, DTensor):
+                param = param.full_tensor()
+
+            num_experts = param.shape[0]
+
+            for expert_idx in range(num_experts):
+                down_name = name.replace("down_proj", f"{expert_idx}.down_proj.weight")
+                yield down_name, param[expert_idx]
+
+            del param
+
+        else:
+            yield name, param

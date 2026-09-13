@@ -15,7 +15,8 @@ def test_load_balance_packer():
     # 创建配置
     config = SequencePackingConfig(
         algorithm="load_balance",
-        max_packed_sequence_length=4096
+        max_packed_sequence_length_forward=4096,
+        max_packed_sequence_length_train=4096,
     )
 
     # 创建 packer
@@ -31,7 +32,7 @@ def test_load_balance_packer():
     print(f"原始数据:")
     print(f"{'=' * 80}")
     print(f"总样本数: {batch_size}")
-    print(f"最大序列长度配置: {config.max_packed_sequence_length}")
+    print(f"最大序列长度配置: {config.max_packed_sequence_length_forward}")
     print(f"\n各样本的序列长度:")
     for idx, length in enumerate(sequence_lengths):
         print(f"  样本 {idx}: {length} tokens")

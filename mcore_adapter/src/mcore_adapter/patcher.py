@@ -3,7 +3,13 @@ import sys
 from bisect import bisect_right, insort
 from typing import Optional
 
+import megatron.core.transformer.moe.router
 import torch
+from megatron.core.transformer.moe.moe_utils import (
+    get_tokens_per_expert_and_token_count,
+    save_to_aux_losses_tracker,
+    switch_load_balancing_loss_func,
+)
 from torch.distributed._shard.metadata import ShardMetadata
 from torch.distributed._shard.sharding_spec._internals import _check_shard_metadata_pair_overlap
 from torch.distributed.checkpoint.default_planner import (
@@ -157,3 +163,134 @@ def patch_torch_validate_global_plan():
         return all_good
 
     torch.distributed.checkpoint.default_planner._validate_global_plan = _validate_global_plan
+
+
+def patch_hybrid_optimizer():
+    def _update_fp32_params_by_new_state(self):
+        if not self.param_update_in_fp32 or not self.param_to_fp32_param:
+            return
+        for param, v in self.state.items():
+            fp32_param = self.param_to_fp32_param[param]
+            fp32_param.data.copy_(v["master_param"])
+
+    from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import HybridDeviceOptimizer
+
+    HybridDeviceOptimizer._update_fp32_params_by_new_state = _update_fp32_params_by_new_state
+
+
+def patch_megatron_preload_tensors_non_blocking(non_blocking: bool = False):
+    """
+    Patch FileSystemWriterAsync.get_save_function_and_args to control the
+    non_blocking parameter passed to preload_tensors during async checkpoint D2H.
+
+    On certain GPU+CPU hardware combinations, async D2H (non_blocking=True) in
+    Megatron's checkpoint saving can cause segmentation faults. This patch
+    allows controlling the non_blocking behavior via McoreAdapter's args.
+
+    This patch is compatible with Megatron-Core versions (>=0.13.0),
+    as the get_save_function_and_args API signature is identical across versions.
+
+    Args:
+        non_blocking (bool): Whether to use non_blocking D2H transfer.
+            Default is False (synchronous, safe for all hardware).
+    """
+    if non_blocking:
+        logger.info("Skip patch mcore preload_tensors when non_blocking=True...")
+        return
+
+    try:
+        from megatron.core.dist_checkpointing.strategies.filesystem_async import (
+            FileSystemWriterAsync,
+        )
+    except ImportError:
+        logger.warning("megatron.core.dist_checkpointing not available, skipping preload_tensors patch")
+        return
+
+    import inspect
+    from functools import partial
+
+    _original_get_save_function_and_args = FileSystemWriterAsync.get_save_function_and_args
+
+    def patched_get_save_function_and_args(self):
+        result = _original_get_save_function_and_args(self)
+
+        if len(result) != 3:
+            logger.warning(
+                f"The return vals of get_save_function_and_args is not 3, skipping preload_tensors patch, check the mcore version."
+            )
+            return result
+
+        save_fn, _preload_fn, args = result
+        if _preload_fn is None:
+            return result
+
+        params = list(inspect.signature(_preload_fn.func).parameters.keys())
+        if "non_blocking" not in params:
+            logger.warning("preload_tensors no longer has 'non_blocking' parameter, skipping patch")
+            return result
+
+        # Override preload_fn with configured non_blocking value
+        new_args = list(_preload_fn.args)
+        non_blocking_idx = params.index("non_blocking")
+        new_args[non_blocking_idx] = non_blocking
+        preload_fn = partial(_preload_fn.func, *new_args)
+        return (save_fn, preload_fn, args)
+
+    logger.info(
+        f"Patched FileSystemWriterAsync.get_save_function_and_args with non_blocking={non_blocking} for D2H transfers"
+    )
+    FileSystemWriterAsync.get_save_function_and_args = patched_get_save_function_and_args
+
+
+def patch_apply_aux_loss():
+    def _apply_aux_loss(
+        self,
+        probs: torch.Tensor,
+        scores_for_aux_loss: torch.Tensor,
+        routing_map: torch.Tensor,
+        with_padding_mask: bool = False,
+    ):
+        """Apply the auxiliary loss for the given scores and routing map."""
+        aux_loss_coeff = self.get_aux_loss_coeff("aux_loss")
+        if aux_loss_coeff == 0:
+            return probs
+
+        global_tokens_per_expert, local_num_tokens, total_num_tokens = get_tokens_per_expert_and_token_count(
+            routing_map=routing_map,
+            reduce_group=self.tp_cp_group,
+            topk=self.topk,
+            with_padding_mask=with_padding_mask,
+        )
+        tokens_per_expert_for_statistics = global_tokens_per_expert.detach().clone()
+        num_layers = self.config.num_layers
+        if self.config.mtp_num_layers is not None:
+            num_layers += self.config.mtp_num_layers
+        save_to_aux_losses_tracker(
+            "expert_distributed_std",
+            torch.std(tokens_per_expert_for_statistics.to(torch.float), unbiased=False),
+            self.layer_number,
+            num_layers,
+        )
+        save_to_aux_losses_tracker(
+            "max_token_per_expert", torch.max(tokens_per_expert_for_statistics), self.layer_number, num_layers
+        )
+        aux_loss = switch_load_balancing_loss_func(
+            probs=scores_for_aux_loss,
+            tokens_per_expert=global_tokens_per_expert,
+            total_num_tokens=total_num_tokens,
+            topk=self.topk,
+            num_experts=self.config.num_moe_experts,
+            moe_aux_loss_coeff=aux_loss_coeff,
+            fused=self.config.moe_router_fusion,
+        )
+        probs = self.attach_and_log_load_balancing_loss(
+            probs,
+            aux_loss_coeff,
+            aux_loss,
+            "load_balancing_loss",
+            self.tp_cp_group,
+            valid_token_count=local_num_tokens,
+        )
+        return probs
+
+    megatron.core.transformer.moe.router.TopKRouter._apply_aux_loss = _apply_aux_loss

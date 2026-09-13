@@ -18,7 +18,6 @@ from transformers import (
     TrainingArguments,
 )
 from transformers.dynamic_module_utils import get_cached_module_file
-from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import is_fsdp_enabled
 
 from roll.configs import ModelArguments
@@ -81,8 +80,6 @@ def prepare_automap_files(model_path: str):
 
 
 def default_tokenizer_provider(model_args: "ModelArguments", model_name_or_path: str = None):
-    if model_args.model_type == "diffusion_module":
-        return None
     if model_name_or_path is None:
         model_name_or_path = model_args.model_name_or_path
     model_name_or_path = download_model(model_name_or_path)
@@ -98,8 +95,6 @@ def default_tokenizer_provider(model_args: "ModelArguments", model_name_or_path:
 
 
 def default_processor_provider(model_args: "ModelArguments", model_name_or_path: str = None):
-    if model_args.model_type == "diffusion_module":
-        return None
     if model_name_or_path is None:
         model_name_or_path = model_args.model_name_or_path
     model_name_or_path = download_model(model_args.model_name_or_path)
@@ -224,13 +219,11 @@ def load_model(
     if model_args.moe_aux_loss_coef is not None:
         setattr(config, "router_aux_loss_coef", model_args.moe_aux_loss_coef)
         setattr(config, "output_router_logits", is_trainable)
-    init_kwargs["low_cpu_mem_usage"] = not is_deepspeed_zero3_enabled() and not is_fsdp2_enabled()
+    init_kwargs["low_cpu_mem_usage"] = not is_fsdp2_enabled()
 
-    # TODO: Shall we need the compute_dtype? Check the necessity.
-    if not is_deepspeed_zero3_enabled():
-        init_kwargs["torch_dtype"] = model_args.compute_dtype
+    init_kwargs["torch_dtype"] = model_args.compute_dtype
 
-    if not is_deepspeed_zero3_enabled() and not is_fsdp_or_fsdp2_enabled():
+    if not is_fsdp_or_fsdp2_enabled():
         if init_kwargs["low_cpu_mem_usage"]:  # device map requires low_cpu_mem_usage=True
             if "device_map" not in init_kwargs and model_args.device_map:
                 init_kwargs["device_map"] = model_args.device_map
@@ -285,16 +278,12 @@ def load_model(
 
         vhead_params = load_valuehead_params(model_name_or_path)
         if vhead_params is not None:
-            if is_deepspeed_zero3_enabled():
-                import deepspeed  # type: ignore
-
-                params = [param for _, param in model.v_head.named_parameters(recurse=False)]
-                with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
-                    if torch.distributed.get_rank() == 0:
-                        model.load_state_dict(vhead_params, strict=False)
-            else:
-                model.load_state_dict(vhead_params, strict=False)
+            model.load_state_dict(vhead_params, strict=False)
             logger.info("Loaded valuehead from checkpoint: {}".format(model_name_or_path))
+
+        # Ensure v_head dtype matches pretrained_model to avoid FSDP2 "uniform dtype" errors
+        if hasattr(model, "v_head") and model_args.compute_dtype is not None:
+            model.v_head.to(model_args.compute_dtype)
 
     if not is_trainable:
         model.requires_grad_(False)
@@ -448,23 +437,6 @@ def patch_model(model, config, use_mcore):
             setattr(model, "_roll_forward_patched", True)
 
 
-def default_diffusion_module_provider(
-    tokenizer: None,
-    model_args: ModelArguments,
-    training_args: TrainingArguments = None,
-    is_trainable: Optional[bool] = False,
-):
-    if model_args.model_config_kwargs["model_name"] == "wan2_2":
-        from roll.pipeline.diffusion.modules.wan_module import WanTrainingModule
-
-        print(f"{model_args.model_config_kwargs=}")
-        training_module = WanTrainingModule(**model_args.model_config_kwargs)
-    else:
-        raise NotImplementedError(f"model_type {model_args.model_type} not implemented yet")
-
-    return training_module
-
-
 def default_actor_model_provider(
     tokenizer: "PreTrainedTokenizer",
     model_args: "ModelArguments",
@@ -486,8 +458,6 @@ def default_actor_model_provider(
         model = AutoModel.from_pretrained(model_args.model_name_or_path, training_args)
         if is_trainable:
             model.train()
-            for param in model.parameters():
-                param.requires_grad = True
         else:
             model.eval()
             for param in model.parameters():
@@ -505,7 +475,7 @@ def default_actor_model_provider(
             "torch_dtype": model_args.compute_dtype,
             "trust_remote_code": True,
         }
-        if not is_deepspeed_zero3_enabled() and not is_fsdp2_enabled():
+        if not is_fsdp2_enabled():
             init_kwargs["low_cpu_mem_usage"] = True
             if is_trainable:
                 init_kwargs["device_map"] = {"": current_platform.current_device()}
@@ -515,7 +485,8 @@ def default_actor_model_provider(
                 init_kwargs["device_map"] = "balanced"
         logger.info(f"init_kwargs: {init_kwargs}")
         model = load_model(model_args, is_trainable, False)
-        if model.config.pad_token_id is None:
+        # model.config may not have pad_token_id
+        if getattr(model.config, "pad_token_id", None) is None:
             model.config.pad_token_id = tokenizer.pad_token_id
         patch_model(model, config, use_mcore=False)
 
@@ -553,12 +524,11 @@ def default_reward_model_provider(
             "torch_dtype": model_args.compute_dtype,
             "trust_remote_code": True,
         }
-        if not is_deepspeed_zero3_enabled():
-            init_kwargs["low_cpu_mem_usage"] = True
-            if is_trainable:
-                init_kwargs["device_map"] = {"": current_platform.current_device()}
-            elif model_args.device_map:
-                init_kwargs["device_map"] = model_args.device_map
+        init_kwargs["low_cpu_mem_usage"] = True
+        if is_trainable:
+            init_kwargs["device_map"] = {"": current_platform.current_device()}
+        elif model_args.device_map:
+            init_kwargs["device_map"] = model_args.device_map
         logger.info(f"init_kwargs: {init_kwargs}")
         if model_args.model_type in ["auto_sequence_classification"]:
             logger.info(f"use AutoModelForSequenceClassification model {model_args.model_type}")
@@ -606,7 +576,8 @@ def default_reward_model_provider(
             logger.info("patch AutoModelForCausalLMWithValueHead load_state_dict and forward")
         else:
             raise NotImplementedError
-        if model.config.pad_token_id is None:
+        # model.config may not have pad_token_id
+        if getattr(model.config, "pad_token_id", None) is None:
             model.config.pad_token_id = tokenizer.pad_token_id
 
     model_args.model_name_or_path = old_model_name_or_path
@@ -638,12 +609,11 @@ def default_value_model_provider(
             "torch_dtype": model_args.compute_dtype,
             "trust_remote_code": True,
         }
-        if not is_deepspeed_zero3_enabled():
-            init_kwargs["low_cpu_mem_usage"] = True
-            if is_trainable:
-                init_kwargs["device_map"] = {"": current_platform.current_device()}
-            elif model_args.device_map:
-                init_kwargs["device_map"] = model_args.device_map
+        init_kwargs["low_cpu_mem_usage"] = True
+        if is_trainable:
+            init_kwargs["device_map"] = {"": current_platform.current_device()}
+        elif model_args.device_map:
+            init_kwargs["device_map"] = model_args.device_map
         logger.info(f"init_kwargs: {init_kwargs}")
         if model_args.model_type in ["auto_token_classification"]:
             logger.info(f"use AutoModelForTokenClassification model {model_args.model_type}")
@@ -677,7 +647,8 @@ def default_value_model_provider(
             )
         else:
             raise NotImplementedError
-        if model.config.pad_token_id is None:
+        # model.config may not have pad_token_id
+        if getattr(model.config, "pad_token_id", None) is None:
             model.config.pad_token_id = tokenizer.pad_token_id
 
     model_args.model_name_or_path = old_model_name_or_path
@@ -902,4 +873,7 @@ def _is_moe_config(cfg) -> bool:
         "output_router_logits",
         "moe_layer_freq",
     )
+    # Use text config to check moe for multi-modal models like Qwen3.5
+    if hasattr(cfg, "text_config"):
+        cfg = cfg.text_config
     return any(getattr(cfg, k, None) not in (None, 0, False) for k in moe_keys)

@@ -52,6 +52,19 @@ def model_path_cache(func):
         return cached_path
     return wrapper
 
+def get_latest_ckpt(checkpoint_config):
+    logger.info(f"checkpoint_config: {checkpoint_config}")
+    if not checkpoint_config:
+        return None
+    upload_type = checkpoint_config.get("type", None)
+    if not upload_type:
+        return None
+    if upload_type not in uploader_registry:
+        raise ValueError(f"Unknown tracker name: {upload_type}, total registered trackers: {uploader_registry.keys()}")
+    uploader_cls = uploader_registry[upload_type]
+    uploader = uploader_cls(**checkpoint_config)
+    return uploader.get_latest_ckpt()
+
 
 @model_path_cache
 def download_model(model_name_or_path: str, local_dir: Optional[str] = None):

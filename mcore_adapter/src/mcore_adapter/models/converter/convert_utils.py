@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 MCA_LAYER_PREFIX = "decoder.layers."
 MCA_MOE_PREFIX = ".mlp.experts.local_experts."
 MCA_MTP_PREFIX = "mtp.layers."
-MCA_MTP_MOE_PREFIX = ".transformer_layer.mlp.experts.local_experts."
+MCA_MTP_MOE_PREFIX = ".mtp_model_layer.mlp.experts.local_experts."
 MAX_SHARD_SIZE = 5_000_000_000  # 5GB
 
 
@@ -38,7 +38,7 @@ def get_layer_index(weight_name: str, prefix: str) -> Optional[int]:
 def get_moe_index(weight_name: str, prefix: str, moe_prefix: str) -> Optional[int]:
     """
     1. megatron format: decoder.layers.{layer_index}.mlp.experts.local_experts.{moe_index}.{weight} -> moe_index
-    2. mtp format: mtp.layers.{layer_index}.transformer_layer.mlp.experts.local_experts.{moe_index}.{weight} -> moe_index
+    2. mtp format: mtp.layers.{layer_index}.mtp_model_layer.mlp.experts.local_experts.{moe_index}.{weight} -> moe_index
     """
     if not weight_name.startswith(prefix):
         return None
@@ -147,7 +147,7 @@ def remove_mca_weight_prefix(weight_name: str):
 
 
 def remove_mca_mtp_weight_prefix(weight_name: str):
-    return remove_weight_prefix(weight_name, MCA_MTP_PREFIX, MCA_MTP_MOE_PREFIX).replace(".transformer_layer", "")
+    return remove_weight_prefix(weight_name, MCA_MTP_PREFIX, MCA_MTP_MOE_PREFIX).replace(".mtp_model_layer", "")
 
 
 def get_mca_moe_index(weight_name: str):
@@ -170,10 +170,10 @@ def add_mca_mtp_layer_prefix(weight_name: str, layer_index: Union[int, str], moe
         return weight_name
     if moe_index is not None:
         weight_name = add_layer_prefix(weight_name, moe_index, MCA_MTP_MOE_PREFIX)
-    has_transformer_layer = ".transformer_layer" not in weight_name and (
+    has_transformer_layer = ".mtp_model_layer" not in weight_name and (
         "self_attention" in weight_name or "mlp" in weight_name or "input_layernorm" in weight_name
     )
-    return MCA_MTP_PREFIX + str(layer_index) + (".transformer_layer" if has_transformer_layer else "") + weight_name
+    return MCA_MTP_PREFIX + str(layer_index) + (".mtp_model_layer" if has_transformer_layer else "") + weight_name
 
 
 def extract_suffix_number(s):

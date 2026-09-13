@@ -1,6 +1,6 @@
 ray[default,cgraph]==2.48.0 # vllm required ray[default,cgraph]>=2.48.0
 numpy<2.0a0,>=1.25
-tensordict
+tensordict>=0.10.0
 sympy
 modelscope
 datasets==3.1.0
@@ -21,10 +21,16 @@ codetiming
 more_itertools
 pybase64
 sglang-router
+TransferQueue==0.1.6
 
 wandb
 swanlab
 trackio
+
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp
+opentelemetry-proto
 
 math-verify
 openai

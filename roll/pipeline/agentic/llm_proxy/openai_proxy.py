@@ -83,11 +83,14 @@ class OpenAIProxy(BaseLLMProxy):
         extra_body = {}
         if top_k is not None:
             extra_body["top_k"] = top_k
-        if enable_thinking:
+        if not enable_thinking:
             # According to the example, enable_thinking goes under extend_fields
-            extra_body.setdefault("extend_fields", {})["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+            #extra_body.setdefault("extend_fields", {})["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+            extra_body["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
         attempt = 0
+        tools = lm_input.meta_info.get("tools", [])
+        tool_choice = "none"
         while attempt < self.max_retries:
             try:
                 logger.debug(f"Attempt {attempt + 1}/{self.max_retries}: Calling OpenAI API for model '{model_name}'...")
@@ -96,20 +99,54 @@ class OpenAIProxy(BaseLLMProxy):
                 completion = self.client.chat.completions.create(
                     model=model_name,
                     messages=messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
                     # presence_penalty=presence_penalty,
                     # Pass extra_body only if it's not empty
-                    extra_body=extra_body if extra_body else None
+                    extra_body=extra_body if extra_body else None,
+                    logprobs=True,
+                    top_logprobs=1,  # Return top 1 token logprobs for each position
                 )
-                if completion.choices is None:
+                if not completion.choices:
                     response_text = "OpenAI API returned no choices."
-                else:
+                elif completion.choices[0].message.content is not None:
                     response_text = completion.choices[0].message.content
+                else:
+                    # Model used native function calling (content=None, tool_calls=[...]).
+                    # Convert to <tool_call> XML so proxy_env_manager's sglang parser can handle it.
+                    native_tcs = completion.choices[0].message.tool_calls or []
+                    if native_tcs:
+                        import json as _json
+                        parts = []
+                        for tc in native_tcs:
+                            try:
+                                args = _json.loads(tc.function.arguments)
+                            except Exception:
+                                args = tc.function.arguments
+                            payload = _json.dumps({"name": tc.function.name, "arguments": args}, ensure_ascii=False)
+                            parts.append(f"<tool_call>\n{payload}\n</tool_call>")
+                        response_text = "\n".join(parts)
+                    else:
+                        response_text = "OpenAI API returned no choices."
+
+                # Extract logprobs if available
+                infer_logprobs = None
+                if completion.choices and completion.choices[0].logprobs and completion.choices[0].logprobs.content:
+                    # Extract the logprob value for each token (matching the format expected by proxy_env_manager)
+                    infer_logprobs = [token_data.logprob for token_data in completion.choices[0].logprobs.content]
+
                 responses = self.tokenizer([response_text], return_tensors="pt")
                 lm_input.batch["responses"] = responses["input_ids"]
                 lm_input.non_tensor_batch["response_text"] = np.array([response_text], dtype=object)
+
+                # Store logprobs in batch as tensor if available
+                if infer_logprobs is not None:
+                    import torch
+                    lm_input.batch["infer_logprobs"] = torch.tensor([infer_logprobs], dtype=torch.float32)
+
                 return lm_input
 
             except OpenAIError as e:

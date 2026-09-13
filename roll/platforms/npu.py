@@ -1,7 +1,9 @@
-from .platform import Platform
-from ..utils.logging import get_logger
+from importlib import import_module
 
 import torch
+
+from .platform import Platform
+from ..utils.logging import get_logger
 
 logger = get_logger()
 
@@ -48,20 +50,32 @@ class NpuPlatform(Platform):
 
     @classmethod
     def get_vllm_worker_class(cls):
+        def import_worker(candidate_modules):
+            errors = []
+            for module_name in candidate_modules:
+                try:
+                    module = import_module(module_name)
+                    worker = getattr(module, "NPUWorker")
+                except (ImportError, AttributeError) as e:
+                    errors.append(f"{module_name}: {e}")
+                    continue
+                logger.info("Successfully imported vLLM NPU Worker from %s.", module_name)
+                return worker
+            raise ImportError("; ".join(errors))
+
         try:
             from vllm import envs
 
             # VLLM_USE_V1 is deprecated in vllm>=0.11.1
             if not hasattr(envs, "VLLM_USE_V1") or envs.VLLM_USE_V1:
-                from vllm_ascend.worker.worker_v1 import NPUWorker as Worker
-
-                logger.info("Successfully imported vLLM V1 Worker.")
-                return Worker
+                return import_worker(
+                    [
+                        "vllm_ascend.worker.worker_v1",
+                        "vllm_ascend.worker.worker",
+                    ]
+                )
             else:
-                from vllm_ascend.worker.worker import NPUWorker as Worker
-
-                logger.info("Successfully imported vLLM V0 Worker.")
-                return Worker
+                return import_worker(["vllm_ascend.worker.worker"])
         except ImportError as e:
             logger.error("Failed to import vLLM Worker. Make sure vLLM is installed correctly: %s", e)
             raise RuntimeError("vLLM is not installed or not properly configured.") from e
@@ -72,6 +86,13 @@ class NpuPlatform(Platform):
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             "ASCEND_RT_VISIBLE_DEVICES": f"{gpu_rank}",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+            # vLLM-Ascend graph/NPU worker initialization is more stable with
+            # task queue mode 1; broader training jobs may use mode 2.
+            "TASK_QUEUE_ENABLE": "1",
+            "VLLM_ASCEND_ENABLE_NZ": "0",
+            # vLLM-Ascend's memory pool is incompatible with expandable
+            # segments, even if the broader NPU test job enables them.
+            "PYTORCH_NPU_ALLOC_CONF": "",
         }
         return env_vars
     

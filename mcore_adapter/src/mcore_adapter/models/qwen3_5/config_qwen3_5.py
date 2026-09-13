@@ -44,9 +44,12 @@ class Qwen3_5Config(McaModelConfig):
             * vision_config_obj.in_channels
             * vision_config_obj.temporal_patch_size
         )  # 1176
-        self.mrope_section = self.rope_scaling.get("mrope_section")
-        self.rotary_base = self.rope_scaling.get("rope_theta")
-        self.rotary_percent = self.rope_scaling.get("partial_rotary_factor")
+        if self.rope_parameters is None and self.rope_scaling is not None:
+            self.rope_parameters = self.rope_scaling
+
+        self.mrope_section = self.rope_parameters.get("mrope_section")
+        self.rotary_base = self.rope_parameters.get("rope_theta")
+        self.rotary_percent = self.rope_parameters.get("partial_rotary_factor")
 
         assert self.hidden_dropout == 0.0, "hidden dropout is Not supported for qwen3_5 yet."
         if self.layer_types is None:

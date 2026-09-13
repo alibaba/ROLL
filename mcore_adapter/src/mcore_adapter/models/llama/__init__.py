@@ -30,6 +30,7 @@ register_template(
         "attention_dropout": "attention_dropout",
         "rope_theta": "rotary_base",
         "rope_scaling": "rope_scaling",
+        "rope_parameters": "rope_parameters",
         "tie_word_embeddings": "tie_embeddings_and_output_weights",
     },
     hf_invalid_keys=[".self_attn.rotary_emb.inv_freq"],

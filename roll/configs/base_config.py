@@ -82,6 +82,16 @@ class ScheduleConfig:
         metadata={"help": "The router configuration, encapsulated in a RouterArguments object."},
     )
 
+@dataclass
+class TransferBackendArguments:
+    backend_name: str = field(
+        default=None,
+        metadata={"help": "The registered backend for transfer."}
+    )
+    backend_config: Dict = field(
+        default_factory=dict,
+        metadata={"help": "Configuration dictionary for the backend."}
+    )
 
 @dataclass
 class BaseConfig(ScheduleConfig):
@@ -215,6 +225,10 @@ class BaseConfig(ScheduleConfig):
     profiler_output_dir: str = field(
         default="./output/profiler", metadata={"help": "Directory to write profiler logs."}
     )
+    otlp_output_dir: str = field(
+        default="./output/otlp",
+        metadata={"help": "The output directory where the OTLP collector saved to."},
+    )
     system_envs: dict = field(
         default_factory=dict,
         metadata={"help": "system environment variables."}
@@ -242,6 +256,11 @@ class BaseConfig(ScheduleConfig):
     rollout_mock: Optional[RolloutMockConfig] = field(
         default=None,
         metadata={"help": "Rollout mock configuration for precision alignment testing."}
+    )
+
+    transfer_backend: Optional[TransferBackendArguments] = field(
+        default=None,
+        metadata={"help": "Transfer backend configuration."}
     )
 
 
@@ -286,6 +305,9 @@ class BaseConfig(ScheduleConfig):
             output_dir = self.checkpoint_config.get("output_dir")
             self.checkpoint_config["output_dir"] = os.path.join(output_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
             logger.info(f"add timestamp to output_dir {self.checkpoint_config['output_dir']}")
+        if self.resume_from_checkpoint is True:
+            logger.info("ensure async_upload=False when resume_from_checkpoint=True and auto resume from lastest ckpt")
+            self.checkpoint_config["async_upload"] = False
 
         for attribute_name in dir(self):
             attribute = getattr(self, attribute_name)
@@ -319,6 +341,13 @@ class BaseConfig(ScheduleConfig):
             os.environ["REPORT_LENGTH_AND_REWARDS"] = "1"
         os.environ.update(self.system_envs)
 
+        # Auto-generate OTLP endpoint when OTel tracing is enabled
+        if self.system_envs.get("ROLL_OTEL_ENABLED") == "1":
+            from roll.utils.telemetry import resolve_otel_endpoint
+            endpoint = resolve_otel_endpoint()
+            self.system_envs["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
+            os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
+
         from ..platforms import current_platform
         self.num_gpus_per_node = current_platform.device_count()
 
@@ -330,6 +359,11 @@ class BaseConfig(ScheduleConfig):
             self.reference.system_envs.update({k: v for k, v in self.system_envs.items() if k not in self.reference.system_envs})
         if hasattr(self, 'critic') and isinstance(self.critic, WorkerConfig):
             self.critic.system_envs.update({k: v for k, v in self.system_envs.items() if k not in self.critic.system_envs})
+        # Also propagate system_envs to _reference_configs for multi-teacher
+        if hasattr(self, '_reference_configs'):
+            for ref_cfg in self._reference_configs.values():
+                if isinstance(ref_cfg, WorkerConfig):
+                    ref_cfg.system_envs.update({k: v for k, v in self.system_envs.items() if k not in ref_cfg.system_envs})
 
         # Validate rollout_batch_size divisibility for Megatron data parallelism
         if hasattr(self, 'actor_train') and isinstance(self.actor_train, WorkerConfig) and self.actor_train.strategy_args is not None:
@@ -367,6 +401,11 @@ class BaseConfig(ScheduleConfig):
             if isinstance(attribute, WorkerConfig):
                 if attribute.device_mapping is not None:
                     total_devices.extend(attribute.device_mapping)
+        # Also include _reference_configs device_mappings for multi-teacher
+        if hasattr(self, '_reference_configs'):
+            for ref_cfg in self._reference_configs.values():
+                if isinstance(ref_cfg, WorkerConfig) and ref_cfg.device_mapping is not None:
+                    total_devices.extend(ref_cfg.device_mapping)
         if len(total_devices) > 0:
             max_gpu_num = max(total_devices) + 1
             if max_gpu_num <= self.num_gpus_per_node:
@@ -557,10 +596,11 @@ class PPOConfig(BaseConfig):
                  "to determine which config class and pipeline to use. "
                  "'rlvr': RLVRConfig + RLVRPipeline, 'agentic': AgenticConfig + AgenticPipeline"}
     )
-    teacher: WorkerConfig = field(
+    teacher: Union[Dict[str, WorkerConfig], WorkerConfig] = field(
         default_factory=WorkerConfig,
-        metadata={"help": "Configuration for the teacher role (used in OPD mode). "
-                 "When is_pure_opd=True or use_opd=True, teacher is automatically mapped to reference."}
+        metadata={"help": "Teacher model config (OPD mode). Single: WorkerConfig; "
+                  "Multi-teacher: Dict[str, WorkerConfig]. "
+                  "Dict[str, WorkerConfig] must be placed first in Union for dacite."}
     )
     student_train: WorkerConfig = field(
         default_factory=WorkerConfig,
@@ -585,11 +625,6 @@ class PPOConfig(BaseConfig):
                  "This allows combining RL reward with distillation signal. "
                  "The OPD KL is computed as: reverse_kl = student_logp - teacher_logp, "
                  "and added to token_level_rewards as: reward - opd_kl_coef * reverse_kl"}
-    )
-    opd_kl_coef: float = field(
-        default=1.0,
-        metadata={"help": "Coefficient for OPD KL penalty when use_opd=True. "
-                 "Controls the weight of distillation signal relative to RL reward."}
     )
 
     def __post_init__(self):
@@ -632,22 +667,13 @@ class PPOConfig(BaseConfig):
         """
         Handle OPD (On-Policy Distillation) mode configuration mapping.
 
-        Pure OPD mode (is_pure_opd=True):
-        - Requires: student_train, student_infer, teacher
-        - Forbidden: reference
-        - Mapping: student_train → actor_train, student_infer → actor_infer, teacher → reference
-
-        Mixed OPD mode (use_opd=True):
-        - Requires: teacher
-        - Forbidden: reference
-        - Mapping: teacher → reference only
-        - actor_train/actor_infer are configured normally by user
-
         This method is called at the beginning of __post_init__ before normal PPO initialization.
+
+        Teacher is normalized to _reference_configs: Dict[str, WorkerConfig] immediately,
+        so all subsequent logic is unified regardless of single vs multi-teacher.
         """
-        has_student_train = self.student_train.is_configured
-        has_student_infer = self.student_infer.is_configured
-        has_teacher = self.teacher.is_configured
+        has_teacher = isinstance(self.teacher, WorkerConfig) and self.teacher.is_configured
+        has_teachers = isinstance(self.teacher, dict) and bool(self.teacher)
         has_reference_configured = self.reference.is_configured
 
         # Mutual exclusion check
@@ -658,45 +684,66 @@ class PPOConfig(BaseConfig):
                 "or use_opd=True for mixed mode (external rewards + Teacher KL)."
             )
 
-        # ========== Pure OPD mode ==========
+        if has_teachers and has_teacher:
+            raise ValueError("Cannot configure both multi-teacher dict and single-teacher WorkerConfig.")
+
+        # Step 1: Normalize teacher to _reference_configs dict (always Dict[str, WorkerConfig])
+        if has_teachers:
+            self._reference_configs = self.teacher
+        elif has_teacher:
+            self._reference_configs = {"default": self.teacher}
+        else:
+            self._reference_configs = {}
+
+        # Step 1.5: Build tag → teacher_names routing map for multi-teacher OPD
+        self._tag_to_teacher_names: Dict[str, List[str]] = {}
+        self._teacher_names_for_all_tags: List[str] = []
+        for name, ref_cfg in self._reference_configs.items():
+            if not ref_cfg.tag_included:
+                # Empty tag_included means this teacher handles all tags
+                self._teacher_names_for_all_tags.append(name)
+            else:
+                for tag in ref_cfg.tag_included:
+                    if tag not in self._tag_to_teacher_names:
+                        self._tag_to_teacher_names[tag] = []
+                    self._tag_to_teacher_names[tag].append(name)
+
+        # Step 2: Pure OPD mode
         if self.is_pure_opd:
-            # Validation: all student fields and teacher must be configured
-            if not (has_student_train and has_student_infer and has_teacher):
+            if not self._reference_configs:
+                raise ValueError("Pure OPD requires teacher config.")
+            if not (self.student_train.is_configured and self.student_infer.is_configured):
                 raise ValueError(
                     "In pure OPD mode (is_pure_opd=True), 'student_train', 'student_infer' "
                     "and teacher must be configured.\n"
                 )
-
-            # Perform mapping for pure OPD
-            logger.info(f"Pure OPD mode: mapping student_train to actor_train")
+            logger.info(f"Pure OPD mode: mapping student_train to actor_train, "
+                        f"student_infer to actor_infer, "
+                        f"{len(self._reference_configs)} teacher(s) to reference")
             self.actor_train = self.student_train
-            logger.info(f"Pure OPD mode: mapping student_infer to actor_infer")
             self.actor_infer = self.student_infer
-            logger.info(f"Pure OPD mode: mapping teacher to reference")
-            self.reference = self.teacher
-
-            # Enable reference for OPD mode (needed for both pure and mixed mode)
+            self.reference = next(iter(self._reference_configs.values()))
             self.enable_reference = True
+            # Propagate opd_kl_coef default (1.0) to each teacher if not explicitly set
+            for ref_cfg in self._reference_configs.values():
+                if ref_cfg.opd_kl_coef is None:
+                    ref_cfg.opd_kl_coef = 1.0
 
-        # ========== Mixed OPD mode ==========
+        # Step 3: Mixed OPD mode
         elif self.use_opd:
-            # Validation: teacher must be configured, reference should NOT be configured
-            if not has_teacher:
-                raise ValueError(
-                    "In mixed OPD mode (use_opd=True), 'teacher' must be configured.\n"
-                )
+            if not self._reference_configs:
+                raise ValueError("Mixed OPD requires teacher config.")
             if has_reference_configured:
                 raise ValueError(
                     "In mixed OPD mode (use_opd=True), 'reference' should NOT be configured. "
                 )
-
-            # Perform mapping for mixed OPD (only teacher → reference)
-            logger.info(f"Mixed OPD mode: mapping teacher to reference")
-            self.reference = self.teacher
-            # Note: actor_train and actor_infer are configured normally by user
-
-            # Enable reference for OPD mode (needed for both pure and mixed mode)
+            logger.info(f"Mixed OPD mode: mapping {len(self._reference_configs)} teacher(s) to reference")
+            self.reference = next(iter(self._reference_configs.values()))
             self.enable_reference = True
+            # Propagate opd_kl_coef default (1.0) to each teacher if not explicitly set
+            for ref_cfg in self._reference_configs.values():
+                if ref_cfg.opd_kl_coef is None:
+                    ref_cfg.opd_kl_coef = 1.0
 
     def set_max_steps(self, max_steps: int):
         actor_backward_batch_size = (
@@ -743,11 +790,7 @@ class PPOConfig(BaseConfig):
         )
         dp_size = 1
         if self.actor_train.strategy_args is not None:
-            if self.actor_train.strategy_args.strategy_name == "deepspeed_train":
-                configured_ulysses_size = getattr(self.actor_train.model_args, 'ulysses_size', None) or 1
-                cp_size = self._get_effective_cp_size_ulysses(configured_ulysses_size)
-                dp_size = len(self.actor_train.device_mapping) // cp_size
-            elif self.actor_train.strategy_args.strategy_name in ("fsdp2_train", "fsdp2_infer"):
+            if self.actor_train.strategy_args.strategy_name in ("fsdp2_train", "fsdp2_infer"):
                 configured_ulysses_size = getattr(self.actor_train.model_args, 'ulysses_size', None) or 1
                 cp_size = self._get_effective_cp_size_ulysses(configured_ulysses_size)
                 dp_size = len(self.actor_train.device_mapping) // cp_size
@@ -780,6 +823,37 @@ class PPOConfig(BaseConfig):
         return self.async_generation_ratio > 0
 
     @property
+    def reference_configs(self) -> Dict[str, WorkerConfig]:
+        """Always returns Dict[str, WorkerConfig] for unified pipeline usage.
+        Single teacher is normalized to {"default": cfg}, multi-teacher to {name: cfg, ...}."""
+        if not hasattr(self, '_reference_configs') or not self._reference_configs:
+            self._reference_configs = {"default": self.reference}
+        return self._reference_configs
+
+    @property
+    def is_multi_teacher(self) -> bool:
+        return len(self.reference_configs) > 1
+
+    @property
+    def tag_to_teacher_names(self) -> Dict[str, List[str]]:
+        """Map tag -> list of teacher names that should handle it."""
+        if not hasattr(self, '_tag_to_teacher_names'):
+            self._tag_to_teacher_names = {}
+        return self._tag_to_teacher_names
+
+    @property
+    def teacher_names_for_all_tags(self) -> List[str]:
+        """Teachers with empty tag_included (handle all tags)."""
+        if not hasattr(self, '_teacher_names_for_all_tags'):
+            self._teacher_names_for_all_tags = []
+        return self._teacher_names_for_all_tags
+
+    @property
+    def needs_teacher_routing(self) -> bool:
+        """Whether any teacher has non-empty tag_included (requires routing logic)."""
+        return bool(self._tag_to_teacher_names)
+
+    @property
     def is_actor_infer_colocated(self) -> bool:
         """Whether actor_infer are colocated with any other clusters (exclude reward)."""
         return is_actor_infer_overlapping_with_any_cluster(
@@ -799,16 +873,21 @@ class PPOConfig(BaseConfig):
         Note: The mapping of student_*/teacher to actor_*/reference is already
         handled by _handle_opd_mapping(). This method only applies OPD-specific
         parameter overrides like gamma, adv_estimator, etc.
-
-        This method handles both pure OPD mode (is_pure_opd=True)
-        and mixed OPD mode (use_opd=True).
         """
+        if not (self.is_pure_opd or self.use_opd):
+            return
+
+        # Set teacher worker names
+        if len(self._reference_configs) > 1:
+            for name, ref_cfg in self._reference_configs.items():
+                ref_cfg.name = f"teacher-{name}"
+        else:
+            self.reference.name = "teacher"
+
         # Pure OPD mode specific settings
         if self.is_pure_opd:
-            # Set worker names for OPD mode (override default names for both modes)
             self.actor_train.name = "student_train"
             self.actor_infer.name = "student_infer"
-            self.reference.name = "teacher"
 
             # gamma=0: OPD's token_level_rewards has KL penalty at every token
             # If gamma=1, compute_reinforce_return will accumulate KL values across entire sequence
@@ -827,8 +906,5 @@ class PPOConfig(BaseConfig):
 
             logger.info(f"Pure OPD mode configured: gamma={self.gamma}, adv_estimator={self.adv_estimator}")
 
-        # Mixed OPD mode doesn't need parameter overrides
         elif self.use_opd:
-            # Set worker names for OPD mode (override default names for both modes)
-            self.reference.name = "teacher"
-            logger.info(f"Mixed OPD mode configured: opd_kl_coef={self.opd_kl_coef}")
+            logger.info(f"Mixed OPD mode configured")

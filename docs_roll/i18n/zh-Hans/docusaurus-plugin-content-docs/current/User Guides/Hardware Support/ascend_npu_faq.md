@@ -1,6 +1,6 @@
 # 昇腾 NPU 常见问题
 
-最后更新：2026/04/27。
+最后更新：2026/08/17。
 
 本文档汇总了在华为昇腾 NPU 上运行 ROLL 时可能遇到的常见问题及解决方案。
 
@@ -51,10 +51,32 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 
 **解决方案：** 确保使用了与硬件匹配的预构建镜像：
 
-- **Atlas 900 A2 PODc** → 使用 `roll:ascend-a2`（`ascend910b1`）
-- **Atlas 900 A3 PODc** → 使用 `roll:ascend-a3`（`ascend910_9391`）
+- **Atlas 900 A2 PODc** → 使用 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12`（`ascend910b1`）
+- **Atlas 900 A3 PODc** → 使用 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12`（`ascend910_9391`）
 
-当前仓库不包含 `Dockerfile.A2` 或 `Dockerfile.A3`。如果维护自定义镜像，请确保 SOC 版本与目标硬件匹配。
+当前仓库包含用于构建自定义镜像的 `docker/Dockerfile.A2` 和 `docker/Dockerfile.A3`。如果维护自定义镜像，请确保 SOC 版本与目标硬件匹配。
+
+### 禁用 FRACTAL_NZ模式
+
+**现象：** 在强化学习中开启NZ优化模式很有可能导致精度问题，vllm_ascend中存在该校验，若开启会出现 `ValueError: FRACTAL_NZ mode is enabled. This may cause model parameter precision issues in the RL scenarios.`错误
+
+**解决方案：** 启动脚本前，添加环境变量，禁用NZ：
+   ```bash
+   export VLLM_ASCEND_ENABLE_NZ=0
+   ```
+
+### HCCL参数面端口绑定失败
+
+**现象：** 当前rank或进程在通信算子参数面建链时绑定device侧网卡端口失败，端口被占用，出现 `The IP address XXXX and port XXXX have already been bound`错误
+
+**解决方案：** 
+
+1. HCCL使用device侧网卡的端口时默认需绑定16666端口，因此若有多个进程执行在同一个device上，且均会调用HCCL的通信算子接口，那么就会出现端口已被其他进程绑定导致失败的问题。
+2. 此时可先从业务上排查多个进程跑在同一个device上是否符合任务预期，若符合任务预期结果，可通过配置HCCL_NPU_SOCKET_PORT_RANGE环境变量使能多进程场景，如：
+   ```bash
+   export HCCL_NPU_SOCKET_PORT_RANGE="auto"
+   ```
+
 
 ## 依赖冲突
 
@@ -66,33 +88,20 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 
 ```bash
 pip uninstall -y triton triton-ascend
-pip install triton-ascend==3.2.0
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
 
 ## 训练配置
-
-### 不支持 Colocated 模式
-
-**现象：** `actor_train` 和 `actor_infer` 共用同一组 NPU 设备时训练失败。
-
-**解决方案：** NPU 不支持 colocated 模式，必须配置 `device_mapping` 使训练和推理在不同的 NPU 卡上执行。例如：
-
-```yaml
-actor_train:
-  device_mapping: list(range(0, 4))
-actor_infer:
-  device_mapping: list(range(4, 8))
-```
 
 ### 不支持 Megatron 策略
 
 **现象：** 在 NPU 上使用 `strategy: megatron` 配置时报错。
 
-**解决方案：** 当前提供的昇腾示例暂不支持 Megatron-LM 训练，请使用 DeepSpeed 作为训练后端：
+**解决方案：** 昇腾 NPU 上不支持 Megatron-LM 训练，请使用 FSDP2 作为训练后端：
 
 ```yaml
 strategy_args:
-  strategy_name: deepspeed_train
+  strategy_name: fsdp2_train
 ```
 
 ### HCCL 通信超时或失败
@@ -252,13 +261,6 @@ ulimit -n 65536
 * hard nofile 65536
 ```
 
-也可以在 ROLL YAML 配置中全局设置：
-
-```yaml
-system_envs:
-  RAY_ULIMIT_NOFILE: "65536"
-```
-
 ### NPU 显存不足
 
 **现象：** 训练或推理过程中出现 OOM（Out of Memory）错误而崩溃。
@@ -267,11 +269,12 @@ system_envs:
 
 1. 在配置文件中减小 `rollout_batch_size` 或 `num_return_sequences_in_group`。
 2. 减小 `per_device_train_batch_size`，同时相应增大 `gradient_accumulation_steps`。
-3. 在配置中启用 DeepSpeed ZeRO-3 + CPU Offloading：
+3. 在配置中启用 FSDP2 + CPU Offloading：
    ```yaml
    strategy_args:
-     strategy_name: deepspeed_train
-     strategy_config: ${deepspeed_zero3_cpuoffload}
+     strategy_name: fsdp2_train
+     strategy_config:
+       offload_policy: true
    ```
 4. 使用更小的模型或应用 LoRA 以降低显存占用。
 
@@ -281,7 +284,7 @@ system_envs:
 
 **解决方案：**
 
-1. 确保 CANN 和 vLLM-Ascend 版本兼容（均应为 v0.13.0）。
+1. 确保 CANN 与昇腾软件栈版本兼容。当前 ROLL A2/A3 镜像使用 CANN 9.1.0、PyTorch 2.10.0、torch-npu 2.10.0.post4、vLLM 0.23.0、vLLM-Ascend v0.23.0rc1。
 2. 检查 SOC 版本是否与硬件匹配。
 3. 调整配置中 vLLM 的 `gpu_memory_utilization` 和 `max_model_len` 参数。
 4. 确认已安装 `triton-ascend`（而非 `triton`），错误的 triton 后端会导致算子编译回退。

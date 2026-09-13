@@ -8,12 +8,14 @@ sokoban_format_penalty: -0.15
 frozen_format_penalty: -0.01
 
 env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+agent_runner_cls: null
 custom_env:
   SimpleSokoban:
     env_type: sokoban
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
+    agent_runner_cls: ${agent_runner_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
@@ -28,6 +30,7 @@ custom_env:
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
+    agent_runner_cls: ${agent_runner_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
@@ -43,6 +46,7 @@ custom_env:
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
+    agent_runner_cls: ${agent_runner_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
@@ -60,6 +64,7 @@ custom_env:
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
+    agent_runner_cls: ${agent_runner_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
@@ -73,6 +78,7 @@ custom_env:
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
+    agent_runner_cls: ${agent_runner_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}
@@ -86,6 +92,7 @@ custom_env:
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
+    agent_runner_cls: ${agent_runner_cls}
     use_thread_lock: true
     agent_system_template: ${agent_system_template}
     agent_template: ${agent_template}

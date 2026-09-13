@@ -14,6 +14,7 @@ gem.register("roll_code", entry_point="roll.pipeline.agentic.env.gem.code_env:Co
 gem.register("roll_qa", entry_point="roll.pipeline.agentic.env.gem.qa_env:QaEnv")
 gem.register("sokoban_sandbox", entry_point="roll.pipeline.agentic.env.sandbox:SokobanSandboxEnv")
 gem.register("sokoban_native_env", entry_point="roll.pipeline.agentic.env.sokoban.native_env:SokobanNativeEnv")
+gem.register("sokoban_tool_call", entry_point="roll.pipeline.agentic.env.sokoban.tool_call_env:SokobanToolCallEnv")
 gem.register("deepeyes", entry_point="roll.pipeline.agentic.env.deepeyes:DeepEyesEnv")
 gem.register("rock_tb_native_env", entry_point="roll.pipeline.agentic.env.sandbox.rock_tb_native_env:RockTBNativeEnv")
 

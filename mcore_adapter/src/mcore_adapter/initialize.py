@@ -65,6 +65,7 @@ def _initialize_distributed(args: "TrainingArguments"):
             virtual_pipeline_model_parallel_size=args.virtual_pipeline_model_parallel_size,
             context_parallel_size=args.context_parallel_size if args.context_parallel_size is not None else 1,
             expert_model_parallel_size=args.expert_model_parallel_size,
+            expert_tensor_parallel_size=args.expert_tensor_parallel_size,
             distributed_timeout_minutes=args.ddp_timeout_delta.total_seconds() // 60,
         )
         logger.info(f"initialized tensor model parallel with size {mpu.get_tensor_model_parallel_world_size()}")

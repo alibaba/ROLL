@@ -28,7 +28,9 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
                 Qwen2_5_VLVisionConfig(**config.vision_config),
                 attn_implementation="sdpa",
                 torch_dtype=self.config.params_dtype,
-            ).to(current_platform.current_device())
+            )
+            if not config.init_model_with_meta_device:
+                self.vision_model = self.vision_model.to(current_platform.current_device())
             # TODO: use_reentrant=True might cause error by twice forward/backward when
             # training images and videos simultaneously, https://github.com/pytorch/pytorch/issues/81296
             if config.recompute_granularity == "full" and self.training:
@@ -298,12 +300,13 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
             return position_ids, mrope_position_deltas
 
     def get_batch_on_this_cp_rank(self, batch, dim3_keys: list[str] = ["attention_mask"]):
-        # VLM need to view all input_ids and media features
-        loss_needed_items = {
-            "labels": batch.pop("labels", None),
-        }
-        loss_needed_items = super().get_batch_on_this_cp_rank(loss_needed_items, dim3_keys=dim3_keys)
-        batch.update(loss_needed_items)
+        # VLM forward() handles input_ids and attention_mask splitting internally
+        skipped = {}
+        for key in ("input_ids", "attention_mask"):
+            if key in batch:
+                skipped[key] = batch.pop(key)
+        batch = super().get_batch_on_this_cp_rank(batch, dim3_keys=dim3_keys)
+        batch.update(skipped)
         return batch
 
     def get_input_ranges(self, total_seqlen):
@@ -363,7 +366,12 @@ class Qwen2_5_VLModel(McaGPTModel, ModuleUtilsMixin):
         }
         if self.config.context_parallel_size > 1:
             cp_batch = {k: v.clone() if v is not None else None for k, v in cp_batch.items()}
-            cp_batch = super().get_batch_on_this_cp_rank(cp_batch, dim3_keys=["attention_mask"])
+            cp_batch = super().get_batch_on_this_cp_rank(
+                cp_batch,
+                dim3_keys=[]
+                if (cp_batch["attention_mask"] is None or cp_batch["attention_mask"].dim() == 2)
+                else ["attention_mask"],
+            )
 
         if not self.pre_process or decoder_input is not None:
             return super().forward(

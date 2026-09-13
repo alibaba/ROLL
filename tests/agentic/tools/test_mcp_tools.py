@@ -293,6 +293,7 @@ def test_execute_action_handles_server_business_logic_error(connected_mock_tool:
     # Verify that the tool was still called correctly.
     tool._client.call_tool.assert_called_once_with("play", {"action": 9})  
 
+@pytest.mark.skip_on_github_ci
 def test_mcp_tool_end_to_end_with_sokoban_mcp_server():
     """
     Tests the full lifecycle of MCPTool against a running MCP server.
@@ -377,6 +378,7 @@ def test_mcp_tool_end_to_end_with_sokoban_mcp_server():
     
     tool.close()
     
+@pytest.mark.skip_on_github_ci
 def test_calculator_tool_with_subset_of_tools():
     """
     Integration test for MCPTool using a real calculator server.

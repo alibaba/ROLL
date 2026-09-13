@@ -1,7 +1,7 @@
 import json
 import os.path
 import time
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from typing import Any, Dict, List
 
 import numpy as np
@@ -31,16 +31,20 @@ from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.dynamic_batching import dynamic_batching_shard
 from roll.utils.functionals import (
     RunningMoments,
+    clusters_have_disjoint_devices,
     agg_loss,
+    build_domain_routing_context,
+    compute_ref_log_probs_with_routing,
     compute_token_reward,
     masked_mean,
     reduce_metrics,
-    batch_balance
+    batch_balance,
 )
 from roll.utils.train_infer_corrections import apply_train_infer_correction_to_batch
 from roll.utils.kl_controller import get_kl_controller
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.telemetry import attach_trace_context, get_tracer, inject_trace_context
 
 
 logger = get_logger()
@@ -83,13 +87,17 @@ class AgenticPipeline(BasePipeline):
         download_clusters = [self.actor_train, self.actor_infer]
 
         if self.use_ref_model:
-            self.reference: Any = Cluster(
-                name=self.pipeline_config.reference.name,
-                worker_cls=self.pipeline_config.reference.worker_cls,
-                resource_manager=self.resource_manager,
-                worker_config=self.pipeline_config.reference,
-            )
-            download_clusters.append(self.reference)
+            self.references: Dict[str, Any] = {}
+            for name, ref_cfg in self.pipeline_config.reference_configs.items():
+                self.references[name] = Cluster(
+                    name=ref_cfg.name,
+                    worker_cls=ref_cfg.worker_cls,
+                    resource_manager=self.resource_manager,
+                    worker_config=ref_cfg,
+                )
+            download_clusters.extend(self.references.values())
+            # Backward compat: self.reference points to the first teacher
+            self.reference = self.references[list(self.references.keys())[0]]
 
 
         if self.pipeline_config.adv_estimator == "gae":
@@ -180,7 +188,14 @@ class AgenticPipeline(BasePipeline):
         ray.get(refs)
 
         if self.use_ref_model:
-            refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True))
+            if clusters_have_disjoint_devices(self.references):
+                ref_init_refs = []
+                for ref_cluster in self.references.values():
+                    ref_init_refs.extend(ref_cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
+                ray.get(ref_init_refs)
+            else:
+                for ref_cluster in self.references.values():
+                    ref_cluster.initialize(pipeline_config=self.pipeline_config, blocking=True)
 
         ray.get([self.train_rollout_scheduler.initialize.remote(), self.val_rollout_scheduler.initialize.remote()])
 
@@ -208,6 +223,7 @@ class AgenticPipeline(BasePipeline):
     def run(self):
         # Calculate tokens-per-second system throughput
         tps_timer = _Timer(window_size=5)
+        tracer = get_tracer("driver")
 
         for global_step in range(self.pipeline_config.max_steps):
             if global_step <= self.state.step:
@@ -217,7 +233,10 @@ class AgenticPipeline(BasePipeline):
             metrics = {}
 
             # Add overall step timing
-            with Timer(name="pipeline_step_total", logger=None) as step_timer:
+            with (Timer(name="pipeline_step_total", logger=None) as step_timer,
+                tracer.start_as_current_span("pipeline_step", attributes={"global_step": global_step}),
+                ExitStack() as defer,
+            ):
                 with tps_timer:
                     # PHASE 1: Offload States
                     if self.pipeline_config.adv_estimator == "gae":
@@ -233,7 +252,8 @@ class AgenticPipeline(BasePipeline):
                         self.actor_infer.offload_states(include=OffloadStateType.other_params)
 
                     # PHASE 3: Model Update
-                    with Timer(name="model_update", logger=None) as model_update_timer:
+                    with Timer(name="model_update", logger=None) as model_update_timer, \
+                            tracer.start_as_current_span("model_update"):
                         model_update_metrics: Dict = self.model_update(global_step)
                     metrics["time/step_model_update"] =model_update_timer.last
                     metrics.update(model_update_metrics)
@@ -269,39 +289,37 @@ class AgenticPipeline(BasePipeline):
 
                     # PHASE 6: Validation (every eval_steps) - Async
                     val_future = None
-                    val_metrics = {}
-                    with Timer(name="val", logger=None) as val_timer:
-                        if self.pipeline_config.eval_steps > 0 and global_step % self.pipeline_config.eval_steps == 0:
-                            # Submit val task to thread pool asynchronously
-                            val_future = self.executor.submit(self.val, global_step)
+                    if self.pipeline_config.eval_steps > 0 and global_step % self.pipeline_config.eval_steps == 0:
+                        # Submit val task to thread pool asynchronously
+                        val_future = self.executor.submit(self.val, global_step, inject_trace_context({}))
 
-                        # PHASE 7: Rollout Get Batch
-                        with Timer(name="rollout", logger=None) as rollout_timer:
-                            batch = ray.get(self.train_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
-                            sample_uuids = [f"{traj_id}_{i}" for i, traj_id in enumerate(batch.non_tensor_batch['traj_id'])]
-                            batch.non_tensor_batch['sample_uuid'] = np.array(sample_uuids, dtype=object)
-                            if "get_batch_return_start_time" in batch.meta_info:
-                                metrics["time/get_batch_cost_train"] = time.time() - batch.meta_info.pop("get_batch_return_start_time")
-                            actor_infer_metrics = self.actor_infer.get_metrics()
-                            metrics.update(reduce_metrics(actor_infer_metrics.meta_info.pop("metrics", {})))
-                            metrics.update(compute_rollout_traj_metrics(batch))
+                    # PHASE 7: Rollout Get Batch
+                    with Timer(name="rollout", logger=None) as rollout_timer, \
+                            tracer.start_as_current_span("rollout"):
+                        inject_trace_context(batch.meta_info)
+                        batch = ray.get(self.train_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
+                        defer.callback(lambda b=batch: DataProto.drop(b))
+                        sample_uuids = [f"{traj_id}_{i}" for i, traj_id in enumerate(batch.non_tensor_batch['traj_id'])]
+                        batch.non_tensor_batch['sample_uuid'] = np.array(sample_uuids, dtype=object)
+                        if "get_batch_return_start_time" in batch.meta_info:
+                            metrics["time/get_batch_cost_train"] = time.time() - batch.meta_info.pop("get_batch_return_start_time")
+                        actor_infer_metrics = self.actor_infer.get_metrics()
+                        metrics.update(reduce_metrics(actor_infer_metrics.meta_info.pop("metrics", {})))
+                        metrics.update(compute_rollout_traj_metrics(batch))
 
-                            dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, batch)
+                        dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, batch)
 
-                        metrics["time/step_rollout"] = rollout_timer.last
-                        metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
-                        batch.meta_info["global_step"] = global_step
-                        batch.meta_info["_broadcast_non_tensor_batch"] = True
-                        batch.meta_info["loss_mask_keys"] = ["response_mask"]
+                    metrics["time/step_rollout"] = rollout_timer.last
+                    metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
+                    batch.meta_info["global_step"] = global_step
+                    batch.meta_info["_broadcast_non_tensor_batch"] = True
+                    batch.meta_info["loss_mask_keys"] = ["response_mask"]
 
-                        # PHASE 8: Stop Server Sync (sync mode only) - Wait for async val to complete
-                        if val_future is not None:
-                            val_metrics = val_future.result()
-
-                    if len(val_metrics) > 0:
+                    if val_future is not None:
+                        val_metrics = val_future.result()
                         metrics.update(val_metrics)
-                        metrics["time/step_val"] = val_timer.last
 
+                    # PHASE 8: Stop Server Sync (sync mode only) - Wait for async val to complete
                     if not self.pipeline_config.async_pipeline:
                         # Suspend scheduler before offload actor infer, because there may be
                         # some inflight redundant trajectories.
@@ -322,7 +340,8 @@ class AgenticPipeline(BasePipeline):
                     #   During training: actor_train uses freed GPUs [0,1]
                     #   Next iteration: model_update reloads actor_infer to all GPUs [0,1,2,3]
                     elif self.partial_gpu_mode:
-                        with Timer(name="cal_ref_log_probs", logger=None) as shrink_timer:
+                        with Timer(name="shrink_sampler", logger=None) as shrink_timer, \
+                                tracer.start_as_current_span("shrink_sampler"):
                             target_gpus = []
                             # Collect actor_train GPUs
                             if hasattr(self.actor_train.worker_config, 'device_mapping') and self.actor_train.worker_config.device_mapping:
@@ -344,41 +363,57 @@ class AgenticPipeline(BasePipeline):
                     metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
 
                     # PHASE 11: Reference Log Probs
-                    with Timer(name="cal_ref_log_probs", logger=None) as cal_timer:
+                    with Timer(name="cal_ref_log_probs", logger=None) as cal_timer, \
+                            tracer.start_as_current_span("cal_ref_log_probs"):
                         # TODO better the code structure, move the dynamic batching and sequence packing to worker/strategy
                         if self.pipeline_config.enable_reference:
-                            worker_config = self.pipeline_config.reference if self.use_ref_model else self.pipeline_config.actor_train
-                            worker = self.reference if self.use_ref_model else self.pipeline_config.actor_train
-                            if worker_config.use_dynamic_batching_in_infer:
-                                batch, dynamic_batching_metrics = dynamic_batching_shard(
-                                    batch,
-                                    worker.dp_size,
-                                    worker_config.max_tokens_per_microbatch_in_infer,
-                                    worker_config.sequence_length_round_in_infer,
-                                    worker_config.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
-                                    worker_config.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
-                                    "reference/compute_log_probs",
-                                )
-                                metrics.update(dynamic_batching_metrics)
                             if not self.use_ref_model:
+                                # LoRA branch: use actor_train with disabled adapter
+                                worker_config = self.pipeline_config.actor_train
+                                batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
                                 batch.meta_info["disable_adapter"] = True
                                 batch.meta_info["is_offload_states"] = False
-                                batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
+                                if worker_config.use_dynamic_batching_in_infer:
+                                    batch, dynamic_batching_metrics = dynamic_batching_shard(
+                                        batch,
+                                        self.actor_train.dp_size,
+                                        worker_config.max_tokens_per_microbatch_in_infer,
+                                        worker_config.sequence_length_round_in_infer,
+                                        worker_config.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
+                                        worker_config.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
+                                        "reference/compute_log_probs",
+                                    )
+                                    metrics.update(dynamic_batching_metrics)
                                 ref_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
+                                ref_log_probs = DataProto.materialize_concat(data_refs=ref_log_probs_refs)
+                                ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
+                                batch = batch.union(ref_log_probs)
+                                avg_ref_log_prob = masked_mean(batch.batch["ref_log_probs"], batch.batch["response_mask"][:, 1:])
+                                metrics.update(reduce_metrics(ref_log_probs.meta_info.pop("metrics", {})))
+                                metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
                             else:
-                                batch_balance(batch, dp_size=self.reference.dp_size, minibatch_size=len(batch))
-                                ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(batch, blocking=False)
+                                saved_routed_experts = batch.batch.pop("routed_experts", None)
+                                domain_to_teacher_names, domain_values = build_domain_routing_context(
+                                    batch, self.pipeline_config, domain_key="tags"
+                                )
+                                batch = compute_ref_log_probs_with_routing(
+                                    batch=batch,
+                                    references=self.references,
+                                    pipeline_config=self.pipeline_config,
+                                    domain_to_teacher_names=domain_to_teacher_names,
+                                    domain_values=domain_values,
+                                    metrics_fn=metrics.update,
+                                )
+                                if saved_routed_experts is not None:
+                                    batch.batch["routed_experts"] = saved_routed_experts
 
-                            ref_log_probs = DataProto.materialize_concat(data_refs=ref_log_probs_refs)
-                            ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
-                            batch = batch.union(ref_log_probs)
-                            avg_ref_log_prob = masked_mean(batch.batch["ref_log_probs"], batch.batch["response_mask"][:, 1:])
-                            metrics.update(reduce_metrics(ref_log_probs.meta_info.pop("metrics", {})))
-                            metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
+                                avg_ref_log_prob = masked_mean(batch.batch["ref_log_probs"], batch.batch["response_mask"][:, 1:])
+                                metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
                     metrics["time/step_ref_log_probs_values_reward"] = cal_timer.last
 
                     # PHASE 12: Old Log Probs & Values
-                    with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
+                    with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer, \
+                            tracer.start_as_current_span("cal_old_log_probs_values"):
                         if self.pipeline_config.enable_reference and not self.use_ref_model:
                             batch.meta_info["disable_adapter"] = False
                         batch.meta_info["is_offload_states"] = False
@@ -422,18 +457,26 @@ class AgenticPipeline(BasePipeline):
                             batch.batch["ref_log_probs"] = batch.batch["old_log_probs"].clone()
                             avg_ref_log_prob = masked_mean(batch.batch["ref_log_probs"], batch.batch["response_mask"][:, 1:])
                             metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
+                            # Multi-teacher: also mock per-teacher keys
+                            for name in self.pipeline_config.reference_configs.keys():
+                                batch.batch[f"ref_log_probs_{name}"] = batch.batch["old_log_probs"].clone()
+                                batch.batch[f"ref_log_probs_{name}_mask"] = torch.ones(
+                                    batch.batch.batch_size[0], dtype=torch.bool, device=batch.batch.device
+                                )
 
                     metrics["time/step_old_log_probs_values"] = cal_old_logpb_timer.last
 
                     # TODO 当前这个还没用处
-                    with Timer(name="cal_response_level_mask", logger=None) as timer:
+                    with Timer(name="cal_response_level_mask", logger=None) as timer, \
+                            tracer.start_as_current_span("cal_response_level_mask"):
                         # TODO 补充完善的过滤要求，不同环境需要维持统一过滤标识
                         batch, mask_metrics = get_agentic_response_level_mask(batch, self.pipeline_config)
                         metrics.update(mask_metrics)
                     metrics["time/step_cal_response_level_mask"] = timer.last
 
                     # PHASE 13: Advantage Computation
-                    with Timer(name="cal_response_norm_rewards", logger=None) as timer:
+                    with Timer(name="cal_response_norm_rewards", logger=None) as timer, \
+                            tracer.start_as_current_span("cal_response_norm_rewards"):
                         # Rewards need to be processed after grouping
                         # We can group by tag(env_type)/traj_group_id(group)/batch(rollout_batch)... to compute rewards / advantages
                         # The compute_response_level_rewards function injects a response_level_rewards key into batch.batch.
@@ -442,14 +485,16 @@ class AgenticPipeline(BasePipeline):
                         metrics.update(reward_metrics)
                     metrics["time/step_cal_norm_rewards"] = timer.last
 
-                    with Timer(name="cal_token_reward", logger=None) as timer:
+                    with Timer(name="cal_token_reward", logger=None) as timer, \
+                            tracer.start_as_current_span("cal_token_reward"):
                         # Expand compute_response_level_rewards and add kl_penalty.
                         # batch, kl_metrics = apply_kl_penalty(data=batch, kl_ctrl=self.kl_ctrl, kl_penalty=self.pipeline_config.kl_penalty)
                         batch, token_level_metrics = compute_token_reward(batch, self.pipeline_config, self.kl_ctrl)
                         metrics.update(token_level_metrics)
                     metrics["time/step_cal_token_reward"] = timer.last
 
-                    with Timer(name="compute_advantage", logger=None) as timer:
+                    with Timer(name="compute_advantage", logger=None) as timer, \
+                            tracer.start_as_current_span("compute_advantage"):
                         # Is the advantage calculated globally across the batch, or within each group?
                         batch = agentic_compute_advantage(
                             data=batch,
@@ -470,7 +515,8 @@ class AgenticPipeline(BasePipeline):
                         metrics.update(corr_metrics)
 
                     # PHASE 14: Training (critic + actor)
-                    with Timer(name="train_timer", logger=None) as train_timer:
+                    with Timer(name="train_timer", logger=None) as train_timer, \
+                            tracer.start_as_current_span("train"):
                         if self.pipeline_config.adv_estimator == "gae":
                             critic_train_metrics_refs: List[ray.ObjectRef] = self.critic.train_step(batch, blocking=False)
 
@@ -503,7 +549,8 @@ class AgenticPipeline(BasePipeline):
                         tps_timer.push_units_processed(n=torch.sum(batch.batch["attention_mask"]).detach().item())
                     metrics["time/step_train"] = train_timer.last
 
-                with Timer(name="compute_data_metrics", logger=None) as data_metrics_timer:
+                with Timer(name="compute_data_metrics", logger=None) as data_metrics_timer, \
+                        tracer.start_as_current_span("compute_data_metrics"):
                     data_metrics = compute_train_data_metrics(batch=batch)
 
                 metrics["time/step_compute_data_metrics"] = data_metrics_timer.last
@@ -517,7 +564,8 @@ class AgenticPipeline(BasePipeline):
 
                 self.do_checkpoint(global_step=global_step)
 
-                with Timer(name="log", logger=None) as log_timer:
+                with Timer(name="log", logger=None) as log_timer, \
+                        tracer.start_as_current_span("log"):
                     if self.pipeline_config.logging_steps > 0 and global_step % self.pipeline_config.logging_steps == 0:
                         if int(os.environ.get("RAY_PROFILING", "0")):
                             timeline_dir = os.path.join(self.pipeline_config.profiler_output_dir, "timeline")
@@ -577,44 +625,52 @@ class AgenticPipeline(BasePipeline):
             self.val_rollout_scheduler.shutdown.remote(),
         ])
 
-
         logger.info("pipeline complete!")
 
-
-    def val(self, global_step):
+    def val(self, global_step, trace_meta):
+        defer = ExitStack()
         batch = DataProto()
         metrics = {}
         batch.meta_info["is_offload_states"] = False
         batch.meta_info["global_step"] = global_step
-        ray.get(self.val_dataset_manager.reset.remote())
-        eval_batch = ray.get(self.val_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.val_batch_size))
+        with (
+            Timer(name="val", logger=None) as val_timer,
+            attach_trace_context(trace_meta),
+            get_tracer("driver").start_as_current_span("val"),
+        ):
+            inject_trace_context(batch.meta_info)
+            ray.get(self.val_dataset_manager.reset.remote())
+            eval_batch = ray.get(self.val_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.val_batch_size))
+            defer.callback(lambda b=eval_batch: DataProto.drop(b))
 
-        if "get_batch_return_start_time" in eval_batch.meta_info:
-            metrics["time/get_batch_cost_val"] = time.time() - eval_batch.meta_info.pop("get_batch_return_start_time")
+            if "get_batch_return_start_time" in eval_batch.meta_info:
+                metrics["time/get_batch_cost_val"] = time.time() - eval_batch.meta_info.pop("get_batch_return_start_time")
 
-        dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, eval_batch)
-        eval_metrics = reduce_metrics(eval_batch.meta_info.get("metrics", {}))
-        eval_score = get_episode_scores(eval_batch)
-        eval_metrics["score/mean"] = torch.mean(eval_score).detach().item()
-        eval_metrics["score/max"] = torch.max(eval_score).detach().item()
-        eval_metrics["score/min"] = torch.min(eval_score).detach().item()
+            dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, eval_batch)
+            eval_metrics = reduce_metrics(eval_batch.meta_info.get("metrics", {}))
+            eval_score = get_episode_scores(eval_batch)
+            eval_metrics["score/mean"] = torch.mean(eval_score).detach().item()
+            eval_metrics["score/max"] = torch.max(eval_score).detach().item()
+            eval_metrics["score/min"] = torch.min(eval_score).detach().item()
 
-        batch_grouped = eval_batch.group_by(keys="tags")
-        for group_name, group_batch in batch_grouped.items():
-            traj_group_scores = []
-            batch_traj_grouped = group_batch.group_by(keys="traj_group_id")
-            for batch_traj_group_name, batch_traj_group in batch_traj_grouped.items():
-                traj_group_score = get_episode_scores(batch_traj_group)
-                traj_group_scores.append(traj_group_score.mean().item())
-            eval_score = torch.tensor(traj_group_scores, dtype=torch.float)
-            eval_metrics[f"{group_name}/score/mean"] = torch.mean(eval_score).detach().item()
-            eval_metrics[f"{group_name}/score/max"] = torch.max(eval_score).detach().item()
-            eval_metrics[f"{group_name}/score/min"] = torch.min(eval_score).detach().item()
+            batch_grouped = eval_batch.group_by(keys="tags")
+            for group_name, group_batch in batch_grouped.items():
+                traj_group_scores = []
+                batch_traj_grouped = group_batch.group_by(keys="traj_group_id")
+                for batch_traj_group_name, batch_traj_group in batch_traj_grouped.items():
+                    traj_group_score = get_episode_scores(batch_traj_group)
+                    traj_group_scores.append(traj_group_score.mean().item())
+                eval_score = torch.tensor(traj_group_scores, dtype=torch.float)
+                eval_metrics[f"{group_name}/score/mean"] = torch.mean(eval_score).detach().item()
+                eval_metrics[f"{group_name}/score/max"] = torch.max(eval_score).detach().item()
+                eval_metrics[f"{group_name}/score/min"] = torch.min(eval_score).detach().item()
 
-        metrics.update({f"val/{k}": v for k, v in eval_metrics.items()})
-        logger.info(f"val_batch_size: {len(eval_batch)}")
-        logger.info(f"val metrics: {metrics}")
+            metrics.update({f"val/{k}": v for k, v in eval_metrics.items()})
+            logger.info(f"val_batch_size: {len(eval_batch)}")
+            logger.info(f"val metrics: {metrics}")
 
+        defer.close()
+        metrics["time/step_val"] = val_timer.last
         return metrics
 
     def adjust_batch(self, data: DataProto, mode="copy") -> DataProto:
@@ -625,7 +681,14 @@ class AgenticPipeline(BasePipeline):
         actor_train_infer_bsz = self.pipeline_config.actor_train.infer_batch_size * self.actor_train.dp_size
 
         ref_infer_bsz = 1
-        if hasattr(self, "reference"):
+        if hasattr(self, "references"):
+            # Multi-teacher: use LCM of all teacher infer batch sizes
+            ref_infer_bzs = [
+                ref_cfg.infer_batch_size * self.references[name].dp_size
+                for name, ref_cfg in self.pipeline_config.reference_configs.items()
+            ]
+            ref_infer_bsz = int(np.lcm.reduce(np.array(ref_infer_bzs)))
+        elif hasattr(self, "reference"):
             ref_infer_bsz = self.pipeline_config.reference.infer_batch_size * self.reference.dp_size
         critic_train_bsz = 1
         critic_infer_bsz = 1
@@ -713,7 +776,13 @@ class AgenticPipeline(BasePipeline):
         train_devices = set(self.actor_train.worker_config.device_mapping)
         infer_devices = set(self.actor_infer.worker_config.device_mapping)
         critic_devices = set(self.critic.worker_config.device_mapping) if hasattr(self, 'critic') and self.critic else set()
-        ref_devices = set(self.reference.worker_config.device_mapping) if self.pipeline_config.enable_reference else set()
+        ref_devices = set()
+        if self.pipeline_config.enable_reference:
+            if hasattr(self, 'references'):
+                for ref_cluster in self.references.values():
+                    ref_devices.update(ref_cluster.worker_config.device_mapping)
+            elif hasattr(self, 'reference'):
+                ref_devices = set(self.reference.worker_config.device_mapping)
         reward_devices = set(self.reward.worker_config.device_mapping) if self.reward else set()
 
         # VAL: VAL_NON_EMPTY - ensure device_mapping not empty
@@ -723,13 +792,21 @@ class AgenticPipeline(BasePipeline):
                 f"train={list(train_devices)}, infer={list(infer_devices)}"
             )
 
-        # Universal validation: Reference must always colocate with actor_train (both Model A and B)
+        # Universal validation: Reference must colocate with actor_train (both Model A and B)
         # VAL: VAL_SUBSET (exact match) - reference colocation
+        # For multi-teacher: relax to warning since teachers may span different GPU sets
         if self.pipeline_config.enable_reference:
-            assert ref_devices == train_devices, (
-                f"Reference device_mapping must match actor_train exactly: "
-                f"ref={list(ref_devices)}, train={list(train_devices)}"
-            )
+            if ref_devices != train_devices:
+                if self.pipeline_config.is_multi_teacher:
+                    logger.warning(
+                        f"Multi-teacher: Reference devices {sorted(ref_devices)} != train devices {sorted(train_devices)}, "
+                        f"colocation may not be guaranteed for all teachers."
+                    )
+                else:
+                    assert ref_devices == train_devices, (
+                        f"Reference device_mapping must match actor_train exactly: "
+                        f"ref={list(ref_devices)}, train={list(train_devices)}"
+                    )
 
         # Determine configuration mode
         if train_devices.isdisjoint(infer_devices):

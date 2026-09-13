@@ -286,6 +286,7 @@ class DistConverter:
         tensor_model_parallel_rank: int = 0,
         pipeline_model_parallel_rank: int = 0,
         expert_model_parallel_rank: int = 0,
+        expert_tensor_parallel_rank: int = 0,
         virtual_pipeline_model_parallel_rank: int = 0,
         revert: bool = False,
         efficient_mode: bool = False,  # not check the consistency of weights
@@ -295,6 +296,7 @@ class DistConverter:
         self.tensor_model_parallel_rank = tensor_model_parallel_rank or 0
         self.pipeline_model_parallel_rank = pipeline_model_parallel_rank or 0
         self.expert_model_parallel_rank = expert_model_parallel_rank or 0
+        self.expert_tensor_parallel_rank = expert_tensor_parallel_rank or 0
         self.virtual_pipeline_model_parallel_rank = virtual_pipeline_model_parallel_rank or 0
         self.swiglu = mca_config.swiglu
         self.revert = revert
@@ -345,7 +347,8 @@ class DistConverter:
         def on_this_pipeline():
             if self.pipeline_model_parallel_rank is None:
                 return True
-            if weight_name.startswith("mtp.layers."):
+            # Handle all MTP weights (mtp.layers.* and mtp.* for non-layer weights like enorm, hnorm, eh_proj, final_layernorm)
+            if weight_name.startswith("mtp."):
                 return self.mca_config.mtp_num_layers and self.is_pipeline_last_stage(vp_stage=vp_stage)
 
             if self.name_match(weight_name, self.config.pre_process_weights):
@@ -383,78 +386,96 @@ class DistConverter:
     def is_pipeline_first_stage(self, vp_stage: int):
         return self.pipeline_model_parallel_rank == 0 and vp_stage == 0
 
-    def _convert_column_parallel(self, weight: "Tensor"):
-        return torch.chunk(weight, self.mca_config.tensor_model_parallel_size, dim=0)[self.tensor_model_parallel_rank]
+    def _convert_column_parallel(self, name: str, weight: "Tensor"):
+        if self.is_expert_parallel_weight(name):
+            return torch.chunk(weight, self.mca_config.expert_tensor_parallel_size, dim=0)[
+                self.expert_tensor_parallel_rank
+            ]
+        return torch.chunk(weight, self.mca_config.tensor_model_parallel_size, dim=0)[
+            self.tensor_model_parallel_rank
+        ]
 
-    def _revert_column_parallel(self, weights: list["Tensor"]):
-        assert len(weights) == self.mca_config.tensor_model_parallel_size
+    def _revert_column_parallel(self, name: str, weights: list["Tensor"]):
+        tp_size = self.mca_config.tensor_model_parallel_size
+        if self.is_expert_parallel_weight(name):
+            tp_size = self.mca_config.expert_tensor_parallel_size
+        assert len(weights) == tp_size
         if len(weights) == 1:
             return weights[0]
         return torch.cat(weights, dim=0)
 
     def handle_column_parallel(self, name: str, weights: Union["Tensor", list["Tensor"]]) -> dict[str, "Tensor"]:
         if self.revert:
-            weight = self._revert_column_parallel(weights)
+            weight = self._revert_column_parallel(name, weights)
         else:
-            weight = self._convert_column_parallel(weights)
+            weight = self._convert_column_parallel(name, weights)
         name = self._name_relocate(name)
         return {name: weight}
 
-    def _convert_row_parallel(self, weight: "Tensor"):
-        return torch.chunk(weight, self.mca_config.tensor_model_parallel_size, dim=1)[self.tensor_model_parallel_rank]
+    def _convert_row_parallel(self, name: str, weight: "Tensor"):
+        if self.is_expert_parallel_weight(name):
+            return torch.chunk(weight, self.mca_config.expert_tensor_parallel_size, dim=1)[
+                self.expert_tensor_parallel_rank
+            ]
+        return torch.chunk(weight, self.mca_config.tensor_model_parallel_size, dim=1)[
+            self.tensor_model_parallel_rank
+        ]
 
-    def _revert_row_parallel(self, weights: list["Tensor"]):
-        assert len(weights) == self.mca_config.tensor_model_parallel_size
+    def _revert_row_parallel(self, name: str, weights: list["Tensor"]):
+        tp_size = self.mca_config.tensor_model_parallel_size
+        if self.is_expert_parallel_weight(name):
+            tp_size = self.mca_config.expert_tensor_parallel_size
+        assert len(weights) == tp_size
         if len(weights) == 1:
             return weights[0]
         return torch.cat(weights, dim=1)
 
     def handle_row_parallel(self, name: str, weights: Union["Tensor", list["Tensor"]]) -> dict[str, "Tensor"]:
         if self.revert:
-            weight = self._revert_row_parallel(weights)
+            weight = self._revert_row_parallel(name, weights)
         else:
-            weight = self._convert_row_parallel(weights)
+            weight = self._convert_row_parallel(name, weights)
         name = self._name_relocate(name)
         return {name: weight}
 
-    def _convert_swiglu(self, weight: "Tensor"):
+    def _convert_swiglu(self, name: str, weight: "Tensor"):
         assert self.swiglu and isinstance(weight, StackedTensors) and len(weight.tensors) == 2 and weight.dim == 0, (
             f"weight: {weight} swiglu: {self.swiglu}"
         )
-        weight_w = self._convert_column_parallel(weight.tensors[0])
-        weight_v = self._convert_column_parallel(weight.tensors[1])
+        weight_w = self._convert_column_parallel(name, weight.tensors[0])
+        weight_v = self._convert_column_parallel(name, weight.tensors[1])
         return torch.cat([weight_w, weight_v], dim=0)
 
-    def _revert_swiglu(self, weights: list["Tensor"]):
+    def _revert_swiglu(self, name: str, weights: list["Tensor"]):
         weights = [torch.chunk(weight, 2, dim=0) for weight in weights]
         weights_w = [weight_w[0] for weight_w in weights]
         weights_v = [weight_v[1] for weight_v in weights]
-        weight_w = self._revert_column_parallel(weights_w)
-        weight_v = self._revert_column_parallel(weights_v)
+        weight_w = self._revert_column_parallel(name, weights_w)
+        weight_v = self._revert_column_parallel(name, weights_v)
         return StackedTensors([weight_w, weight_v], dim=0)
 
     def handle_swiglu(self, name: str, weights: Union["Tensor", list["Tensor"]]) -> dict[str, "Tensor"]:
         if self.revert:
-            weight = self._revert_swiglu(weights)
+            weight = self._revert_swiglu(name, weights)
         else:
-            weight = self._convert_swiglu(weights)
+            weight = self._convert_swiglu(name, weights)
         name = self._name_relocate(name)
         return {name: weight}
 
-    def _convert_gdn(self, weight: "StackedTensors"):
+    def _convert_gdn(self, name: str, weight: "StackedTensors"):
         # q, k, v, z, b, a for in_proj
         # or q, k, v for conv1d
         assert self.swiglu and isinstance(weight, StackedTensors) and weight.dim == 0, (
             f"weight: {weight} swiglu: {self.swiglu}"
         )
-        return torch.cat([self._convert_column_parallel(weight.tensors[i]) for i in range(len(weight.tensors))], dim=0)
+        return torch.cat([self._convert_column_parallel(name, weight.tensors[i]) for i in range(len(weight.tensors))], dim=0)
 
-    def _revert_gdn(self, weights: list["Tensor"], split_shape: list[int]):
+    def _revert_gdn(self, name: str, weights: list["Tensor"], split_shape: list[int]):
         weights = [torch.split(weight, split_shape, dim=0) for weight in weights]
         converted_weights = []
         for i in range(len(split_shape)):
             split_weights = [weight[i] for weight in weights]
-            converted_weight = self._revert_column_parallel(split_weights)
+            converted_weight = self._revert_column_parallel(name, split_weights)
             converted_weights.append(converted_weight)
         return StackedTensors(converted_weights, dim=0)
 
@@ -480,9 +501,9 @@ class DistConverter:
                 ]
             elif "conv1d" in name:
                 split_shape = [local_qk_dim, local_qk_dim, local_v_dim]
-            weight = self._revert_gdn(weights, split_shape)
+            weight = self._revert_gdn(name, weights, split_shape)
         else:
-            weight = self._convert_gdn(weights)
+            weight = self._convert_gdn(name, weights)
         name = self._name_relocate(name)
         return {name: weight}
 
@@ -599,9 +620,9 @@ class DistConverter:
 
     def _convert_te_grouped_column(self, name: str, weights: "Tensor"):
         if self.swiglu:
-            weights = self._convert_swiglu(weights)
+            weights = self._convert_swiglu(name, weights)
         else:
-            weights = self._convert_column_parallel(weights)
+            weights = self._convert_column_parallel(name, weights)
         # weights = weights.transpose(0, 1)
         moe_index = get_mca_moe_index(name) % self.num_layers_for_expert
         relocated_name = self._name_relocate(name) + str(moe_index)
@@ -609,17 +630,17 @@ class DistConverter:
 
     def _revert_te_grouped_column(self, name: str, weights: list["Tensor"], moe_index_preprocessed: bool = False):
         if self.swiglu:
-            weight = self._revert_swiglu(weights)
+            weight = self._revert_swiglu(name, weights)
         else:
-            weight = self._revert_column_parallel(weights)
+            weight = self._revert_column_parallel(name, weights)
         moe_index = int(extract_suffix_number(name))
         return {self._name_relocate(name, moe_index=moe_index, moe_index_preprocessed=moe_index_preprocessed): weight}
 
     def _convert_grouped_column(self, name: str, weights: "Tensor"):
         if self.swiglu:
-            weights = self._convert_swiglu(weights)
+            weights = self._convert_swiglu(name, weights)
         else:
-            weights = self._convert_column_parallel(weights)
+            weights = self._convert_column_parallel(name, weights)
         weights = weights.transpose(0, 1)
         relocated_name = self._name_relocate(name)
         moe_index = get_mca_moe_index(name) % self.num_layers_for_expert
@@ -643,13 +664,13 @@ class DistConverter:
         # [expert_num_per_rank, tp]
         ungrouped_weights = [[weights[i] for weights in ungrouped_weights] for i in range(self.num_layers_for_expert)]
 
-        def _revert_column(weights: list["Tensor"]):
+        def _revert_column(name: str, weights: list["Tensor"]):
             if self.swiglu:
-                return self._revert_swiglu(weights)
+                return self._revert_swiglu(name, weights)
             else:
-                return self._revert_column_parallel(weights)
+                return self._revert_column_parallel(name, weights)
 
-        ungrouped_weights = [_revert_column(weights) for weights in ungrouped_weights]
+        ungrouped_weights = [_revert_column(name, weights) for weights in ungrouped_weights]
         return {
             self._name_relocate(name, moe_index=moe_index): weight
             for moe_index, weight in enumerate(ungrouped_weights)
@@ -668,18 +689,18 @@ class DistConverter:
             return self._convert_grouped_column(name, weights)
 
     def _convert_te_grouped_row(self, name: str, weights: "Tensor"):
-        weights = self._convert_row_parallel(weights)
+        weights = self._convert_row_parallel(name, weights)
         moe_index = get_mca_moe_index(name) % self.num_layers_for_expert
         relocated_name = self._name_relocate(name) + str(moe_index)
         return {relocated_name: weights}
 
     def _revert_te_grouped_row(self, name: str, weights: list["Tensor"], moe_index_preprocessed: bool = False):
-        weights = self._revert_row_parallel(weights)
+        weights = self._revert_row_parallel(name, weights)
         moe_index = int(extract_suffix_number(name))
         return {self._name_relocate(name, moe_index=moe_index, moe_index_preprocessed=moe_index_preprocessed): weights}
 
     def _convert_grouped_row(self, name: str, weights: "Tensor"):
-        weights = self._convert_row_parallel(weights)
+        weights = self._convert_row_parallel(name, weights)
         weights = weights.transpose(0, 1)
         relocated_name = self._name_relocate(name)
         moe_index = get_mca_moe_index(name) % self.num_layers_for_expert
@@ -702,7 +723,7 @@ class DistConverter:
         ungrouped_weights = [_revert_grouped(weight) for weight in weights]
         # [expert_num_per_rank, tp]
         ungrouped_weights = [[weights[i] for weights in ungrouped_weights] for i in range(self.num_layers_for_expert)]
-        ungrouped_weights = [self._revert_row_parallel(weights) for weights in ungrouped_weights]
+        ungrouped_weights = [self._revert_row_parallel(name, weights) for weights in ungrouped_weights]
         return {
             self._name_relocate(name, moe_index=moe_index): weight
             for moe_index, weight in enumerate(ungrouped_weights)
@@ -766,19 +787,22 @@ class DistConverter:
         """
         Preprocess layer index for pipeline parallelism.
         Converts between global and local layer indices before calling name_relocate.
+        MTP layer indices are independent of PP mapping and are kept as-is.
         """
         layer_index = get_mca_layer_index(name)
         if layer_index is None:
             return name
         moe_index = get_mca_moe_index(name)
 
+        if name.startswith("mtp.layers."):
+            # MTP layer indices are independent of PP mapping, skip conversion
+            return add_mca_mtp_layer_prefix(remove_mca_weight_prefix(name), layer_index, moe_index)
+
         if self.revert:
             layer_index = self.get_global_layer_index(layer_index, vp_stage=vp_stage)
         else:
             layer_index = self.get_local_layer_index(layer_index)
 
-        if name.startswith("mtp.layers."):
-            return add_mca_mtp_layer_prefix(remove_mca_weight_prefix(name), layer_index, moe_index)
         return add_mca_layer_prefix(remove_mca_weight_prefix(name), layer_index, moe_index)
 
     def dist_convert(

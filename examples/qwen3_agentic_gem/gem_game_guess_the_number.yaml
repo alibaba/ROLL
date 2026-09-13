@@ -1,9 +1,5 @@
 defaults:
   - ../config/traj_envs_gem_games@_here_
-  - ../config/deepspeed_zero@_here_
-  - ../config/deepspeed_zero2@_here_
-  - ../config/deepspeed_zero3@_here_
-  - ../config/deepspeed_zero3_cpuoffload@_here_
 
 hydra:
   run:
@@ -76,8 +72,6 @@ actor_train:
     gradient_accumulation_steps: 8
     lr_scheduler_type: constant
   strategy_args:
-#    strategy_name: deepspeed_train
-#    strategy_config: ${deepspeed_zero3}
     strategy_name: megatron_train
     strategy_config:
       tensor_model_parallel_size: 1

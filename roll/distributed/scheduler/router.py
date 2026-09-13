@@ -70,7 +70,7 @@ class RouterManager:
         self.actor_cluster = actor_cluster
         self.workers = actor_cluster.workers
 
-        self.strategy_name = actor_cluster.worker_config.strategy_args.strategy_name 
+        self.strategy_name = actor_cluster.worker_config.strategy_args.strategy_name
         self.model_path = download_model(actor_cluster.worker_config.model_args.model_name_or_path)
         self.tokenizer = default_tokenizer_provider(model_args=actor_cluster.worker_config.model_args)
 
@@ -571,7 +571,17 @@ class RouterClient:
         if "multi_modal_data" in req.non_tensor_batch:
             multi_modal_data = req.non_tensor_batch["multi_modal_data"]
             assert len(multi_modal_data) == 1
-            payload["multi_modal_data"] = multi_modal_data[0]
+            if 'multi_modal_data' in multi_modal_data[0] and 'video' in multi_modal_data[0]['multi_modal_data'] and self.strategy_name == 'sglang':
+                multi_modal_data = req.non_tensor_batch["multi_modal_inputs"]
+                assert len(multi_modal_data) == 1
+                payload["multi_modal_data"] = {'multi_modal_data': {'video': multi_modal_data[0]}}
+                input_ids = req.batch["input_ids"]
+                attention_mask = req.batch["attention_mask"]
+                input_ids = gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
+                payload["multi_modal_data"]["prompt_token_ids"] = input_ids[0]
+            else:
+                payload["multi_modal_data"] = multi_modal_data[0]
+
         else:
             input_ids = req.batch["input_ids"]
             assert not collect_unfinished or input_ids.size(0) == 1
@@ -597,10 +607,19 @@ class RouterClient:
     def _postprocess_generate(self, req, response):
         output_data = DataProto(meta_info=req.meta_info)
         output_data.meta_info["finish_reasons"] = response["finish_reasons"]
-        output_data.meta_info["output_token_ids"] = response["output_token_ids"]
+        output_data.meta_info["output_token_ids"] = response.get("output_token_ids", None)
         output_data.meta_info["output_logprobs"] = response.get("output_logprobs", None)
+        # TODO: The size of routed_experts is [b * s * layer * topk].
+        # For the 30A3 model, this data block is tens of MB in size.
+        # The serialization overhead of Ray transmission needs to be profiled again.
+        output_data.meta_info["routed_experts"] = response.get("routed_experts", None)
         output_data.meta_info["eos_token_id"] = [self.eos_token_id, self.pad_token_id]
         output_data.meta_info["pad_token_id"] = self.pad_token_id
+
+        # Merge metrics from response (e.g., speculative decoding metrics)
+        if "metrics" in response:
+            output_data.meta_info.setdefault("metrics", {}).update(response["metrics"])
+
         return output_data
 
     async def generate_request(self, req: DataProto, request_id, uid):
