@@ -116,7 +116,11 @@ class RLVRVLMPipeline(BasePipeline):
 
         # prepare dataset and collect_fn_kwargs
         train_data_kwargs = create_pipeline_data_kwargs(
-            self.pipeline_config.actor_train.data_args, tokenizer=self.tokenizer, processor=self.processor
+            self.pipeline_config.actor_train.data_args,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            max_prompt_length=self.pipeline_config.prompt_length,
+            vlm_filter=self.pipeline_config.vlm_filter,
         )
         # pipeline related data args
         def _data_kwargs_helper(data_kwargs):
@@ -164,6 +168,8 @@ class RLVRVLMPipeline(BasePipeline):
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 is_val=True,
+                max_prompt_length=self.pipeline_config.prompt_length,
+                vlm_filter=self.pipeline_config.vlm_filter,
             )
             val_data_kwargs = _data_kwargs_helper(val_data_kwargs)
             val_dataset, val_collect_fn_kwargs = val_data_kwargs["dataset"], val_data_kwargs["collect_fn_kwargs"]
