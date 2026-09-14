@@ -113,3 +113,28 @@ def test_data_integrity(sample_dataset):
     original_ids = set(range(len(sample_dataset)))
     used_ids = set(all_samples)
     assert used_ids.issuperset(original_ids)
+
+
+def test_empty_domain_ratio_entry_is_dropped():
+    data = [{"domain": "a", "id": i} for i in range(10)]
+    data += [{"domain": "b", "id": i} for i in range(10)]
+    dataset = MockDataset(data)
+
+    sampler = BatchStratifiedSampler(
+        dataset,
+        domain_ratios={"a": 0.5, "b": 0.3, "c": 0.2},
+        batch_size=10,
+        drop_last=True,
+    )
+
+    assert "c" not in sampler.domain_ratios
+    assert "c" not in sampler.domain_batch_num
+    assert abs(sum(sampler.domain_ratios.values()) - 1.0) < 1e-9
+    assert sampler.domain_batch_num["a"] + sampler.domain_batch_num["b"] == 10
+
+    batches = list(sampler)
+    assert len(batches) >= 1
+    for batch in batches:
+        domains = {dataset[i]["domain"] for i in batch}
+        assert domains <= {"a", "b"}
+
