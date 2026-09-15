@@ -26,6 +26,36 @@ patch_gdn_attention()
 logger = get_logger()
 
 
+def apply_hf_to_vllm_mapper(model, weights_list: list) -> list:
+    """Rewrite HF-style weight names into the model's internal names before load_weights.
+
+    mcore_adapter's all_gather_weights_as_hf_bucket emits HF-style names
+    (e.g. `model.language_model.layers.0...`). vLLM model classes whose module
+    tree differs from those names expose `hf_to_vllm_mapper` (a WeightsMapper)
+    and apply it when loading from disk. Weight sync must do the same, otherwise
+    load_weights fails with:
+
+        ValueError: There is no module or parameter named 'model' in
+        Qwen3_8FlashNextForConditionalGeneration
+
+    The mapper is read off the loaded model rather than hardcoded: two classes in
+    the same file can map in OPPOSITE directions (one strips
+    `model.language_model.` -> `model.`, the other adds it), and picking the
+    wrong one produces the identical "no module or parameter named" error.
+    """
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    if mapper is None:
+        return weights_list
+    before = len(weights_list)
+    weights_list = list(mapper.apply(weights_list))
+    if len(weights_list) != before:
+        logger.warning(
+            f"hf_to_vllm_mapper changed tensor count {before} -> {len(weights_list)}; "
+            "the mapper may be dropping tensors"
+        )
+    return weights_list
+
+
 class TensorLoraManager:
     def __init__(self):
         self.lora_params = OrderedDict()
@@ -83,14 +113,18 @@ class WorkerBase:
         weights_list = list(weights)
 
         # Update target model (skips mtp.* prefixed weights via skip_prefixes)
-        self.model_runner.model.load_weights(weights=weights_list)
+        target_model = self.model_runner.model
+        target_weights = apply_hf_to_vllm_mapper(target_model, weights_list)
+        target_model.load_weights(weights=target_weights)
 
         # Update drafter model (MTP/EAGLE) if exists
         # Drafter models like EagleProposer and DraftModelProposer have a model attribute
         # that needs to be updated separately with the same weights
         if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
             logger.info("Updating drafter (MTP/EAGLE) model weights...")
-            self.model_runner.drafter.model.load_weights(weights=weights_list)
+            drafter_model = self.model_runner.drafter.model
+            drafter_weights = apply_hf_to_vllm_mapper(drafter_model, weights_list)
+            drafter_model.load_weights(weights=drafter_weights)
 
     def load_states(self):
         self.reload_model()
