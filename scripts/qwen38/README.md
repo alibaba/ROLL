@@ -170,3 +170,21 @@ Completion still requires the real-model update, save/restore, natural
 cross-framework parity, export, and performance acceptance results. CPU tests,
 dependency hashes, or a successful partial optimizer step do not satisfy those
 gates.
+
+## Native DCP payload validation
+
+After a training process exits, validate every declared model and optimizer
+payload with bounded tensor memory:
+
+```bash
+python scripts/qwen38/validate_backbone_payloads.py \
+  /path/to/checkpoint-19 \
+  --output /path/to/payload-validation.json
+```
+
+The validator checks logical chunk coverage, actual tensor type, dtype, shape,
+finite values, Adam step values, and native common state. It groups items by
+storage file and reads increasing offsets through one file handle, so a large
+checkpoint scan does not reopen the same rank file for every tensor. This is a
+payload gate; architecture inventory, state equality, resumed updates, export,
+parity, and performance remain separate checks.
