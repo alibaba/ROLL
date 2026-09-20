@@ -33,11 +33,14 @@ def gather_and_convert_weights(
     model_converter: ModelConverter,
     tp_group: Optional[dist.ProcessGroup] = None,
     ep_group: Optional[dist.ProcessGroup] = None,
+    weight_provider=None,
     **kwargs,
 ) -> dict[str, torch.Tensor]:
     """
     weights_info: list of tuples, each tuple is (mcore_name, weight)
     """
+    if weight_provider is not None:
+        weights_info = [(name, weight_provider(name, weight)) for name, weight in weights_info]
     if model_converter.mca_config.hf_model_type in ["qwen3_vl_moe", "qwen3_5_moe"] and ep_group is not None:
         # qwen3_vl_moe and qwen3_5_moe has fused moe weights, so we need to gather weights in ep_group before convert
         handles, gathered_named_weights = [], []
@@ -116,9 +119,14 @@ def _gather_hf_weights(
     model_converter: ModelConverter,
     named_weights: list[tuple[str, torch.Tensor]],
     buffer_size: Optional[int] = None,
+    weight_provider=None,
     **kwargs,
 ):
     mca_config = model_converter.mca_config
+    # Online Qwen4 updates must not accumulate the checkpoint's entire expert layer.
+    if mca_config.hf_model_type == "qwen4_exp":
+        kwargs.setdefault("expert_format", "per_expert")
+    stream_qwen4_experts = mca_config.hf_model_type == "qwen4_exp" and kwargs["expert_format"] == "per_expert"
     other_weights_with_info = []
     expert_weights_with_info = []
     for mcore_name, weight in named_weights:
@@ -134,14 +142,26 @@ def _gather_hf_weights(
         group_size *= 1 if ep_group is None else dist.get_world_size(ep_group)
         for mcore_name, weight in weights_info:
             weight_size = weight.numel() * weight.element_size() * group_size
-            if buffer_size is not None and waiting_weights_size + weight_size > buffer_size:
-                yield gather_and_convert_weights(waiting_weights, model_converter, group, ep_group)
+            if (
+                stream_qwen4_experts
+                and buffer_size is not None
+                and weight_size > buffer_size
+                and model_converter.dist_converter.is_expert_parallel_weight(mcore_name)
+            ):
+                raise ValueError(
+                    f"expert {mcore_name} requires {weight_size} gathered bytes, exceeding buffer_size={buffer_size}; "
+                    "increase the buffer or split the source into individual experts"
+                )
+            if buffer_size is not None and waiting_weights_size + weight_size > buffer_size and waiting_weights:
+                yield gather_and_convert_weights(waiting_weights, model_converter, group, ep_group,
+                                                 weight_provider=weight_provider, **kwargs)
                 waiting_weights, waiting_weights_size = [], 0
             waiting_weights.append((mcore_name, weight))
             waiting_weights_size += weight_size
 
         if waiting_weights:
-            yield gather_and_convert_weights(waiting_weights, model_converter, group, ep_group, **kwargs)
+            yield gather_and_convert_weights(waiting_weights, model_converter, group, ep_group,
+                                             weight_provider=weight_provider, **kwargs)
 
     ep_group = None
     if mca_config.expert_model_parallel_size is not None and mca_config.expert_model_parallel_size > 1:
@@ -164,7 +184,7 @@ def _iter_vp_stage_named_weights(models: list[McaGPTModel], model_converter: Mod
             yield mcore_name, weight
 
 
-def gather_pp_stage_hf_weights(models: list[McaGPTModel], buffer_size, **kwargs):
+def gather_pp_stage_hf_weights(models: list[McaGPTModel], buffer_size, weight_provider=None, **kwargs):
     # gather tp&ep weights, not including pipeline parallel
     if not mpu.model_parallel_is_initialized():
         raise RuntimeError("Model parallelism must be initialized before save as hf inflight.")
@@ -172,7 +192,8 @@ def gather_pp_stage_hf_weights(models: list[McaGPTModel], buffer_size, **kwargs)
     model_config = models[0].config
     model_converter = ModelConverter(model_config, to_hf=True, efficient_mode=True)
     yield from _gather_hf_weights(
-        model_converter, list(_iter_vp_stage_named_weights(models, model_converter)), buffer_size, **kwargs
+        model_converter, list(_iter_vp_stage_named_weights(models, model_converter)), buffer_size,
+        weight_provider=weight_provider, **kwargs
     )
 
 
@@ -215,7 +236,8 @@ def gather_weights_meta_cross_pp(models: list[McaGPTModel]):
     return expert_weights_meta + other_weights_meta
 
 
-def gather_all_hf_weights(models: list[McaGPTModel], buffer_size: int, weights_meta: Optional[list[dict]]):
+def gather_all_hf_weights(models: list[McaGPTModel], buffer_size: int, weights_meta: Optional[list[dict]],
+                          weight_provider=None):
     # weights_meta: list of dict, each dict is {"name": str, "shape": list, "dtype": str, "pp_stage": int, "size": int}
     if not mpu.model_parallel_is_initialized():
         raise RuntimeError("Model parallelism must be initialized before save as hf inflight.")
@@ -227,8 +249,11 @@ def gather_all_hf_weights(models: list[McaGPTModel], buffer_size: int, weights_m
 
     pp_size = models[0].config.pipeline_model_parallel_size
     if pp_size <= 1:
-        yield from gather_pp_stage_hf_weights(models, buffer_size, **kwargs)
+        yield from gather_pp_stage_hf_weights(models, buffer_size, weight_provider=weight_provider, **kwargs)
         return
+
+    if weight_provider is not None:
+        raise ValueError("CPU master weight streaming currently requires PP1")
 
     pp_rank = mpu.get_pipeline_model_parallel_rank()
     model_converter = ModelConverter(
@@ -307,10 +332,10 @@ class MegatronWeightUpdater:
         else:
             self._setup_separated_model_update()
 
-    def model_update(self):
+    def model_update(self, weight_provider=None):
         if self.is_colocated:
-            return self._colocated_model_update()
-        return self._separated_model_update()
+            return self._colocated_model_update(weight_provider=weight_provider)
+        return self._separated_model_update(weight_provider=weight_provider)
 
     def _setup_colocated_model_update(self):
         logger.info(f"RANK {dist.get_rank()} Setup colocated model update")
@@ -422,14 +447,15 @@ class MegatronWeightUpdater:
             handle.wait()
         return refs
 
-    def _colocated_model_update(self):
+    def _colocated_model_update(self, weight_provider=None):
         refs = []
         infer_parallel_size = dist.get_world_size(self._infer_parallel_cpu_group)
         co_infer_rank = dist.get_rank(self._infer_parallel_cpu_group)
         if is_lora := (self.worker_config.model_args.lora_target is not None):
             peft_config = self.models_unwrapped[0].peft_config.get("default", None)
         for hf_named_weights in gather_all_hf_weights(
-            self.models_unwrapped, buffer_size=self._model_update_buffer_size, weights_meta=self._weights_meta
+            self.models_unwrapped, buffer_size=self._model_update_buffer_size, weights_meta=self._weights_meta,
+            weight_provider=weight_provider,
         ):
             if not hf_named_weights:
                 continue
@@ -460,13 +486,16 @@ class MegatronWeightUpdater:
 
         if is_lora and co_infer_rank == 0 and self._co_infer_worker is not None:
             refs.append(self._co_infer_worker.add_lora.remote(peft_config=asdict(peft_config)))
+            # The inference actor is asynchronous. Bucket transfer completion
+            # does not imply its adapter has been admitted on all ranks.
+            ray.get(refs)
         return {}
 
-    def _separated_model_update(self):
+    def _separated_model_update(self, weight_provider=None):
 
         logger.info(f"start broadcast model update {self.model_update_name}")
         for hf_named_weights in gather_pp_stage_hf_weights(
-            self.models_unwrapped, buffer_size=self._model_update_buffer_size
+            self.models_unwrapped, buffer_size=self._model_update_buffer_size, weight_provider=weight_provider,
         ):
             if not self._broadcast_workers:
                 continue

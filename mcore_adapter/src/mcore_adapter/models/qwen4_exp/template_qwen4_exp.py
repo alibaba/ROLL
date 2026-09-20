@@ -30,9 +30,9 @@ the differences this checkpoint actually has. The ones that matter:
    all 512 experts, whereas qwen3_next has per-expert tensors. Needs slicing per
    expert, and ``gate_up_proj`` is already fused so no gate/up stacking is needed.
 
-5. **Not yet supported, dropped deliberately** (see M6/M7/M8):
-   PLE n-gram table, QSA indexer, MTP, vision tower.
-   (Hyperconnection is no longer dropped -- M7 maps it; see below.)
+5. **Not yet supported, dropped deliberately**: MTP and the vision tower.
+   The frozen PLE n-gram table is managed as an external asset; trainable PLE
+   projections, QSA indexer weights, and hyperconnections are mapped below.
    Each is listed explicitly rather than pattern-swallowed, so that a tensor we
    have not thought about raises instead of vanishing.
 """
@@ -52,6 +52,7 @@ from ..converter.dist_converter import (
 from ..converter.dist_converter import StackedTensors
 from ..converter.template import (
     ConverOp,
+    CopyConverOp,
     GatedQKVConverOp,
     GDNConv1dConverOp,
     RenameConverOp,
@@ -223,11 +224,46 @@ _qwen4_exp_extra_dist_config = DistParallelConfig(
     ],
 )
 
+# Qwen4 adapters include projections absent from the generic LoRA distribution
+# table. Keep these rules model-local so other templates retain their existing
+# checkpoint and streaming behavior.
+_qwen4_exp_lora_dist_config = DistParallelConfig(
+    duplicated_weights=[
+        ".self_attention.in_proj.lora_A.weight",
+        ".self_attention.out_proj.lora_B.weight",
+        ".attn_hyper_connection.input_mix_weight_down.lora_A.weight",
+        ".attn_hyper_connection.input_mix_weight_down.lora_B.weight",
+        ".attn_hyper_connection.input_mix_weight_up.lora_A.weight",
+        ".attn_hyper_connection.input_mix_weight_up.lora_B.weight",
+        ".attn_hyper_connection.block_inject_weight.lora_A.weight",
+        ".attn_hyper_connection.block_inject_weight.lora_B.weight",
+        ".mlp_hyper_connection.input_mix_weight_down.lora_A.weight",
+        ".mlp_hyper_connection.input_mix_weight_down.lora_B.weight",
+        ".mlp_hyper_connection.input_mix_weight_up.lora_A.weight",
+        ".mlp_hyper_connection.input_mix_weight_up.lora_B.weight",
+        ".mlp_hyper_connection.block_inject_weight.lora_A.weight",
+        ".mlp_hyper_connection.block_inject_weight.lora_B.weight",
+        ".ple.key_proj.lora_A.weight",
+        ".ple.key_proj.lora_B.weight",
+        ".ple.value_proj.lora_A.weight",
+        ".ple.value_proj.lora_B.weight",
+        ".self_attention.indexer.index_qk_proj.lora_A.weight",
+        ".self_attention.indexer.index_qk_proj.lora_B.weight",
+        "decoder.hyper_connection_mixer.hc.input_mix_weight_down.lora_A.weight",
+        "decoder.hyper_connection_mixer.hc.input_mix_weight_down.lora_B.weight",
+        "decoder.hyper_connection_mixer.hc.input_mix_weight_up.lora_A.weight",
+        "decoder.hyper_connection_mixer.hc.input_mix_weight_up.lora_B.weight",
+    ],
+    row_parallel_weights=[".self_attention.out_proj.lora_A.weight"],
+    gdn_weights=[".self_attention.in_proj.lora_B.weight"],
+)
+
 register_dist_config(
     "qwen4_exp",
     default_dist_config.merge_configs(shared_moe_dist_config)
     .merge_configs(gdn_dist_config)
-    .merge_configs(_qwen4_exp_extra_dist_config),
+    .merge_configs(_qwen4_exp_extra_dist_config)
+    .merge_configs(_qwen4_exp_lora_dist_config),
 )
 
 
@@ -354,9 +390,78 @@ class Qwen4ExpTemplate(Template):
             ]
         return super().hf_name_to_mca_names(hf_name)
 
-    def add_mca_weight(self, name, weight, **kwargs):
-        # Re-stack per-expert weights. Buffer until every expert of a layer has
-        # arrived, then emit the single HF tensor.
+    def get_lora_conver_op(self, name, pattern_to_conver_ops, lora_rank):
+        """Use Qwen4's fused layouts when exporting adapter factors.
+
+        LoRA-A is shared by each HF projection represented by one fused MCA
+        linear. LoRA-B carries the output layout and therefore uses the exact
+        GDN or gated-QKV split. This direction is exact because the MCA adapter
+        has one shared A; independently trained HF A factors cannot in general
+        be fused back into the same rank and are outside this export contract.
+        """
+        lora_name = name[name.find(".lora") :]
+        cache_key = f"{name}_{lora_rank}"
+        if cache_key in self._lora_op_cache:
+            return self._lora_op_cache[cache_key]
+
+        base_name = name[: name.find(".lora")] + ".weight"
+        base_op = self.get_conver_op(base_name, pattern_to_conver_ops)
+        if not isinstance(base_op, (Qwen4ExpGDNInProjConverOp, GatedQKVConverOp)):
+            return super().get_lora_conver_op(name, pattern_to_conver_ops, lora_rank)
+
+        hf_names = [hf_name.replace(".weight", lora_name) for hf_name in base_op.hf_names]
+        mca_names = [mca_name.replace(".weight", lora_name) for mca_name in base_op.mca_names]
+        if "lora_A" in lora_name:
+            lora_op = CopyConverOp(
+                hf_names=hf_names,
+                mca_names=mca_names,
+                _mca_config=base_op.mca_config,
+            )
+        elif isinstance(base_op, Qwen4ExpGDNInProjConverOp):
+            lora_op = Qwen4ExpGDNInProjConverOp(
+                hf_names=hf_names,
+                mca_names=mca_names,
+                _mca_config=base_op.mca_config,
+            )
+        else:
+            lora_op = GatedQKVConverOp(
+                hf_names=hf_names,
+                mca_names=mca_names,
+                _mca_config=base_op.mca_config,
+                hidden_size=lora_rank,
+            )
+        self._lora_op_cache[cache_key] = lora_op
+        return lora_op
+
+    def add_mca_weight(self, name, weight, *, expert_format="stacked", **kwargs):
+        """Export checkpoint stacks or one expert at a time for online loading.
+
+        The format belongs to this call, not the shared registered template.
+        Streaming must neither consume nor populate a pending checkpoint stack.
+        """
+        if expert_format not in ("stacked", "per_expert"):
+            raise ValueError(f"unsupported expert_format={expert_format!r}; use 'stacked' or 'per_expert'")
+        adapter_expert = re.match(
+            r"^decoder\.layers\.(\d+)\.mlp\.experts\.local_experts\.(\d+)\."
+            r"(linear_fc1|linear_fc2)\.lora_([AB])\.weight$",
+            name,
+        )
+        if adapter_expert:
+            layer_idx, expert_idx = int(adapter_expert.group(1)), int(adapter_expert.group(2))
+            fc, factor = adapter_expert.group(3), adapter_expert.group(4)
+            prefix = f"model.language_model.layers.{layer_idx}.mlp.experts.{expert_idx}"
+            if fc == "linear_fc1" and factor == "A":
+                projections = (("gate_proj", weight), ("up_proj", weight))
+            elif fc == "linear_fc1":
+                assert isinstance(weight, StackedTensors) and len(weight.tensors) == 2
+                projections = zip(("gate_proj", "up_proj"), weight.tensors)
+            else:
+                projections = (("down_proj", weight),)
+            return {
+                f"{prefix}.{projection}.lora_{factor}.weight": tensor.clone()
+                for projection, tensor in projections
+            }
+
         em = re.match(
             r"^decoder\.layers\.(\d+)\.mlp\.experts\.local_experts\.(\d+)\."
             r"(linear_fc1|linear_fc2)\.weight$",
@@ -369,6 +474,10 @@ class Qwen4ExpTemplate(Template):
             # flatten to the fused (2*moe_inter, hidden) form the HF tensor uses.
             if hasattr(weight, "tensors"):
                 weight = torch.cat(list(weight.tensors), dim=weight.dim)
+            if expert_format == "per_expert":
+                return {
+                    f"model.language_model.layers.{layer_idx}.mlp.experts.{e}.{hf_which}.weight": weight
+                }
             buf = self._expert_buffer.setdefault((layer_idx, hf_which), {})
             buf[e] = weight
             if len(buf) < self.mca_config.num_moe_experts:
@@ -387,7 +496,13 @@ class Qwen4ExpTemplate(Template):
             return {
                 f"model.language_model.layers.{idx}.input_layernorm.weight": weight
             }
-        return super().add_mca_weight(name, weight, **kwargs)
+        converted = super().add_mca_weight(name, weight, **kwargs)
+        if converted and (".lora_A." in name or ".lora_B." in name):
+            # Split/chunk operations commonly return views into a fused tensor.
+            # Own each emitted adapter tensor so streaming does not retain the
+            # oversized source storage after the current update is released.
+            return {hf_name: tensor.clone() for hf_name, tensor in converted.items()}
+        return converted
 
 
 register_template(
@@ -414,6 +529,7 @@ register_template(
         "text_config.shared_expert_intermediate_size": "moe_shared_expert_intermediate_size",
         "text_config.num_experts": "num_moe_experts",
         "text_config.num_experts_per_tok": "moe_router_topk",
+        "text_config.output_gate_type": "gdn_output_gate_type",
         # GDN linear attention
         "text_config.linear_conv_kernel_dim": "linear_conv_kernel_dim",
         "text_config.linear_key_head_dim": "linear_key_head_dim",

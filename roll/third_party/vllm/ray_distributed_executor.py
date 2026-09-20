@@ -146,8 +146,14 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
             if worker is None:
                 # driver_dummy_worker can be None when using ray spmd worker.
                 continue
+            # Newer wrappers renamed this RPC. These IDs describe Ray's
+            # fractional reservation; ROLL keeps its explicit one-device
+            # visibility and local_rank=0 when initializing each worker.
+            get_node_and_gpu_ids = getattr(worker, "get_node_and_physical_gpu_ids", None)
+            if get_node_and_gpu_ids is None:
+                get_node_and_gpu_ids = worker.get_node_and_gpu_ids
             worker_node_and_gpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote())
+                ray.get(get_node_and_gpu_ids.remote())
             )  # type: ignore[attr-defined]
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
@@ -224,6 +230,15 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
 
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
+
+        # Native executors finalize cache geometry after attention backends
+        # have been registered by model loading. Hybrid models need this to
+        # fit recurrent state pages into attention pages before cache grouping.
+        if hasattr(current_platform, "update_block_size_for_backend"):
+            def _update_block_size(worker):
+                current_platform.update_block_size_for_backend(worker.vllm_config)
+
+            self.collective_rpc(_update_block_size)
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_tp_workers.append([])

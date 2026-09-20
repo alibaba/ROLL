@@ -26,6 +26,12 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
+# ``None`` is a meaningful explicit timeout for checkpoint waits: a full
+# distributed optimizer checkpoint can legitimately outlive the ordinary RPC
+# timeout.  Keep a sentinel so existing callers retain the environment-based
+# default while checkpoint code can opt out of that deadline.
+_USE_ENV_TIMEOUT = object()
+
 try:
     tensordict.set_lazy_legacy(False).set()
 except:
@@ -1079,6 +1085,7 @@ class DataProto:
             data_refs: Union[List[ray.ObjectRef], ray.ObjectRef, List["ObjectRefWrap"]],
             *,
             global_keys: Optional[Set[str]] = None,
+            timeout: Union[int, None, object] = _USE_ENV_TIMEOUT,
     ) -> "DataProto":
         """
         Fetch a collection of DataProto objects from Ray ObjectRef(s) and concatenate
@@ -1101,9 +1108,10 @@ class DataProto:
         if isinstance(data_refs, DataProto):
             data_refs = [data_refs]
 
-        timeout = None
-        if "roll_RPC_TIMEOUT" in os.environ:
-            timeout = int(os.environ["roll_RPC_TIMEOUT"])
+        if timeout is _USE_ENV_TIMEOUT:
+            timeout = None
+            if "roll_RPC_TIMEOUT" in os.environ:
+                timeout = int(os.environ["roll_RPC_TIMEOUT"])
 
         # Fetch objects from Ray
         if isinstance(data_refs[0], ObjectRefWrap):

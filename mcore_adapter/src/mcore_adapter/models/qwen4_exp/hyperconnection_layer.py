@@ -34,7 +34,10 @@ The stream state is widened once before the stack and mixed down once after; see
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
+from megatron.core import tensor_parallel
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
 from .hyperconnection import HyperConnection
@@ -106,8 +109,33 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 f"hyperconnection layer expected a stream of width {expected}, "
                 f"got {hidden_states.shape[-1]}; use expand_to_streams() first"
             )
-        # Base _forward_attention/_forward_mlp apply ordinary residual BDA.
-        # GR must call the raw blocks, fold bias/dropout once, and write once.
+        attention = partial(
+            self._attention_block, attention_mask=attention_mask,
+            inference_context=inference_context, rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos, rotary_pos_sin=rotary_pos_sin,
+            rotary_pos_cos_sin=rotary_pos_cos_sin, attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params, sequence_len_offset=sequence_len_offset,
+            qsa_valid_mask=qsa_valid_mask, qsa_loss_mask=qsa_loss_mask,
+        )
+        mlp = partial(self._mlp_block, padding_mask=padding_mask)
+        if self.training and getattr(self.config, "checkpoint_cpu_offload", False):
+            # Recompute one GR branch at a time. A whole-layer checkpoint
+            # retains the attention graph while building the MoE graph, which
+            # exceeds real 8K memory even when the layer input lives on CPU.
+            with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                stream = tensor_parallel.checkpoint(attention, False, hidden_states)
+            with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                stream = tensor_parallel.checkpoint(mlp, False, stream)
+        else:
+            stream = mlp(attention(hidden_states))
+        return make_viewless_tensor(
+            inp=stream, requires_grad=stream.requires_grad, keep_graph=True
+        ), context
+
+    def _attention_block(self, hidden_states, *, qsa_valid_mask=None,
+                         qsa_loss_mask=None, **attention_kwargs):
+        # GR consumes raw branch output: ordinary Transformer BDA would add
+        # a second residual and build a different architecture.
         stream, attn_input, attn_inj = self.attn_hyper_connection.mix(hidden_states)
         qsa_kwargs = {}
         if hasattr(self.self_attention, "indexer"):
@@ -123,17 +151,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             if local_valid.shape != attn_input.shape[:2]:
                 raise ValueError("GDN token validity must match its sequence shard")
             attn_input = attn_input * local_valid.unsqueeze(-1)
-        attn_out = self.self_attention(
-            attn_input, attention_mask=attention_mask,
-            inference_context=inference_context, rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos, rotary_pos_sin=rotary_pos_sin,
-            rotary_pos_cos_sin=rotary_pos_cos_sin, attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params, sequence_len_offset=sequence_len_offset,
-            **qsa_kwargs,
-        )
-        stream = self.attn_hyper_connection.combine(
+        attn_out = self.self_attention(attn_input, **attention_kwargs, **qsa_kwargs)
+        return self.attn_hyper_connection.combine(
             stream, self._block_output(attn_out), attn_inj
         )
+
+    def _mlp_block(self, stream, padding_mask=None):
         stream, mlp_input, mlp_inj = self.mlp_hyper_connection.mix(stream)
         if self.recompute_mlp:
             from functools import partial
@@ -152,12 +175,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 )
         else:
             mlp_out = self.mlp(mlp_input, padding_mask=padding_mask)
-        stream = self.mlp_hyper_connection.combine(
+        return self.mlp_hyper_connection.combine(
             stream, self._block_output(mlp_out), mlp_inj
         )
-        return make_viewless_tensor(
-            inp=stream, requires_grad=stream.requires_grad, keep_graph=True
-        ), context
 
     def _block_output(self, output_with_bias):
         output, bias = output_with_bias

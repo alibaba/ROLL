@@ -1,3 +1,4 @@
+import gc
 import itertools
 import inspect
 import logging
@@ -10,8 +11,20 @@ from megatron.core.optimizer import OptimizerConfig, MegatronOptimizer, _get_par
     _get_megatron_optimizer_based_on_param_groups, ChainedOptimizer
 from megatron.core.transformer import MegatronModule
 from megatron.core.utils import log_single_rank
+from roll.third_party.megatron.optimizer_config import validate_bounded_cpu_grad_staging
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_bounded_cpu_grad_staging(optimizer, hybrid_cls):
+    """Enable every Hybrid below Megatron's chained/distributed wrappers."""
+    if isinstance(optimizer, hybrid_cls):
+        optimizer.bounded_cpu_grad_staging = True
+    elif hasattr(optimizer, "chained_optimizers"):
+        for child in optimizer.chained_optimizers:
+            _enable_bounded_cpu_grad_staging(child, hybrid_cls)
+    elif getattr(optimizer, "optimizer", None) is not None:
+        _enable_bounded_cpu_grad_staging(optimizer.optimizer, hybrid_cls)
 
 
 def get_megatron_optimizer(
@@ -43,6 +56,20 @@ def get_megatron_optimizer(
     Returns:
         Instance of MegatronOptimizer.
     """
+
+    bounded_hybrid_cls = None
+    if validate_bounded_cpu_grad_staging(config):
+        patch_error = (
+            "bounded_cpu_grad_staging requires the Megatron dependency patch; run "
+            "scripts/qwen38/patch_megatron_cpu_grad_staging.py on the task Megatron checkout"
+        )
+        try:
+            from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
+        except ImportError as error:
+            raise RuntimeError(patch_error) from error
+        if "bounded_cpu_grad_staging" not in inspect.signature(HybridDeviceOptimizer).parameters:
+            raise RuntimeError(patch_error)
+        bounded_hybrid_cls = HybridDeviceOptimizer
 
     log_single_rank(logger, logging.INFO, f'Setting up optimizer with config {config}')
 
@@ -137,7 +164,13 @@ def get_megatron_optimizer(
             setattr(optimizers[-1], "buffers", list(itertools.chain(*moe_buffers.values())))
             setattr(optimizers[-1], "model_chunks", model_chunks)
 
-    if len(optimizers) == 1:
-        return optimizers[0]
-
-    return ChainedOptimizer(optimizers)
+    optimizer = optimizers[0] if len(optimizers) == 1 else ChainedOptimizer(optimizers)
+    if bounded_hybrid_cls is not None:
+        _enable_bounded_cpu_grad_staging(optimizer, bounded_hybrid_cls)
+    if config.optimizer_cpu_offload and config.use_distributed_optimizer:
+        # Megatron replaces each full-parameter Hybrid with one owning DP
+        # shards. CPU step hooks form cycles in the retired Hybrid, retaining
+        # its FP32 masters until GC. Reclaim those owners before allocating
+        # Adam moments during the first step or checkpoint restoration.
+        gc.collect()
+    return optimizer

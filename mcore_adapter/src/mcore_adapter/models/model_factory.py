@@ -87,9 +87,18 @@ class VirtualModels:
                 return self.config.save_pretrained(save_directory)
             return self.models[0].save_pretrained(save_directory, ckpt_format=ckpt_format)
         state_dict = {f"model{i}": generate_model_state_dict(model, ckpt_format) for i, model in enumerate(self.models)}
-        return self.models[0].save_pretrained(save_directory, state_dict=state_dict, ckpt_format=ckpt_format)
+        return self.models[0].save_pretrained(
+            save_directory, state_dict=state_dict, ckpt_format=ckpt_format, external_asset_models=self.models
+        )
 
     def load_external_assets(self, model_name_or_path: str, external_asset_path: Optional[str] = None):
+        ngram_models = [model for model in self.models if callable(getattr(model, "attach_ngram_assets", None))]
+        if ngram_models:
+            from .qwen4_exp.asset_lifecycle import restore_ngram_asset_models
+
+            return restore_ngram_asset_models(
+                ngram_models, model_name_or_path, external_asset_path=external_asset_path
+            )
         loaded = []
         for model in self.models:
             hook = getattr(model, "load_external_assets", None)
@@ -106,6 +115,11 @@ class VirtualModels:
         VirtualModels boundary so callers do not need to know how many virtual
         stages are active.
         """
+        ngram_models = [model for model in self.models if callable(getattr(model, "attach_ngram_assets", None))]
+        if ngram_models:
+            from .qwen4_exp.asset_lifecycle import persist_ngram_asset_models
+
+            return [persist_ngram_asset_models(ngram_models, save_directory)]
         if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
             return []
         saved = []
@@ -311,12 +325,20 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
         logger.info(f"End loading, cost: {time.time() - load_start_time:0.3f}s")
         return models
 
-    def save_pretrained(self, save_directory: str, state_dict=None, ckpt_format: str = "legacy"):
+    def save_pretrained(
+        self, save_directory: str, state_dict=None, ckpt_format: str = "legacy", external_asset_models=None
+    ):
         os.makedirs(save_directory, exist_ok=True)
         state_dict = state_dict if state_dict is not None else {"model": generate_model_state_dict(self, ckpt_format)}
         save_config_and_state_dict(save_directory, self.config, state_dict, ckpt_format=ckpt_format)
         hook = getattr(self, "save_external_assets", None)
-        if hook is not None and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0):
+        if callable(getattr(self, "attach_ngram_assets", None)):
+            from .qwen4_exp.asset_lifecycle import persist_ngram_asset_models
+
+            persist_ngram_asset_models(
+                [self] if external_asset_models is None else external_asset_models, save_directory
+            )
+        elif hook is not None and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0):
             hook(save_directory)
 
     def get_batch_on_this_cp_rank(self, batch: Dict[str, "torch.Tensor"], dim3_keys: List[str] = ["attention_mask"]):

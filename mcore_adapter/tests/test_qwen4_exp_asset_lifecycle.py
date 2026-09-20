@@ -35,15 +35,17 @@ def load_qwen4_module(name):
 ngram_embedding = load_qwen4_module("ngram_embedding")
 
 
-def checkpoint_fixture(path: Path, *, constants_delta: int = 0):
+def checkpoint_fixture(path: Path, *, constants_delta: int = 0, layer_indices=(1,)):
     path.mkdir()
-    prefix = "model.language_model.layers.1.ple.ple_embedding."
-    tensors = {
-        prefix + "ngram_embedding.shard_0.weight": torch.arange(24).reshape(12, 2).to(torch.bfloat16),
-        prefix + "layer_multipliers": torch.tensor([13, 17, 29 + constants_delta]),
-        prefix + "ngram_heads_vocab_sizes": torch.tensor([3, 3, 3, 3]),
-        prefix + "ngram_heads_offsets": torch.tensor([0, 3, 6, 9]),
-    }
+    tensors = {}
+    for layer in layer_indices:
+        prefix = f"model.language_model.layers.{layer}.ple.ple_embedding."
+        tensors.update({
+            prefix + "ngram_embedding.shard_0.weight": torch.arange(24).reshape(12, 2).to(torch.bfloat16),
+            prefix + "layer_multipliers": torch.tensor([13, 17, 29 + constants_delta]),
+            prefix + "ngram_heads_vocab_sizes": torch.tensor([3, 3, 3, 3]),
+            prefix + "ngram_heads_offsets": torch.tensor([0, 3, 6, 9]),
+        })
     filename = "model.safetensors"
     save_file(tensors, path / filename)
     (path / "model.safetensors.index.json").write_text(
@@ -82,6 +84,103 @@ class TinyAssetModel(torch.nn.Module):
     def save_external_assets(self, save_directory):
         lifecycle = load_qwen4_module("asset_lifecycle")
         return lifecycle.persist_ngram_assets(self, save_directory)
+
+
+class AssetStage(torch.nn.Module):
+    """Small stage with real frozen table attachment and global model config."""
+
+    def __init__(self, layer_indices, global_layers=(1, 3)):
+        super().__init__()
+        self.config = types.SimpleNamespace(ple_layer_indices=list(global_layers))
+        self.embeddings = torch.nn.ModuleDict({
+            str(layer): ngram_embedding.FrozenNGramEmbedding(
+                embedding_dim=8, ngram_size=3, heads_per_ngram=2, vocab_size=3, eos_token_id=0
+            ) for layer in layer_indices
+        })
+
+    def attach_ngram_assets(self, checkpoint, manifests=None):
+        return {layer: embedding.attach_checkpoint(
+            checkpoint, int(layer), expected_manifest=(manifests or {}).get(layer)
+        ) for layer, embedding in self.embeddings.items()}
+
+    load_external_assets = TinyAssetModel.load_external_assets
+    save_external_assets = TinyAssetModel.save_external_assets
+
+
+def test_virtual_stages_save_union_and_resume_local_subsets_after_relocation(tmp_path):
+    lifecycle = load_qwen4_module("asset_lifecycle")
+    source = tmp_path / "source"
+    checkpoint_fixture(source, layer_indices=(1, 3))
+    models = [AssetStage([1]), AssetStage([]), AssetStage([3])]
+    loaded = lifecycle.restore_ngram_asset_models(models, source)
+    assert [set(manifests) for manifests in loaded] == [{"1"}, set(), {"3"}]
+    saved = tmp_path / "saved"
+    sidecar = lifecycle.persist_ngram_asset_models(models, saved)
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert set(record["manifests"]) == {"1", "3"}
+
+    relocated = tmp_path / "relocated"
+    shutil.move(source, relocated)
+    resumed = [AssetStage([1]), AssetStage([]), AssetStage([3])]
+    restored = lifecycle.restore_ngram_asset_models(resumed, saved, external_asset_path=relocated)
+    assert restored == loaded
+    for stage in resumed:
+        for embedding in stage.embeddings.values():
+            assert embedding.store.checkpoint == relocated.resolve()
+            torch.testing.assert_close(
+                embedding.store.lookup(torch.tensor([[0, 3, 11]])),
+                torch.tensor([[[0, 1], [6, 7], [22, 23]]], dtype=torch.bfloat16),
+            )
+    # A first-chunk-only save must not use a cached global record to hide an
+    # omitted virtual stage. The caller has to provide every local chunk.
+    with pytest.raises(ValueError, match="coverage"):
+        lifecycle.persist_ngram_assets(resumed[0], tmp_path / "resaved")
+
+
+@pytest.mark.parametrize("mutation", ["missing", "forged", "unexpected"])
+def test_nonzero_virtual_stage_identity_is_required_on_resume(tmp_path, mutation):
+    lifecycle = load_qwen4_module("asset_lifecycle")
+    source = tmp_path / "source"
+    checkpoint_fixture(source, layer_indices=(1, 3))
+    models = [AssetStage([1]), AssetStage([3])]
+    lifecycle.restore_ngram_asset_models(models, source)
+    saved = tmp_path / "saved"
+    sidecar = lifecycle.persist_ngram_asset_models(models, saved)
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    if mutation == "missing":
+        del record["manifests"]["3"]
+    elif mutation == "forged":
+        record["manifests"]["3"]["index_sha256"] = "0" * 64
+    else:
+        record["manifests"]["9"] = dict(record["manifests"]["3"], layer_idx=9)
+    sidecar.write_text(json.dumps(record), encoding="utf-8")
+    resumed = [AssetStage([1]), AssetStage([3])]
+    with pytest.raises(ValueError, match="coverage|manifest mismatch"):
+        lifecycle.restore_ngram_asset_models(resumed, saved)
+
+
+def test_missing_model_stage_fails_global_coverage_on_initial_load(tmp_path):
+    lifecycle = load_qwen4_module("asset_lifecycle")
+    source = tmp_path / "source"
+    checkpoint_fixture(source, layer_indices=(1, 3))
+    with pytest.raises(ValueError, match="coverage"):
+        lifecycle.restore_ngram_asset_models([AssetStage([1])], source)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("megatron") is None, reason="requires mcore_adapter runtime")
+def test_virtual_model_hooks_keep_all_chunk_manifests(tmp_path):
+    from mcore_adapter.models.model_factory import VirtualModels
+
+    source = tmp_path / "source"
+    checkpoint_fixture(source, layer_indices=(1, 3))
+    models = object.__new__(VirtualModels)
+    models.models = [AssetStage([1]), AssetStage([]), AssetStage([3])]
+    loaded = models.load_external_assets(source)
+    saved = tmp_path / "saved"
+    models.save_external_assets(saved)
+    record = json.loads((saved / "mca_external_assets.json").read_text())
+    assert set(record["manifests"]) == {"1", "3"}
+    assert models.load_external_assets(saved) == loaded
 
 
 def test_sidecar_save_and_resume_bind_real_external_table(tmp_path):

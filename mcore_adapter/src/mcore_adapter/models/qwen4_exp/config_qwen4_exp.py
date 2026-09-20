@@ -19,11 +19,10 @@ class Qwen4ExpConfig(McaModelConfig):
     * The HF config nests everything under ``text_config`` (there is also a
       ``vision_config``); the template's ``config_hf_to_mca`` handles that, this
       class only needs the flattened fields.
-    * Full-attention layers use QSA (a sparse indexer), and every layer is
-      wrapped in a hyperconnection. Neither has a megatron-core counterpart yet,
-      so the corresponding fields are carried here as plain metadata and are NOT
-      yet consumed by the spec builder. They are recorded so that conversion does
-      not silently drop them and so M7/M8 have somewhere to read them from.
+    * Full-attention layers use the adapter's QSA attention and indexer modules,
+      and the transformer block wraps attention and MLP branches in the GR
+      hyperconnection path. Their fields control construction and conversion;
+      the capability checks define which training combinations are enabled.
     * Layer 1 (0-based) carries the PLE n-gram table. That table is frozen and
       handled outside the Megatron parameter tree, so no field is needed for the
       table itself, only for locating the layer.
@@ -36,10 +35,28 @@ class Qwen4ExpConfig(McaModelConfig):
     # multi-hour conversion.
     layer_types: Optional[list[str]] = None
 
+    # TE combines top-k expert outputs with a deterministic FP32 reduction.
+    # Megatron's unfused BF16 scatter_add rounds after each atomic update;
+    # top-10 routing amplifies rank-dependent accumulation error across 48 layers.
+    moe_permute_fusion: bool = True
+    gdn_output_gate_type: Optional[str] = None
+
+    # Bound vocabulary logits/softmax memory in SFT and token-logprob training.
+    # Zero selects Megatron's original output-layer/loss path.
+    vocab_loss_chunk_size: int = 256
+    # ROLL RL forwards normally omit labels. This explicit opt-in replaces the
+    # full-vocabulary output with [selected logprob, entropy] token statistics.
+    bounded_rl_token_statistics: bool = False
+    # Full recomputation at separate GR attention/MLP, PLE and final-mixer
+    # boundaries. Only checkpoint inputs are saved on pinned CPU memory;
+    # recomputed branch activations and parameter storage stay on GPU.
+    checkpoint_cpu_offload: bool = False
+
     # --- QSA (Qwen Sparse Attention) on full-attention layers ----------------
     # mcore has a `dsa` variant, but its weight layout does not match QSA (dsa
     # keeps q/k projections separate and has a learned per-head weights_proj;
-    # QSA fuses q/k and has both q and k layernorms). Carried as metadata for M8.
+    # QSA fuses q/k and has both q and k layernorms). The adapter supplies the
+    # matching attention/indexer implementation and auxiliary-loss contract.
     indexer_n_heads: Optional[int] = None
     indexer_kv_heads: Optional[int] = None
     indexer_head_dim: Optional[int] = None
@@ -50,7 +67,7 @@ class Qwen4ExpConfig(McaModelConfig):
 
     # --- hyperconnection (replaces the ordinary residual stream) -------------
     # 398 checkpoint tensors; residual width is hidden_size * hc_count.
-    # No mcore counterpart -> metadata only, consumed by M7 when implemented.
+    # Consumed by the adapter's GR hyperconnection modules.
     hc_count: Optional[int] = None
     hc_lowrank: Optional[int] = None
 
@@ -66,6 +83,22 @@ class Qwen4ExpConfig(McaModelConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.checkpoint_cpu_offload and self.recompute_granularity != "full":
+            raise ValueError("checkpoint_cpu_offload requires full recomputation")
+        if (isinstance(self.vocab_loss_chunk_size, bool)
+                or not isinstance(self.vocab_loss_chunk_size, int)
+                or self.vocab_loss_chunk_size < 0):
+            raise ValueError("vocab_loss_chunk_size must be a nonnegative integer (0 disables chunking)")
+        from .capabilities import validate_bounded_rl_token_statistics
+
+        validate_bounded_rl_token_statistics(
+            enabled=self.bounded_rl_token_statistics,
+            chunk_size=self.vocab_loss_chunk_size,
+            context_parallel_size=self.context_parallel_size,
+            mtp_num_layers=self.mtp_num_layers,
+        )
+        if self.gdn_output_gate_type not in (None, "silu", "sigmoid"):
+            raise ValueError("Qwen4 GDN output gate must be silu or sigmoid")
         if self.pipeline_model_parallel_size > 1 or self.virtual_pipeline_model_parallel_size:
             raise ValueError("Qwen4Exp training currently requires PP=1 and VPP disabled")
         if self.context_parallel_size > 1:
@@ -148,6 +181,13 @@ _generated_init = Qwen4ExpConfig.__init__
 def _tolerant_init(self, **kwargs):
     import dataclasses
 
+    rl_temperature = kwargs.pop("rl_token_statistics_temperature", 1.0)
+    if (
+        isinstance(rl_temperature, bool)
+        or not isinstance(rl_temperature, (int, float))
+        or float(rl_temperature) != 1.0
+    ):
+        raise ValueError("bounded RL token statistics use raw logits and require temperature=1")
     known = {f.name for f in dataclasses.fields(self)}
     extra = {k: kwargs.pop(k) for k in list(kwargs) if k not in known}
     _generated_init(self, **kwargs)  # runs __post_init__

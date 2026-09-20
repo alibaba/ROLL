@@ -109,8 +109,11 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
             "init_method": self.config.init_method,
             "is_expert": self.is_expert,
             "skip_bias_add": False,
-            "tp_group": self.base_layer.tp_group,
         }
+        if self.is_grouped:
+            lora_layer_kwargs["pg_collection"] = self.base_layer._pg_collection
+        else:
+            lora_layer_kwargs["tp_group"] = self.base_layer.tp_group
         lora_a, lora_b = self._create_lora_layers(r, lora_bias, **lora_layer_kwargs)
 
         # Disable ub_overlap for parallel layers

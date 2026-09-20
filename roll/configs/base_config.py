@@ -108,6 +108,15 @@ class BaseConfig(ScheduleConfig):
         default=3600,
         metadata={"help": "Timeout duration for RPC calls in seconds."}
     )
+    checkpoint_rpc_timeout: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Timeout for collecting checkpoint worker results in seconds. "
+                "None waits for large distributed saves to finish."
+            )
+        },
+    )
     output_dir: str = field(
         default="./output",
         metadata={"help": "The output directory where the model predictions and checkpoints will be written."},

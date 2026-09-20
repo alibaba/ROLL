@@ -28,12 +28,13 @@ def tiny_config():
     return Qwen4ExpConfig(
         num_layers=4, hidden_size=128, num_attention_heads=4, num_query_groups=2,
         kv_channels=32, ffn_hidden_size=256, padded_vocab_size=256, max_sequence_length=64,
-        normalization="RMSNorm", transformer_impl="transformer_engine", bf16=True,
+        normalization="RMSNorm", layernorm_epsilon=1e-6, transformer_impl="transformer_engine", bf16=True,
         params_dtype=torch.bfloat16, add_bias_linear=False, gated_linear_unit=True,
         hidden_dropout=0.0, attention_dropout=0.0, experimental_attention_variant="gated_delta_net",
         linear_attention_type="gated_delta_net", linear_attention_freq=4, linear_conv_kernel_dim=4,
         linear_key_head_dim=16, linear_value_head_dim=16, linear_num_key_heads=2,
         linear_num_value_heads=6, num_moe_experts=4, moe_router_topk=2, moe_ffn_hidden_size=64,
+        gdn_output_gate_type="sigmoid",
         moe_grouped_gemm=True, moe_router_load_balancing_type="none",
         moe_token_dispatcher_type="alltoall", moe_shared_expert_intermediate_size=64,
         moe_shared_expert_gate=True, layernorm_zero_centered_gamma=True, qk_layernorm=True,
@@ -75,6 +76,29 @@ def test_full_model_uses_original_ids_and_all_required_modules(environment):
         assert params[name].grad.float().norm() > 0, name
     assert not any("final_layernorm" in name for name in params)
     assert not any("in_proj.layer_norm" in name or "linear_qkv.layer_norm" in name for name in params)
+
+
+@pytest.mark.parametrize("activation", ["sigmoid", "silu"])
+def test_gdn_output_gate_and_gradients_match_checkpoint_semantics(environment, activation):
+    config = tiny_config()
+    config.gdn_output_gate_type = activation
+    gdn = make_model(config).decoder.layers[0].self_attention
+    assert gdn.activation == "silu", "the output gate must not change convolution activation"
+    x = torch.randn(4, 6, 16, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    gate = torch.randn_like(x, requires_grad=True)
+    actual = gdn._apply_gated_norm(x, gate)
+    normed = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + config.layernorm_epsilon)
+    normed = normed * (gdn.out_norm.weight.float() + 1)
+    activate = torch.sigmoid if activation == "sigmoid" else torch.nn.functional.silu
+    expected = (normed * activate(gate.float())).bfloat16().reshape_as(actual)
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    upstream = torch.randn_like(actual)
+    inputs = (x, gate, gdn.out_norm.weight)
+    gradients = torch.autograd.grad(actual, inputs, upstream, retain_graph=True)
+    reference = torch.autograd.grad(expected, inputs, upstream)
+    for got, want in zip(gradients, reference):
+        relative = (got.float() - want.float()).norm() / want.float().norm().clamp_min(1e-9)
+        assert relative < 0.02
 
 
 def test_full_recompute_keeps_each_microbatch_ids(environment):

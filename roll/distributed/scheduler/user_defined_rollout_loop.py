@@ -1,8 +1,10 @@
 import asyncio
 import copy
+import json
 import math
 from typing import List, Optional
 
+import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -165,6 +167,19 @@ def postprocess_output_data(request, data: DataProto, sequence_length) -> DataPr
     )
     request_repeat = request.repeat(repeat_times=len(output_tokens))
     output.non_tensor_batch = request_repeat.non_tensor_batch
+    # Batch-level meta_info retains only one request after concatenation. Keep
+    # generation provenance with the samples so it also survives reordering.
+    sampling_metadata = {
+        key: value
+        for key in (
+            "request_id", "generation_config", "finish_reasons", "output_token_ids",
+            "eos_token_id", "pad_token_id", "global_step",
+        )
+        if (value := data.meta_info.get(key, request.meta_info.get(key))) is not None
+    }
+    output.non_tensor_batch["sampling_params"] = np.full(
+        len(output_tokens), json.dumps(sampling_metadata), dtype=object
+    )
     output.meta_info = request_repeat.meta_info
     # Preserve metrics from data (e.g., speculative decoding metrics)
     if "metrics" in data.meta_info:

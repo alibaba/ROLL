@@ -35,19 +35,27 @@ class Qwen4ExpTransformerBlock(TransformerBlock):
             if hasattr(layer, "ple"):
                 if input_ids is None:
                     raise ValueError("PLE requires original input_ids")
-                ple_hidden = hidden
-                if self.config.sequence_parallel:
-                    # Full-sequence PLE runs redundantly on TP ranks; scatter's
-                    # backward allgathers gradients, so gather backward splits.
-                    ple_hidden = tensor_parallel.gather_from_sequence_parallel_region(
-                        hidden, tensor_parallel_output_grad=False, group=self.pg_collection.tp)
-                delta = layer.ple(ple_hidden.transpose(0, 1), input_ids, valid_mask=valid).transpose(0, 1)
-                if self.config.sequence_parallel:
-                    delta = tensor_parallel.scatter_to_sequence_parallel_region(delta, group=self.pg_collection.tp)
-                hidden = hidden + delta
+                if self.training and self.config.checkpoint_cpu_offload:
+                    with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                        hidden = tensor_parallel.checkpoint(
+                            partial(self._run_ple, layer), False, hidden, input_ids, valid)
+                else:
+                    hidden = self._run_ple(layer, hidden, input_ids, valid)
             hidden, _ = layer(hidden, attention_mask=attention_mask, rotary_pos_emb=rotary_pos_emb,
                               padding_mask=padding_mask, qsa_valid_mask=valid, qsa_loss_mask=loss_mask)
         return hidden
+
+    def _run_ple(self, layer, hidden, input_ids, valid):
+        ple_hidden = hidden
+        if self.config.sequence_parallel:
+            # Full-sequence PLE runs redundantly on TP ranks; scatter's
+            # backward allgathers gradients, so gather backward splits.
+            ple_hidden = tensor_parallel.gather_from_sequence_parallel_region(
+                hidden, tensor_parallel_output_grad=False, group=self.pg_collection.tp)
+        delta = layer.ple(ple_hidden.transpose(0, 1), input_ids, valid_mask=valid).transpose(0, 1)
+        if self.config.sequence_parallel:
+            delta = tensor_parallel.scatter_to_sequence_parallel_region(delta, group=self.pg_collection.tp)
+        return hidden + delta
 
     def forward(self, hidden_states, attention_mask=None, rotary_pos_emb=None,
                 ple_input_ids=None, qsa_valid_mask=None, qsa_loss_mask=None,
@@ -62,7 +70,8 @@ class Qwen4ExpTransformerBlock(TransformerBlock):
         hidden = make_viewless_tensor(hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True)
         rng = tensor_parallel.get_cuda_rng_tracker().fork() if self.config.sequence_parallel else nullcontext()
         with rng:
-            if self.training and self.config.recompute_granularity == "full":
+            if (self.training and self.config.recompute_granularity == "full"
+                    and not self.config.checkpoint_cpu_offload):
                 chunk = self.config.recompute_num_layers or 1
                 for start in range(0, len(self.layers), chunk):
                     run = partial(self._run_layers, start, min(start+chunk, len(self.layers)))
@@ -74,5 +83,12 @@ class Qwen4ExpTransformerBlock(TransformerBlock):
                                           qsa_valid_mask, qsa_loss_mask, padding_mask,
                                           attention_mask, rotary_pos_emb)
         if self.post_process:
-            hidden = self.hyper_connection_mixer(hidden)
+            if self.training and self.config.checkpoint_cpu_offload:
+                # The final mixer's FP32 norm/gate graph is wide enough to
+                # dominate the remaining activations after layer checkpoints
+                # are offloaded. Recompute it from its one CPU-saved stream.
+                with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                    hidden = tensor_parallel.checkpoint(self.hyper_connection_mixer, False, hidden)
+            else:
+                hidden = self.hyper_connection_mixer(hidden)
         return make_viewless_tensor(hidden, requires_grad=hidden.requires_grad, keep_graph=True)

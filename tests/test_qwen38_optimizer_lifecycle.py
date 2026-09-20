@@ -23,6 +23,7 @@ class _Config:
     pin_cpu_grads: bool = True
     pin_cpu_params: bool = True
     offload_optimizer_states: bool = False
+    use_precision_aware_optimizer: bool = False
 
 
 class _Args:
@@ -33,6 +34,7 @@ class _Args:
     pin_cpu_grads = False
     pin_cpu_params = False
     offload_optimizer_states = True
+    use_precision_aware_optimizer = True
 
 
 def test_optimizer_config_forwards_cpu_mode_and_state_lifecycle_fields():
@@ -45,6 +47,52 @@ def test_optimizer_config_forwards_cpu_mode_and_state_lifecycle_fields():
     assert config.pin_cpu_grads is False
     assert config.pin_cpu_params is False
     assert config.offload_optimizer_states is True
+    assert config.use_precision_aware_optimizer is True
+
+
+def test_old_optimizer_config_accepts_default_gpu_mode():
+    @dataclass
+    class OldConfig:
+        lr: float
+
+    defaults = _Config(lr=0.01)
+    assert build_optimizer_config(OldConfig, {"lr": 0.01}, defaults).lr == 0.01
+
+
+def test_roll_only_bounded_staging_survives_upstream_config_construction():
+    args = _Args()
+    args.bounded_cpu_grad_staging = True
+    config = build_optimizer_config(_Config, {"lr": 0.01}, args)
+    assert config.bounded_cpu_grad_staging is True
+
+
+def test_cpu_master_model_offload_survives_config_construction():
+    args = _Args()
+    args.offload_model_from_cpu_master = True
+    config = build_optimizer_config(_Config, {"lr": 0.01}, args)
+    assert config.offload_model_from_cpu_master is True
+
+
+@pytest.mark.parametrize("name,value", [
+    ("optimizer_cpu_offload", False),
+    ("optimizer_offload_fraction", 0.5),
+    ("use_precision_aware_optimizer", False),
+])
+def test_cpu_master_model_offload_rejects_incompatible_optimizer(name, value):
+    args = _Args()
+    args.offload_model_from_cpu_master = True
+    setattr(args, name, value)
+    with pytest.raises(ValueError, match=name):
+        build_optimizer_config(_Config, {"lr": 0.01}, args)
+
+
+@pytest.mark.parametrize("missing", ["optimizer_cpu_offload", "overlap_cpu_optimizer_d2h_h2d"])
+def test_bounded_staging_rejects_incompatible_configuration(missing):
+    args = _Args()
+    args.bounded_cpu_grad_staging = True
+    setattr(args, missing, False)
+    with pytest.raises(ValueError, match=missing):
+        build_optimizer_config(_Config, {"lr": 0.01}, args)
 
 
 def test_requested_cpu_optimizer_mode_is_rejected_when_upstream_lacks_field():

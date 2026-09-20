@@ -113,3 +113,4 @@ class CheckpointManager:
         except Exception as e:
             traceback.print_exc()
             logger.error(f"upload failed, {e}")
+            raise

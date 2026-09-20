@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 def grouped_gemma_rmsnorm(
@@ -51,8 +52,10 @@ def grouped_gemma_rmsnorm(
     d = total // hc_count
 
     xg = x.float().reshape(-1, hc_count, d)
-    rrms = torch.rsqrt(xg.pow(2).sum(-1, keepdim=True) / d + eps)
-    y = xg * rrms
+    # A generic sum can change its CUDA reduction order with the row count,
+    # rounding the same token differently in prefill and decode. Normalize
+    # each stream with the dedicated RMSNorm operator, keeping FP32 arithmetic.
+    y = F.rms_norm(xg, (d,), eps=eps)
 
     wf = weight.float()
     if wf.numel() == d:

@@ -23,6 +23,31 @@ class Qwen4ExpQSAAttention(SelfAttention):
             param.tensor_model_parallel = False
         self.last_indexer_loss = None
 
+    def get_query_key_value_tensors(self, hidden_states, key_value_states=None,
+                                    output_gate=False, split_qkv=True):
+        tensors = super().get_query_key_value_tensors(
+            hidden_states, key_value_states=key_value_states,
+            output_gate=output_gate, split_qkv=split_qkv)
+        if not output_gate:
+            return tensors
+        query, key, value, gate = tensors
+        if gate.shape != query.shape:
+            # Megatron versions that assemble a replicated KV group slice its
+            # query heads but leave all of its gate heads on every TP rank.
+            # Follow the same within-group rank order, without slicing twice
+            # when the installed Megatron already returns a local gate.
+            groups = self.config.num_query_groups
+            replicas = self.world_size // groups
+            if (groups >= self.world_size or self.world_size % groups
+                    or gate.shape[:2] != query.shape[:2]
+                    or gate.shape[2] != query.shape[2] * replicas
+                    or gate.shape[3] != query.shape[3]):
+                raise ValueError("QSA output gate does not match the query TP partition")
+            rank = torch.distributed.get_rank(self.pg_collection.tp)
+            start = (rank % replicas) * query.shape[2]
+            gate = gate[:, :, start:start + query.shape[2], :]
+        return query, key, value, gate
+
     def forward(self, hidden_states, attention_mask=None, inference_context=None,
                 rotary_pos_emb=None, rotary_pos_cos=None, rotary_pos_sin=None,
                 rotary_pos_cos_sin=None, attention_bias=None, packed_seq_params=None,

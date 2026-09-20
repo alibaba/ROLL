@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import dataclass, field, fields
 from typing import Literal, Optional, Union
 
@@ -319,9 +320,9 @@ class DistributingParallelArguments:
 
 @dataclass
 class MegatronArguments(DistributingParallelArguments):
-    accumulate_allreduce_grads_in_fp32: bool = field(
-        default=False,
-        metadata={"help": "Gradient accumulation and all-reduce in fp32."},
+    accumulate_allreduce_grads_in_fp32: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Gradient accumulation and all-reduce in fp32; defaults to enabled for BF16 training."},
     )
     use_distributed_optimizer: bool = field(
         default=False,
@@ -380,10 +381,22 @@ class MegatronArguments(DistributingParallelArguments):
     overlap_cpu_optimizer_d2h_h2d: bool = field(
         default=False, metadata={"help": "Overlap CPU optimizer transfers with the update."}
     )
+    bounded_cpu_grad_staging: bool = field(
+        default=False,
+        metadata={"help": "Reuse one CPU gradient buffer per Hybrid optimizer; requires CPU offload, overlap, and the Megatron staging patch."},
+    )
+    offload_model_from_cpu_master: bool = field(
+        default=False,
+        metadata={"help": "Discard parked BF16/FP16 model buffers and restore from CPU FP32 masters; requires a fully CPU-offloaded precision-aware distributed optimizer without overlap."},
+    )
     pin_cpu_grads: bool = field(default=True, metadata={"help": "Pin gradients transferred to CPU."})
     pin_cpu_params: bool = field(default=True, metadata={"help": "Pin parameters transferred to CPU."})
     offload_optimizer_states: bool = field(
         default=False, metadata={"help": "Offload distributed optimizer states after each step."}
+    )
+    use_precision_aware_optimizer: bool = field(
+        default=False,
+        metadata={"help": "Let the optimizer own master parameters, including on CPU when CPU offload is enabled."},
     )
 
     save_hf_model: bool = field(default=False, metadata={"help": "Save model as hf format."})
@@ -415,8 +428,18 @@ class MegatronArguments(DistributingParallelArguments):
         metadata={"help": "Enable compile warmup before training."},
     )
 
+    # Transformers v5 merged ratios into warmup_steps. ROLL and existing MCA
+    # checkpoints still carry this field; keep their scheduler semantics.
+    warmup_ratio: float = field(default=0.0, metadata={"help": "Legacy fraction of training steps used for warmup."})
+
     def __post_init__(self):
         super().__post_init__()
+        if not 0.0 <= self.warmup_ratio <= 1.0:
+            raise ValueError("warmup_ratio must be between 0 and 1")
+        if self.bounded_cpu_grad_staging:
+            for name in ("optimizer_cpu_offload", "overlap_cpu_optimizer_d2h_h2d"):
+                if not getattr(self, name):
+                    raise ValueError(f"bounded_cpu_grad_staging requires {name}=True")
         if self.overlap_param_gather:
             assert self.use_distributed_optimizer, "--overlap_param_gather only supported with distributed optimizer"
             assert self.overlap_grad_reduce, (
@@ -426,6 +449,13 @@ class MegatronArguments(DistributingParallelArguments):
             logger.info(f"Set ckpt_format to `torch_dist` when etp_size[{self.expert_tensor_parallel_size}]"
                         f"is not equal to tp_size[{self.tensor_model_parallel_size}]")
             self.ckpt_format = "torch_dist"
+
+    def get_warmup_steps(self, num_training_steps: int):
+        if self.warmup_steps == 0 and self.warmup_ratio > 0:
+            return math.ceil(num_training_steps * self.warmup_ratio)
+        # Preserve native fractional warmup_steps on Transformers versions that
+        # implement it, and the existing explicit-step precedence on v4.
+        return super().get_warmup_steps(num_training_steps)
 
     @classmethod
     def from_json_file(cls, json_file_path) -> "MegatronArguments":
@@ -440,8 +470,8 @@ class MegatronArguments(DistributingParallelArguments):
 @dataclass
 class TrainingArguments(MegatronArguments, HFTrainingArguments):
     def __post_init__(self):
-        if self.bf16:
-            self.accumulate_allreduce_grads_in_fp32 = True
+        if self.accumulate_allreduce_grads_in_fp32 is None:
+            self.accumulate_allreduce_grads_in_fp32 = bool(self.bf16)
 
         self.deepspeed = None
         MegatronArguments.__post_init__(self)
@@ -453,8 +483,8 @@ class TrainingArguments(MegatronArguments, HFTrainingArguments):
 @dataclass
 class Seq2SeqTrainingArguments(MegatronArguments, HFSeq2SeqTrainingArguments):
     def __post_init__(self):
-        if self.bf16:
-            self.accumulate_allreduce_grads_in_fp32 = True
+        if self.accumulate_allreduce_grads_in_fp32 is None:
+            self.accumulate_allreduce_grads_in_fp32 = bool(self.bf16)
 
         self.deepspeed = None
         MegatronArguments.__post_init__(self)

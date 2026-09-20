@@ -22,6 +22,7 @@ from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto, list_of_dict_to_dict_of_list
 from roll.distributed.strategy.strategy import InferenceStrategy
 from roll.third_party.vllm import create_async_llm
+from roll.third_party.vllm.compat import call_maybe_await
 from roll.utils.functionals import (
     concatenate_input_and_output,
     reduce_metrics,
@@ -144,10 +145,7 @@ class VllmStrategy(InferenceStrategy):
         self.model = await create_async_llm(resource_placement_groups=self.worker_config.resource_placement_groups, **vllm_config)
 
 
-        if Version("0.15.0") <= Version(vllm.__version__):
-            self.tokenizer = self.model.get_tokenizer()
-        else:
-            self.tokenizer = await self.model.get_tokenizer()
+        self.tokenizer = await call_maybe_await(self.model.get_tokenizer)
 
         assert self.worker.rank_info.dp_rank == self.worker.rank
         assert self.worker.rank_info.dp_size == self.worker.world_size
@@ -390,8 +388,19 @@ class VllmStrategy(InferenceStrategy):
         await self.model.update_parameter_in_bucket(serialized_named_tensors, is_lora)
 
     async def add_lora(self, peft_config):
-        peft_config["target_modules"] = set(self.worker_config.model_args.lora_target)
-        await self.model.add_lora(peft_config)
+        target = self.worker_config.model_args.lora_target
+        config = dict(peft_config)
+        config["target_modules"] = target if isinstance(target, str) else list(target)
+        acknowledgements = await self.model.add_lora(config)
+        expected = self.worker_config.num_gpus_per_worker
+        if (not isinstance(acknowledgements, (list, tuple))
+                or len(acknowledgements) != expected
+                or any(added is not True for added in acknowledgements)):
+            raise RuntimeError(
+                f"LoRA admission requires {expected} successful rank acknowledgements; "
+                f"received {acknowledgements!r}"
+            )
+        return acknowledgements
 
     # Mapping from raw vLLM metric names to internal keys
     _VLLM_METRIC_MAP = {

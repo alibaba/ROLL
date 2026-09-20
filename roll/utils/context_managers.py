@@ -154,54 +154,63 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
     strategy.offload_states()
     为metrics埋点
     """
+    previous_exec_name = os.environ.get("roll_EXEC_FUNC_NAME")
     os.environ["roll_EXEC_FUNC_NAME"] = metric_infix
-    with Timer(name=f"{metric_infix}_total") as timer, local_profiler():
-        with Timer(name=f"{metric_infix}_onload") as onload_timer, profiling.profile("load_states"):
-            for device_id in range(current_platform.device_count()):
-                current_platform.reset_max_memory_allocated(device_id)
-                current_platform.reset_max_memory_cached(device_id)
-                current_platform.reset_peak_memory_stats(device_id)
+    try:
+        with Timer(name=f"{metric_infix}_total") as timer, local_profiler():
+            with Timer(name=f"{metric_infix}_onload") as onload_timer, profiling.profile("load_states"):
+                for device_id in range(current_platform.device_count()):
+                    current_platform.reset_max_memory_allocated(device_id)
+                    current_platform.reset_max_memory_cached(device_id)
+                    current_platform.reset_peak_memory_stats(device_id)
 
-            metrics.update(_get_gpu_memory_metrics(metric_infix, "start/offload"))
+                metrics.update(_get_gpu_memory_metrics(metric_infix, "start/offload"))
 
-            log_gpu_memory_usage(head=f"{metric_infix}_start_offload", logger=logger, rank=None)
-            strategy.load_states(**load_kwargs)
-            if load_kwargs.get("include", None) is not None:
-                strategy.offload_states(**get_load_exclude_kwargs(load_kwargs))
-            if strategy.offload_nccl:
-                with Timer(f"{metric_infix}_reload") as reload_pg_timer, gpu_memory_offload_profiler(metrics, metric_infix, "reload_nccl"):
-                    reload_process_groups()
-                metrics[f"time/{metric_infix}/reload_nccl"] = reload_pg_timer.last
-            log_gpu_memory_usage(head=f"{metric_infix}_start_onload", logger=logger, rank=None)
-
-            metrics.update(_get_gpu_memory_metrics(metric_infix, "start/onload"))
-            metrics.update(_get_cpu_memory_metrics(metric_infix, "start"))
-
-        with Timer(name=f"{metric_infix}_execute") as execute_timer, profiling.profile("execute"):
-            yield
-
-        with Timer(name=f"{metric_infix}_offload") as offload_timer, profiling.profile("offload_states"):
-            metrics.update(_get_gpu_memory_metrics(metric_infix, "end/onload", with_max_frac=True))
-
-            log_gpu_memory_usage(head=f"{metric_infix}_end_onload", logger=logger, rank=None)
-            if is_offload_states:
-                current_platform.clear_cublas_workspaces()
-                strategy.offload_states()
+                log_gpu_memory_usage(head=f"{metric_infix}_start_offload", logger=logger, rank=None)
+                strategy.load_states(**load_kwargs)
+                if load_kwargs.get("include", None) is not None:
+                    strategy.offload_states(**get_load_exclude_kwargs(load_kwargs))
                 if strategy.offload_nccl:
-                    with Timer(f"{metric_infix}_destroy") as destroy_pg_timer, gpu_memory_offload_profiler(metrics, metric_infix, "offload_nccl"):
-                        destroy_process_groups()
-                    metrics[f"time/{metric_infix}/offload_nccl"] = destroy_pg_timer.last
-            log_gpu_memory_usage(head=f"{metric_infix}_end_offload", logger=logger, rank=None)
+                    with Timer(f"{metric_infix}_reload") as reload_pg_timer, gpu_memory_offload_profiler(metrics, metric_infix, "reload_nccl"):
+                        reload_process_groups()
+                    metrics[f"time/{metric_infix}/reload_nccl"] = reload_pg_timer.last
+                log_gpu_memory_usage(head=f"{metric_infix}_start_onload", logger=logger, rank=None)
 
-            metrics.update(_get_gpu_memory_metrics(metric_infix, "end/offload"))
-            metrics.update(_get_cpu_memory_metrics(metric_infix, "end"))
+                metrics.update(_get_gpu_memory_metrics(metric_infix, "start/onload"))
+                metrics.update(_get_cpu_memory_metrics(metric_infix, "start"))
 
-    metrics[f"time/{metric_infix}/total"] = timer.last
-    if is_roll_debug_mode():
-        metrics[f"time/{metric_infix}/execute"] = execute_timer.last
-        metrics[f"time/{metric_infix}/onload"] = onload_timer.last
-        metrics[f"time/{metric_infix}/offload"] = offload_timer.last
-    del os.environ["roll_EXEC_FUNC_NAME"]
+            try:
+                with Timer(name=f"{metric_infix}_execute") as execute_timer, profiling.profile("execute"):
+                    yield
+
+            finally:
+                with Timer(name=f"{metric_infix}_offload") as offload_timer, profiling.profile("offload_states"):
+                    metrics.update(_get_gpu_memory_metrics(metric_infix, "end/onload", with_max_frac=True))
+
+                    log_gpu_memory_usage(head=f"{metric_infix}_end_onload", logger=logger, rank=None)
+                    if is_offload_states:
+                        current_platform.clear_cublas_workspaces()
+                        strategy.offload_states()
+                        if strategy.offload_nccl:
+                            with Timer(f"{metric_infix}_destroy") as destroy_pg_timer, gpu_memory_offload_profiler(metrics, metric_infix, "offload_nccl"):
+                                destroy_process_groups()
+                            metrics[f"time/{metric_infix}/offload_nccl"] = destroy_pg_timer.last
+                    log_gpu_memory_usage(head=f"{metric_infix}_end_offload", logger=logger, rank=None)
+
+                    metrics.update(_get_gpu_memory_metrics(metric_infix, "end/offload"))
+                    metrics.update(_get_cpu_memory_metrics(metric_infix, "end"))
+
+        metrics[f"time/{metric_infix}/total"] = timer.last
+        if is_roll_debug_mode():
+            metrics[f"time/{metric_infix}/execute"] = execute_timer.last
+            metrics[f"time/{metric_infix}/onload"] = onload_timer.last
+            metrics[f"time/{metric_infix}/offload"] = offload_timer.last
+    finally:
+        if previous_exec_name is None:
+            os.environ.pop("roll_EXEC_FUNC_NAME", None)
+        else:
+            os.environ["roll_EXEC_FUNC_NAME"] = previous_exec_name
+
 
 
 @contextmanager

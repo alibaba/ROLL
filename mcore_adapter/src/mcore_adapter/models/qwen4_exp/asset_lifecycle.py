@@ -25,8 +25,8 @@ _MODEL_RECORD_ATTRIBUTE = "_qwen4_ngram_asset_record"
 
 
 def _validate_manifests(manifests: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(manifests, dict) or not manifests:
-        raise ValueError("external asset sidecar manifests must be a nonempty object")
+    if not isinstance(manifests, dict):
+        raise ValueError("external asset sidecar manifests must be an object")
     validated = {}
     for layer, manifest in manifests.items():
         if not isinstance(layer, str) or not layer.isdigit() or not isinstance(manifest, dict):
@@ -48,6 +48,63 @@ def _validate_manifests(manifests: Any) -> dict[str, dict[str, Any]]:
             raise ValueError(f"external asset sidecar layer key {layer} disagrees with its manifest")
         validated[layer] = manifest
     return validated
+
+
+def _configured_layers(model) -> set[str] | None:
+    layers = getattr(getattr(model, "config", None), "ple_layer_indices", None)
+    return {str(layer) for layer in layers} if layers is not None else None
+
+
+def _validate_coverage(manifests, required):
+    if required is not None and set(manifests) != required:
+        raise ValueError(
+            "n-gram external asset coverage mismatch: "
+            f"missing={sorted(required - set(manifests))}, unexpected={sorted(set(manifests) - required)}"
+        )
+
+
+def _asset_owner(model):
+    # PEFT forwards the bound hook to its base model. Keep the record there so
+    # both wrapper and base-model checkpoint hooks observe the same identity.
+    hook = model.attach_ngram_assets
+    return getattr(hook, "__self__", model)
+
+
+def _gather_results(result, error):
+    """Reach the same validation outcome on every rank before further I/O."""
+    import torch.distributed as dist
+
+    payload = {"result": result, "error": None if error is None else f"{type(error).__name__}: {error}"}
+    gathered = [payload]
+    if dist.is_initialized():
+        gathered = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, payload)
+    errors = [f"rank {rank}: {item['error']}" for rank, item in enumerate(gathered) if item["error"]]
+    if errors:
+        if error is not None:
+            raise error
+        raise ValueError("n-gram external asset validation failed: " + "; ".join(errors))
+    return [item["result"] for item in gathered]
+
+
+def _merge_records(groups):
+    records = [record for group in groups for record in group]
+    if not records:
+        raise RuntimeError("cannot save Qwen4 checkpoint before frozen n-gram assets are attached")
+    merged = dict(records[0], manifests={})
+    for record in records:
+        record = _validate_record(record)
+        for layer, manifest in record["manifests"].items():
+            if layer in merged["manifests"] and merged["manifests"][layer] != manifest:
+                raise ValueError(f"n-gram external asset manifest mismatch across stages for layer {layer}")
+            merged["manifests"][layer] = manifest
+    return merged
+
+
+def _validate_global_coverage(record, requirements):
+    for group in requirements:
+        for required in group:
+            _validate_coverage(record["manifests"], required)
 
 
 def _validate_record(record: Any) -> dict[str, Any]:
@@ -113,9 +170,11 @@ def restore_ngram_assets(
     record = _read_record(checkpoint)
     source = _resolved_source(checkpoint, record, external_asset_path)
     expected = record["manifests"] if record is not None else None
+    if expected is not None:
+        _validate_coverage(expected, _configured_layers(model))
     loaded = model.attach_ngram_assets(source, expected)
     loaded = _validate_manifests(loaded)
-    if expected is not None and loaded != expected:
+    if expected is not None and any(expected.get(layer) != manifest for layer, manifest in loaded.items()):
         raise ValueError("n-gram external asset manifest mismatch")
     setattr(
         model,
@@ -130,13 +189,63 @@ def restore_ngram_assets(
     return loaded
 
 
+def restore_ngram_asset_models(models, model_name_or_path, *, external_asset_path=None):
+    """Restore each local chunk and validate the union across all PP/TP/DP ranks.
+
+    All ranks must enter this boundary, including stages without PLE layers.
+    Only small identity metadata is communicated; external tables stay mapped
+    by their owning local layers.
+    """
+    models = [_asset_owner(model) for model in models]
+    loaded, records, requirements, error = [], [], [], None
+    try:
+        for model in models:
+            loaded.append(restore_ngram_assets(model, model_name_or_path, external_asset_path=external_asset_path))
+            records.append(getattr(model, _MODEL_RECORD_ATTRIBUTE))
+            requirements.append(_configured_layers(model))
+    except Exception as exc:
+        error = exc
+    gathered = _gather_results({"records": records, "requirements": requirements}, error)
+    record = _merge_records([item["records"] for item in gathered])
+    _validate_global_coverage(record, [item["requirements"] for item in gathered])
+    return loaded
+
+
 def persist_ngram_assets(model, save_directory: str | os.PathLike[str]) -> Path:
     """Persist the attached asset identity beside an MCA or adapter checkpoint."""
-    record = getattr(model, _MODEL_RECORD_ATTRIBUTE, None)
-    if record is None:
-        raise RuntimeError("cannot save Qwen4 checkpoint before frozen n-gram assets are attached")
-    record = _validate_record(record)
-    directory = Path(save_directory)
+    return persist_ngram_asset_models([model], save_directory)
+
+
+def persist_ngram_asset_models(models, save_directory: str | os.PathLike[str]) -> Path:
+    """Collect all stage identities and atomically publish one complete sidecar."""
+    import torch.distributed as dist
+
+    records, requirements, error = [], [], None
+    try:
+        for model in models:
+            model = _asset_owner(model)
+            record = getattr(model, _MODEL_RECORD_ATTRIBUTE, None)
+            if record is None:
+                raise RuntimeError("cannot save Qwen4 checkpoint before frozen n-gram assets are attached")
+            records.append(_validate_record(record))
+            requirements.append(_configured_layers(model))
+    except Exception as exc:
+        error = exc
+    gathered = _gather_results({"records": records, "requirements": requirements}, error)
+    record = _merge_records([item["records"] for item in gathered])
+    _validate_global_coverage(record, [item["requirements"] for item in gathered])
+    destination = Path(save_directory) / EXTERNAL_ASSET_METADATA_NAME
+    error = None
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        try:
+            _write_record(record, Path(save_directory))
+        except Exception as exc:
+            error = exc
+    _gather_results(None, error)
+    return destination
+
+
+def _write_record(record, directory):
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / EXTERNAL_ASSET_METADATA_NAME
     with tempfile.NamedTemporaryFile(
@@ -152,5 +261,7 @@ def persist_ngram_assets(model, save_directory: str | os.PathLike[str]) -> Path:
 __all__ = [
     "EXTERNAL_ASSET_METADATA_NAME",
     "persist_ngram_assets",
+    "persist_ngram_asset_models",
     "restore_ngram_assets",
+    "restore_ngram_asset_models",
 ]

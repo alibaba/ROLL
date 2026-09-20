@@ -61,8 +61,8 @@ def dump_rollout_to_specific_path(path: str, global_step: int, data: DataProto, 
     write_data['responses'] = responses
     scores = data.batch['scores'].tolist()
     write_data['scores'] = scores
-    meta_info = [json.dumps(data.meta_info)] * data_cnt
-    write_data['sampling_params'] = meta_info
+    if 'sampling_params' not in write_data:
+        write_data['sampling_params'] = [json.dumps(data.meta_info)] * data_cnt
     write_data['global_step'] = [global_step] * data_cnt
 
     # TODO:If IO becomes the bottleneck, need use queue and only one write process to dump data

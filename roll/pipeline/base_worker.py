@@ -479,7 +479,7 @@ class InferWorker(Worker):
         await self.strategy.update_parameter_in_bucket(*args, **kwargs)
 
     async def add_lora(self, *args, **kwargs):
-        await self.strategy.add_lora(*args, **kwargs)
+        return await self.strategy.add_lora(*args, **kwargs)
 
     @register(dispatch_mode=Dispatch.DP_MP_COMPUTE)
     async def generate(self, data: DataProto):

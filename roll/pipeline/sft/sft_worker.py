@@ -11,6 +11,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.utils.functionals import reduce_metrics
+from roll.utils.checkpoint_manager import download_model, get_latest_ckpt
 from roll.models.model_providers import default_actor_model_provider
 from roll.platforms import current_platform
 
@@ -26,6 +27,11 @@ class SFTWorker(Worker):
         super().initialize(pipeline_config)
         self.strategy = create_strategy(worker=self)
         self.strategy.initialize(model_provider=default_actor_model_provider)
+        resume = self.pipeline_config.resume_from_checkpoint
+        if resume:
+            checkpoint = get_latest_ckpt(self.pipeline_config.checkpoint_config) if resume is True else resume
+            if checkpoint:
+                self.strategy.load_checkpoint(load_dir=download_model(checkpoint), tag="checkpoint")
         self.logger.info(f"{self.worker_name} initialized")
 
     @register(Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
@@ -39,6 +45,7 @@ class SFTWorker(Worker):
         return output
 
     @register(Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
+    @torch.no_grad()
     def val_step(self, data: DataProto):
         data = data.to(current_platform.device_type)
         data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size

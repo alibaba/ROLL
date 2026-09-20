@@ -1,4 +1,5 @@
 from typing import Any
+import os
 
 import datasets
 import numpy as np
@@ -19,6 +20,7 @@ from roll.utils.constants import IGNORE_INDEX
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 from roll.utils.functionals import batch_balance, reduce_metrics
+from roll.utils.worker_state import WorkerState
 
 logger = get_logger()
 
@@ -180,21 +182,38 @@ class SFTPipeline(BasePipeline):
 
     @torch.no_grad()
     def run(self):
-        global_step = 0
         metrics_mgr = MetricsManager()
         num_epochs = self.pipeline_config.sft_train.training_args.num_train_epochs
-        total_steps = num_epochs * len(self.dataloader)
+        steps_per_epoch = len(self.dataloader)
+        if steps_per_epoch == 0:
+            logger.info("pipeline complete: no full training batches")
+            return
+        total_steps = num_epochs * steps_per_epoch
+        global_step = self.state.step + 1
+        first_epoch, consumed_batches = divmod(global_step, steps_per_epoch)
+        rng_directory = None
+        if self.resume_from_checkpoint:
+            rng_directory = os.path.join(self.resume_from_checkpoint, "pipeline")
+            rng_file = os.path.join(rng_directory, "rng_state_pipeline.pth")
+            if not os.path.isfile(rng_file):
+                raise FileNotFoundError(f"SFT resume requires pipeline RNG state: {rng_file}")
+            WorkerState.load_rng_state(rng_directory, "pipeline")
 
-        for epoch in range(num_epochs):
+        for epoch in range(first_epoch, num_epochs):
             logger.info(f"epoch {epoch} start...")
 
-            pbar = tqdm(self.dataloader, desc=f"Epoch {epoch}/{num_epochs}")
+            iterator = iter(self.dataloader)
+            skipped = consumed_batches if epoch == first_epoch else 0
+            for _ in range(skipped):
+                next(iterator)
+            if skipped and rng_directory is not None:
+                # Rebuilding an interrupted iterator consumes a base seed and
+                # may run random transforms for already-consumed batches. The
+                # next unseen batch must start from the saved driver RNG.
+                WorkerState.load_rng_state(rng_directory, "pipeline")
+            pbar = tqdm(iterator, desc=f"Epoch {epoch}/{num_epochs}",
+                        initial=skipped, total=steps_per_epoch)
             for batch_dict in pbar:
-                # for continual training
-                if global_step <= self.state.step:
-                    global_step += 1
-                    continue
-
                 logger.info(f"pipeline step {global_step} start...")
 
                 metrics_mgr.clear_metrics()

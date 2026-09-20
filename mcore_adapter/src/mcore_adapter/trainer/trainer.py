@@ -49,6 +49,7 @@ from transformers.trainer_utils import (
 from transformers.utils import is_peft_available
 
 from ..checkpointing import get_checkpoint_dir, load_state_dict_from_checkpoint
+from ..checkpoint_write import streaming_save_strategy
 from ..constants import ADAPTER_CONFIG_NAME, DIST_OPTIMIZER_DIR, IGNORE_INDEX
 from ..initialize import initialize_megatron
 from ..patcher import (
@@ -115,7 +116,7 @@ class McaTrainer(Trainer):
         self.forward_backward_func = get_forward_backward_func()
         if self.args.use_distributed_optimizer:
             self.save_strategy = FullyParallelSaveStrategyWrapper(
-                dist_checkpointing.serialization.get_default_save_sharded_strategy(),
+                streaming_save_strategy(),
                 mpu.get_data_parallel_group(with_context_parallel=True),
                 do_cache_distribution=True,  # don't support change model structure during training
             )

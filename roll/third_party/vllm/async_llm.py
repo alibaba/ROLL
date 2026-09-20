@@ -22,7 +22,7 @@ class CustomAsyncLLM(AsyncLLM):
         await self.engine_core.collective_rpc_async(method="update_parameter_in_bucket", args=(serialized_named_tensors, is_lora))
 
     async def add_lora(self, *args, **kwargs):
-        await self.engine_core.collective_rpc_async(method="custom_add_lora", args=args, kwargs=kwargs)
+        return await self.engine_core.collective_rpc_async(method="custom_add_lora", args=args, kwargs=kwargs)
 
     async def process_weights_after_loading(self):
         await self.engine_core.collective_rpc_async(method="process_weights_after_loading")

@@ -35,7 +35,9 @@ def load_pinned_hf():
             nodes.append(node)
         elif isinstance(node, ast.Assign) and all(isinstance(t,ast.Name) and t.id.startswith('_') and t.id.isupper() for t in node.targets):
             nodes.append(node)
-    namespace = dict(torch=torch, nn=nn, F=F, math=math, ACT2FN={"silu":F.silu}, GradientCheckpointingLayer=nn.Module, is_torchdynamo_exporting=lambda: False, is_torchdynamo_compiling=lambda: False, use_kernel_func_from_hub_with_fallback=lambda *a,**k: (lambda f:f), use_kernelized_func=lambda *a,**k: (lambda f:f), use_kernel_forward_from_hub=lambda *a,**k: (lambda f:f), force_accelerate_hooks=lambda *a,**k: (lambda f:f))
+    namespace = dict(torch=torch, nn=nn, F=F, math=math, ACT2FN={"silu":F.silu, "sigmoid":torch.sigmoid}, GradientCheckpointingLayer=nn.Module, is_torchdynamo_exporting=lambda: False, is_torchdynamo_compiling=lambda: False, use_kernel_func_from_hub_with_fallback=lambda *a,**k: (lambda f:f), use_kernelized_func=lambda *a,**k: (lambda f:f), use_kernel_forward_from_hub=lambda *a,**k: (lambda f:f), force_accelerate_hooks=lambda *a,**k: (lambda f:f))
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    namespace['ALL_ATTENTION_FUNCTIONS'] = ALL_ATTENTION_FUNCTIONS
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(path), 'exec'), namespace)
     namespace['__file__'] = str(path)
     return types.SimpleNamespace(**namespace)
@@ -54,9 +56,11 @@ def main():
     config = tiny_config()
     config.hf_model_type = "qwen4_exp"
     config.swiglu = True
+    config.gdn_output_gate_type = "sigmoid"
     torch.manual_seed(725)
     h = Qwen4ExpTextConfig(vocab_size=256, hidden_size=128, intermediate_size=256,
-        hidden_act='silu', output_gate_type='silu', rms_norm_eps=1e-6, attention_dropout=0.,
+        hidden_act='silu', output_gate_type='sigmoid', rms_norm_eps=1e-6, attention_dropout=0.,
+        _attn_implementation='eager',
         attention_bias=False, norm_topk_prob=True, seed=0,
         num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2, head_dim=32,
         layer_types=['linear_attention']*3+['full_attention'], linear_conv_kernel_dim=4,
@@ -69,6 +73,9 @@ def main():
         make_ngram_vocab_size_divisible_by=1, eos_token_id=0,
         rope_parameters={'rope_type':'default','rope_theta':10000.0,'partial_rotary_factor':0.25})
     print('HF_CONFIG', h, flush=True)
+    assert config.layernorm_epsilon == h.rms_norm_eps, (
+        f"parity requires identical RMS epsilon: MCA={config.layernorm_epsilon}, HF={h.rms_norm_eps}"
+    )
     reference = nn.Module()
     reference.embed_tokens = nn.Embedding(h.vocab_size,h.hidden_size)
     reference.layers = nn.ModuleList([hfmod.Qwen4ExpTextDecoderLayer(h,i) for i in range(4)])
@@ -107,6 +114,10 @@ def main():
     print('SHARED_WIDTH',config.moe_shared_expert_intermediate_size,tuple(model.decoder.layers[0].mlp.shared_experts.linear_fc1.weight.shape),flush=True)
     model.eval()
     reference.eval()
+    from mcore_adapter.models.qwen4_exp.ngram_embedding import TensorNGramStore
+    model.decoder.layers[1].ple.ple_embedding.store = TensorNGramStore(
+        reference.layers[1].ple.ple_embedding.ngram_embedding.weight.detach().cpu()
+    )
     x = torch.randn(2,32,128,device='cuda',dtype=torch.bfloat16)*0.5
     metrics = {}
     def compare(name, actual, expected):
@@ -126,7 +137,32 @@ def main():
         got=model.decoder.layers[0](stream.transpose(0,1).contiguous(),attention_mask=None)[0].transpose(0,1)
         want=reference.layers[0](stream,position_embeddings=None)
         compare('gdn_gr_layer0',got,want)
+        # Independent pinned decoder stack, including PLE and sparse QSA.
+        # Compare logits as well as residual increments so a large skip path
+        # cannot hide a broken attention/MLP branch.
+        ids = torch.arange(32, device='cuda').remainder(15).add(1).unsqueeze(0)
+        angles = model.rotary_pos_emb(32)[:, 0, 0].unsqueeze(0)
+        positions = (angles.cos().bfloat16(), angles.sin().bfloat16())
+        causal = torch.zeros(1, 1, 32, 32, device='cuda', dtype=torch.bfloat16)
+        causal.masked_fill_(torch.ones(32, 32, device='cuda', dtype=torch.bool).triu(1),
+                            torch.finfo(torch.bfloat16).min)
+        stream_hf = reference.embed_tokens(ids).repeat(1, 1, h.hc_count)
+        stream_mca = stream_hf.transpose(0, 1).contiguous()
+        for i, layer in enumerate(reference.layers):
+            hf_input, mca_input = stream_hf, stream_mca
+            stream_hf = layer(hf_input, positions, attention_mask=causal, ple_input_ids=ids)
+            stream_mca = model.decoder._run_layers(
+                i, i+1, mca_input, ids, torch.ones_like(ids, dtype=torch.bool),
+                None, None, None, angles.squeeze(0).unsqueeze(1).unsqueeze(1))
+            compare(f'decoder{i}', stream_mca.transpose(0, 1), stream_hf)
+        mixed_hf = reference.hyper_connection_mixer(stream_hf)
+        assert mixed_hf.shape == (1, 32, h.hidden_size)
+        wanted_logits = F.linear(mixed_hf, source['lm_head.weight'].cuda())
+        actual_logits = model(ids, torch.arange(32, device='cuda').unsqueeze(0), None)
+        compare('full_logits', actual_logits, wanted_logits)
     print('METRICS',json.dumps(metrics),flush=True)
+    for name, metric in metrics.items():
+        assert metric['relative_l2'] < 0.03, (name, metric)
     index=json.loads(Path('/data_hdd/Qwen3.8-Flash-Next/model.safetensors.index.json').read_text())['weight_map']
     print('REAL_STALE_NORMS',[k for k in index if '.input_layernorm.' in k or '.post_attention_layernorm.' in k],flush=True)
     parallel_state.destroy_model_parallel()
