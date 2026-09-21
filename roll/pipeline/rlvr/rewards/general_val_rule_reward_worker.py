@@ -21,6 +21,9 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()  # 获取日志记录器实例
 
+# single_choice_reward 只适用于以下单选题类型的 tag
+SUPPORTED_TAGS = ["ceval", "race_high", "mmlu_pro", "commonsense_qa"]
+
 
 def extract_after_last_think(input_string, end_think="</think>"):
     """
@@ -134,7 +137,7 @@ class GeneralValRuleRewardWorker(Worker):
             )
             answer_text = extract_after_last_think(resp_text_without_sptoken)
 
-            if tag in ["ceval", "race_high", "mmlu_pro", "commonsense_qa"]:
+            if tag in SUPPORTED_TAGS:
                 extracted_answer, reward, format_flag, correct_flag = single_choice_reward(answer_text, ground_truth)
                 format_value = 1 if format_flag else 0
                 correct_value = 1 if correct_flag else 0
@@ -143,6 +146,10 @@ class GeneralValRuleRewardWorker(Worker):
                     score = 1.0
                 else:
                     score = 0.0
+            else:
+                # 没有这个分支时，未支持的tag会直接复用上一个样本的score/extracted_answer，
+                # 或者在batch的第一个样本上抛UnboundLocalError
+                raise ValueError(f"Unsupported tag: {tag}, GeneralValRuleRewardWorker supports tags: {SUPPORTED_TAGS}")
 
             # 存到 scores
             scores.append(score)
