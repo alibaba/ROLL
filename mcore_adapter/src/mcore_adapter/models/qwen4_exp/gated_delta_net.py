@@ -13,19 +13,10 @@ class Qwen4ExpGatedDeltaNet(GatedDeltaNet):
         super().__init__(*args, **kwargs)
 
     def _apply_causal_conv1d(self, x, weight, bias):
-        """Keep the checkpoint's convolution output dtype before SiLU.
+        """Match native product rounding across the complete causal window."""
+        from .causal_convolution import causal_conv1d
 
-        Fusing activation inside FLA retains the accumulator in FP32 through
-        SiLU. The native model applies SiLU to the rounded convolution output.
-        Use FLA's differentiable convolution and retain that boundary.
-        """
-        from fla.modules.convolution import causal_conv1d
-
-        convolved, _ = causal_conv1d(
-            x=x, weight=weight.squeeze(1), bias=bias, activation=None,
-            initial_state=None, output_final_state=False,
-        )
-        return self.act_fn(convolved)
+        return causal_conv1d(x, weight.squeeze(1), bias)
 
     def _apply_gated_norm(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         """Round after normalization, affine scaling and the output gate.
