@@ -211,6 +211,11 @@ class Qwen4ExpGatedDeltaNet(GatedDeltaNet):
             weight = weight + 1
         activation = self.config.gdn_output_gate_type
         if x.is_cuda:
+            if activation == "sigmoid":
+                from .gated_norm import sigmoid_gated_rms_norm
+
+                return sigmoid_gated_rms_norm(x, gate, weight, self.out_norm.eps)
+
             from fla.modules.fused_norm_gate import rms_norm_gated
 
             return rms_norm_gated(x, gate, weight, None, activation=activation, eps=self.out_norm.eps)

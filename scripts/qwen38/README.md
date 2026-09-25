@@ -268,6 +268,27 @@ updates. The complete small-model TP1 versus TP2/SP gradient comparison improved
 from relative L2 `0.0216556` to `0.00124173`, passing the unchanged `0.02` bound.
 These tests do not establish real-model inference/training probability parity.
 
+Qwen3.8's sigmoid-gated GDN RMSNorm uses the native `rsqrt` operation in
+its fused forward. FLA's `1 / sqrt` can round differently at a BF16 midpoint:
+a real layer-0 replay isolated one changed normalized element, which produced
+74 changed elements after the output projection. The scoped forward saves its
+reciprocal RMS for FLA's existing fused backward; other FLA models and the
+non-sigmoid gate path are unaffected. No checkpoint parameter names change.
+
+Run the forward and gradient regression with the pinned CUDA/vLLM dependencies:
+
+```bash
+python -m pytest -q mcore_adapter/tests/test_qwen4_exp_gated_norm.py
+```
+
+On September 25, the old forward failed two strict native-rounding cases. The
+scoped implementation passed all 12 tests, including native forward equality
+and independent FP64 checks of input, gate and norm-weight gradients. The
+complete small-model TP1 versus TP2/SP test also passed with aggregate gradient
+relative L2 `0.00124173`. Real-model probability parity remains unverified;
+matching the first GDN output does not establish agreement in subsequent MoE
+layers or after training.
+
 ROLL's vLLM factory defaults the GDN prefill backend to `triton` when the model
 directory or HF repository name begins with `Qwen3.8-Flash-Next` (ignoring
 punctuation). An explicit `additional_config.gdn_prefill_backend` is preserved.
