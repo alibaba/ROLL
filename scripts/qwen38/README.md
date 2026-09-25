@@ -296,3 +296,52 @@ storage file and reads increasing offsets through one file handle, so a large
 checkpoint scan does not reopen the same rank file for every tensor. This is a
 payload gate; architecture inventory, state equality, resumed updates, export,
 parity, and performance remain separate checks.
+
+## RLVR and OPD configuration candidates
+
+The `configs` directory includes `rlvr_lora.yaml`, `rlvr_backbone.yaml`,
+`opd_lora.yaml`, and `opd_backbone.yaml`. They use the real validation role
+topologies: TP1/EP8 for LoRA training, TP4/EP8 for backbone training and the
+separate teacher, and TP8 native vLLM rollout. Both training scopes use CPU Adam
+and frozen N-gram tables. OPD explicitly names all three model paths so that the
+configured teacher cannot be replaced by the student's base checkpoint.
+
+These configurations use ordinary ROLL workers and have no dependency on the
+private validation observers under `output/`. Each runs 20 steps and saves a
+final checkpoint. Reserve the checkpoint capacity described above before
+launching a backbone configuration. The independent memory supervisor described
+above is part of the validation environment, not installed by these YAML files.
+
+After setting up the pinned dependencies, run from the repository root:
+
+```bash
+export MODEL_PATH=/path/to/Qwen3.8-Flash-Next
+export ROLL_RL_DATA="$PWD/data/gpqa_diamond_boxed.jsonl"
+export ROLL_RL_OUTPUT_DIR=/path/to/fresh-rl-output
+NVIDIA_TF32_OVERRIDE=0 CUDA_DEVICE_MAX_CONNECTIONS=1 \
+python examples/start_rlvr_pipeline.py \
+  --config_path ../scripts/qwen38/configs --config_name rlvr_lora
+```
+
+Use `rlvr_backbone` to train the text backbone. For pure OPD, set
+`ROLL_TEACHER_PATH` to a compatible trained Flash-Next model directory, choose a
+new output directory, and select `opd_lora` or `opd_backbone` with the same
+entry point. A native model-only teacher view must retain the matching HF
+configuration, tokenizer and external N-gram assets. An optimizer checkpoint
+directory alone is not a portable teacher model directory.
+
+The example data uses the existing `messages`, `ground_truth`, and
+`gpqa_diamond_boxed` tag format and the strict boxed-choice reward. Prompt and
+response budgets are 256 and 128 tokens; these are lifecycle examples, not a
+GPQA accuracy evaluation or an 8K RL configuration. The September 25 validation
+used a fixed 80-question answer-only derivative of that dataset.
+
+On the observed validation installation, Hydra composition and the actual
+`RLVRConfig` parser accepted all four configurations with CUDA uninitialized;
+the training topology matched the executed validation configurations. Current
+LoRA RL and OPD each recorded two optimizer updates, three adapter transfers,
+unchanged frozen sentinels, and valid adapter/Adam payloads. Both raw runs exited
+with an error in the final observer's LoRA callback count; corrected independent
+record validation passed. This does not establish a fresh successful lifecycle
+exit, cold resume, whole-model probability parity, or full acceptance of these
+public examples.
