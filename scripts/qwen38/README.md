@@ -158,6 +158,42 @@ preserving GR module names such as `input_mix_weight_down`. It accepts the known
 source hash (or its own already-patched form) and rejects unknown source.
 Apply it to an isolated dependency copy before starting training processes.
 
+### Export a native LoRA checkpoint
+
+Use the checkpoint directory containing the named adapter directories, and a
+fresh export destination. The public converter writes Qwen4 per-expert 2D
+adapters with `roll_lora_layout=qwen4_exp_vllm_2d` for the native vLLM file loader.
+Generic Transformers/PEFT reload of this layout remains unsupported; inference
+also requires the original base model and its frozen N-gram assets.
+
+```bash
+export MODEL_PATH=/path/to/Qwen3.8-Flash-Next
+export QWEN38_ADAPTER_CHECKPOINT=/path/to/checkpoint-19
+export QWEN38_ADAPTER_EXPORT=/path/to/new-adapter-export
+CUDA_VISIBLE_DEVICES= python - <<'PY'
+import os
+import torch
+from mcore_adapter.models.converter.post_converter import LoRAHFConverter
+
+LoRAHFConverter(
+    hf_base_model_path=os.environ["MODEL_PATH"],
+    adapter_name_or_path=os.environ["QWEN38_ADAPTER_CHECKPOINT"],
+    save_directory=os.environ["QWEN38_ADAPTER_EXPORT"],
+    torch_dtype=torch.bfloat16,
+).convert()
+PY
+```
+
+On September 25, the real checkpoint from two 8192-token SFT updates with the
+current gated-normalization fix exported 148,808 finite BF16 tensors in about
+29 seconds, using approximately 8 GiB peak host memory and no CUDA context.
+The native CPU file loader and packing path then reproduced every selected
+adapter value and its scaling exactly on all eight expert partitions, including
+9,892 projections and 276 packed modules per partition. That CPU diagnostic
+disabled pinned-memory allocation in its own process. Exported-adapter GPU
+forward, natural probability parity, and complete training acceptance remain
+separate checks.
+
 ## Validation resource policy
 
 The current RL capacity probe uses TP4/EP8/ETP1, CPU Adam, frozen N-gram tables,
