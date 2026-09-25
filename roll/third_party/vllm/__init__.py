@@ -17,6 +17,7 @@ from roll.third_party.vllm.frozen_ngram_sleep import configure_frozen_ngram_load
 import roll.third_party.vllm.fp8 as fp8
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
+from roll.utils.qwen38_gdn import configure_qwen38_gdn_backend
 
 
 logger = get_logger()
@@ -54,6 +55,7 @@ logger.info(f"Using vllm version {vllm.__version__}")
 
 
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
+    configure_qwen38_gdn_backend(kwargs, kwargs.get("model"))
     kwargs["enable_sleep_mode"] = True
     apply_default_attention_config(
         kwargs,

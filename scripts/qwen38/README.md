@@ -28,6 +28,36 @@ it with the latest PyPI release has not been validated. The repository's
 `Dockerfile.torch2100` uses different PyTorch and floating dependency versions;
 building it unchanged does not reproduce this environment.
 
+### Isolated FLA backward regression
+
+The September 22 H800 / Triton 3.7.1 diagnostic reproduced incorrect local
+value gradients at 64-token chunk boundaries with a 32-wide value head. The
+bounded candidate uses a minimum value tile of 64 on Hopper, only in
+`chunk_bwd_dv_local`; the model's 128-wide value heads are unaffected.
+`patch_fla_hopper_dv.py` accepts only the captured source's before/after hashes
+and rejects other revisions. Do not apply it to running validation snapshots.
+
+The regression includes an independent FP64 recurrence, nonzero initial-state
+gradients, packed sequences, both state layouts and the model's 1:3 grouped
+heads. To verify an isolated source copy:
+
+```bash
+python scripts/qwen38/patch_fla_hopper_dv.py /path/to/isolated-fla
+PYTHONPATH=/path/to/isolated-fla \
+QWEN38_FLA_SOURCE=/path/to/isolated-fla/fla/ops/common/chunk_o.py \
+RUN_QWEN38_FLA_TESTS=1 \
+python -m pytest -q mcore_adapter/tests/test_qwen4_exp_fla_backward.py
+```
+
+CPU-only checks do not exercise the seven CUDA cases. This workaround remains
+separate from full-model inference/training probability parity and is not
+automatically enabled by the dependency recipe below.
+
+On September 23, the isolated H800 regression reproduced the unpatched failure
+and passed all 10 tests after the patch, including 36 gradient comparisons.
+The installed FLA dependency was unchanged, and no full model was loaded by
+this regression.
+
 ## Reproduce the Megatron source
 
 Use a fresh dependency directory in an existing compatible CUDA/PyTorch
@@ -170,6 +200,84 @@ Completion still requires the real-model update, save/restore, natural
 cross-framework parity, export, and performance acceptance results. CPU tests,
 dependency hashes, or a successful partial optimizer step do not satisfy those
 gates.
+
+## GDN convolution arithmetic
+
+The native BF16 convolution cache path rounds each input/weight product to
+BF16, accumulates those products in FP32, applies SiLU in FP32, and casts the
+result to BF16. Rounding the completed convolution before SiLU agrees only at
+the first causal token. The model-specific differentiable convolution preserves
+the product casts and uses `torch.compile` with `emulate_precision_casts=True`
+so kernel fusion does not remove them. Parameter shapes and checkpoint keys
+are unchanged. This path handles independent padded batches, without packing
+or recurrent state.
+
+Run the CUDA regression in the pinned dependency environment:
+
+```bash
+RUN_QWEN4_GDN_DECAY_TESTS=1 python -m pytest -q \
+  mcore_adapter/tests/test_qwen4_exp_gdn_convolution.py \
+  mcore_adapter/tests/test_qwen4_exp_causal_convolution.py
+```
+
+On September 24, all five tests passed on the H800/PyTorch 2.13 validation
+environment, including gradients, strided batches, bias and an actual
+8192-token convolution. Two captured native input prefixes also matched
+exactly after the fix. This does not establish whole-model numerical parity.
+
+For a `[1, 8192, 1280]` BF16 convolution in a fresh process, measured median
+forward / forward-plus-backward latency was 0.112 / 0.419 ms versus
+0.150 / 0.452 ms for the previous FLA path, excluding compilation. The compiled
+training path uses more temporary memory. Unusually many stride/gradient
+variants can exhaust the compiler cache; normal eager fallback preserves
+correctness but costs more time and memory. Full-model throughput and memory
+acceptance remain pending.
+
+## GDN projection precision and distributed gradients
+
+The training implementation computes native `qkvz` and `ba` projections
+separately while retaining the fused checkpoint parameter. It preserves TP
+input-gradient reduction, sequence-parallel gathering and LoRA dtype promotion.
+LoRA's column projection already reduces its input gradient; its surrounding
+sequence gather therefore scatters that gradient without reducing it again.
+
+The GDN output projection keeps BF16 operands for the Tensor Core GEMM, returns
+FP32 partial results, performs the TP reduction in FP32, and then casts once to
+BF16. This avoids amplifying rank-local output rounding in the later PLE gate.
+It retains parameter objects, adapter wrappers and checkpoint names. PyTorch
+2.13 supports `mm(out_dtype=torch.float32)` on CUDA but lacks its autograd
+implementation; the scoped helper supplies a first-order backward. It requires
+the immediate cast after the TP sum and is not a general FP32-output linear.
+
+Run each distributed test file in a separate process group:
+
+```bash
+NVIDIA_TF32_OVERRIDE=0 RUN_QWEN4_NATIVE_PROJECTION_TESTS=1 \
+torchrun --nproc_per_node=2 -m pytest -q \
+  mcore_adapter/tests/test_qwen4_exp_native_projection.py
+NVIDIA_TF32_OVERRIDE=0 RUN_QWEN4_OUTPUT_PROJECTION_TESTS=1 \
+torchrun --nproc_per_node=2 -m pytest -q \
+  mcore_adapter/tests/test_qwen4_exp_output_projection.py
+NVIDIA_TF32_OVERRIDE=0 RUN_QWEN4_DISTRIBUTED_TESTS=1 \
+torchrun --nproc_per_node=2 -m pytest -q \
+  mcore_adapter/tests/test_qwen4_exp_distributed.py
+```
+
+On September 25, actual TE/LoRA/TP/SP/DDP projection tests passed over two
+updates. The complete small-model TP1 versus TP2/SP gradient comparison improved
+from relative L2 `0.0216556` to `0.00124173`, passing the unchanged `0.02` bound.
+These tests do not establish real-model inference/training probability parity.
+
+ROLL's vLLM factory defaults the GDN prefill backend to `triton` when the model
+directory or HF repository name begins with `Qwen3.8-Flash-Next` (ignoring
+punctuation). An explicit `additional_config.gdn_prefill_backend` is preserved.
+For generic names such as `checkpoint-99`, set that option explicitly; parent
+experiment directories are not used to identify the model.
+
+The SFT validation runner requires at least one complete heldout batch before
+initializing workers: `DP * gradient_accumulation_steps * infer_batch_size`
+records. With the supplied TP1/EP8 LoRA configuration, use at least eight
+heldout records. A second check rejects an empty loader after preprocessing.
 
 ## Native DCP payload validation
 
