@@ -58,6 +58,18 @@ def _positive_size(topology, name):
     return value
 
 
+def validate_heldout_batch(records, worker, dp_size):
+    """Reject a validation split that drop_last would discard entirely."""
+    training = _field(worker, "training_args")
+    batch_size = (dp_size * _field(training, "gradient_accumulation_steps", 1)
+                  * _field(worker, "infer_batch_size", 1))
+    if records < batch_size:
+        raise ValueError(
+            f"heldout has {records} records but a complete validation batch requires "
+            f"{batch_size} (DP={dp_size}); increase --heldout-records or the dataset"
+        )
+
+
 def _legacy_rank_payloads(adapters, tp_size, pp_size, ep_size):
     payloads = []
     for adapter in adapters:
@@ -710,9 +722,13 @@ def main():
     (work / "resolved-config.json").write_text(json.dumps(resolved, indent=2) + "\n")
     config = from_dict(SFTConfig, resolved)
     contract = checkpoint_contract(config)
+    validate_heldout_batch(manifest["heldout"]["records"], config.sft_train,
+                          contract["topology"]["data_parallel_size"])
     (work / "checkpoint-location.json").write_text(json.dumps(config.checkpoint_config, indent=2) + "\n")
     init()
     pipeline = SFTPipeline(config)
+    if not hasattr(pipeline, "val_dataloader") or len(pipeline.val_dataloader) == 0:
+        raise ValueError("heldout preprocessing produced no complete validation batch")
     actual_steps = len(pipeline.dataloader) * config.sft_train.training_args.num_train_epochs
     if actual_steps != args.max_steps:
         raise ValueError(f"Dataset and real DP topology yield {actual_steps} steps, expected {args.max_steps}")
