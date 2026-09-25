@@ -316,7 +316,9 @@ After setting up the pinned dependencies, run from the repository root:
 
 ```bash
 export MODEL_PATH=/path/to/Qwen3.8-Flash-Next
-export ROLL_RL_DATA="$PWD/data/gpqa_diamond_boxed.jsonl"
+python scripts/qwen38/prepare_rl_validation_data.py \
+  --output-dir "$PWD/output/qwen38-rl-data"
+export ROLL_RL_DATA="$PWD/output/qwen38-rl-data/train.jsonl"
 export ROLL_RL_OUTPUT_DIR=/path/to/fresh-rl-output
 NVIDIA_TF32_OVERRIDE=0 CUDA_DEVICE_MAX_CONNECTIONS=1 \
 python examples/start_rlvr_pipeline.py \
@@ -335,6 +337,11 @@ The example data uses the existing `messages`, `ground_truth`, and
 response budgets are 256 and 128 tokens; these are lifecycle examples, not a
 GPQA accuracy evaluation or an 8K RL configuration. The September 25 validation
 used a fixed 80-question answer-only derivative of that dataset.
+The data preparation command verifies the bundled source and recorded split
+hashes, reproduces those 80 training records byte for byte, and writes 16
+disjoint heldout records and a manifest into a fresh directory. It changes only
+the instruction to request a boxed answer without an explanation; questions,
+choices, and ground-truth answers remain unchanged.
 
 On the observed validation installation, Hydra composition and the actual
 `RLVRConfig` parser accepted all four configurations with CUDA uninitialized;
