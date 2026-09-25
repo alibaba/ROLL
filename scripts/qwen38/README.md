@@ -222,6 +222,14 @@ cold restore reproduced the saved actor/reference sentinel outputs and resumed
 updates. The complete continuation run and final checkpoint remain under
 validation; the sentinel check is not an all-state tensor comparison.
 
+The deterministic optimizer-padding patch also has real checkpoint evidence:
+a September 25 CPU check of the saved full-backbone OPD continuation found all
+864 known 52-element alignment gaps exactly zero. It read approximately 1.5 MB
+of serialized padding, with no CUDA context. The earlier SFT continuation's
+original comparison still records 864 padding differences; its failed raw-state
+comparison has not been rewritten as a pass. Zero padding in a later save does
+not establish equality of model or Adam state between training runs.
+
 A full text-backbone checkpoint with FP32 Adam and master parameters occupies
 approximately 1.79 TB in this environment. Use fast local storage for the first
 save and cold restore, and keep its staging and final checkpoint directories on
