@@ -229,7 +229,12 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
 
         if not isinstance(self.base_layer, TopKRouter) and not self.disable_adapters and not self.merged:
             if self.sequence_parallel and self.base_layer.parallel_mode == "column":
-                x = gather_from_sequence_parallel_region(x)
+                # Column-parallel LoRA-B already all-reduces its input gradient.
+                # Return that replicated gradient to the local sequence shard
+                # without summing it over the tensor-parallel ranks again.
+                x = gather_from_sequence_parallel_region(
+                    x, tensor_parallel_output_grad=False, group=self.base_layer.tp_group
+                )
             for active_adapter in self.active_adapters:
                 if active_adapter not in self.lora_A.keys():
                     continue
