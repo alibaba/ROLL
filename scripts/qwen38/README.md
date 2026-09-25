@@ -410,10 +410,16 @@ choices, and ground-truth answers remain unchanged.
 
 On the observed validation installation, Hydra composition and the actual
 `RLVRConfig` parser accepted all four configurations with CUDA uninitialized;
-the training topology matched the executed validation configurations. Current
-LoRA RL and OPD each recorded two optimizer updates, three adapter transfers,
-unchanged frozen sentinels, and valid adapter/Adam payloads. Both raw runs exited
-with an error in the final observer's LoRA callback count; corrected independent
-record validation passed. This does not establish a fresh successful lifecycle
-exit, cold resume, whole-model probability parity, or full acceptance of these
-public examples.
+the training topology matched the executed validation configurations.
+LoRA RL validation of the gated-RMSNorm fix (`9064b72`) subsequently completed
+20 updates on every rank and transferred versions 0 through 20. A fresh process
+restored checkpoint 19, completed updates 20 and 21 on all eight ranks, and
+transferred versions 20 through 22. Both runs exited successfully. The final
+checkpoints each passed an actual payload scan of 297,936 optimizer storage
+items and eight adapter files. Reference and frozen-backbone sentinels remained
+unchanged, and the restored sentinels matched the baseline's final values.
+
+This verifies the instrumented LoRA RL lifecycle and positive-count cold
+continuation. It does not establish complete state equality, whole-model
+probability parity, performance, or full acceptance of the public examples.
+The corresponding 20-step OPD validation and cold continuation remain pending.
