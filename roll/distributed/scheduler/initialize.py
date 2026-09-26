@@ -77,7 +77,14 @@ def start_ray_cluster():
     node_name = get_driver_node_name()
     dashboard_port = get_driver_dashboard_port()
 
-    if is_ray_cluster_running():
+    # A pre-existing default Ray cluster may point at a full or unrelated
+    # filesystem. When the caller supplied a dedicated temp directory, start
+    # an isolated head/worker cluster so Ray session and spill files honor it
+    # instead of silently reusing the stale cluster.
+    force_new_cluster = os.environ.get("ROLL_RAY_FORCE_NEW_CLUSTER", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if is_ray_cluster_running() and not force_new_cluster:
         logger.info("Ray cluster already initialized")
         return False
 
