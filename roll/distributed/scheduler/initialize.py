@@ -1,4 +1,5 @@
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from roll.distributed.scheduler.driver_utils import (
 from roll.distributed.scheduler.log_monitor import LogMonitorListener
 from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.logging import get_logger
+from roll.utils.ray_temp_dir import resolve_ray_temp_dir
 from roll.platforms import current_platform
 
 logger = get_logger()
@@ -79,12 +81,15 @@ def start_ray_cluster():
         logger.info("Ray cluster already initialized")
         return False
 
+    ray_temp_dir = resolve_ray_temp_dir()
+    temp_dir_arg = f" --temp-dir={shlex.quote(str(ray_temp_dir))}" if ray_temp_dir else ""
+
     if rank == 0:
-        cmd = f"ray start --head --port={master_port} --node-name={node_name} --dashboard-port={dashboard_port}"
+        cmd = f"ray start --head --port={master_port} --node-name={node_name} --dashboard-port={dashboard_port}{temp_dir_arg}"
     else:
         # Wait for head node to be ready before starting worker
         wait_for_head_node_ready(master_addr, master_port)
-        cmd = f"ray start --address={master_addr}:{master_port} --node-name={node_name} --dashboard-port={dashboard_port}"
+        cmd = f"ray start --address={master_addr}:{master_port} --node-name={node_name} --dashboard-port={dashboard_port}{temp_dir_arg}"
 
     logger.info(f"Starting ray cluster: {cmd}")
     ret = subprocess.run(cmd, shell=True, capture_output=True)
