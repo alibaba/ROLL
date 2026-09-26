@@ -41,7 +41,10 @@ global_template: native_nonthinking
 enable_reference: true
 enable_old_logprobs_recompute: true
 whiten_advantages: false
-max_len_mask: true
+# Teacher-only OPD must train on valid response tokens even when generation
+# finishes before the rollout cap. Length filtering can turn a whole step into
+# a no-op and leave the optimizer/scheduler one update behind the pipeline step.
+max_len_mask: false
 difficulty_mask: false
 add_token_level_kl: false
 rollout_dump_dir: ${output_dir}/rollouts
