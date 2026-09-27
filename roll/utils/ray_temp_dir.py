@@ -12,6 +12,12 @@ import time
 
 _DEFAULT_MIN_FREE_BYTES = 128 * 1024**3
 _FORCE_TRUE = {"1", "true", "yes", "on"}
+# Ray appends a timestamped session directory, a sockets directory, and the
+# plasma-store socket below ``--temp-dir``. Keep a conservative budget for
+# that suffix so Ray fails before spawning a half-initialized cluster when a
+# deeply nested validation path would exceed AF_UNIX's 107-byte limit.
+_RAY_UNIX_SOCKET_MAX_PATH = 107
+_RAY_SESSION_SOCKET_SUFFIX_BUDGET = 70
 
 
 def should_force_new_cluster(temp_dir: Path | None) -> bool:
@@ -125,6 +131,12 @@ def resolve_ray_temp_dir() -> Path | None:
     if not raw:
         return None
     path = Path(raw).expanduser().resolve()
+    if len(str(path)) + _RAY_SESSION_SOCKET_SUFFIX_BUDGET > _RAY_UNIX_SOCKET_MAX_PATH:
+        raise ValueError(
+            f"ROLL_RAY_TEMP_DIR {path} is too long for Ray's Unix socket paths; "
+            f"use a directory with at most "
+            f"{_RAY_UNIX_SOCKET_MAX_PATH - _RAY_SESSION_SOCKET_SUFFIX_BUDGET} characters"
+        )
     path.mkdir(parents=True, exist_ok=True)
     minimum = int(os.environ.get("ROLL_RAY_TEMP_MIN_FREE_BYTES", str(_DEFAULT_MIN_FREE_BYTES)))
     if minimum < 0:

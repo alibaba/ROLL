@@ -213,7 +213,9 @@ Ray also writes its session logs and object-store spill files to its temporary
 filesystem. Set `ROLL_RAY_TEMP_DIR` to a dedicated local filesystem before
 launching a Qwen3.8 run to make the head and worker use the same location; ROLL
 passes it to `ray start --temp-dir` and checks free space before starting the
-cluster. The default minimum is 128 GiB and can be changed with
+cluster. Keep the configured directory path short enough for Ray's Unix socket
+limit (for example `/tmp/roll-qwen38-ray`); ROLL rejects an overlong path before
+starting a cluster. The default minimum is 128 GiB and can be changed with
 `ROLL_RAY_TEMP_MIN_FREE_BYTES`. An unset variable preserves Ray's normal
 `/tmp/ray` behavior. Keep this directory separate from checkpoint output and
 remove only completed run sessions after the run has exited.

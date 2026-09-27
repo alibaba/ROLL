@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -16,23 +19,39 @@ def test_unset_ray_temp_dir_preserves_default(monkeypatch):
 
 
 def test_configured_ray_temp_dir_is_created_and_returned(tmp_path, monkeypatch):
-    target = tmp_path / "ray-tmp"
+    target = Path("/tmp") / f"roll-ray-test-{os.getpid()}"
+    shutil.rmtree(target, ignore_errors=True)
+    try:
+        monkeypatch.setenv("ROLL_RAY_TEMP_DIR", str(target))
+        monkeypatch.setenv("ROLL_RAY_TEMP_MIN_FREE_BYTES", "1")
+        assert resolve_ray_temp_dir() == target.resolve()
+        assert target.is_dir()
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def test_configured_ray_temp_dir_rejects_paths_that_overflow_ray_socket_limit(tmp_path, monkeypatch):
+    target = Path("/tmp") / ("r" * 80)
     monkeypatch.setenv("ROLL_RAY_TEMP_DIR", str(target))
     monkeypatch.setenv("ROLL_RAY_TEMP_MIN_FREE_BYTES", "1")
-    assert resolve_ray_temp_dir() == target.resolve()
-    assert target.is_dir()
+    with pytest.raises(ValueError, match="Unix socket"):
+        resolve_ray_temp_dir()
 
 
 def test_configured_ray_temp_dir_rejects_low_free_space(tmp_path, monkeypatch):
-    target = tmp_path / "ray-tmp"
-    monkeypatch.setenv("ROLL_RAY_TEMP_DIR", str(target))
-    monkeypatch.setenv("ROLL_RAY_TEMP_MIN_FREE_BYTES", "100")
+    target = Path("/tmp") / f"roll-ray-low-space-{os.getpid()}"
+    shutil.rmtree(target, ignore_errors=True)
+    try:
+        monkeypatch.setenv("ROLL_RAY_TEMP_DIR", str(target))
+        monkeypatch.setenv("ROLL_RAY_TEMP_MIN_FREE_BYTES", "100")
 
-    import roll.utils.ray_temp_dir as module
+        import roll.utils.ray_temp_dir as module
 
-    monkeypatch.setattr(module.shutil, "disk_usage", lambda _: SimpleNamespace(free=99))
-    with pytest.raises(RuntimeError, match="bytes free"):
-        resolve_ray_temp_dir()
+        monkeypatch.setattr(module.shutil, "disk_usage", lambda _: SimpleNamespace(free=99))
+        with pytest.raises(RuntimeError, match="bytes free"):
+            resolve_ray_temp_dir()
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
 
 
 def test_dedicated_temp_dir_forces_an_isolated_cluster(monkeypatch, tmp_path):
