@@ -52,6 +52,10 @@ def main() -> None:
     parser.add_argument("--input-manifest", type=Path)
     parser.add_argument("--save-layer-states", action="store_true")
     parser.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
+    parser.add_argument("--router-dtype", choices=["model", "fp32"], default="model",
+                        help="Compare checkpoint-native routing with an explicit FP32 gate")
+    parser.add_argument("--compare-router-dtypes", action="store_true",
+                        help="Evaluate both gate precisions using the same loaded weights and natural routes")
     parser.add_argument("--stream-decoder", action="store_true",
                         help="Diagnostic only: keep decoder parameters on CPU between layers")
     parser.add_argument("--deterministic-gdn", action="store_true",
@@ -68,6 +72,7 @@ def main() -> None:
         moe_token_dispatcher_type="alltoall", report_to=[],
         additional_configs={"perform_initialization": False, "gradient_accumulation_fusion": False,
                             "params_dtype": torch.bfloat16 if cli.dtype == "bf16" else torch.float32,
+                            "moe_router_dtype": None if cli.router_dtype == "model" else cli.router_dtype,
                             "deterministic_mode": cli.deterministic_gdn},
     )
     events = output / f"rank-{os.environ['RANK']}.jsonl"
@@ -88,7 +93,7 @@ def main() -> None:
     module = model.get_models()[0].eval()
     record("loaded", seconds=time.monotonic() - started,
            parameters=sum(p.numel() for p in module.parameters()),
-           layers=len(module.decoder.layers))
+           layers=len(module.decoder.layers), router_dtype=module.config.moe_router_dtype)
     assert len(module.decoder.layers) == 48, "real-model acceptance requires all 48 layers"
     module.requires_grad_(False)
     handles = []
@@ -159,7 +164,16 @@ def main() -> None:
         manifest = json.loads(cli.input_manifest.read_text())
         cases = [(name, cli.input_manifest.parent / fixture["tensor_file"], output / name)
                  for name, fixture in manifest["fixtures"].items()]
-    for case, input_path, case_output in cases:
+    modes = ["model", "fp32"] if cli.compare_router_dtypes else [cli.router_dtype]
+    cases = [(mode, case, path, output / mode / case if cli.compare_router_dtypes else destination)
+             for mode in modes for case, path, destination in cases]
+    from megatron.core.transformer.moe.router import Router
+
+    for mode, case, input_path, case_output in cases:
+        router_dtype = None if mode == "model" else mode
+        for child in module.modules():
+            if isinstance(child, Router):
+                child.config.moe_router_dtype = router_dtype
         case_output.mkdir(parents=True, exist_ok=True)
         for length in cli.lengths:
             current_length = length
@@ -177,7 +191,8 @@ def main() -> None:
                 losses = module(ids, positions, torch.ones_like(ids), labels=ids.roll(-1, -1))
             torch.cuda.synchronize()
             finite = bool(torch.isfinite(losses).all())
-            record("forward", case=case, sequence_length=length, seconds=time.monotonic() - started,
+            record("forward", case=case, router_dtype=router_dtype,
+                   sequence_length=length, seconds=time.monotonic() - started,
                    finite=finite, mean_loss=float(losses.float().mean()), shape=list(losses.shape))
             assert finite, "real checkpoint produced nonfinite losses"
             compare_replicas(f"losses-{length}", losses)
