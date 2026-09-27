@@ -20,7 +20,7 @@ class Qwen4ExpTransformerBlock(TransformerBlock):
             self.hyper_connection_mixer = HyperConnectionMixer(
                 config.hidden_size, config.hc_count, config.hc_lowrank,
                 eps=config.layernorm_epsilon, dtype=config.params_dtype, device=device,
-                sequence_parallel=config.sequence_parallel)
+                sequence_parallel=config.sequence_parallel, norm_after_combine=True)
         for layer in self.layers:
             if layer.layer_number in (config.ple_layer_ids or []):
                 layer.ple = PLELayer(config.hidden_size, config.ple_embed_dim, config.hc_count,

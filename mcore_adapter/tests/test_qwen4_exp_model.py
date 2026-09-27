@@ -61,6 +61,11 @@ def test_full_model_uses_original_ids_and_all_required_modules(environment):
     torch.manual_seed(718)
     config = tiny_config()
     model = make_model(config)
+    assert [layer.attn_hyper_connection.norm_after_combine for layer in model.decoder.layers] == [
+        False, False, True, True,
+    ]
+    assert all(layer.mlp_hyper_connection.norm_after_combine for layer in model.decoder.layers)
+    assert model.decoder.hyper_connection_mixer.hc.norm_after_combine
     ids = torch.randint(1, 16, (2, 32), device="cuda")
     positions = torch.arange(32, device="cuda").expand(2, -1)
     labels = ids.roll(-1, -1)

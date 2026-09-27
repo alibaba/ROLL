@@ -1,13 +1,19 @@
 """GR normalization must preserve a token when its batch shape changes."""
 import importlib.util
 from pathlib import Path
+import sys
+import types
 
 import pytest
 import torch
 
 
 _SOURCE = Path(__file__).parents[1] / 'src/mcore_adapter/models/qwen4_exp/hyperconnection.py'
-_SPEC = importlib.util.spec_from_file_location('_gr_normalization_test', _SOURCE)
+_PACKAGE = '_gr_normalization_test'
+_package = types.ModuleType(_PACKAGE)
+_package.__path__ = [str(_SOURCE.parent)]
+sys.modules[_PACKAGE] = _package
+_SPEC = importlib.util.spec_from_file_location(f'{_PACKAGE}.hyperconnection', _SOURCE)
 hc = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(hc)
 

@@ -81,8 +81,15 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             "device": "cpu" if config.use_cpu_initialization else torch.cuda.current_device(),
             "sequence_parallel": config.sequence_parallel,
         }
-        self.attn_hyper_connection = HyperConnection(**common)
-        self.mlp_hyper_connection = HyperConnection(**common)
+        # Inference folds the preceding branch into the next GR norm. PLE
+        # materializes the residual before its addition, so its attention GR
+        # (and the first layer) use the standalone normalization reduction.
+        self.attn_hyper_connection = HyperConnection(
+            **common, norm_after_combine=(
+                self.layer_number > 1 and self.layer_number not in (config.ple_layer_ids or [])
+            ),
+        )
+        self.mlp_hyper_connection = HyperConnection(**common, norm_after_combine=True)
 
     def forward(
         self, hidden_states, attention_mask=None, context=None, context_mask=None,

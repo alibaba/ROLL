@@ -7,10 +7,7 @@ and writes back a gated broadcast. megatron-core has no equivalent -- searching
 the tree for ``hyper_connection`` / ``hc_count`` / ``block_inject`` returns
 nothing -- so this module is new.
 
-The arithmetic below is not a paraphrase of the reference: P16 pinned it down by
-writing this same maths in plain PyTorch and checking it against the vLLM Triton
-kernels on random inputs (all five ops matched to 0.000e+00). Two details were
-wrong on a first reading and would have been silent numerical bugs:
+The arithmetic follows the checkpoint's GR equations. In particular:
 
   * the per-group RMSNorm is **Gemma-style**, ``x*rrms*(1+w)``, not ``x*rrms*w``
   * ``hc_silu`` divides by ``hc_count`` **before** the SiLU, not after
@@ -26,9 +23,9 @@ Checkpoint layout this must match (398 tensors, 48 layers x 2 groups):
 
 Real geometry: hidden=2560, hc_count=4 -> stream width 10240, lowrank 320.
 
-This is a training-side (non-fused) implementation: plain PyTorch ops, so autograd
-works and the numerics can be compared against the inference kernels. Fusing it is
-a later optimisation, not a correctness requirement.
+CUDA normalization, gate mixing and residual combination preserve the native
+kernel's FP32 reduction/FMA order before BF16 rounding, with analytic backwards.
+CPU execution retains a plain PyTorch implementation.
 """
 
 from __future__ import annotations
@@ -39,17 +36,28 @@ from torch.nn import functional as F
 
 
 def grouped_gemma_rmsnorm(
-    x: torch.Tensor, weight: torch.Tensor, eps: float, hc_count: int
+    x: torch.Tensor, weight: torch.Tensor, eps: float, hc_count: int,
+    *, after_combine: bool = False,
 ) -> torch.Tensor:
     """Per-stream RMSNorm with a Gemma ``(1 + w)`` affine.
 
     ``x`` is ``[..., hidden*hc]``; each of the ``hc`` groups is normalised over its
     own ``hidden`` elements. ``weight`` may be ``[hidden*hc]`` (this checkpoint) or
     ``[hidden]`` (shared across streams).
+
+    ``after_combine`` preserves the tiled reduction used by the native fused
+    combine+norm kernel. Its input must already be rounded to the stream dtype.
     """
     *lead, total = x.shape
     assert total % hc_count == 0, f"{total} not divisible by hc_count={hc_count}"
     d = total // hc_count
+
+    if weight.numel() not in (d, total):
+        raise ValueError(f"hc_norm weight has {weight.numel()} elements; expected {d} or {total}")
+    if x.is_cuda:
+        from .hyperconnection_kernels import GroupedNorm
+
+        return GroupedNorm.apply(x, weight, eps, hc_count, after_combine)
 
     xg = x.float().reshape(-1, hc_count, d)
     # A generic sum can change its CUDA reduction order with the row count,
@@ -85,6 +93,10 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
     """
     *lead, total = x.shape
     d = total // hc_count
+    if x.is_cuda:
+        from .hyperconnection_kernels import GateMix
+
+        return GateMix.apply(x, gate, hc_count)
     xg = x.float().reshape(-1, hc_count, d)
     gg = gate.float().reshape(-1, hc_count, d)
     out = (torch.sigmoid(gg) * xg).sum(1) / hc_count
@@ -104,6 +116,10 @@ def hc_combine(
     """
     *lead, total = residual.shape
     d = total // hc_count
+    if residual.is_cuda:
+        from .hyperconnection_kernels import Combine
+
+        return Combine.apply(residual, block_output, injection_logits, hc_count)
     resg = residual.float().reshape(-1, hc_count, d)
     inj = 2.0 * torch.sigmoid(injection_logits.float().reshape(-1, hc_count) / hc_count)
     blk = block_output.float().reshape(-1, d)
@@ -143,6 +159,7 @@ class HyperConnection(nn.Module):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         sequence_parallel: bool = False,
+        norm_after_combine: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -150,6 +167,7 @@ class HyperConnection(nn.Module):
         self.lowrank = lowrank
         self.eps = eps
         self.use_combine = use_combine
+        self.norm_after_combine = norm_after_combine
 
         kw = {"dtype": dtype, "device": device}
         w = self.hyper_hidden_size
@@ -183,7 +201,10 @@ class HyperConnection(nn.Module):
 
     def mix(self, residual: torch.Tensor):
         """Prepare a block input from the stream state. No pending output to fold."""
-        xn = grouped_gemma_rmsnorm(residual, self.hc_norm, self.eps, self.hc_count)
+        xn = grouped_gemma_rmsnorm(
+            residual, self.hc_norm, self.eps, self.hc_count,
+            after_combine=self.norm_after_combine,
+        )
         block_input, injection = self._mix_from_normed(xn)
         return residual, block_input, injection
 
@@ -195,14 +216,15 @@ class HyperConnection(nn.Module):
     ):
         """Fold the previous block's output in, then prepare the next block input.
 
-        The reference fuses the combine with this module's input RMSNorm; here they
-        are two calls, which is numerically the same thing (P16 checked exactly
-        this: ``combine_norm == combine followed by grouped RMSNorm``).
+        Preserve the reference's BF16 materialization and tiled norm reduction
+        even though the training checkpoint boundaries use separate calls.
         """
         residual = hc_combine(
             residual, prev_block_output, prev_injection, self.hc_count
         )
-        xn = grouped_gemma_rmsnorm(residual, self.hc_norm, self.eps, self.hc_count)
+        xn = grouped_gemma_rmsnorm(
+            residual, self.hc_norm, self.eps, self.hc_count, after_combine=True,
+        )
         block_input, injection = self._mix_from_normed(xn)
         return residual, block_input, injection
 
@@ -237,6 +259,7 @@ class HyperConnectionMixer(nn.Module):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         sequence_parallel: bool = False,
+        norm_after_combine: bool = False,
     ) -> None:
         super().__init__()
         self.hc = HyperConnection(
@@ -248,6 +271,7 @@ class HyperConnectionMixer(nn.Module):
             dtype=dtype,
             device=device,
             sequence_parallel=sequence_parallel,
+            norm_after_combine=norm_after_combine,
         )
 
     @property
@@ -269,7 +293,8 @@ class HyperConnectionMixer(nn.Module):
         pending_injection: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if pending_output is not None and pending_injection is not None:
-            residual = self.hc.combine(residual, pending_output, pending_injection)
+            _, block_input, _ = self.hc.combine_and_mix(residual, pending_output, pending_injection)
+            return block_input
         _, block_input, _ = self.hc.mix(residual)
         return block_input
 
