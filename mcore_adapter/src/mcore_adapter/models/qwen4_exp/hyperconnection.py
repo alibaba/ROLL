@@ -127,6 +127,28 @@ def hc_combine(
     return out.reshape(*lead, total).to(residual.dtype)
 
 
+class _GRProjection(nn.Linear):
+    """Keep the native merged GEMM geometry when a projection is wrapped.
+
+    PEFT calls this base layer normally, then applies its adapter. Padding is
+    temporary: checkpoint parameters retain their original names and shapes.
+    The unwrapped pair uses one GEMM in ``HyperConnection._mix_from_normed``.
+    """
+
+    def __init__(self, in_features, out_features, *, merged_width, offset=0, **kwargs):
+        super().__init__(in_features, out_features, bias=False, **kwargs)
+        self.merged_width = merged_width
+        self.output_offset = offset
+
+    def forward(self, x):
+        if not x.is_cuda:
+            return super().forward(x)
+        start = self.output_offset
+        end = start + self.out_features
+        weight = F.pad(self.weight, (0, 0, start, self.merged_width - end))
+        return F.linear(x, weight)[..., start:end]
+
+
 class HyperConnection(nn.Module):
     """One hyperconnection block (the checkpoint has two per layer: attn and mlp).
 
@@ -174,10 +196,19 @@ class HyperConnection(nn.Module):
 
         # Names match the checkpoint so conversion is a rename, not a remap.
         self.hc_norm = nn.Parameter(torch.zeros(w, **kw))
-        self.input_mix_weight_down = nn.Linear(w, lowrank, bias=False, **kw)
+        if use_combine:
+            self.projection_padding = (-(lowrank + hc_count)) % 16
+            merged_width = lowrank + hc_count + self.projection_padding
+            self.input_mix_weight_down = _GRProjection(
+                w, lowrank, merged_width=merged_width, **kw,
+            )
+        else:
+            self.input_mix_weight_down = nn.Linear(w, lowrank, bias=False, **kw)
         self.input_mix_weight_up = nn.Linear(lowrank, w, bias=False, **kw)
         if use_combine:
-            self.block_inject_weight = nn.Linear(w, hc_count, bias=False, **kw)
+            self.block_inject_weight = _GRProjection(
+                w, hc_count, merged_width=merged_width, offset=lowrank, **kw,
+            )
         else:
             self.block_inject_weight = None
 
@@ -193,10 +224,29 @@ class HyperConnection(nn.Module):
         return self.hidden_size * self.hc_count
 
     def _mix_from_normed(self, xn: torch.Tensor):
-        lora = hc_silu(self.input_mix_weight_down(xn), self.hc_count)
+        down, inject = self.input_mix_weight_down, self.block_inject_weight
+        bare_pair = type(down) is _GRProjection and type(inject) is _GRProjection
+        has_hooks = bare_pair and any(
+            getattr(layer, name)
+            for layer in (down, inject)
+            for name in ('_forward_pre_hooks', '_forward_hooks', '_backward_pre_hooks', '_backward_hooks')
+        )
+        if xn.is_cuda and bare_pair and not has_hooks:
+            # Native down + injection + alignment padding share one GEMM.
+            # Only fuse bare modules: wrappers must execute their own forward
+            # for active/disabled/merged adapters and their backward semantics.
+            # Module hooks may also wait on asynchronous parameter all-gather.
+            weight = torch.cat((down.weight, inject.weight), dim=0)
+            weight = F.pad(weight, (0, 0, 0, self.projection_padding))
+            projections = F.linear(xn, weight)
+            down_output = projections[..., :self.lowrank]
+            injection = projections[..., self.lowrank:self.lowrank + self.hc_count]
+        else:
+            down_output = down(xn)
+            injection = inject(xn) if self.use_combine else None
+        lora = hc_silu(down_output, self.hc_count)
         gate = self.input_mix_weight_up(lora)
         block_input = hc_gate_mix(xn, gate, self.hc_count)
-        injection = self.block_inject_weight(xn) if self.use_combine else None
         return block_input, injection
 
     def mix(self, residual: torch.Tensor):
