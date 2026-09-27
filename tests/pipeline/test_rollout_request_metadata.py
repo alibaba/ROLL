@@ -47,9 +47,9 @@ def test_request_metadata_survives_postprocess_concat_reorder_and_dump(tmp_path,
     result = json.loads((tmp_path/'rollout_dump_data.step_3.jsonl').read_text())
     records = [json.loads(s) for s in result['sampling_params']]
     assert [r['request_id'] for r in records] == ['request-b', 'request-a', 'request-b', 'request-a']
-    assert [r['output_token_ids'] for r in records] == [second_tokens, first_tokens, second_tokens, first_tokens]
+    assert [r['output_token_ids'] for r in records] == [second_tokens[0], first_tokens[0], second_tokens[1], first_tokens[1]]
     assert all(r['generation_config'] == dict(temperature=.8, num_return_sequences=2) for r in records)
-    assert all(r['finish_reasons'] == ['stop', 'stop'] for r in records)
+    assert [r['finish_reasons'] for r in records] == ['stop', 'stop', 'stop', 'stop']
     assert all('unrelated_tensor' not in r for r in records)
     assert result['global_step'] == [3] * 4
 

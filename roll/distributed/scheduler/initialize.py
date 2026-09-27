@@ -22,11 +22,18 @@ from roll.distributed.scheduler.driver_utils import (
 from roll.distributed.scheduler.log_monitor import LogMonitorListener
 from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.logging import get_logger
-from roll.utils.ray_temp_dir import resolve_ray_temp_dir
+from roll.utils.ray_temp_dir import (
+    resolve_ray_session_dir,
+    resolve_ray_temp_dir,
+    should_force_new_cluster,
+    stop_owned_ray_processes,
+)
 from roll.platforms import current_platform
 
 logger = get_logger()
 log_monitor_listener = None
+ray_cluster_started = False
+owned_ray_session_dir = None
 
 def wait_for_head_node_ready(master_addr: str, master_port: str, timeout: int = 600, check_interval: int = 2):
     """Wait for Ray head node GCS to become available.
@@ -77,18 +84,15 @@ def start_ray_cluster():
     node_name = get_driver_node_name()
     dashboard_port = get_driver_dashboard_port()
 
-    # A pre-existing default Ray cluster may point at a full or unrelated
-    # filesystem. When the caller supplied a dedicated temp directory, start
-    # an isolated head/worker cluster so Ray session and spill files honor it
-    # instead of silently reusing the stale cluster.
-    force_new_cluster = os.environ.get("ROLL_RAY_FORCE_NEW_CLUSTER", "").strip().lower() in {
-        "1", "true", "yes", "on"
-    }
+    # Resolve the storage boundary before checking the host-wide default Ray
+    # cluster. ``ray status`` and ``ray.init(address="auto")`` can discover an
+    # unrelated cluster; a dedicated temp dir must always create its own one.
+    ray_temp_dir = resolve_ray_temp_dir()
+    force_new_cluster = should_force_new_cluster(ray_temp_dir)
     if is_ray_cluster_running() and not force_new_cluster:
         logger.info("Ray cluster already initialized")
         return False
 
-    ray_temp_dir = resolve_ray_temp_dir()
     temp_dir_arg = f" --temp-dir={shlex.quote(str(ray_temp_dir))}" if ray_temp_dir else ""
 
     if rank == 0:
@@ -105,13 +109,23 @@ def start_ray_cluster():
         logger.error(f"ret.stdout: {ret.stdout}")
         logger.error(f"ret.stderr: {ret.stderr}")
         sys.exit(1)
+    global ray_cluster_started, owned_ray_session_dir
+    ray_cluster_started = True
+    owned_ray_session_dir = resolve_ray_session_dir(ray_temp_dir)
+    if ray_temp_dir is not None and owned_ray_session_dir is None:
+        logger.warning("Ray started with a dedicated temp dir but session_latest was not discoverable; cleanup is disabled")
     return True
 
 
 def stop_handler():
-    global log_monitor_listener
+    global log_monitor_listener, ray_cluster_started, owned_ray_session_dir
     if log_monitor_listener is not None:
         log_monitor_listener.stop()
+    if ray_cluster_started and get_driver_rank() == 0:
+        stopped = stop_owned_ray_processes(owned_ray_session_dir)
+        logger.info("Stopped %s Ray processes owned by this ROLL session", stopped)
+    ray_cluster_started = False
+    owned_ray_session_dir = None
 
 
 def init():

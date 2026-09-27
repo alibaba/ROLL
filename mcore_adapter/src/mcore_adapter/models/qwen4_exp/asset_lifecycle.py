@@ -164,6 +164,7 @@ def restore_ngram_assets(
     model_name_or_path: str | os.PathLike[str],
     *,
     external_asset_path: str | os.PathLike[str] | None = None,
+    _validate_configured_coverage: bool = True,
 ) -> dict[str, dict[str, Any]]:
     """Attach and validate assets for a direct HF load or MCA resume."""
     checkpoint = Path(model_name_or_path).expanduser().resolve()
@@ -174,6 +175,8 @@ def restore_ngram_assets(
         _validate_coverage(expected, _configured_layers(model))
     loaded = model.attach_ngram_assets(source, expected)
     loaded = _validate_manifests(loaded)
+    if _validate_configured_coverage:
+        _validate_coverage(loaded, _configured_layers(model))
     if expected is not None and any(expected.get(layer) != manifest for layer, manifest in loaded.items()):
         raise ValueError("n-gram external asset manifest mismatch")
     setattr(
@@ -200,7 +203,10 @@ def restore_ngram_asset_models(models, model_name_or_path, *, external_asset_pat
     loaded, records, requirements, error = [], [], [], None
     try:
         for model in models:
-            loaded.append(restore_ngram_assets(model, model_name_or_path, external_asset_path=external_asset_path))
+            loaded.append(restore_ngram_assets(
+                model, model_name_or_path, external_asset_path=external_asset_path,
+                _validate_configured_coverage=False,
+            ))
             records.append(getattr(model, _MODEL_RECORD_ATTRIBUTE))
             requirements.append(_configured_layers(model))
     except Exception as exc:

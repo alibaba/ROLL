@@ -167,6 +167,15 @@ def test_missing_model_stage_fails_global_coverage_on_initial_load(tmp_path):
         lifecycle.restore_ngram_asset_models([AssetStage([1])], source)
 
 
+def test_direct_restore_rejects_missing_configured_layer(tmp_path):
+    lifecycle = load_qwen4_module("asset_lifecycle")
+    source = tmp_path / "source"
+    checkpoint_fixture(source, layer_indices=(1, 3))
+    model = AssetStage([1], global_layers=(1, 3))
+    with pytest.raises(ValueError, match="coverage"):
+        lifecycle.restore_ngram_assets(model, source)
+
+
 @pytest.mark.skipif(importlib.util.find_spec("megatron") is None, reason="requires mcore_adapter runtime")
 def test_virtual_model_hooks_keep_all_chunk_manifests(tmp_path):
     from mcore_adapter.models.model_factory import VirtualModels
