@@ -729,9 +729,13 @@ def main():
     pipeline = SFTPipeline(config)
     if not hasattr(pipeline, "val_dataloader") or len(pipeline.val_dataloader) == 0:
         raise ValueError("heldout preprocessing produced no complete validation batch")
-    actual_steps = len(pipeline.dataloader) * config.sft_train.training_args.num_train_epochs
+    epoch_steps = len(pipeline.dataloader) * config.sft_train.training_args.num_train_epochs
+    actual_steps = min(epoch_steps, args.max_steps)
     if actual_steps != args.max_steps:
-        raise ValueError(f"Dataset and real DP topology yield {actual_steps} steps, expected {args.max_steps}")
+        raise ValueError(
+            f"Dataset and real DP topology yield at most {actual_steps} steps, "
+            f"expected {args.max_steps}"
+        )
     first_step = pipeline.state.step + 1
     pipeline.run()
     if pipeline.state.step != args.max_steps - 1 or first_step >= args.max_steps:
