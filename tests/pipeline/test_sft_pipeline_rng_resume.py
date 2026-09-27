@@ -115,3 +115,48 @@ def test_sft_run_honors_explicit_pipeline_step_cap(tmp_path, monkeypatch):
 
     assert list(pipeline.batches) == [0, 1]
     assert pipeline.state.step == 1
+
+
+@pytest.mark.parametrize('step_limit,expected_epochs,expected_worker_steps', [
+    (None, 2, 8), (2, 1, 4),
+])
+def test_sft_initialization_preserves_epochs_unless_cap_is_explicit(
+        monkeypatch, step_limit, expected_epochs, expected_worker_steps):
+    from roll.configs.base_config import BaseConfig
+    from roll.pipeline.sft.sft_config import SFTConfig
+    from roll.pipeline.sft import sft_pipeline as module
+
+    # Isolate external I/O and Ray startup, retaining the real SFT config,
+    # pipeline initialization, DP batch sizing and DataLoader.
+    monkeypatch.setattr(BaseConfig, '__post_init__', lambda self: None)
+    worker = SimpleNamespace(
+        model_args=SimpleNamespace(model_name_or_path=None), worker_cls=None,
+        training_args=SimpleNamespace(num_train_epochs=2,
+            per_device_train_batch_size=1, gradient_accumulation_steps=1,
+            dataloader_num_workers=0, max_steps=-1),
+        strategy_args=SimpleNamespace(strategy_name='megatron_train', strategy_config={}),
+        world_size=2,
+        data_args=SimpleNamespace(file_name='fixture.json', template='native',
+                                  preprocessing_num_workers=1),
+    )
+    kwargs = {} if step_limit is None else {'max_steps': step_limit}
+    config = SFTConfig(sft_train=worker, **kwargs)
+    monkeypatch.setattr(module.BasePipeline, '__init__',
+                        lambda self, config: setattr(self, 'resource_manager', None))
+    monkeypatch.setattr(module, 'default_tokenizer_provider', lambda args: SimpleNamespace())
+    monkeypatch.setattr(module.datasets, 'load_dataset', lambda *a, **kw: {'train': _RandomDataset()})
+    monkeypatch.setattr(module, 'get_encode_function', lambda *a, **kw: None)
+    monkeypatch.setattr(module, 'preprocess_dataset', lambda dataset, *a, **kw: dataset)
+    monkeypatch.setattr(module, 'DataCollatorForSFT', lambda **kw: None)
+    monkeypatch.setattr(module, 'Cluster', lambda **kw: SimpleNamespace(
+        dp_size=2, initialize=lambda **kw: None))
+    monkeypatch.setattr(module.ray, 'get', lambda value: value)
+    monkeypatch.setattr(SFTPipeline, 'set_checkpoint_clusters', lambda *a: None)
+
+    pipeline = SFTPipeline(config)
+
+    assert len(pipeline.dataloader) == 2
+    assert worker.training_args.num_train_epochs == expected_epochs
+    # Workers divide this budget by DP=2; the driver keeps the pre-DP value.
+    assert worker.training_args.max_steps == expected_worker_steps
+    assert pipeline._pipeline_max_steps == step_limit
