@@ -4,7 +4,7 @@ from roll.pipeline.sft.step_planning import resolve_sft_step_plan
 def test_explicit_pipeline_max_steps_overrides_epoch_derived_steps():
     plan = resolve_sft_step_plan(
         configured_max_steps=2,
-        dataset_size=8,
+        dataset_size=12,
         data_parallel_size=4,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=1,
@@ -13,7 +13,9 @@ def test_explicit_pipeline_max_steps_overrides_epoch_derived_steps():
 
     assert plan.pipeline_steps == 2
     assert plan.worker_max_steps == 8
-    assert plan.steps_per_epoch == 2
+    # Epoch-derived behavior would produce three steps here; the explicit
+    # pipeline cap must win and shorten the run to two updates.
+    assert plan.steps_per_epoch == 3
     assert plan.epochs == 1
 
 
