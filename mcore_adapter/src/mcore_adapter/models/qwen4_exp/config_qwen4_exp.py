@@ -82,7 +82,12 @@ class Qwen4ExpConfig(McaModelConfig):
     eos_token_id: int = 0
 
     def __post_init__(self):
+        router_dtype = self.moe_router_dtype
         super().__post_init__()
+        # The checkpoint projects router logits in the model dtype, then runs
+        # softmax in FP32. The generic large-MoE default changes that projection
+        # to FP32 and can change top-k expert selection. Keep explicit overrides.
+        self.moe_router_dtype = router_dtype
         if self.checkpoint_cpu_offload and self.recompute_granularity != "full":
             raise ValueError("checkpoint_cpu_offload requires full recomputation")
         if (isinstance(self.vocab_loss_chunk_size, bool)
