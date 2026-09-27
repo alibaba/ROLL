@@ -265,7 +265,9 @@ class SFTPipeline(BasePipeline):
             pbar = tqdm(iterator, desc=f"Epoch {epoch}/{num_epochs}",
                         initial=skipped, total=steps_per_epoch)
             for batch_dict in pbar:
-                if pipeline_max_steps is not None and global_step > pipeline_max_steps:
+                # ``state.step`` and ``global_step`` are zero based.  A cap of
+                # N therefore permits indices [0, N), exactly N updates.
+                if pipeline_max_steps is not None and global_step >= pipeline_max_steps:
                     break
                 logger.info(f"pipeline step {global_step} start...")
 
@@ -313,7 +315,7 @@ class SFTPipeline(BasePipeline):
 
                 global_step += 1
 
-            if pipeline_max_steps is not None and global_step > pipeline_max_steps:
+            if pipeline_max_steps is not None and global_step >= pipeline_max_steps:
                 break
 
         logger.info("pipeline complete!")

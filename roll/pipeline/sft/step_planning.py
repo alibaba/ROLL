@@ -42,7 +42,12 @@ def resolve_sft_step_plan(
         raise ValueError(f"num_train_epochs must be positive, got {num_train_epochs!r}")
 
     global_batch = data_parallel_size * per_device_train_batch_size * gradient_accumulation_steps
-    steps_per_epoch = max(1, dataset_size // global_batch)
+    steps_per_epoch = dataset_size // global_batch
+    if steps_per_epoch < 1:
+        raise ValueError(
+            "dataset does not contain a complete global batch: "
+            f"dataset_size={dataset_size}, global_batch={global_batch}"
+        )
     if configured_max_steps > 0:
         pipeline_steps = configured_max_steps
         epochs = max(1, math.ceil(pipeline_steps / steps_per_epoch))

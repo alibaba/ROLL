@@ -25,7 +25,7 @@ class _RandomDataset(Dataset):
         return {'input_ids': torch.tensor(values), 'attention_mask': torch.ones(4, dtype=torch.long)}
 
 
-def _pipeline(directory, resume=None):
+def _pipeline(directory, resume=None, pipeline_max_steps=None):
     random.seed(42)
     np.random.seed(42)
     torch.manual_seed(42)
@@ -35,6 +35,7 @@ def _pipeline(directory, resume=None):
         eval_steps=2,
     )
     pipeline.resume_from_checkpoint = str(resume) if resume else False
+    pipeline._pipeline_max_steps = pipeline_max_steps
     pipeline.state = (WorkerState.load_from_json(str(resume / 'pipeline'), 'pipeline')
                       if resume else WorkerState())
     pipeline.dataloader = DataLoader(_RandomDataset(), batch_size=1, shuffle=False, num_workers=0)
@@ -102,3 +103,15 @@ def test_sft_resume_rejects_missing_driver_rng_before_new_updates(tmp_path, monk
     with pytest.raises(FileNotFoundError, match='pipeline RNG'):
         recovered.run()
     assert recovered.batches == {}
+
+
+def test_sft_run_honors_explicit_pipeline_step_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(DataProto, 'materialize_concat', staticmethod(lambda data_refs: data_refs))
+    monkeypatch.setattr(worker_state, 'current_platform', SimpleNamespace(
+        device_type='cuda', random=SimpleNamespace(get_rng_state_all=lambda: [], set_rng_state_all=lambda value: None)))
+    pipeline = _pipeline(tmp_path / 'capped', pipeline_max_steps=2)
+
+    pipeline.run()
+
+    assert list(pipeline.batches) == [0, 1]
+    assert pipeline.state.step == 1
