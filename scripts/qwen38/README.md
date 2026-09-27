@@ -28,6 +28,28 @@ it with the latest PyPI release has not been validated. The repository's
 `Dockerfile.torch2100` uses different PyTorch and floating dependency versions;
 building it unchanged does not reproduce this environment.
 
+### Repeatable native LoRA inference
+
+ROLL's worker initialization selects a single K partition for dense Triton
+LoRA shrink on Flash-Next. Native split-K FP32 atomic accumulation can vary
+between identical requests; the recurrent backbone amplifies this into visible
+log-probability drift. The patch is process-local, applies only when Flash-Next
+LoRA is enabled, and leaves MoE and expand kernels unchanged. It does not enable
+`VLLM_BATCH_INVARIANT`, which the observed GDN backend does not support. A changed
+native configuration API raises an error instead of silently losing this fix.
+
+Run the CPU boundary checks and the real CUDA repeatability/accuracy regression
+in the validation environment:
+
+```bash
+python -m pytest -q tests/third_party/vllm/test_qwen38_lora_shrink.py \
+  tests/third_party/vllm/test_qwen38_lora_shrink_cuda.py
+```
+
+Repeatability does not establish actor/native probability parity or invariance
+across different batch and prefill shapes. The single-partition performance
+tradeoff must be measured with the intended rollout workload.
+
 ### Isolated FLA backward regression
 
 The September 22 H800 / Triton 3.7.1 diagnostic reproduced incorrect local

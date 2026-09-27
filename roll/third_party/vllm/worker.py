@@ -60,6 +60,12 @@ class TensorLoraManager:
 
 class WorkerBase:
     def custom_init_worker(self, *args, **kwargs):
+        from roll.third_party.vllm.lora_shrink import patch_qwen38_lora_shrink
+
+        patch_qwen38_lora_shrink(
+            getattr(getattr(self, "model_config", None), "hf_config", None),
+            getattr(getattr(self, "vllm_config", None), "lora_config", None),
+        )
         self.weight_loaded: bool = True
         self.kv_cache_loaded: bool = True
         self.buffers = None
