@@ -241,6 +241,20 @@ class QSAIndexer(torch.nn.Module):
         return selection, q, pooled
 
 
+def default_indexer_temperature(head_dim: int) -> float:
+    """QSA indexer softmax temperature absent an explicit config override.
+
+    The official report's Eq.15 shows no temperature, but the HF reference
+    divides the summed relu(qk) score by ``sqrt(index_head_dim)`` before the
+    top-k selection and the KL target. Top-k is scale-invariant, so omitting
+    this only matters for :func:`indexer_distillation_loss`'s KL sharpness --
+    callers must resolve an unset temperature to this, not to 1.0.
+    """
+    if head_dim <= 0:
+        raise ValueError("QSA indexer head_dim must be positive")
+    return head_dim ** 0.5
+
+
 def indexer_distillation_loss(index_query, index_key, selection, query, key, lse,
                              *, temperature=1.0, tile_size=16, loss_mask=None, tp_group=None):
     """Train selected indexer blocks against the detached QSA teacher (Eq17–20).
@@ -249,6 +263,8 @@ def indexer_distillation_loss(index_query, index_key, selection, query, key, lse
     attention Q/K and its LSE. No token-square probability tensor is retained.
     The student dot products are checkpointed to avoid saving gathered keys for
     all query/block pairs. Tail tokens affect LSE but never enter the block KL.
+    ``temperature`` has no reference-matching default here; callers configuring
+    real training must resolve it via :func:`default_indexer_temperature`.
     """
     from torch.utils.checkpoint import checkpoint
     if temperature <= 0 or tile_size < 1:
@@ -320,4 +336,4 @@ def qsa_indexer_kl_loss(
     return per_row.mean()
 
 
-__all__ = ["qsa_indexer_kl_loss", "select_causal_blocks"]
+__all__ = ["default_indexer_temperature", "qsa_indexer_kl_loss", "select_causal_blocks"]

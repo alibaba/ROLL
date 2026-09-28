@@ -59,6 +59,16 @@ def test_selected_teacher_kl_detaches_teacher_and_empty_rows():
     assert teacher.grad is None
 
 
+def test_default_indexer_temperature_matches_reference_sqrt_head_dim():
+    assert qsa.default_indexer_temperature(128) == 128 ** 0.5
+    assert qsa.default_indexer_temperature(16) == 4.0
+
+
+def test_default_indexer_temperature_rejects_nonpositive_head_dim():
+    with pytest.raises(ValueError, match="positive"):
+        qsa.default_indexer_temperature(0)
+
+
 def test_indexer_distillation_uses_head_sum_block_max_pool_and_stop_gradient():
     torch.manual_seed(813)
     b, s, h, kv, d, ih, idim = 2, 13, 4, 2, 8, 2, 4

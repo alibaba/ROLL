@@ -63,7 +63,10 @@ class Qwen4ExpConfig(McaModelConfig):
     indexer_budget: Optional[int] = None
     indexer_compress_ratio: Optional[int] = None
     qsa_indexer_kl_coef: float = 0.0
-    qsa_indexer_temperature: float = 1.0
+    # None resolves to sqrt(indexer_head_dim) in __post_init__, matching the
+    # HF reference's score scaling (see qsa.default_indexer_temperature). An
+    # explicit override is honored as-is; do not silently substitute 1.0.
+    qsa_indexer_temperature: Optional[float] = None
 
     # --- hyperconnection (replaces the ordinary residual stream) -------------
     # 398 checkpoint tensors; residual width is hidden_size * hc_count.
@@ -112,8 +115,20 @@ class Qwen4ExpConfig(McaModelConfig):
             raise ValueError("Qwen4Exp text training currently requires BF16/FP32 without MTP")
         if self.cpu_offloading or self.fine_grained_activation_offloading:
             raise ValueError("Qwen4Exp activation offloading is not yet validated")
-        if self.qsa_indexer_kl_coef < 0 or self.qsa_indexer_temperature <= 0:
-            raise ValueError("QSA indexer KL coefficient must be nonnegative and temperature positive")
+        if self.qsa_indexer_kl_coef < 0:
+            raise ValueError("QSA indexer KL coefficient must be nonnegative")
+        if self.qsa_indexer_temperature is None:
+            # No explicit override: match the HF reference's indexer score
+            # scaling instead of silently defaulting to an unscaled (1.0)
+            # temperature, which would make the KL target ~sqrt(head_dim)
+            # times sharper than the reference calibration.
+            from .qsa import default_indexer_temperature
+
+            self.qsa_indexer_temperature = (
+                default_indexer_temperature(self.indexer_head_dim) if self.indexer_head_dim else 1.0
+            )
+        elif self.qsa_indexer_temperature <= 0:
+            raise ValueError("QSA indexer temperature must be positive")
 
         # GDN asserts activation in {silu, swish} with a bare assert and no
         # message (gated_delta_net.py). TransformerConfig defaults to gelu, so
