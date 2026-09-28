@@ -13,8 +13,8 @@ If our pre-built Docker images are not compatible with your environment, you can
 CUDA Version >= 12.4
 cuDNN Version >= 9.1.0
 PyTorch >= 2.5.1
-SGlang >= 0.4.3
-vLLM >= 0.7.3
+SGlang >= 0.4.10.post2
+vLLM >= 0.11.0
 
 # Clone the repository and install
 git clone https://github.com/alibaba/ROLL.git
@@ -28,8 +28,8 @@ For AMD users, please ensure you meet the following prerequisites:
 ```bash
 # Prerequisites
 ROCm Version >= 6.3.4
-PyTorch >= 2.6.0
-vLLM >= 0.8.4
+PyTorch >= 2.8.0
+vLLM >= 0.11.0
 # Clone the repository and install
 git clone https://github.com/alibaba/ROLL.git
 cd ROLL

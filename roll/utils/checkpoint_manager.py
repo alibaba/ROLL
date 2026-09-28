@@ -11,6 +11,7 @@ import ray
 from filelock import FileLock
 from huggingface_hub import snapshot_download
 
+from roll.distributed.scheduler.driver_utils import Counter
 from roll.distributed.scheduler.storage import SharedStorage
 from roll.utils.constants import STORAGE_NAME, RAY_NAMESPACE
 from roll.utils.logging import get_logger
@@ -86,9 +87,11 @@ class CheckpointManager:
     ray.Actor创建到每个node上，负责将本地output_dir的文件上传到远程存储(oss/hdfs)
     """
 
-    def __init__(self, checkpoint_config=None):
+    def __init__(self, checkpoint_config=None, register=False):
         self.checkpoint_config: Dict = copy.deepcopy(checkpoint_config)
         self.uploader = None
+        self.register = register
+        self._register_counter = None
         logger.info(f"checkpoint_config: {checkpoint_config}")
         if self.checkpoint_config:
             upload_type = self.checkpoint_config.pop("type", "file_system")
@@ -98,13 +101,28 @@ class CheckpointManager:
             uploader_cls = uploader_registry[upload_type]
             self.uploader = uploader_cls(**self.checkpoint_config)
 
+    def init_register_counter(self, total_workers=1):
+        if self._register_counter is None and self.uploader:
+            self._register_counter = Counter.options(
+                name="register_counter", get_if_exists=True, namespace=RAY_NAMESPACE
+            ).remote(total_workers)
+        return self._register_counter
+
     def upload(self, ckpt_id, local_state_path, keep_local_file=False):
         try:
             if not self.uploader:
                 logger.warning(f"uploader is None, skip upload...")
                 return
 
-            self.uploader.upload(ckpt_id=ckpt_id, local_state_path=local_state_path)
+            result = self.uploader.upload(ckpt_id=ckpt_id, local_state_path=local_state_path)
+
+            if result is not None and self.register:
+                counter = self.init_register_counter()
+                is_leader = ray.get(counter.arrive.remote(ckpt_id))
+                if is_leader:
+                    logger.info(f"Elected as leader, registering checkpoint {ckpt_id}")
+                    self.uploader.register(result)
+
             if not keep_local_file:
                 if os.path.isdir(local_state_path):
                     shutil.rmtree(local_state_path, ignore_errors=True)

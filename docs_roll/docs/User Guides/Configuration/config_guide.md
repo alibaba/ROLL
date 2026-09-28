@@ -121,11 +121,13 @@ Commonly used strategy configs are listed below:
 - `gpu_memory_utilization`: The fraction of GPU memory to be used for the model executor.
 - `block_size`: Token block size for contiguous chunks of tokens.
 - `max_model_len`: Model context length. If unspecified, will be automatically derived from the model config.
+- `max_num_seqs`: Maximum number of sequences per vLLM engine iteration. When configured, the router `max_running_requests` is aligned to `max(128, max_num_seqs)` so the router does not throttle the engine concurrency.
 - `load_format`: The format of the model weights to load. Since there will be a `model update` in the beginning, this value should can be set to `dummy`.
 
 #### SGLang Strategy Config
 
 - `mem_fraction_static`: Fraction of the free GPU memory used for static memory like model weights and KV cache. Increase it if KV cache building fails. Decrease it if CUDA runs out of memory.
+- `max_running_requests`: The maximum number of running requests in the engine. When configured, the router `max_running_requests` is aligned to `max(128, max_running_requests)` so the router does not throttle the engine concurrency.
 - `load_format`: The format of the model weights to load. Since there will be a `model update` in the beginning, this value should can be set to `dummy`.
 
 
@@ -134,8 +136,16 @@ Commonly used strategy configs are listed below:
 - `fsdp_size`: Number of FSDP shards
   - If `fsdp_size >= world_size` or `fsdp_size <= 1`: pure FSDP2 mode
   - If `fsdp_size < world_size`: HSDP mode with DDP replicas
-- `param_dtype`: Parameter data type (e.g., `bf16`, `fp16`, `float32`)
-- `reduce_dtype`: Data type for gradient reduction (e.g., `float32`)
+- `enable_mix_precision`: Recommended mix precision setting for `fsdp2_train`
+  - `true`: Use `param_dtype=bf16` and `reduce_dtype=float32`
+  - `false`: Use `param_dtype=bf16` and `reduce_dtype=bf16`
+  - If `param_dtype` or `reduce_dtype` is explicitly configured, those explicit values are used and `enable_mix_precision` does not take effect.
+- `param_dtype`: Optional parameter data type (e.g., `bf16`, `fp16`, `float32`)
+  - For `fsdp2_train`, configure this only when you need a custom precision setup instead of `enable_mix_precision`.
+  - For `fsdp2_infer`, the default is `bf16`; set `param_dtype` only when you need a different inference precision.
+- `reduce_dtype`: Optional gradient reduction data type override for `fsdp2_train` (e.g., `bf16`, `fp16`, `float32`)
+  - For `fsdp2_train`, configure this only when you need a custom precision setup instead of `enable_mix_precision`.
+  - This is not needed for `fsdp2_infer` because inference does not perform gradient reduction.
 - `reshard_after_forward`: Whether to reshard parameters after forward pass
   - `true`: Reshard after forward
   - `false`: Keep parameters gathered

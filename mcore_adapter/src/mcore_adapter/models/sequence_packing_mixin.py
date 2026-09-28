@@ -2,7 +2,7 @@
 Multimodal Embedding Mixin.
 
 Provides ``prepare_packing_state`` and ``build_multimodal_embeddings`` for
-multimodal models (Qwen3VL, Qwen3OmniMoe, Qwen3_5, Qwen3OmniNext).
+multimodal models (Qwen3VL, Qwen3OmniMoe, Qwen3_5).
 Handles both packing and non-packing paths with a unified two-phase API.
 
 The two-phase API separates lightweight input preparation (needed by

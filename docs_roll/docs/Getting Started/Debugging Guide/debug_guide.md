@@ -57,8 +57,8 @@ To run the debug script, follow these steps:
 
 1. Create and activate a Python environment:
 ```bash
-conda create -n python310_torch260_em python=3.10
-conda activate python310_torch260_em
+conda create -n python310_torch280_em python=3.10
+conda activate python310_torch280_em
 ```
 
 2. Install dependencies:

@@ -8,6 +8,11 @@ class GeneratingArguments:
     Arguments pertaining to specify the decoding parameters.
     """
 
+    seed: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional base seed for request-level sampling."},
+    )
+
     do_sample: Optional[bool] = field(
         default=True,
         metadata={"help": "Whether or not to use sampling, use greedy decoding otherwise."},
@@ -62,6 +67,30 @@ class GeneratingArguments:
         default=0,
         metadata={"help": "The number of logprobs to return. Set None to not return logprobs."},
     )
+    height: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional image height for diffusion generation backends."},
+    )
+    width: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional image width for diffusion generation backends."},
+    )
+    num_inference_steps: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional diffusion sampling step count."},
+    )
+    max_sequence_length: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional maximum sequence length used by diffusion backends."},
+    )
+    guidance_scale: Optional[float] = field(
+        default=None,
+        metadata={"help": "Optional classifier-free guidance scale for diffusion generation."},
+    )
+    extra_args: Optional[Dict[str, Any]] = field(
+        default_factory=dict,
+        metadata={"help": "Optional backend-specific generation kwargs passed through unchanged."},
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         args = asdict(self)
@@ -71,6 +100,10 @@ class GeneratingArguments:
             args.pop("max_new_tokens", None)
         if self.include_stop_str_in_output is None:
             args.pop("include_stop_str_in_output", None)
+        if self.seed is None:
+            args.pop("seed", None)
+        if not self.extra_args:
+            args.pop("extra_args", None)
         return args
 
     def __post_init__(self):

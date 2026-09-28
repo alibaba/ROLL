@@ -62,7 +62,7 @@
 
 #### Configuration File Structure and Organization
 
-Configuration files (such as `examples/qwen2.5-7B-distill_megatron/distill_megatron.yaml`) are organized by functional modules, containing the following main sections:
+Configuration files (such as `examples/distill/off_policy/llm/distill_megatron.yaml`) are organized by functional modules, containing the following main sections:
 
 1. **Experiment Basic Settings**
    * `exp_name`: Experiment name, used to identify a specific training run
@@ -137,7 +137,7 @@ In the YAML file, use the keys `question_key` and `answer_key` to specify the fi
 The primary method is to use the `examples/start_distill_pipeline.py` script. This script uses Hydra to load and manage configurations.
 
 1. **Select or Create a Configuration File**  
-   Start with an example YAML (e.g., `examples/qwen2.5-7B-distill_megatron/distill_megatron.yaml`) or create your own configuration.
+   Start with an example YAML (e.g., `examples/distill/off_policy/llm/distill_megatron.yaml`) or create your own configuration.
 
 2. **Execute the Python Launcher Script**
 
@@ -146,7 +146,7 @@ The primary method is to use the `examples/start_distill_pipeline.py` script. Th
    # export PYTHONPATH=$(pwd):$PYTHONPATH
    
    python examples/start_distill_pipeline.py \
-          --config_path examples/qwen2.5-7B-distill_megatron \
+          --config_path distill/off_policy/llm \
           --config_name distill_megatron
    ```
 
@@ -163,10 +163,10 @@ Example structure:
 
 ```bash
 #!/bin/bash
-# Example: examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
+# Example: examples/distill/off_policy/llm/run_distill_pipeline.sh
 
 CONFIG_NAME="distill_megatron"                         # distill_megatron.yaml
-CONFIG_PATH="examples/qwen2.5-7B-distill_megatron"
+CONFIG_PATH="distill/off_policy/llm"
 
 # Set environment variables and other configurations
 
@@ -179,7 +179,7 @@ python examples/start_distill_pipeline.py \
 Run using:
 
 ```bash
-bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
+bash examples/distill/off_policy/llm/run_distill_pipeline.sh
 ```
 
 ---
@@ -192,7 +192,7 @@ bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
 
 ### Step 1: Configure Settings
 
-* File: `examples/qwen2.5-7B-distill_megatron/distill_megatron.yaml`  
+* File: `examples/distill/off_policy/llm/distill_megatron.yaml`
   Key sections include `exp_name`, `seed`, `output_dir`, model paths, `student` and `teacher` configurations.
 
 * Pay special attention to these configuration sections:
@@ -216,7 +216,7 @@ bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
 
 ```bash
 python examples/start_distill_pipeline.py \
-       --config_path examples/qwen2.5-7B-distill_megatron \
+       --config_path distill/off_policy/llm \
        --config_name distill_megatron
 ```
 

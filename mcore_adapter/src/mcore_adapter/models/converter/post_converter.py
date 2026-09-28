@@ -4,12 +4,11 @@ import os
 import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from dataclasses import dataclass
 from itertools import product
 from typing import TYPE_CHECKING, Optional
 
 import torch
-from megatron.core import dist_checkpointing, mpu 
+from megatron.core import dist_checkpointing, mpu
 from megatron.core.tensor_parallel import model_parallel_cuda_manual_seed
 from safetensors.torch import save_file
 from tqdm import tqdm
@@ -25,7 +24,7 @@ from transformers import (
 )
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto.auto_factory import _get_model_class
-from transformers.utils import is_peft_available
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, is_peft_available
 
 from ...checkpointing import find_dist_ckpt, get_checkpoint_name, save_config_and_state_dict
 from ...constants import ADAPTER_CONFIG_NAME
@@ -43,11 +42,14 @@ if is_peft_available():
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
+
     from ...training_args import DistributingParallelArguments
     from ..model_config import McaModelConfig
     from .template import Template
 
 logger = get_logger(__name__)
+
+VALUE_HEAD_WEIGHTS_NAME = "value_head.safetensors"
 
 
 class BaseHFConverter(ABC):
@@ -198,7 +200,52 @@ class HFConverter(BaseHFConverter):
             None, config=self.hf_config, state_dict=hf_state_dict, torch_dtype=self.torch_dtype, trust_remote_code=True
         )
         model.save_pretrained(self.save_directory, max_shard_size=MAX_SHARD_SIZE, save_original_format=False)
+
+        if self.mca_config.use_value_head:
+            self._save_value_head(hf_state_dict)
+
         self._finalize()
+
+    def _save_value_head(self, hf_state_dict: dict):
+        vhead_state_dict = {
+            "v_head.summary.weight": hf_state_dict["v_head.summary.weight"],
+            "v_head.summary.bias": hf_state_dict["v_head.summary.bias"],
+        }
+        value_head_path = os.path.join(self.save_directory, VALUE_HEAD_WEIGHTS_NAME)
+        save_file(
+            vhead_state_dict,
+            value_head_path,
+            metadata={"format": "pt"},
+        )
+
+        def _read_safetensors_header(path: str) -> dict:
+            with open(path, "rb") as f:
+                header_size = int.from_bytes(f.read(8), byteorder="little", signed=False)
+                return json.loads(f.read(header_size))
+
+        index_path = os.path.join(self.save_directory, SAFE_WEIGHTS_INDEX_NAME)
+        if os.path.exists(index_path):
+            with open(index_path, encoding="utf-8") as f:
+                index = json.load(f)
+        else:
+            model_path = os.path.join(self.save_directory, SAFE_WEIGHTS_NAME)
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(
+                    f"Cannot create {SAFE_WEIGHTS_INDEX_NAME}: {SAFE_WEIGHTS_NAME} was not found in "
+                    f"{self.save_directory}."
+                )
+            model_header = _read_safetensors_header(model_path)
+            index = {
+                "metadata": {},
+                "weight_map": {name: SAFE_WEIGHTS_NAME for name in model_header if name != "__metadata__"},
+            }
+
+        weight_map = index.setdefault("weight_map", {})
+        weight_map.update({name: VALUE_HEAD_WEIGHTS_NAME for name in vhead_state_dict})
+
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(index, f, indent=2, sort_keys=True)
+            f.write("\n")
 
     def _get_hf_model_class(self):
         has_remote_code = hasattr(self.hf_config, "auto_map") and "AutoModelForCausalLM" in self.hf_config.auto_map
@@ -427,12 +474,15 @@ class DistHFConverter(HFConverter):
                 vp_stage=None,
             )
             hf_state_dict.update(converted_state_dict)
-        
+
         model_class = self._get_hf_model_class()
         model = model_class.from_pretrained(
             None, config=self.hf_config, state_dict=hf_state_dict, torch_dtype=self.torch_dtype, trust_remote_code=True
         )
         model.save_pretrained(self.save_directory, max_shard_size=MAX_SHARD_SIZE, save_original_format=False)
+
+        if self.mca_config.use_value_head:
+            self._save_value_head(hf_state_dict)
 
         self._finalize()
 

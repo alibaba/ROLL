@@ -15,9 +15,9 @@ from roll.utils.checkpoint_manager import download_model
 from roll.utils.constants import RAY_NAMESPACE, STORAGE_NAME
 from roll.utils.context_managers import state_offload_manger
 from roll.utils.logging import get_logger
+from roll.utils.nccl_suspend import require_nccl_comm_suspend_support
 from roll.utils.network_utils import collect_free_port, get_node_ip
 from roll.utils.offload_states import OffloadStateType
-from roll.utils.offload_nccl import monkey_patch_torch_dist
 from roll.utils.telemetry import init_telemetry
 
 from roll.platforms import current_platform
@@ -46,7 +46,9 @@ class Worker:
 
     def __init__(self, worker_config: WorkerConfig):
         if worker_config.offload_nccl:
-            monkey_patch_torch_dist()
+            # Validate the server-provided runtime in every worker before loading
+            # models or allocating distributed training state.
+            require_nccl_comm_suspend_support()
         self.worker_config = worker_config
         self.pipeline_config = None
         self.worker_name = os.environ.get("WORKER_NAME", None)
@@ -151,8 +153,8 @@ class Worker:
         if model_name:
             self.worker_config.model_args.model_name_or_path = download_model(model_name)
 
-        if self.pipeline_config.resume_from_checkpoint:
-            self.logger.info(f"resume_from_checkpoint: {self.pipeline_config.resume_from_checkpoint}")
+        if self.pipeline_config.resume_from_checkpoint or self.pipeline_config.auto_resume:
+            self.logger.info(f"resume_from_checkpoint: {self.pipeline_config.resume_from_checkpoint}, auto_resume: {self.pipeline_config.auto_resume}")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_states(self, *args, **kwargs):

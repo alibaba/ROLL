@@ -48,9 +48,8 @@ sft_train:
   strategy_args:
     strategy_name: fsdp2_train
     strategy_config:
+      enable_mix_precision: true
       fsdp_size: 8
-      param_dtype: bf16
-      reduce_dtype: bf16
       offload_policy: false
       reshard_after_forward: true
       wrap_policy:

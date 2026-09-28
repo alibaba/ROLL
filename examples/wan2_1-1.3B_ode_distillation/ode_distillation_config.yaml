@@ -1,0 +1,96 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: wan21_1.3b_ode_distillation
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output/ode_distillation
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/ode_distillation/ckpt
+  async_upload: true
+  keep_local_file: false
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ./output/ode_distillation/tensorboard
+
+max_steps: 3000
+save_steps: 1000
+logging_steps: 1
+resume_from_checkpoint: false
+num_nodes: 1
+num_gpus_per_node: 8
+
+pretrain: wan_models/Wan2.1-T2V-1.3B-Diffusers
+diffusion_model_variant: wan2_1
+num_train_timesteps: 1000
+teacher_num_steps: 48
+denoising_step_list: [1000, 750, 500, 250]
+timestep_shift: 5.0
+guidance_scale: 6.0
+num_frame_per_block: 3
+num_ode_pairs: 16000
+ode_pair_cache_dir: /mnt/localssd/wan2_1_sf_ode_shift5_pairs_16k
+gpu_tensor_transfer: true
+max_grad_norm: 10.0
+latent_shape: [21, 16, 60, 104]
+
+negative_prompt: >-
+  色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，
+  整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，
+  画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，
+  手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走
+
+teacher:
+  model_args:
+    dtype: bf16
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+  data_args:
+    file_name: data/vidprom_filtered_extended.txt
+    dataset_type: text
+  training_args:
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 1
+  strategy_args:
+    strategy_name: veomni_infer
+    strategy_config:
+      mixed_precision: true
+      param_dtype: bfloat16
+      reduce_dtype: float32
+      ulysses_parallel_size: 1
+  device_mapping: "[0,1,2,3,4,5,6,7]"
+  infer_batch_size: 1
+
+student:
+  model_args:
+    dtype: bf16
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    model_config_kwargs:
+      local_attn_size: -1
+      sink_size: 0
+  training_args:
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 8
+    learning_rate: 2.0e-6
+    lr_scheduler_type: constant
+    adam_beta1: 0.0
+    adam_beta2: 0.999
+    weight_decay: 0.01
+    num_train_epochs: 1
+  strategy_args:
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: 8
+      param_dtype: bfloat16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      wrap_policy:
+        transformer_layer_cls_to_wrap: WanTransformerBlock
+  device_mapping: "[0,1,2,3,4,5,6,7]"
+  infer_batch_size: 1

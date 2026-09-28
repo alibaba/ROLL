@@ -55,8 +55,8 @@ ROLL 框架的一个特色是支持 Agentic 多轮交互过程的调试。这对
 
 1. 创建并激活 Python 环境：
 ```bash
-conda create -n python310_torch260_em python=3.10
-conda activate python310_torch260_em
+conda create -n python310_torch280_em python=3.10
+conda activate python310_torch280_em
 ```
 
 2. 安装依赖：

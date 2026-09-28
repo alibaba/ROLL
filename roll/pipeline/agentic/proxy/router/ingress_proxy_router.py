@@ -80,6 +80,7 @@ class IngressProxyRouter(ProxyRouter):
         self._core = client.CoreV1Api()
         self._networking = client.NetworkingV1Api()
 
+        self._owner_ref = self._build_owner_reference()
         self._ensure_namespace()
 
     # ------------------------------------------------------------------
@@ -198,6 +199,26 @@ class IngressProxyRouter(ProxyRouter):
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _build_owner_reference(self) -> Optional[List[client.V1OwnerReference]]:
+        """Build ownerReferences from the current Pod so created resources are GC'd when the Pod dies."""
+        pod_name = os.environ.get('POD_NAME') or os.environ.get('HOSTNAME')
+        pod_namespace = os.environ.get('POD_NAMESPACE', self.namespace)
+        if not pod_name:
+            logger.warning("Cannot determine Pod name (POD_NAME/HOSTNAME not set), ownerReferences disabled")
+            return None
+        try:
+            pod = self._core.read_namespaced_pod(pod_name, pod_namespace)
+            return [client.V1OwnerReference(
+                api_version="v1",
+                kind="Pod",
+                name=pod.metadata.name,
+                uid=pod.metadata.uid,
+                block_owner_deletion=False,
+            )]
+        except ApiException as e:
+            logger.warning("Failed to read Pod %s/%s for ownerReference: %s", pod_namespace, pod_name, e)
+            return None
+
     def _ensure_namespace(self) -> None:
         """Create the namespace if it does not already exist.
 
@@ -239,7 +260,10 @@ class IngressProxyRouter(ProxyRouter):
 
     def _ensure_service(self, name: str, labels: dict, port: int) -> None:
         svc = client.V1Service(
-            metadata=client.V1ObjectMeta(name=name, namespace=self.namespace, labels=labels),
+            metadata=client.V1ObjectMeta(
+                name=name, namespace=self.namespace, labels=labels,
+                owner_references=self._owner_ref,
+            ),
             spec=client.V1ServiceSpec(
                 cluster_ip="None",  # headless — no kube-proxy load balancing
                 ports=[client.V1ServicePort(port=port, protocol="TCP")],
@@ -267,7 +291,10 @@ class IngressProxyRouter(ProxyRouter):
             raise ValueError(f"No valid addresses parsed from: {addresses}")
 
         ep = client.V1Endpoints(
-            metadata=client.V1ObjectMeta(name=name, namespace=self.namespace, labels=labels),
+            metadata=client.V1ObjectMeta(
+                name=name, namespace=self.namespace, labels=labels,
+                owner_references=self._owner_ref,
+            ),
             subsets=[
                 client.V1EndpointSubset(
                     addresses=endpoint_addrs,
@@ -304,6 +331,7 @@ class IngressProxyRouter(ProxyRouter):
                 name=name,
                 namespace=self.namespace,
                 labels=labels,
+                owner_references=self._owner_ref,
                 annotations={
                     "nginx.ingress.kubernetes.io/use-regex": "true",
                     "nginx.ingress.kubernetes.io/rewrite-target": "/$2",

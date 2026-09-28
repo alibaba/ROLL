@@ -42,6 +42,8 @@ logging_steps: 1
 eval_steps: 10
 resume_from_checkpoint: false
 
+offload_backend: local  # local | local_dedup
+
 rollout_batch_size: 1024
 val_batch_size: 1024
 sequence_length: 8192

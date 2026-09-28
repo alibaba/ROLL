@@ -1,0 +1,27 @@
+diffusers>=0.36
+# Internal yum build has no cp313 wheel; the 0.1.6 official release covers py3.13.
+# Split by python version, otherwise pip resolution fails and installs nothing.
+TransferQueue==0.1.6+no.limit.numpy.version; python_version < "3.13"
+TransferQueue==0.1.6; python_version >= "3.13"
+
+transformers>=5.0
+huggingface-hub>=0.25.0
+safetensors>=0.5.0
+einops>=0.8.0
+ftfy
+regex
+codetiming
+dacite>=1.8
+hydra-core>=1.3
+omegaconf>=2.3
+tensordict>=0.10.0
+datasets>=2.20.0,<=2.21.0
+./mcore_adapter
+modelscope
+ml_tracker>=0.1.88
+av>=14.0
+more-itertools
+peft>=0.12
+tqdm
+pyyaml
+veomni>=0.1.11

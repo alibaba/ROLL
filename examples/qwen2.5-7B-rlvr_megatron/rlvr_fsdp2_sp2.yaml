@@ -128,9 +128,8 @@ actor_train:
   strategy_args:
     strategy_name: fsdp2_train
     strategy_config:
+      enable_mix_precision: true
       fsdp_size: 4
-      param_dtype: bf16
-      reduce_dtype: float32
       reshard_after_forward: true
       offload_policy: false
   device_mapping: list(range(0,8))
@@ -172,8 +171,6 @@ reference:
     strategy_name: fsdp2_infer
     strategy_config:
       fsdp_size: 4
-      param_dtype: bf16
-      reduce_dtype: float32
       reshard_after_forward: true
       offload_policy: true
   device_mapping: list(range(0,8))

@@ -1,0 +1,206 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "geo3k_vlm_multi_turn"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+render_save_dir: ./output/render
+system_envs:
+  USE_MODELSCOPE: '1'
+
+track_with: ml_tracker
+tracker_kwargs:
+  project: roll-geo3k-multi-turn
+  name: ${exp_name}
+  notes: "agentic_pipeline"
+  tags:
+    - agentic
+    - roll
+    - geo3k
+    - vlm
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/checkpoints/${exp_name}
+
+num_gpus_per_node: 8
+
+# ---- Training schedule ----
+max_steps: 200
+save_steps: 0
+logging_steps: 1
+eval_steps: 0
+resume_from_checkpoint: false
+
+# ---- Rollout / batch ----
+# 512 trajectories per step, group_size=8 → 64 GRPO groups
+rollout_batch_size: 512
+val_batch_size: 64
+prompt_length: 2048
+response_length: 2048
+sequence_length: 8192
+
+# ---- GRPO ----
+adv_estimator: "grpo"
+ppo_epochs: 1
+use_pg_clip_range: true
+pg_clip_low: 0.2
+pg_clip_high: 0.28
+whiten_advantages: false
+add_token_level_kl: false
+use_kl_loss: false
+init_kl_coef: 0.0
+kl_loss_coef: 0.0
+entropy_loss_coef: 0.0
+max_grad_norm: 1.0
+reward_clip: 1.0
+
+pretrain: Qwen/Qwen3-VL-2B-Instruct
+
+# ---- Reward normalisation (group-relative for GRPO) ----
+reward_normalization:
+  grouping: traj_group_id
+  method: mean_std
+
+# ============================ Actor (train) ============================
+actor_train:
+  system_envs:
+    NVTE_FLASH_ATTN: '1'
+    NVTE_FUSED_ATTN: '0'
+    NVTE_UNFUSED_ATTN: '0'
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    lr_scheduler_type: constant
+    weight_decay: 0.1
+    adam_beta1: 0.9
+    adam_beta2: 0.98
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 32
+    warmup_steps: 0
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      sequence_parallel: true
+      context_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+      additional_configs:
+        attention_softmax_in_fp32: true
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+  offload_nccl: false
+  use_dynamic_batching_in_train: true
+  max_tokens_per_microbatch_in_train: 32768
+  sequence_length_round_in_train: 8
+  use_dynamic_batching_in_infer: true
+  max_tokens_per_microbatch_in_infer: 32768
+  sequence_length_round_in_infer: 8
+
+# ============================ Actor (infer / rollout) ============================
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 1.0
+    top_k: -1
+    num_beams: 1
+    temperature: 1.0
+    num_return_sequences: 1
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.9
+      max_model_len: 32768
+      enforce_eager: true
+      block_size: 16
+      enable_prefix_caching: false
+      limit_mm_per_prompt:
+        image: 1
+  device_mapping: list(range(0,8))
+  offload_nccl: false
+
+# ============================ Reference ============================
+reference:
+  system_envs:
+    NVTE_FLASH_ATTN: '1'
+    NVTE_FUSED_ATTN: '0'
+    NVTE_UNFUSED_ATTN: '0'
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 1
+      sequence_parallel: true
+      context_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+  offload_nccl: false
+  use_dynamic_batching_in_train: true
+  max_tokens_per_microbatch_in_train: 32768
+  sequence_length_round_in_train: 8
+  use_dynamic_batching_in_infer: true
+  max_tokens_per_microbatch_in_infer: 32768
+  sequence_length_round_in_infer: 8
+
+# ============================ Environment managers ============================
+max_actions_per_traj: 3   # max_turns
+
+train_env_manager:
+  max_env_num_per_worker: 32
+  num_env_groups: 64       # 64 groups × group_size 8 = 512 trajectories
+  group_size: 8            # GRPO group size (n-samples-per-prompt)
+  tags: [geo3k]
+  num_groups_partition: [64]
+
+val_env_manager:
+  max_env_num_per_worker: 32
+  num_env_groups: ${val_batch_size}
+  group_size: 1
+  tags: [geo3k]
+  num_groups_partition:
+    - ${val_batch_size}
+
+# ============================ Geo3K environment ============================
+custom_envs:
+  geo3k:
+    env_type: geo3k
+    max_steps: ${max_actions_per_traj}   # max_turns = 3
+    max_tokens_per_step: ${response_length}
+    env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager_geo3k.Geo3kTrajEnvManager
+    use_thread_lock: true
+    agent_system_template: ""
+    pre_step_template: ""
+    next_step_template: ""
+    env_config:
+      data_args:
+        # Download: hf download --repo-type dataset VeraIsHere/geo3k_imgurl_processed --local-dir <your_path/geo3k_imgurl_processed>
+        file_name: path/to/geo3k_imgurl_processed/train.parquet
+        preprocessing_num_workers: 32
+      question_key: problem
+      answer_key: answer
+      image_key: images
+      max_steps: ${max_actions_per_traj}
+      seed: ${seed}
+      mode: train

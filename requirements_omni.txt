@@ -1,0 +1,29 @@
+vllm_omni==0.18.0
+# Internal yum PyPI build with the numpy<2.0.0 dependency constraint removed.
+# Set the version to 0.1.6 to use the official TransferQueue release.
+TransferQueue==0.1.6+no.limit.numpy.version
+# vllm==0.17.1
+nvidia-cutlass
+nvidia-cutlass-dsl==4.4.1
+nvidia-cutlass-dsl-libs-base==4.4.1
+tensordict
+modelscope
+codetiming
+peft
+tensordict
+pybase64
+hydra-core
+omegaconf
+datasets
+./mcore_adapter
+# wandb
+# swanlab
+Levenshtein
+dacite
+tensorboard
+mmengine>=0.7.1,<1.0.0
+mmdet
+open_clip_torch
+clip-benchmark
+diffusers==0.38.0
+ml_tracker>=0.1.88

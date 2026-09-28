@@ -1,0 +1,89 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: qwen_image_rollout
+seed: 42
+output_dir: /tmp/output/qwen_image_rollout
+logging_dir: /tmp/output/qwen_image_rollout/logs
+dump_step_output_path: ./output/test-rollout
+dump_step_output_type: [val]
+dump_step_output_idx: "list(range(0,8))"
+track_with: stdout
+
+max_steps: 8
+rollout_batch_size: 128
+prompt_length: 1058
+sequence_length: 1059
+max_running_requests: 16
+num_return_sequences_in_group: 1
+is_num_return_sequences_expand: true
+
+pretrain: Qwen/Qwen-Image
+# Optional local path or MOS URI for a standalone Diffusers transformer checkpoint.
+# transformer_ckpt: path/to/qwen-image-transformer-checkpoint
+
+actor_infer:
+  worker_cls: roll.pipeline.base_worker.InferWorker
+  model_args:
+    model_name_or_path: ${pretrain}
+    model_type: diffusion_model
+    dtype: bf16
+  generating_args:
+    num_return_sequences: ${num_return_sequences_in_group}
+    temperature: 0
+    top_p: 1.0
+    top_k: 50
+    max_length: ${prompt_length}
+    max_sequence_length: ${prompt_length}
+    max_new_tokens: 1
+    height: 512
+    width: 512
+    num_inference_steps: 50
+    guidance_scale: 1.0
+    extra_args:
+      logprobs: true
+      sde_type: ode
+  data_args:
+    template: native
+    file_name:
+      - data/ocr/test.json
+    messages: prompt
+    preprocessing_num_workers: 1
+  strategy_args:
+    strategy_name: vllm_omni
+    strategy_config:
+      enforce_eager: true
+      load_format: safetensors
+      sleep_level: 1
+      vllm_omni:
+        custom_pipeline: roll.pipeline.diffusion.models.qwen_image.vllm_omni_qwen_image_adapter.QwenImagePipelineWithLogProb
+  device_mapping: list(range(0,8))
+
+rewards:
+  ocr:
+    name: ocr
+    worker_cls: roll.pipeline.diffusion.rewards.qwen_vl_judge_reward_worker.QwenVLJudgeRewardWorker
+    judge_model_type: inference
+    tag_included: [ocr]
+    model_args:
+      model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
+      dtype: bf16
+    generating_args:
+      max_new_tokens: 32
+      temperature: 0
+      top_p: 0.8
+      num_return_sequences: 1
+    data_args:
+      template: native
+    strategy_args:
+      strategy_name: vllm
+      strategy_config:
+        gpu_memory_utilization: 0.1
+        enforce_eager: false
+        max_model_len: 8192
+        tensor_parallel_size: 4
+        load_format: auto
+        max_num_seqs: 1
+    device_mapping: list(range(0,8))

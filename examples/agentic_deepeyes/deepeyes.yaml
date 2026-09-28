@@ -21,6 +21,16 @@ checkpoint_config:
   type: file_system
   output_dir: /data/cpfs_0/yuzhao/models/${exp_name}
 
+track_with: ml_tracker
+tracker_kwargs:
+ project: roll-agentic
+ name: ${exp_name}_rebase
+ notes: "agentic_pipeline"
+ tags:
+   - agentic
+   - roll
+   - baseline
+
 # track_with: tensorboard
 # tracker_kwargs:
 #   log_dir: /data/oss_bucket_0/yuzhao/llm/tensorboard/roll_exp/deepeyes
@@ -112,6 +122,7 @@ actor_infer:
       disable_mm_preprocessor_cache: true
       # enable_prefix_caching: false
       sleep_level: 2  # 2 will destroy model parameter and kv_cache after generate to save cpu memory, 1 will destroy kv_cache only.
+      enforce_eager: true
   device_mapping: list(range(0,12))
   offload_nccl: ${offload_nccl}
 

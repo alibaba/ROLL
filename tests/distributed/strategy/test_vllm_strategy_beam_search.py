@@ -2,7 +2,7 @@ import asyncio
 import importlib
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import torch
@@ -56,7 +56,7 @@ from roll.distributed.scheduler.protocol import DataProto
 def _install_mock_vllm_modules(monkeypatch):
     mock_vllm = ModuleType("vllm")
     mock_vllm.__path__ = []
-    mock_vllm.__version__ = "0.8.4"
+    mock_vllm.__version__ = "0.11.0"
     mock_vllm.RequestOutput = MockRequestOutput
     mock_vllm.SamplingParams = MockSamplingParams
 
@@ -75,11 +75,15 @@ def _install_mock_vllm_modules(monkeypatch):
 
     inputs = ModuleType("vllm.inputs")
     inputs.__path__ = []
+    inputs.TokensPrompt = MockTokensPrompt
     inputs_data = ModuleType("vllm.inputs.data")
     inputs_data.TokensPrompt = MockTokensPrompt
 
     utils = ModuleType("vllm.utils")
     utils.random_uuid = Mock(return_value="test_uuid")
+
+    gdn_patcher = ModuleType("roll.third_party.vllm.gdn_patcher")
+    gdn_patcher.patch_gdn_attention = Mock()
 
     monkeypatch.setitem(sys.modules, "vllm", mock_vllm)
     monkeypatch.setitem(sys.modules, "vllm.sampling_params", sampling_params)
@@ -90,6 +94,7 @@ def _install_mock_vllm_modules(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm.inputs.data", inputs_data)
     monkeypatch.setitem(sys.modules, "vllm.utils", utils)
     monkeypatch.setitem(sys.modules, "roll.third_party.vllm", Mock())
+    monkeypatch.setitem(sys.modules, "roll.third_party.vllm.gdn_patcher", gdn_patcher)
 
 
 @pytest.fixture
@@ -266,3 +271,110 @@ class TestVllmStrategyBeamSearch:
 
         # Check result shape: (batch_size * beam_width, ...)
         assert result.shape[0] == batch_size * beam_width  # 2 * 2 = 4
+
+    @pytest.mark.parametrize(
+        ("version", "supports_external_dp", "uses_logical_nodes", "enable_expert_parallel"),
+        [
+            ("0.11.0", True, False, False),
+            ("0.11.1", True, True, False),
+            ("0.12.0", True, True, False),
+            ("0.16.0.dev1+local", True, True, True),
+            ("0.16.0rc2", True, True, True),
+            ("0.16.0", True, True, True),
+            ("0.17.0.dev1+local", True, True, True),
+            ("0.17.0rc2", True, True, True),
+            ("0.17.0", True, True, True),
+        ],
+    )
+    def test_external_dp_launch_args_follow_vllm_version(
+        self,
+        monkeypatch,
+        vllm_strategy_module,
+        mock_worker,
+        version,
+        supports_external_dp,
+        uses_logical_nodes,
+        enable_expert_parallel,
+    ):
+        mock_worker.world_size = 2
+        mock_worker.rank_info.dp_size = 2
+        mock_worker.cluster_name = "actor-infer"
+        mock_worker.master_port = 29500
+        mock_worker.get_node_ip = Mock(return_value="127.0.0.1")
+        mock_worker.worker_config.strategy_args.strategy_config = {
+            "data_parallel_size": 2,
+            "enable_expert_parallel": enable_expert_parallel,
+        }
+        mock_worker.worker_config.resource_placement_groups = [
+            {"node_rank": 0, "gpu_rank": 0, "placement_group": "pg-0"}
+        ]
+        put = Mock()
+        put.remote = AsyncMock()
+        mock_worker.shared_storage.put = put
+
+        model = Mock()
+        model.get_tokenizer = AsyncMock(return_value=Mock())
+        create_async_llm = AsyncMock(return_value=model)
+        monkeypatch.setattr(vllm_strategy_module, "create_async_llm", create_async_llm)
+        vllm_strategy_module.vllm.__version__ = version
+        strategy = vllm_strategy_module.VllmStrategy(mock_worker)
+        strategy._start_headless_workers = AsyncMock()
+
+        if not supports_external_dp:
+            with pytest.raises(RuntimeError, match="external data parallelism"):
+                asyncio.run(strategy.initialize(None))
+            return
+
+        asyncio.run(strategy.initialize(None))
+        kwargs = create_async_llm.await_args.kwargs
+        assert kwargs["data_parallel_rank"] == 0
+        assert kwargs["data_parallel_address"] == "127.0.0.1"
+        assert kwargs["data_parallel_rpc_port"] == 12345
+        assert kwargs["enable_expert_parallel"] is enable_expert_parallel
+        for name in ("nnodes", "node_rank", "master_addr", "master_port"):
+            assert (name in kwargs) is uses_logical_nodes
+
+    @pytest.mark.parametrize(
+        "version", ["0.11.0", "0.11.1", "0.11.1rc2", "0.12.0", "0.15.1"]
+    )
+    def test_ep_requires_vllm_0_16_or_later(
+        self, vllm_strategy_module, mock_worker, version
+    ):
+        mock_worker.worker_config.strategy_args.strategy_config = {
+            "enable_expert_parallel": True
+        }
+        mock_worker.worker_config.resource_placement_groups = [
+            {"node_rank": 0, "gpu_rank": 0, "placement_group": "pg-0"}
+        ]
+        vllm_strategy_module.vllm.__version__ = version
+
+        with pytest.raises(RuntimeError, match="Upgrade vLLM"):
+            asyncio.run(vllm_strategy_module.VllmStrategy(mock_worker).initialize(None))
+
+    @pytest.mark.parametrize("version", ["0.11.0"])
+    def test_legacy_vllm_cross_node_tp_uses_ray(
+        self, monkeypatch, vllm_strategy_module, mock_worker, version
+    ):
+        mock_worker.cluster_name = "actor-infer"
+        mock_worker.master_port = 29500
+        mock_worker.get_node_ip = Mock(return_value="127.0.0.1")
+        mock_worker.worker_config.strategy_args.strategy_config = {
+            "tensor_parallel_size": 2
+        }
+        mock_worker.worker_config.resource_placement_groups = [
+            {"node_rank": 0, "gpu_rank": 0, "placement_group": "pg-0"},
+            {"node_rank": 1, "gpu_rank": 0, "placement_group": "pg-1"},
+        ]
+
+        model = Mock()
+        model.get_tokenizer = AsyncMock(return_value=Mock())
+        create_async_llm = AsyncMock(return_value=model)
+        monkeypatch.setattr(vllm_strategy_module, "create_async_llm", create_async_llm)
+        vllm_strategy_module.vllm.__version__ = version
+        strategy = vllm_strategy_module.VllmStrategy(mock_worker)
+        strategy._start_headless_workers = AsyncMock()
+
+        asyncio.run(strategy.initialize(None))
+
+        assert create_async_llm.await_args.kwargs["distributed_executor_backend"] == "ray"
+        strategy._start_headless_workers.assert_not_awaited()

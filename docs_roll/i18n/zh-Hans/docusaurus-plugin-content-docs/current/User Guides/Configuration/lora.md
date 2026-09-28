@@ -43,8 +43,7 @@ actor_train:
     strategy_name: fsdp2_train
     strategy_config:
       fsdp_size: 16
-      param_dtype: bf16
-      reduce_dtype: float32
+      enable_mix_precision: true
       reshard_after_forward: true
       offload_policy: false
   device_mapping: list(range(0,16))

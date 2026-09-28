@@ -6,9 +6,11 @@ We can subclass Protocol to define more detailed batch info with specific keys
 
 import copy
 import os
+import io
 import uuid
+from contextlib import contextmanager
 from collections import defaultdict
-from typing import Dict, List, Optional, Union, Set
+from typing import Any, Dict, List, Optional, Union, Set
 
 import numpy as np
 import ray
@@ -25,6 +27,54 @@ from roll.platforms import current_platform
 from roll.utils.logging import get_logger
 
 logger = get_logger()
+
+# Large multi-modal tensor keys that are expensive to serialize through Ray.
+# These match mm_feature_names in roll/datasets/collator.py.
+LARGE_MM_FEATURE_KEYS = ["pixel_values", "pixel_values_videos", "input_features"]
+
+
+@contextmanager
+def strip_multi_modal_for_reward(
+    non_tensor_batch: Dict[str, Any],
+    enabled: bool = False,
+    strip_keys: Optional[List[str]] = None,
+):
+    """Temporarily strip large multi-modal tensors from non_tensor_batch for efficient Ray transfer.
+
+    When enabled, removes:
+    - ``multi_modal_data`` entirely (raw inference pixels, never needed by reward workers).
+    - Large tensor keys (pixel_values, pixel_values_videos, input_features) from each
+      ``multi_modal_inputs`` dict, **preserving** small metadata like ``image_grid_thw``
+      that some reward workers (e.g. detection_reward_worker) require.
+
+    All stripped data is restored when the context exits, so callers see no side effects.
+    The context manager is safe to use around ``await`` statements because the
+    strip/restore operations are synchronous.
+    """
+    if not enabled:
+        yield
+        return
+
+    if strip_keys is None:
+        strip_keys = LARGE_MM_FEATURE_KEYS
+
+    saved_mm_data = non_tensor_batch.pop("multi_modal_data", None)
+    saved_mm_tensors: list = []  # (dict, key, value) tuples for restoration
+
+    mm_inputs_list = non_tensor_batch.get("multi_modal_inputs")
+    if mm_inputs_list is not None:
+        for mm_dict in mm_inputs_list:
+            for key in strip_keys:
+                if key in mm_dict:
+                    saved_mm_tensors.append((mm_dict, key, mm_dict.pop(key)))
+
+    try:
+        yield
+    finally:
+        if saved_mm_data is not None:
+            non_tensor_batch["multi_modal_data"] = saved_mm_data
+        for mm_dict, key, value in saved_mm_tensors:
+            mm_dict[key] = value
 
 try:
     tensordict.set_lazy_legacy(False).set()
@@ -139,6 +189,53 @@ def move_tensors_to_device(data, device):
     elif isinstance(data, torch.Tensor):
         return data.to(device)
     return data
+
+
+def serialize_single_tensor(obj: torch.Tensor) -> tuple[str, tuple[int, ...], np.ndarray]:
+    data = obj.flatten().contiguous().cpu().view(torch.uint8).numpy()
+    dtype = str(obj.dtype).removeprefix("torch.")
+    return dtype, obj.shape, data
+
+
+def serialize_tensor_dict(batch: TensorDict) -> tuple[tuple[int, ...], Optional[str], dict[str, tuple[str, Any]]]:
+    encoded_items: dict[str, tuple[Any]] = {}
+    for k, v in batch.items():
+        if not v.is_nested:
+            encoded_items[k] = serialize_single_tensor(v)
+        else:
+            layout = str(v.layout).removeprefix("torch.")
+            data = [serialize_single_tensor(tensor) for tensor in v.unbind()]
+            encoded_items[k] = (layout, data)
+
+    batch_size = tuple(batch.batch_size)
+    device = str(batch.device) if batch.device is not None else None
+    return batch_size, device, encoded_items
+
+
+def deserialize_single_tensor(arr: Any) -> torch.Tensor:
+    dtype, shape, data = arr
+    torch_dtype = getattr(torch, dtype)
+    assert isinstance(torch_dtype, torch.dtype)
+    buffer = bytearray(data)
+    tensor = torch.frombuffer(buffer, dtype=torch.uint8)
+    return tensor.view(torch_dtype).view(shape)
+
+
+def deserialize_tensor_dict(arr: Any) -> TensorDict:
+    batch_size, device, encoded_items = arr
+    decoded_items: dict[str, Any] = {}
+    for k, v in encoded_items.items():
+        if len(v) == 3:
+            decoded_items[k] = deserialize_single_tensor(v)
+        elif len(v) == 2:
+            layout, data = v
+            torch_layout = getattr(torch, layout)
+            decoded_items[k] = torch.nested.as_nested_tensor(
+                [deserialize_single_tensor(tensor) for tensor in data], layout=torch_layout
+            )
+        else:
+            raise ValueError(f"Invalid tensor encoding format, expected length 2 or 3, got {len(v)}")
+    return TensorDict(source=decoded_items, batch_size=batch_size, device=device)
 
 
 def custom_np_concatenate(val):
@@ -325,15 +422,32 @@ class DataProto:
         if tensordict.__version__ >= "0.5.0" and self._batch is not None:
             self._batch = self._batch.contiguous()
             self._batch = self._batch.consolidate()
-        torch.save(self._batch, buffer)
-        return buffer, self._non_tensor_batch, self._remote_batch, self.meta_info
+
+        if os.getenv("DATAPROTO_SERIALIZATION_METHOD") == "numpy":
+            if self._batch is None:
+                batch = None
+            else:
+                batch = serialize_tensor_dict(self._batch)
+            return batch, self._non_tensor_batch, self._remote_batch, self.meta_info
+        else:
+            torch.save(self._batch, buffer)
+            return buffer, self._non_tensor_batch, self._remote_batch, self.meta_info
 
     def __setstate__(self, data):
         batch_deserialized, non_tensor_batch, remote_batch, meta_info = data
-        batch_deserialized.seek(0)
-        batch = torch.load(
-            batch_deserialized, weights_only=False, map_location="cpu" if not current_platform.is_available() else None
-        )
+
+        if isinstance(batch_deserialized, io.BytesIO):
+            batch_deserialized.seek(0)
+            batch = torch.load(
+                batch_deserialized, weights_only=False, map_location="cpu" if not current_platform.is_available() else None
+            )
+        elif isinstance(batch_deserialized, tuple):
+            batch = deserialize_tensor_dict(batch_deserialized)
+        elif batch_deserialized is None:
+            batch = None
+        else:
+            raise TypeError(f"Unsupported type for batch_deserialized: {type(batch_deserialized)}")
+
         self._batch = batch
         self._non_tensor_batch = non_tensor_batch
         self._remote_batch = remote_batch
@@ -451,14 +565,13 @@ class DataProto:
 
     def clone(self) -> "DataProto":
         """
-        Create a deep copy of this DataProto, including tensors,
-        non-tensor data, and meta_info.
+        Create a copy of this DataProto.
 
-        The new DataProto will share no underlying storage with the original.
-
-        Returns:
-            DataProto: A new DataProto instance with the same content but
-                       independent memory.
+        - batch: tensors are cloned (independent storage).
+        - non_tensor_batch: numpy arrays are copied, but elements inside
+          (e.g. dicts containing pixel_values) are shared references, not deep-copied.
+          This is memory-efficient when non_tensor_batch elements are read-only.
+        - meta_info: deep-copied.
         """
         # Copy batch
         batch_copy = self._batch.clone() if self._batch is not None else None
@@ -678,6 +791,8 @@ class DataProto:
                 non_tensors[key] = self._non_tensor_batch.pop(key)
 
         remote_batch = self._remote_batch.pop(remote_batch_keys) if self._remote_batch else None
+        if remote_batch is not None and len(remote_batch.fields) == 0:
+            remote_batch = None
 
         meta_info = {}
         for key in meta_info_keys:

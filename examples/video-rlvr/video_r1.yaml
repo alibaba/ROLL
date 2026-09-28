@@ -85,6 +85,7 @@ actor_train:
     video_fps: 2.0
     video_max_frames: 192
     video_folder: /data/oss_bucket_0/
+    rollout_dataloader_num_workers: 16
   strategy_args:
     strategy_name: megatron_train
     strategy_config:
@@ -120,8 +121,6 @@ actor_infer:
       max_num_batched_tokens: 32768
       gpu_memory_utilization: 0.8
       block_size: 16
-      disable_mm_preprocessor_cache: true
-      enable_prefix_caching: false
   device_mapping: list(range(0,16))
   infer_batch_size: 32
   offload_nccl: ${offload_nccl}

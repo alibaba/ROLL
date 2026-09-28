@@ -49,9 +49,6 @@ class InferenceStrategy(ABC):
         """
         pass
 
-    def get_data_input(self, batch: "DataProto") -> "DataProto":
-        return batch
-
     def generate(self, *args, **kwargs):
         raise NotImplementedError
 
@@ -152,6 +149,14 @@ class InferenceStrategy(ABC):
 
     def offload_states(self, *args, **kwargs):
         raise NotImplementedError
+
+    def _log_offload_summary(self):
+        """Log offload backend stats once. Requires the subclass to provide
+        _get_offload_backend()."""
+        from roll.utils.context_managers import log_offload_debug
+        stats = self._get_offload_backend().get_stats()
+        log_offload_debug("offload_states summary", store_stats=stats,
+                          once_id=f"offload_summary_{id(self)}")
 
     # 定义一些通用的分布式op，op计算依赖分布式实现
     # 算法开发Worker时，可在worker中自行实现计算逻辑，需要分布式的可在优化时集成入op库中
@@ -405,7 +410,17 @@ class InferenceStrategy(ABC):
 
         out = {}
 
-        num_valid = torch.tensor(len(batch), device=batch.batch["input_ids"].device)
+        device = None
+        if batch.batch is not None:
+            for key in batch.batch.keys():
+                value = batch.batch[key]
+                if torch.is_tensor(value):
+                    device = value.device
+                    break
+        if device is None:
+            device = current_platform.current_device()
+
+        num_valid = torch.tensor(len(batch), device=device)
         dist.all_reduce(num_valid, op=dist.ReduceOp.SUM, group=dp_group)
         out["default"] = num_valid
 
@@ -437,10 +452,13 @@ class TrainStrategy(InferenceStrategy):
 
         self.optimizer = None
         self.scheduler = None
-        self.checkpoint_manager = CheckpointManager(checkpoint_config=self.worker_config.checkpoint_config)
+        self.checkpoint_manager = CheckpointManager(
+            checkpoint_config=self.worker_config.checkpoint_config, register=True
+        )
 
     def setup_collective_group(self, model_update_name, comm_plan, backend=None, mode="sender"):
         self._setup_collective_group_impl(model_update_name, comm_plan, backend, mode=mode)
+
 
     def train_step(
         self,

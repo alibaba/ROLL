@@ -12,6 +12,11 @@ class DataArguments:
         default="native",
         metadata={"help": "Which template to use for constructing prompts in training and inference."},
     )
+    enable_thinking: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Control thinking mode in chat template. None = use template default (True for qwen3). "
+                  "False = skip thinking (direct answers). True = enable thinking."},
+    )
     domain_interleave_probs: Optional[Dict[str, float]] = field(
         default=None,
         metadata={"help": "Probabilities to sample data from domains in one batch."},
@@ -70,6 +75,26 @@ class DataArguments:
         default=64,
         metadata={"help": "The frames of the chunk to resize the video."},
     )
+    rollout_dataloader_num_workers: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "The number of DataLoader workers used by rollout schedulers for data loading. "
+                "The number of prefetched samples is roughly "
+                "rollout_dataloader_num_workers * prefetch_factor * rollout_dataloader_batch_size."
+            )
+        },
+    )
+    rollout_dataloader_batch_size: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "The DataLoader batch size used by rollout schedulers for data loading. "
+                "This is not the training rollout_batch_size; keep it small for video data because each worker "
+                "prefetches batches and may decode many videos ahead of use."
+            )
+        },
+    )
     image_folder: Optional[str] = field(default=None, metadata={"help": "Path to the folder containing the images."})
     video_folder: Optional[str] = field(default=None, metadata={"help": "Path to the folder containing the videos."})
     audio_folder: Optional[str] = field(default=None, metadata={"help": "Path to the folder containing the audios."})
@@ -81,3 +106,5 @@ class DataArguments:
         assert not (
             self.prompt is not None and self.messages is not None
         ), "prompt and messages are mutually exclusive"
+        assert self.rollout_dataloader_num_workers >= 0, "rollout_dataloader_num_workers must be non-negative"
+        assert self.rollout_dataloader_batch_size > 0, "rollout_dataloader_batch_size must be positive"

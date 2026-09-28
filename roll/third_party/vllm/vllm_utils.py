@@ -12,47 +12,6 @@ else:
     from vllm.lora.models import LoRAModel
 
 
-# TODO: remove this patch once vllm 0.8.4 is deprecated
-# Patch weight loader for moe models
-# borrow from https://github.com/volcengine/verl/blob/main/verl/utils/vllm_utils.py
-SUPPORTED_MOE_MODELS = []
-
-try:
-    from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM, DeepseekV3ForCausalLM
-
-    SUPPORTED_MOE_MODELS.append(DeepseekV2ForCausalLM)
-    SUPPORTED_MOE_MODELS.append(DeepseekV3ForCausalLM)
-except ImportError:
-    pass
-
-try:
-    from vllm.model_executor.models.qwen2_moe import Qwen2MoeForCausalLM
-
-    SUPPORTED_MOE_MODELS.append(Qwen2MoeForCausalLM)
-except ImportError:
-    pass
-
-try:
-    from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
-
-    SUPPORTED_MOE_MODELS.append(Qwen3MoeForCausalLM)
-except ImportError:
-    pass
-
-
-def patch_vllm_moe_model_weight_loader(model):
-    if not isinstance(model, tuple(SUPPORTED_MOE_MODELS)):
-        return
-
-    for layer in model.model.layers:
-        mlp = getattr(layer, "mlp")
-        param_dict = dict(mlp.named_parameters())
-        for name, param in param_dict.items():
-            skip_patch = getattr(param, "roll_skip_patch_moe", False)
-            if ("w13_weight" in name or "w2_weight" in name) and not skip_patch:
-                param.weight_loader = mlp.experts.weight_loader
-
-
 class TensorLoRARequest(LoRARequest):
     peft_config: dict = field(default=None)
     lora_tensors: dict = field(default=None)
@@ -92,9 +51,7 @@ def patch_vllm_lora_manager():
                 lora_tensors = lora_request.lora_tensors
                 peft_helper = PEFTHelper.from_dict(peft_config)
             else:
-                kwargs = {}
-                if Version(vllm_version) > Version("0.8.4"):
-                    kwargs["tensorizer_config_dict"] = lora_request.tensorizer_config_dict
+                kwargs = {"tensorizer_config_dict": lora_request.tensorizer_config_dict}
                 lora_path = get_adapter_absolute_path(lora_request.lora_path)
                 peft_helper = PEFTHelper.from_local_dir(
                     lora_path,
@@ -132,9 +89,7 @@ def patch_vllm_lora_manager():
                     **kwargs,
                 )
             else:
-                kwargs = {}
-                if Version(vllm_version) > Version("0.8.4"):
-                    kwargs["tensorizer_config_dict"] = lora_request.tensorizer_config_dict
+                kwargs = {"tensorizer_config_dict": lora_request.tensorizer_config_dict}
                 if Version(vllm_version) >= Version("0.12.0"):
                     kwargs["model_vocab_size"] = self.vocab_size
                 else:

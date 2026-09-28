@@ -136,6 +136,7 @@ class AgenticRolloutPipeline(BasePipeline):
                 logger.info(json.dumps(generate_res[:10], ensure_ascii=False))
                 logger.info(json.dumps(metrics, ensure_ascii=False))
 
+            DataProto.drop(batch)
             logger.info(f"pipeline step {global_step} finished")
             global_step += 1
         ray.get(self.rollout_scheduler.shutdown.remote())

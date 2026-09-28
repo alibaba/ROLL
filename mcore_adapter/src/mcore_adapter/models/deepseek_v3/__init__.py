@@ -25,7 +25,7 @@ class DeepSeekV3Template(Template):
         rope_scaling = getattr(hf_config, "rope_scaling", None) or getattr(hf_config, "rope_parameters", None)
         if rope_scaling:
             if rope_scaling.get("original_max_position_embeddings", None):
-                kw_args["max_position_embeddings"] = rope_scaling["original_max_position_embeddings"]
+                kw_args["original_max_position_embeddings"] = rope_scaling["original_max_position_embeddings"]
             if rope_scaling.get("type", None):
                 rope_type = rope_scaling["type"]
                 kw_args["rope_type"] = rope_type
@@ -75,7 +75,7 @@ class DeepSeekV3Template(Template):
 
         if mca_config.rope_type != "rope":
             kw_args["rope_scaling"] = {
-                "original_max_position_embeddings": mca_config.max_position_embeddings,
+                "original_max_position_embeddings": mca_config.original_max_position_embeddings,
                 "type": mca_config.rope_type,
                 "factor": mca_config.rotary_scaling_factor,
                 "mscale_all_dim": mca_config.mscale_all_dim,

@@ -50,7 +50,6 @@ validation:
  eval_steps: ${eval_steps}
 actor_train:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
@@ -90,7 +89,6 @@ actor_train:
   infer_batch_size: 8
 actor_infer:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
@@ -106,7 +104,6 @@ actor_infer:
     strategy_config:
       gpu_memory_utilization: 0.8
       block_size: 16
-      # mm preprocessor cache mismatch error occured in vllm084
       disable_mm_preprocessor_cache: true
       enable_prefix_caching: false
   num_gpus_per_worker: 1
@@ -114,7 +111,6 @@ actor_infer:
   infer_batch_size: 32
 reference:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16

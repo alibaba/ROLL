@@ -1,0 +1,141 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: wan21_1.3b_dmd_shell
+seed: 42
+full_determinism: false
+logging_dir: ./output/logs
+output_dir: ./output/dmd_shell
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/dmd_shell/ckpt
+  async_upload: true
+  keep_local_file: false
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ./output/dmd_shell/tensorboard
+
+max_steps: 10000
+save_steps: 5000
+checkpoint_steps: []
+checkpoint_roles: [generator, fake_score]
+parallel_checkpoint_roles: false
+logging_steps: 1
+resume_from_checkpoint: false
+max_grad_norm: 10.0
+share_prompt_embeddings: true
+gpu_tensor_transfer: true
+is_offload_optimizer_states_in_train_step: true
+
+num_nodes: 1
+num_gpus_per_node: 4
+
+pretrain: wan_models/Wan2.1-T2V-1.3B-Diffusers
+diffusion_model_variant: wan2_1
+
+timestep_shift: 5.0
+
+denoising:
+  step_list: [1000, 750, 500, 250]
+  warp_step: true
+
+sample:
+  num_frames: 81
+  height: 480
+  width: 832
+
+score_timestep:
+  num_train_timestep: 1000
+  min_score_timestep: 0
+  sample_shift: 5.0
+
+guidance:
+  scale: 3.0
+  negative_prompt: >-
+    色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，
+    整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，
+    画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，
+    手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走
+
+ddmd:
+  enabled: false
+  gradient_scale: 1.0
+
+dfake_gen_update_ratio: 5
+
+ema:
+  enabled: false
+  weight: 0.99
+  start_step: 200
+  update_interval: 1
+
+generator:
+  model_args:
+    dtype: bf16
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+  data_args:
+    file_name: data/vidprom_filtered_extended.txt
+    dataset_type: text
+  training_args:
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 1
+    learning_rate: 2.0e-6
+    lr_scheduler_type: constant
+    adam_beta1: 0.0
+    adam_beta2: 0.999
+    weight_decay: 0.01
+    num_train_epochs: 1
+  strategy_args:
+    strategy_name: veomni_train
+    strategy_config:
+      mixed_precision: true
+      param_dtype: bfloat16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      ulysses_parallel_size: 2
+  device_mapping: "[0,1,2,3]"
+  infer_batch_size: 1
+
+fake_score:
+  model_args:
+    dtype: bf16
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+  training_args:
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 1
+    learning_rate: 4.0e-7
+    lr_scheduler_type: constant
+    adam_beta1: 0.0
+    adam_beta2: 0.999
+    weight_decay: 0.01
+    num_train_epochs: 1
+  strategy_args:
+    strategy_name: veomni_train
+    strategy_config:
+      mixed_precision: true
+      param_dtype: bfloat16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      ulysses_parallel_size: 2
+  device_mapping: "[0,1,2,3]"
+  infer_batch_size: 1
+
+real_score:
+  model_args:
+    dtype: bf16
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+  strategy_args:
+    strategy_name: veomni_infer
+    strategy_config:
+      mixed_precision: false
+      reshard_after_forward: true
+      ulysses_parallel_size: 2
+  device_mapping: "[0,1,2,3]"
+  infer_batch_size: 1

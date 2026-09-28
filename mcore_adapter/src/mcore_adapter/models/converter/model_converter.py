@@ -1,15 +1,12 @@
 import gc
 import json
 import os
-from typing import TYPE_CHECKING, Dict, Optional, Union
+from typing import TYPE_CHECKING, Dict, Iterator, Optional, Union
 
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
-from transformers.modeling_utils import (
-    get_checkpoint_shard_files,
-    load_state_dict,
-)
+from transformers.modeling_utils import get_checkpoint_shard_files
 from transformers.utils import (
     SAFE_WEIGHTS_INDEX_NAME,
     SAFE_WEIGHTS_NAME,
@@ -19,6 +16,7 @@ from transformers.utils import (
 )
 
 from ...utils import get_logger, is_safetensors_available
+from ..value_head import make_value_head_converter, make_value_head_template
 from .convert_utils import (
     MAX_SHARD_SIZE,
     StateDictSplitState,
@@ -36,6 +34,7 @@ if is_peft_available():
     from peft import PeftModel, get_peft_model_state_dict
 
 if is_safetensors_available():
+    from safetensors import safe_open
     from safetensors.torch import save_file as safe_save_file
 
 
@@ -63,6 +62,8 @@ class ModelConverter:
         self.mca_config = mca_config
         self.verbose = verbose
         self.template = get_template(mca_config.hf_model_type)
+        if mca_config.use_value_head:
+            make_value_head_template(self.template)
         self.template.set_mca_config_for_ops(self.mca_config)
         if tensor_model_parallel_rank is None:
             tensor_model_parallel_rank = mpu.get_tensor_model_parallel_rank()
@@ -81,6 +82,8 @@ class ModelConverter:
             revert=to_hf,
             efficient_mode=efficient_mode,
         )
+        if mca_config.use_value_head:
+            make_value_head_converter(self.dist_converter)
         self.resized_vocab_size = resized_vocab_size
 
     def log(self, msg):
@@ -89,8 +92,12 @@ class ModelConverter:
 
     def load_mca_state_dict_from_hf(self, model_path: str, vp_stage: int):
         state_dict_iter = self.hf_state_dict_iter(model_path, vp_stage=vp_stage)
-        mca_state_dict = self.get_mca_state_dict(state_dict_iter, vp_stage=vp_stage)
-        return mca_state_dict
+        return self.get_mca_state_dict(state_dict_iter, vp_stage=vp_stage)
+
+    def iter_mca_state_dict_from_hf(self, model_path: str, vp_stage: int) -> "Iterator[tuple[str, Tensor]]":
+        """Yield converted rank-local tensors without building a complete state dict."""
+        state_dict_iter = self.hf_state_dict_iter(model_path, vp_stage=vp_stage)
+        yield from self.iter_mca_state_dict(state_dict_iter, vp_stage=vp_stage)
 
     def get_needed_hf_files(self, path, vp_stage: int):
         files = []
@@ -126,41 +133,82 @@ class ModelConverter:
             return False
         return any(self.dist_converter.is_on_this_rank(name, vp_stage=vp_stage) for name in mca_names)
 
-    def hf_state_dict_iter(self, path, vp_stage: int):
-        files = self.get_needed_hf_files(path, vp_stage=vp_stage)
+    def hf_state_dict_iter(
+        self,
+        path: str,
+        vp_stage: int,
+    ) -> "Iterator[tuple[str, Tensor]]":
+        """Yield needed HF tensors, reading safetensors one key at a time."""
+        files = sorted(self.get_needed_hf_files(path, vp_stage=vp_stage))
+
+        if not files:
+            raise FileNotFoundError(
+                f"No Hugging Face checkpoint files were found in {path}. "
+                "The latest ROLL only supports safetensors checkpoints."
+            )
+
+        if not is_safetensors_available():
+            raise ImportError(
+                "safetensors is required because the latest ROLL only supports "
+                "Hugging Face checkpoints in safetensors format."
+            )
+
         for file in files:
-            state_dict = load_state_dict(file)
-            for k, v in state_dict.items():
-                if not self.is_needed_hf_name(k, vp_stage=vp_stage):
-                    continue
-                yield k, v
+            if not file.endswith(".safetensors"):
+                raise ValueError(
+                    f"Unsupported Hugging Face checkpoint file: {file}. "
+                    "The latest ROLL only supports safetensors checkpoints."
+                )
+
+            with safe_open(file, framework="pt", device="cpu") as reader:
+                needed_keys = [key for key in reader.keys() if self.is_needed_hf_name(key, vp_stage=vp_stage)]
+                weight = None
+                for key in needed_keys:
+                    weight = reader.get_tensor(key)
+                    yield key, weight
+                    weight = None
 
     def get_mca_state_dict(self, state_dict_iter, vp_stage: int):
-        mca_state_dict = {}
+        return dict(self.iter_mca_state_dict(state_dict_iter, vp_stage=vp_stage))
 
-        for name, weight in state_dict_iter:
-            converted_state_dict = self.template.add_hf_weight(name, weight)
-            if converted_state_dict is not None:
-                for mca_name, mca_weight in converted_state_dict.items():
-                    # resize before tensor parallel conversion
-                    if self.resized_vocab_size and (
-                        (mca_name == MCORE_WORD_EMBEDDING)
-                        or (mca_name == MCORE_LM_HEAD and not self.mca_config.tie_embeddings_and_output_weights)
-                    ):
-                        mca_weight = resize_embedding_layer(mca_weight, self.resized_vocab_size)
-                    named_weights = self.dist_converter.dist_convert(mca_name, mca_weight, vp_stage=vp_stage)
-                    if named_weights is not None:
-                        mca_state_dict.update(named_weights)
-                        self.log(f"hf_name: {name} -> mca_name: {list(named_weights.keys())}")
-                    else:
-                        self.log(
-                            f"hf_name: {name} not on this rank: pp {self.dist_converter.pipeline_model_parallel_rank}"
-                            f" ep: {self.dist_converter.expert_model_parallel_rank} or not ready to convert"
-                        )
-            else:
-                self.log(f"hf_name: {name} added but not converted")
-        self.template.release()
-        return mca_state_dict
+    def iter_mca_state_dict(
+        self,
+        state_dict_iter: "Iterator[tuple[str, Tensor]]",
+        vp_stage: int,
+    ) -> "Iterator[tuple[str, Tensor]]":
+        """Convert HF tensors and yield each final rank-local Megatron tensor immediately."""
+        try:
+            for name, weight in state_dict_iter:
+                converted_state_dict = self.template.add_hf_weight(name, weight)
+                if converted_state_dict is not None:
+                    for mca_name, mca_weight in converted_state_dict.items():
+                        # resize before tensor parallel conversion
+                        if self.resized_vocab_size and (
+                            (mca_name == MCORE_WORD_EMBEDDING)
+                            or (mca_name == MCORE_LM_HEAD and not self.mca_config.tie_embeddings_and_output_weights)
+                        ):
+                            mca_weight = resize_embedding_layer(mca_weight, self.resized_vocab_size)
+                        named_weights = self.dist_converter.dist_convert(mca_name, mca_weight, vp_stage=vp_stage)
+                        if named_weights is not None:
+                            self.log(f"hf_name: {name} -> mca_name: {list(named_weights.keys())}")
+                            for converted_name, converted_weight in named_weights.items():
+                                yield converted_name, converted_weight
+                                converted_weight = None
+                            named_weights = None
+                        else:
+                            self.log(
+                                f"hf_name: {name} not on this rank: "
+                                f"pp {self.dist_converter.pipeline_model_parallel_rank} "
+                                f"ep: {self.dist_converter.expert_model_parallel_rank} or not ready to convert"
+                            )
+                        mca_weight = None
+                    converted_state_dict = None
+                else:
+                    self.log(f"hf_name: {name} added but not converted")
+                weight = None
+        finally:
+            self.template.release()
+            self.dist_converter.release()
 
     def _mca_named_params_with_vp_stage(self, models, params_group=None):
         for vp_stage, model in enumerate(models):

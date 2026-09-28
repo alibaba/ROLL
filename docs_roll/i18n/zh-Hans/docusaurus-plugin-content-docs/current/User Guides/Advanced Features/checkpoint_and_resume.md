@@ -34,6 +34,8 @@ ROLL 框架会在以下情况下自动保存检查点：
 
 3. **手动保存**: 在代码中可以调用相应的 API 手动保存检查点
 
+FSDP2 异步 DCP 保存（`strategy_config.async_save_ckpt: true`）在 storage-level staging 时读取 DTensor 的真实 local storage，并保留 mesh、placements、shape 和 view offset。使用 `offload_backend: local` 时，模型参数只 offload 一次，DCP 直接写已有的 CPU flat buffer，不再额外分配一份模型 CPU 快照；异步写盘完成前，Strategy 会保留这些 buffer，并在完成后再回收。优化器、scheduler 以及不在 store 中的 tensor 仍使用常规的独立 CPU staging。`local_dedup` 每个 rank 只保存一段数据，需要先重建 local shard，因此仍走常规 staging 路径。该实现不增加 GPU shard 副本和 checkpoint 通信次数，checkpoint 格式与恢复配置保持不变。
+
 ## 恢复训练配置
 
 要从检查点恢复训练，需要设置 `resume_from_checkpoint` 参数：

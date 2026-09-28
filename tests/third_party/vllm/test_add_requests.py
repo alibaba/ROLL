@@ -75,7 +75,6 @@ if __name__ == "__main__":
         gpu_memory_utilization=0.8,
         tensor_parallel_size=4,
         trust_remote_code=True,
-        distributed_executor_backend="ray",
         disable_custom_all_reduce=True,
         enable_sleep_mode=True,
     )

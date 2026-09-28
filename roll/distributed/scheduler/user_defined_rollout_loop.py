@@ -1,7 +1,8 @@
 import asyncio
 import copy
 import math
-from typing import List, Optional
+from contextlib import nullcontext
+from typing import ContextManager, List, Optional
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -13,7 +14,6 @@ from roll.distributed.scheduler.generate_scheduler import (
 from roll.distributed.scheduler.router import is_report_data_finished
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
-from roll.distributed.scheduler.protocol import DataProto
 from roll.utils.functionals import (
     postprocess_generate,
     concatenate_input_and_output,
@@ -123,54 +123,6 @@ def postprocess_paused_data(pre_data, data: DataProto, sequence_length, prompt_l
     assert data.batch["init_input_ids"].shape[1] == prompt_length
     return data
 
-def postprocess_output_data(request, data: DataProto, sequence_length) -> DataProto:
-    # postprocess_generate, input_ids, attention_mask, left pad
-    eos_token_id = data.meta_info["eos_token_id"]
-    pad_token_id = data.meta_info["pad_token_id"]
-    input_ids = request.batch.pop("init_input_ids", request.batch["input_ids"])
-    request.batch["input_ids"] = input_ids
-    request.batch["attention_mask"] = request.batch.pop("init_attention_mask", request.batch["attention_mask"])
-    output_token_ids = data.meta_info["output_token_ids"]
-    pre_output_token_ids = request.meta_info.pop("pre_output_token_ids", [[]] * len(output_token_ids))
-    output_token_ids = [pre_output_token_ids[i] + output_token_ids[i] for i in range(len(pre_output_token_ids))]
-
-    output_logprobs = data.meta_info.get("output_logprobs", None)
-    if output_logprobs is not None:
-        pre_output_logprobs = request.meta_info.get("pre_output_logprobs", [[]] * len(output_token_ids))
-        output_logprobs = [pre_output_logprobs[i] + output_logprobs[i] for i in range(len(pre_output_logprobs))]
-
-    # new: process routed_experts
-    routed_experts = data.meta_info.get("routed_experts", None)
-    if routed_experts is not None:
-        # routed_experts : [B*S, num_expert, topk]
-        pre_routed_experts = request.meta_info.get("pre_routed_experts", None)
-        if pre_routed_experts is not None:
-            # B*S1, num_expert, topk] + [B*S2, num_expert, topk] -> [B*(S1+S2), num_expert, topk]
-            routed_experts = torch.cat([pre_routed_experts, routed_experts], dim=0)
-
-    output_tokens = [torch.tensor(token_ids) for token_ids in output_token_ids]
-    output_tensor = pad_sequence(output_tokens, batch_first=True, padding_value=pad_token_id)
-    output_tensor = concatenate_input_and_output(
-        input_ids=input_ids, output_ids=output_tensor, num_return_sequences=len(output_tokens)
-    )
-    output: DataProto = postprocess_generate(
-        prompts=request,
-        output=output_tensor,
-        num_return_sequences=len(output_tokens),
-        sequence_length=sequence_length,
-        eos_token_id=eos_token_id,
-        pad_token_id=pad_token_id,
-        output_logprobs=output_logprobs,
-        routed_experts=routed_experts,
-    )
-    request_repeat = request.repeat(repeat_times=len(output_tokens))
-    output.non_tensor_batch = request_repeat.non_tensor_batch
-    output.meta_info = request_repeat.meta_info
-    # Preserve metrics from data (e.g., speculative decoding metrics)
-    if "metrics" in data.meta_info:
-        output.meta_info.setdefault("metrics", {}).update(data.meta_info["metrics"])
-    return output
-
 # ================= example of user defined rollout loop =================
 
 class UserDefinedRolloutLoop:
@@ -197,9 +149,77 @@ class UserDefinedRolloutLoop:
         exception and should handle clean up by themself.)
 
         User should catch all other exceptions, any other exceptions will be treat as sys.exit by framework.
+
+    Customization:
+        To customize rollout behavior, subclass this class and override:
+            - prepare_requests(request_data_list, context) -> list[DataProto]
+            - postprocess_output_data(request, data, sequence_length) -> DataProto
+        Then set pipeline_config.user_defined_rollout_loop_cls to your subclass path.
     """
-    def __init__(self):
-        pass
+
+    def prepare_requests(self, request_data_list: List[DataProto], context: RolloutContext) -> List[DataProto]:
+        """Enrich expanded requests before generation.
+
+        Called after expand_requests(). Default is identity (no-op).
+        Override in subclass to inject custom request preprocessing.
+        """
+        return request_data_list
+
+    def postprocess_output_data(self, request: DataProto, data: DataProto, sequence_length: int) -> DataProto:
+        """Convert raw generate output to DataProto.
+
+        Default is token-based postprocess (concatenate input/output, pad, etc.).
+        Override in subclass to customize output postprocessing.
+        """
+        return self._default_token_postprocess(request, data, sequence_length)
+
+    def _default_token_postprocess(self, request: DataProto, data: DataProto, sequence_length: int) -> DataProto:
+        # postprocess_generate, input_ids, attention_mask, left pad
+        eos_token_id = data.meta_info["eos_token_id"]
+        pad_token_id = data.meta_info["pad_token_id"]
+        input_ids = request.batch.pop("init_input_ids", request.batch["input_ids"])
+        request.batch["input_ids"] = input_ids
+        request.batch["attention_mask"] = request.batch.pop("init_attention_mask", request.batch["attention_mask"])
+        output_token_ids = data.meta_info["output_token_ids"]
+        pre_output_token_ids = request.meta_info.pop("pre_output_token_ids", [[]] * len(output_token_ids))
+        output_token_ids = [pre_output_token_ids[i] + output_token_ids[i] for i in range(len(pre_output_token_ids))]
+
+        output_logprobs = data.meta_info.get("output_logprobs", None)
+        if output_logprobs is not None:
+            pre_output_logprobs = request.meta_info.get("pre_output_logprobs", [[]] * len(output_token_ids))
+            output_logprobs = [pre_output_logprobs[i] + output_logprobs[i] for i in range(len(pre_output_logprobs))]
+
+        # process routed_experts
+        routed_experts = data.meta_info.get("routed_experts", None)
+        if routed_experts is not None:
+            # routed_experts : [B*S, num_expert, topk]
+            pre_routed_experts = request.meta_info.get("pre_routed_experts", None)
+            if pre_routed_experts is not None:
+                # [B*S1, num_expert, topk] + [B*S2, num_expert, topk] -> [B*(S1+S2), num_expert, topk]
+                routed_experts = torch.cat([pre_routed_experts, routed_experts], dim=0)
+
+        output_tokens = [torch.tensor(token_ids) for token_ids in output_token_ids]
+        output_tensor = pad_sequence(output_tokens, batch_first=True, padding_value=pad_token_id)
+        output_tensor = concatenate_input_and_output(
+            input_ids=input_ids, output_ids=output_tensor, num_return_sequences=len(output_tokens)
+        )
+        output: DataProto = postprocess_generate(
+            prompts=request,
+            output=output_tensor,
+            num_return_sequences=len(output_tokens),
+            sequence_length=sequence_length,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            output_logprobs=output_logprobs,
+            routed_experts=routed_experts,
+        )
+        request_repeat = request.repeat(repeat_times=len(output_tokens))
+        output.non_tensor_batch = request_repeat.non_tensor_batch
+        output.meta_info = request_repeat.meta_info
+        # Preserve metrics from data (e.g., speculative decoding metrics)
+        if "metrics" in data.meta_info:
+            output.meta_info.setdefault("metrics", {}).update(data.meta_info["metrics"])
+        return output
 
     async def process_new_prompt(self, context: RolloutContext) -> Optional[DataProto|List[DataProto]]:
         num_return_sequences = context.meta_info["generation_config"]["num_return_sequences"]
@@ -211,6 +231,9 @@ class UserDefinedRolloutLoop:
         request_data, domain = context.get_request_data(meta_info=context.meta_info)
         request_data_list = expand_requests(data=request_data, num_return_sequences=num_return_sequences,
                             is_num_return_sequences_expand=is_num_return_sequences_expand)
+
+        # Hook: prepare_requests (e.g., inject deterministic seeds for diffusion)
+        request_data_list = self.prepare_requests(request_data_list, context)
         # TODO data filter
 
         ################# STEP 2: spawn tasks to process requests, including generate, reward, and filter at response level
@@ -246,6 +269,15 @@ class UserDefinedRolloutLoop:
         with get_tracer("scheduler").start_as_current_span("generate_and_reward"):
             return await self._generate_and_reward_impl(context=context, req=req, domain=domain)
 
+    def reward_transfer_ctx(self, req: DataProto) -> ContextManager:
+        """Return a context manager to prepare data for Ray transfer to reward workers.
+
+        Override in subclasses to strip large tensors that reward workers don't need.
+        The context manager should save and restore any stripped data so callers see
+        no side effects. Default: no-op.
+        """
+        return nullcontext()
+
     async def _generate_and_reward_impl(
         self,
         context: RolloutContext,
@@ -255,7 +287,7 @@ class UserDefinedRolloutLoop:
         responses: List[DataProto] = []
 
         for _ in range(5): # limit max retry times, otherwise may cause dead loop
-            original_req = copy.deepcopy(req)
+            original_req = req.clone()
 
             # TODO deprecate collect_unfinished after sglang support partial rollout
             collect_unfinished = req.meta_info.get("collect_unfinished", False)
@@ -274,7 +306,7 @@ class UserDefinedRolloutLoop:
                     # only happened at shutdown, abort this prompt
                     return
                 elif is_report_data_finished(data):
-                    req = postprocess_output_data(req, data, context.sequence_length)
+                    req = self.postprocess_output_data(req, data, context.sequence_length)
                     break
                 else:
                     if not collect_unfinished:
@@ -284,7 +316,8 @@ class UserDefinedRolloutLoop:
                     else:
                         req = postprocess_paused_data(req, data, context.sequence_length, context.prompt_length)
 
-            rewards = await context.compute_rewards(req=req, domain=domain)
+            with self.reward_transfer_ctx(req):
+                rewards = await context.compute_rewards(req=req, domain=domain)
             metrics = req.meta_info.pop("metrics", {})
             req.union(rewards)
             req_metrics = req.meta_info.pop("metrics", {})

@@ -1,6 +1,7 @@
 import os
 import re
 import inspect
+import uuid as uuid_lib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import partial
@@ -9,7 +10,9 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import PIL
 import torch
+from packaging.version import Version
 from transformers import BatchFeature, PreTrainedTokenizerBase, ProcessorMixin
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.data.data_collator import pad_without_fast_tokenizer_warning
 from transformers.utils import PaddingStrategy
 
@@ -90,6 +93,100 @@ class DataCollatorWithPaddingForDPO:
         )
         position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
         return {"input_ids": input_ids, "attention_mask": attention_mask, "prompt_id_lens": prompt_id_lens, "position_ids": position_ids}
+
+
+def _normalize_diffusion_mm_token_field(value):
+    """Convert a multi-modal token field to a torch.long tensor."""
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype=torch.long)
+    return torch.tensor(list(value), dtype=torch.long)
+
+
+@dataclass
+class DataCollatorForDiffusion:
+    """Batch collator for diffusion rollout datasets.
+
+    Converts a list of dataset rows into a padded batch dict suitable for the
+    DynamicSamplingScheduler and diffusion rollout engines (e.g. vllm_omni).
+
+    The collator performs:
+    - Fixed-length padding of input_ids and attention_mask
+    - Extraction of domain, tag, id, ground_truth, prompt metadata
+    - Normalization of multi-modal token fields (prompt_ids, prompt_mask,
+      negative_prompt_ids, negative_prompt_mask) into multi_modal_data
+
+    ``domain`` selects which reward worker computes the reward, while ``tag``
+    identifies the task itself. The two differ whenever several tags share one
+    reward worker (e.g. all geneval subtasks), so ``tag`` is what per-task
+    metrics must be grouped by.
+
+    This collator is NOT model-specific. All diffusion models (Qwen-Image,
+    Flux, SD3, ...) share the same input field structure.
+
+    Attributes:
+        tokenizer: Tokenizer instance (used for pad_token_id).
+        max_length: Fixed sequence length for padding/truncation.
+    """
+
+    tokenizer: object
+    max_length: int
+
+    def __call__(self, data):
+        if not isinstance(data, list) or len(data) == 0:
+            raise ValueError("DataCollatorForDiffusion expects a non-empty list of samples.")
+
+        input_ids_batch = []
+        attention_mask_batch = []
+        domain = np.empty(len(data), dtype=object)
+        tag = np.empty(len(data), dtype=object)
+        sample_ids = np.empty(len(data), dtype=object)
+        ground_truth = np.empty(len(data), dtype=object)
+        prompt_text = np.empty(len(data), dtype=object)
+        mm_data = np.empty(len(data), dtype=object)
+
+        pad_token_id = getattr(self.tokenizer, "pad_token_id", 0)
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        for i, item in enumerate(data):
+            token_ids = list(item["input_ids"])
+            attn_mask = item["attention_mask"]
+            attn_mask = [1] * len(token_ids) if not isinstance(attn_mask, list) else list(attn_mask)
+
+            # Truncate or pad to fixed max_length
+            if len(token_ids) > self.max_length:
+                token_ids = token_ids[: self.max_length]
+                attn_mask = attn_mask[: self.max_length]
+            elif len(token_ids) < self.max_length:
+                pad_len = self.max_length - len(token_ids)
+                token_ids = token_ids + [pad_token_id] * pad_len
+                attn_mask = attn_mask + [0] * pad_len
+
+            input_ids_batch.append(token_ids)
+            attention_mask_batch.append(attn_mask)
+            domain[i] = item["domain"]
+            tag[i] = item.get("tag", item["domain"])
+            sample_ids[i] = item["id"]
+            ground_truth[i] = item["ground_truth"]
+            prompt_text[i] = item.get("prompt", "")
+            mm_data[i] = {
+                "prompt_ids": _normalize_diffusion_mm_token_field(item["prompt_ids"]),
+                "prompt_mask": _normalize_diffusion_mm_token_field(item["prompt_mask"]),
+                "negative_prompt_ids": _normalize_diffusion_mm_token_field(item["negative_prompt_ids"]),
+                "negative_prompt_mask": _normalize_diffusion_mm_token_field(item["negative_prompt_mask"]),
+                "encode_start_idx": item.get("encode_start_idx", 0),
+            }
+
+        return {
+            "input_ids": torch.tensor(input_ids_batch, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask_batch, dtype=torch.long),
+            "domain": domain,
+            "tag": tag,
+            "id": sample_ids,
+            "ground_truth": ground_truth,
+            "prompt": prompt_text,
+            "multi_modal_data": mm_data,
+        }
 
 
 @dataclass
@@ -279,6 +376,44 @@ def load_images(images, image_metas, **kwargs):
     return sampled_images, sampled_kwargs
 
 
+def is_single_mm_item(modality: str, item: Any) -> bool:
+    if modality == "image":
+        return is_valid_image(item)
+    if modality == "video":
+        if isinstance(item, tuple) and len(item) == 2:
+            # (video, video_metadata) pair consumed by `_get_video_with_metadata` in vllm
+            item = item[0]
+        return is_valid_video(item)
+    if modality == "audio":
+        if isinstance(item, tuple) and len(item) == 2:
+            # (waveform, sampling_rate) pair accepted by vllm audio parser
+            item = item[0]
+        return isinstance(item, (np.ndarray, torch.Tensor)) and item.ndim == 1
+    if modality == "vision_chunk":  # Kimi
+        return isinstance(item, dict)
+    return False
+
+
+def count_mm_items(modality: str, data: Any) -> Optional[int]:
+    if not isinstance(data, list):
+        return 1 if is_single_mm_item(modality, data) else None
+    if data and all(is_single_mm_item(modality, item) for item in data):
+        return len(data)
+    return None
+
+
+def build_mm_uuids(multi_modal_data: Dict[str, Any]) -> Optional[Dict[str, List[str]]]:
+    mm_uuids = {}
+    base_uuid = uuid_lib.uuid4().hex
+    for modality, data in multi_modal_data.items():
+        count = count_mm_items(modality, data)
+        if count is None:
+            logger.warning(f"cannot count {modality} items of type {type(data)}, skip multi_modal_uuids")
+            return None
+        mm_uuids[modality] = [f"{base_uuid}-{modality}-{i}" for i in range(count)]
+    return mm_uuids
+
+
 @dataclass
 class DataCollatorWithPaddingForMM:
     tokenizer: Optional[PreTrainedTokenizerBase] = None
@@ -326,12 +461,16 @@ class DataCollatorWithPaddingForMM:
     # padded fields from processor outputs, mainly for llm input fields, maybe rename later
     padded_keys: List[str] = field(default_factory=lambda: ["input_ids", "attention_mask", "labels"])
     # unused fields from processor outputs
-    processor_unused_keys: List[str] = field(default_factory=lambda: ["prompt", "position_ids", "rope_deltas"])
+    # mm_token_type_ids: transformers>=5.0 Qwen VL processors emit mm_token_type_ids (per-token modality ids consumed by HF models for M-RoPE)
+    processor_unused_keys: List[str] = field(default_factory=lambda: ["prompt", "position_ids", "rope_deltas", "mm_token_type_ids"])
     # unpaded fields from feature
     extra_unpadded_keys: List[str] = field(default_factory=lambda: [])
     return_tensors: str = "pt"
     return_infer_inputs: bool = True  # whether to include infer engine inputs which differs with train
     return_train_inputs: bool = True  # maybe set to False in multi-turn rollout to reduce overhead
+    # generate random per item ids for the infer engine to hash instead of the raw media content,
+    # only valid when all requests of one prompt reuse this collated result, see `build_mm_uuids`
+    generate_mm_uuids: bool = False
     # use lower precision for multi-modal feature values to reduce store and transfer overhead by ray
     mm_feature_dtype: Optional[str] = None
     mm_feature_names: List[str] = field(
@@ -339,9 +478,13 @@ class DataCollatorWithPaddingForMM:
     )
 
     def __post_init__(self):
+        if hasattr(self.processor, "media_processor"):  # Kimi
+            patch_size = self.processor.media_processor.media_proc_cfg["patch_size"]
+        else:
+            patch_size = self.processor.image_processor.patch_size
         if self.video_load_sample_fn is None:
             self.video_load_sample_fn = partial(
-                load_videos, image_patch_size=self.processor.image_processor.patch_size
+                load_videos, image_patch_size=patch_size
             )
             self._default_video_processor_mm_kwargs = {
                 # sample and resize have been done in default video_load_sample_fn
@@ -352,22 +495,23 @@ class DataCollatorWithPaddingForMM:
                 "fps": None,
                 "video_metadata": None,
             }
+            if hasattr(self.processor, "media_processor"):
+                self._default_video_processor_mm_kwargs = {}
         if self.image_load_sample_fn is None:
             self.image_load_sample_fn = partial(
-                load_images, image_patch_size=self.processor.image_processor.patch_size
+                load_images, image_patch_size=patch_size
             )
             # avoid duplicate operation in processor, while it might conflict with video do_resize
             # if one does and the other does not
             self._default_image_processor_mm_kwargs = {"do_resize": False}
+            if hasattr(self.processor, "media_processor"):
+                self._default_image_processor_mm_kwargs = {}
         if self.audio_load_sample_fn is None:
             self.audio_load_sample_fn = load_audios
             self._default_audio_processor_mm_kwargs = {}
         if self.processor.__class__.__name__.startswith("Qwen3Omni"):
             self.processor_mm_kwargs.update({"use_audio_in_video": self.use_audio_in_video})
             # refer to https://github.com/vllm-project/vllm/issues/26630
-            from packaging.version import Version
-            from transformers import __version__ as TRANSFORMERS_VERSION
-
             if Version(TRANSFORMERS_VERSION) < Version("4.58.0") and "truncation" not in self.processor_mm_kwargs:
                 self.processor_mm_kwargs["truncation"] = False
         else:
@@ -525,12 +669,21 @@ class DataCollatorWithPaddingForMM:
                     )
                 )
             # compatibility for qwen2.5-vl/qwen3-vl/qwen3-omni, subject to change
-            # NOTE: qwen3-omni processor only supports single value fps, hack to work around temporarily
             if (
-                self.processor.__class__.__name__.startswith("Qwen3Omni")
+                (
+                    self.processor.__class__.__name__.startswith("Qwen3Omni")
+                    or Version(TRANSFORMERS_VERSION) >= Version("5.0.0")
+                )
                 and "fps" in processor_kwargs
                 and isinstance(processor_kwargs["fps"], list)
             ):
+                # NOTE: hack to work around temporarily:
+                # 1. qwen3-omni processor only supports single value fps
+                # 2. transformers >= 5.0 strictly validates processor kwargs types (fps must be
+                # int/float/None) and raises StrictDataclassFieldValidationError for the
+                # per-video list fps, fallback to the first value to keep a valid single fps;
+                # transformers < 5.0 accepts the per-video list fps (e.g. qwen2.5-vl/vllm
+                # compute per-video timestamps with it), keep the list to preserve behavior
                 assert all(fps == processor_kwargs["fps"][0] for fps in processor_kwargs["fps"]), (
                     f"{self.processor.__class__} only support single value fps currently"
                 )
@@ -605,9 +758,21 @@ class DataCollatorWithPaddingForMM:
 
             if self.return_train_inputs:
                 # model_inputs are mainly for train engine
-                model_inputs: BatchFeature = self.processor(
-                    images=images, videos=videos, audio=audios, text=prompt, **processor_kwargs
-                )
+                medias = []
+                if images is not None:
+                    for image in images:
+                        medias.append({"type": "image", "image": image})
+                if videos is not None:
+                    for video in videos_for_audio:
+                        medias.append({"type": "video", "video": video})
+                if hasattr(self.processor, "media_processor"):
+                    updated_medias, video_prompts = self.processor.preprocess_medias(medias)
+                    model_inputs: BatchFeature = self.processor(medias=medias, text=prompt, **processor_kwargs)
+                    prompt = self.processor.update_raw_text(prompt, video_prompts)
+                else:
+                    model_inputs: BatchFeature = self.processor(
+                        images=images, videos=videos, audio=audios, text=prompt, **processor_kwargs
+                    )
                 if not isinstance(model_inputs, BatchFeature):
                     model_inputs = BatchFeature(data=model_inputs)
                 # TODO: maybe use processor produced position_ids
@@ -640,27 +805,34 @@ class DataCollatorWithPaddingForMM:
                     }
                 )
                 multi_modal_data = {}
-                if images:
-                    multi_modal_data["image"] = images
-                if audios:
-                    multi_modal_data["audio"] = audios
-                if videos:
-                    # compatibility for qwen2.5-vl/qwen3-vl/qwen3-omni, subject to change
-                    # NOTE: video_mata is used as kwargs in hf while it is put into video for qwen3-vl in vllm==0.11.1,
-                    # see: https://github.com/QwenLM/Qwen3-VL?tab=readme-ov-file#offline-inference
-                    # hash error occurs for video_metadata when used as mm_kwargs in vllm==0.11.1
-                    # avoid vllm version incompatibility for video meta and only use it for qwen3-vl
-                    # since video meta only after https://github.com/vllm-project/vllm/pull/19331
-                    video_metas = processor_kwargs.pop("video_metadata", video_metas)
-                    if self.processor.__class__.__name__.startswith("Qwen3VL") and isinstance(video_metas, list):
-                        # vllm gets video num using `n = len(data) if isinstance(data, list) else 1` for mm_uuids
-                        # in `_maybe_build_mm_uuids` and gets video and video_meta from tuple in `_get_video_with_metadata`
-                        videos = list(zip(videos, video_metas))
-                    multi_modal_data["video"] = videos
+                if hasattr(self.processor, "media_processor"):
+                    multi_modal_data["vision_chunk"] = updated_medias
+                else:
+                    if images:
+                        multi_modal_data["image"] = images
+                    if audios:
+                        multi_modal_data["audio"] = audios
+                    if videos:
+                        # compatibility for qwen2.5-vl/qwen3-vl/qwen3-omni, subject to change
+                        # NOTE: video_mata is used as kwargs in hf while it is put into video for qwen3-vl in vllm==0.11.1,
+                        # see: https://github.com/QwenLM/Qwen3-VL?tab=readme-ov-file#offline-inference
+                        # hash error occurs for video_metadata when used as mm_kwargs in vllm==0.11.1
+                        # avoid vllm version incompatibility for video meta and only use it for qwen3-vl
+                        # since video meta only after https://github.com/vllm-project/vllm/pull/19331
+                        video_metas = processor_kwargs.pop("video_metadata", video_metas)
+                        if self.processor.__class__.__name__.startswith("Qwen3VL") and isinstance(video_metas, list):
+                            # vllm gets video num using `n = len(data) if isinstance(data, list) else 1` for mm_uuids
+                            # in `_maybe_build_mm_uuids` and gets video and video_meta from tuple in `_get_video_with_metadata`
+                            videos = list(zip(videos, video_metas))
+                        multi_modal_data["video"] = videos
                 if multi_modal_data:
                     un_padded_features["multi_modal_data"][-1]["multi_modal_data"] = multi_modal_data
                     # vllm use mm_processor_kwargs to call processor and select processor output fileds by model defination
                     un_padded_features["multi_modal_data"][-1]["mm_processor_kwargs"] = processor_kwargs
+                    if self.generate_mm_uuids:
+                        mm_uuids = build_mm_uuids(multi_modal_data)
+                        if mm_uuids:
+                            un_padded_features["multi_modal_data"][-1]["multi_modal_uuids"] = mm_uuids
 
             if self.answer_key:
                 un_padded_features[self.answer_key].append(feature[self.answer_key])

@@ -4,44 +4,40 @@ Utilities for handling router replay functionality in Megatron models.
 ref from https://github.com/verl-project/verl/blob/cb236075dbf1f9b89660d5e2f28e30f3268ec7ee/verl/utils/megatron/router_replay_utils.py
 """
 
+import inspect
 from typing import Optional
 
 import torch
 from megatron.core import parallel_state as mpu
 from megatron.core.pipeline_parallel.schedules import get_schedule_table
-from megatron.core.pipeline_parallel.utils import is_vp_first_stage, is_vp_last_stage
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region, scatter_to_sequence_parallel_region
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
 
-from roll.third_party.megatron.util import postprocess_packed_seqs, preprocess_packed_seqs
 # from roll.third_party.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 from megatron.core.transformer.moe.router_replay import (
     RouterReplay,
     RouterReplayAction,
 )
 
+from roll.utils.logging import get_logger
 
-def get_routed_experts_dtype(max_expert_idx: int) -> torch.dtype:
-    """Select the minimal dtype for storing routed expert indices.
+logger = get_logger()
 
-    Uses uint8 when all indices fit in 0-255 (1 byte per element),
-    otherwise falls back to int16 (2 bytes per element, range 0-32767).
 
-    Args:
-        max_expert_idx: Maximum expert index value.
+def get_expert_dtype(num_moe_experts: int) -> torch.dtype:
+    """Statically select minimal dtype for expert indices based on model config.
 
-    Returns:
-        torch.dtype: uint8 if max_expert_idx <= 255, int16 otherwise.
+    Uses tf_config.num_moe_experts (unified Megatron field) to determine the
+    minimal dtype without a runtime .max().item() GPU sync. This is safe because
+    router top-k indices are always in [0, num_moe_experts - 1].
     """
-    if max_expert_idx <= 255:
+    if num_moe_experts <= 256:
         return torch.uint8
-    assert max_expert_idx <= 32767, (
-        f"Expert index {max_expert_idx} exceeds int16 range (0-32767). "
-        f"Consider using a larger dtype."
-    )
-    return torch.int16
+    elif num_moe_experts <= 65536:
+        return torch.uint16
+    return torch.uint32
 
 
 def get_device_name() -> str:
@@ -60,104 +56,166 @@ def get_device_name() -> str:
     return device
 
 
-def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None):
+def is_moe_layer(tf_config, layer_idx):
+    moe_layer_freq = getattr(tf_config, "moe_layer_freq", None)
+
+    if moe_layer_freq is None:
+        return True
+    elif isinstance(moe_layer_freq, int):
+        return layer_idx % moe_layer_freq == 0
+    elif isinstance(moe_layer_freq, list):
+        return moe_layer_freq[layer_idx] == 1
+    else:
+        raise ValueError(f"Unsupported moe_layer_freq type: {type(moe_layer_freq)}")
+
+
+def get_moe_num_layers_to_build(
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+) -> int:
+    """Count the number of MoE layers assigned to the current rank.
+    When ``moe_layer_freq`` is 1 or unset, every transformer layer is an MoE
+    layer, so the count equals the total layer count. Otherwise only layers
+    whose global index satisfies the frequency predicate are counted.
+    Args:
+        config: Megatron TransformerConfig providing layer layout information.
+        vp_stage: Virtual-pipeline stage index (None defaults to current).
+        pp_rank: Pipeline-parallel rank (None defaults to current).
+    Returns:
+        Number of MoE layers on the specified rank/stage.
     """
-    Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
-    then pack/unpack them to align with the original (batch, seq_len) layout and append the result.
+    total_layers = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
+
+    sig = inspect.signature(get_transformer_layer_offset)
+    # core 0.12.1 is not support vp_stage and pp_rank as parameters
+    if "vp_stage" in sig.parameters and "pp_rank" in sig.parameters:
+        layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
+    elif "pp_rank" in sig.parameters:
+        layer_offset = get_transformer_layer_offset(config, pp_rank=pp_rank)
+    else:
+        layer_offset = get_transformer_layer_offset(config)
+
+    local_global_indices = range(layer_offset, layer_offset + total_layers)
+
+    num_moe_layers = sum(1 for idx in local_global_indices if is_moe_layer(config, idx))
+
+    return num_moe_layers
+
+
+def collect_r2_router_indices(tf_config, vp_rank: int) -> Optional[torch.Tensor]:
+    """Collect recorded router top-k indices for R2 mode after model forward.
+
+    Gathers recorded_topk_idx from all router instances for the current VP chunk,
+    performs dtype optimization, stack, permute, and SP gather. Returns the raw
+    gathered tensor for the caller to unpack/reshape as needed.
 
     Args:
-        attention_mask (torch.Tensor): Attention mask of shape [batch_size, seq_len]. Used to determine
-            the valid token positions during pack/unpack.
-        input_ids (torch.Tensor): Input token IDs of shape [batch_size, seq_len]. Used together with
-            attention_mask for sequence packing/unpacking.
-        mini_layer_topk_idx_list (list): A Python list to which the merged top-k indices tensor will be appended.
-        tf_config: Megatron/Transformer engine configuration object. Used to locate router instances for
-            the current micro-batch.
-        vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
-            Megatron parallel state will be used.
+        tf_config: Megatron TransformerConfig providing layer layout information.
+        vp_rank: Virtual pipeline stage rank for this micro-batch.
 
     Returns:
-        None: The function has side effects only; it appends a tensor of shape
-        [1, dynamic_bs_all, layer_num, topk] to mini_layer_topk_idx_list.
+        Tensor of shape [1, tokens_all, moe_layers_in_vp, topk] on the current
+        device, or None if no router instances are found.
     """
-    with torch.no_grad():
-        router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
-        max_expert_idx = max(int(r.recorded_topk_idx.max().item()) for r in router_instances_list)
-        expert_dtype = get_routed_experts_dtype(max_expert_idx)
-        layers_topk_idx = []
-        for router in router_instances_list:
-            layers_topk_idx.append(router.recorded_topk_idx.to(expert_dtype))
+    router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
+    if not router_instances_list:
+        return None
 
-        # layer_num, dynamic_bs, topk  -> dynamic_bs, layer_num, topk
-        layers_topk_idx = torch.stack(layers_topk_idx).permute(1, 0, 2).to(device_name)
-        # dynamic_bs, layer_num, topk -> 1, dynamic_bs_all, layer_num, topk
-        layers_topk_idx = (
-            gather_from_sequence_parallel_region(layers_topk_idx, tensor_parallel_output_grad=False)
-            .unsqueeze(0)
-            .contiguous()
+    expert_dtype = get_expert_dtype(tf_config.num_moe_experts)
+
+    # Stack recorded indices: [moe_layers_in_vp, tokens_local, topk]
+    layers_topk_idx = torch.stack([r.recorded_topk_idx.to(expert_dtype) for r in router_instances_list])
+    # -> [tokens_local, moe_layers_in_vp, topk]
+    layers_topk_idx = layers_topk_idx.permute(1, 0, 2).to(get_device_name())
+
+    # SP gather -> [tokens_all, moe_layers_in_vp, topk], unsqueeze -> [1, tokens_all, moe_layers_in_vp, topk]
+    layers_topk_idx = (
+        gather_from_sequence_parallel_region(layers_topk_idx, tensor_parallel_output_grad=False)
+        .unsqueeze(0)
+        .contiguous()
+    )
+    return layers_topk_idx
+
+
+def finalize_r2_routed_experts(
+    router_topk_indices_list: list,
+    tf_config,
+    num_microbatches: int,
+) -> torch.Tensor:
+    """Finalize R2 routed experts by merging VPP layers and gathering across PP ranks.
+
+    Handles VPP reordering (if vp_size > 1) and PP all-gather to produce the
+    global routed_experts tensor. Sequence-packing restore_results_order is
+    left to the caller.
+
+    Args:
+        router_topk_indices_list: List of per-micro-batch tensors, each of shape
+            [mbs, seq_length, moe_layers_in_vp, topk].
+        tf_config: Megatron TransformerConfig providing VPP and PP info.
+        num_microbatches: Number of microbatches in this forward step.
+
+    Returns:
+        Tensor of shape [bs, max_seq_len, total_moe_layers, topk] on CPU.
+    """
+    vp_size = tf_config.virtual_pipeline_model_parallel_size
+    if vp_size is not None and vp_size > 1:
+        microbatch_group_size_per_vp_stage = tf_config.microbatch_group_size_per_vp_stage
+        layers_topk_idx = reorder_and_merge_vpp_layers(
+            router_topk_indices_list, num_microbatches, vp_size, microbatch_group_size_per_vp_stage
         )
+    else:
+        layers_topk_idx = torch.cat(router_topk_indices_list, dim=0)
 
-        batch_size, seq_len = attention_mask.shape[:2]
-        _, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
-        layers_topk_idx = postprocess_packed_seqs(
-            layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
-        )
-        mini_layer_topk_idx_list.append(layers_topk_idx.cpu())
+    layers_topk_idx = pp_gather(layers_topk_idx, tf_config)
+    return layers_topk_idx
 
 
-def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=None):
+def set_router_replay_data(layers_topk_idx, tf_config, vp_rank=None):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
     RouterReplay instance with target indices for replay mode.
 
-    This function prepares the per-layer, per-sample top-k routing decisions (recorded during an earlier
-    forward) so that subsequent replay passes can follow exactly the same routing.
-
     Args:
         layers_topk_idx (torch.Tensor): Router top-k indices with shape [bs, max_seq_len, layer_num, topk].
-            This should be the merged output produced by merge_router_topk_indices.
-        attention_mask (torch.Tensor): Attention mask [batch_size, seq_len] used for pack/unpack alignment.
         tf_config: Megatron/Transformer engine configuration object.
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
-
-    Returns:
-        None: The function updates internal RouterReplay instances in-place.
     """
     with torch.no_grad():
-        # layers_topk_idx_rmpad, _ = preprocess_packed_seqs(layers_topk_idx, attention_mask, pre_process=True)
-        # layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
-
-        # # 1, dynamic_bs_split, layer_num, topk
-        # layers_topk_idx_rmpad_split = scatter_to_sequence_parallel_region(
-        #     layers_topk_idx_rmpad.to(device_name).squeeze(dim=0)
-        # ).unsqueeze(dim=0)
-
-        # # dynamic_bs_split, layer_num, topk -> layer_num, dynamic_bs_split, topk
-        # layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
-        #     dim=0
-        # )  # layer_num, dynamic_bs_all, topk
         local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
         offset = local_rank_info["start"]
 
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
 
-        # 1. [bsz, seq_len, layer_num, topk] -> [seq_len, bsz, layer_num, topk]
         layers_topk_idx = layers_topk_idx.permute(1, 0, 2, 3).contiguous()
-
-        # 2. SP split along seq_len -> [seq_len/sp, bsz, layer_num, topk]
         layers_topk_idx = scatter_to_sequence_parallel_region(layers_topk_idx.to(get_device_name()))
 
-        # 3. reshape -> [seq_len/sp * bsz, layer_num, topk]
-        #    flatten order: seq_len outer, bsz inner — matches router's logits.view(-1, num_experts)
         layers_topk_idx = layers_topk_idx.reshape(-1, layers_topk_idx.shape[2], layers_topk_idx.shape[3])
-
-        # 4. permute -> [layer_num, seq_len/sp * bsz, topk]
         layers_topk_idx = layers_topk_idx.permute(1, 0, 2).contiguous()
 
-        # 5. Per layer: [seq_len/sp * bsz, topk] — aligned with scores [seq_len/sp * bsz, num_experts]
-        for i, router in enumerate(router_instances_list):
-            router.set_target_indices(layers_topk_idx[i + offset].to(torch.int64))
+        num_layers_in_tensor = layers_topk_idx.shape[0]
+        index_by_layer = (num_layers_in_tensor == tf_config.num_layers)
+        end = local_rank_info["end"]
+        moe_idx = sum(1 for i in range(offset) if is_moe_layer(tf_config, i))
+        router_offset = 0
+        for layer_idx in range(offset, end):
+            if not is_moe_layer(tf_config, layer_idx):
+                continue
+            idx = layer_idx if index_by_layer else moe_idx
+            raw = layers_topk_idx[idx].to(torch.int64)
+            # Sanitize invalid expert indices (e.g. -1 sentinels from SGLang, or 255 after
+            # uint8 wrap). Out-of-range rows get dropped from routing_map, which desyncs
+            # the MoE all-to-all split sizes against the dispatched token count.
+            target = raw.clamp(0, tf_config.num_moe_experts - 1)
+            router_instances_list[router_offset].set_target_indices(target)
+            router_offset += 1
+            moe_idx += 1
+        if router_offset != len(router_instances_list):
+            error_msg = (
+                f"[RouterReplay] set {router_offset} routers but expected "
+                f"{len(router_instances_list)}; unset routers keep stale targets"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
 
 def reorder_and_merge_vpp_layers(
@@ -229,20 +287,34 @@ def get_current_rank_layer_info(tf_config, vp_rank=None):
     return local
 
 
+def _compute_moe_layers_per_pp(tf_config):
+    """Compute total MoE layer count for each PP rank from config (no communication needed)."""
+    pp_size = tf_config.pipeline_model_parallel_size
+    vp_size = tf_config.virtual_pipeline_model_parallel_size
+    moe_layers_per_pp = []
+    for pp_rank in range(pp_size):
+        if vp_size is not None:
+            total = sum(get_moe_num_layers_to_build(tf_config, vp_stage, pp_rank) for vp_stage in range(vp_size))
+        else:
+            total = get_moe_num_layers_to_build(tf_config, pp_rank=pp_rank)
+        moe_layers_per_pp.append(total)
+    return moe_layers_per_pp
+
+
 def pp_gather(local_layers_router_map, tf_config):
-    # TODO: Consider non-uniform layer allocation cases.
     """
     Gather local router maps from all PP ranks into a global router map.
-    pp_gather 是为 R2 模式（Megatron 推理 + Megatron 训练）设计的辅助函数，用于：
-    在 Pipeline Parallel（PP）场景下，将各 PP rank 上记录的局部 router map 汇聚成全局 router map。
+
+    Supports non-uniform MoE layer distribution across PP ranks by padding
+    the layer dimension to the maximum before all_gather, then slicing back.
 
     Args:
         local_layers_router_map (torch.Tensor): Local router map of shape
-            [bs, max_seq_len, local_num_layers, topk].
+            [bs, max_seq_len, local_moe_layers, topk].
         tf_config: Configuration providing pipeline_model_parallel_size.
 
     Returns:
-        torch.Tensor: Global router map of shape [bs, max_seq_len, num_layers, topk] placed on CPU.
+        torch.Tensor: Global router map of shape [bs, max_seq_len, total_moe_layers, topk] on CPU.
     """
     pp_size = tf_config.pipeline_model_parallel_size
     if pp_size <= 1:
@@ -250,7 +322,23 @@ def pp_gather(local_layers_router_map, tf_config):
 
     pp_group = mpu.get_pipeline_model_parallel_group()
     world_size = torch.distributed.get_world_size(pp_group)
-    local_layers_router_map = local_layers_router_map.to(device_name)
+    local_layers_router_map = local_layers_router_map.to(get_device_name())
+
+    moe_layers_per_pp = _compute_moe_layers_per_pp(tf_config)
+    max_moe_layers = max(moe_layers_per_pp)
+    local_moe_layers = local_layers_router_map.shape[2]
+
+    # Pre-allocate max-size buffer and copy in to avoid temporary doubling from F.pad
+    if local_moe_layers < max_moe_layers:
+        padded = torch.zeros(
+            (*local_layers_router_map.shape[:2], max_moe_layers, local_layers_router_map.shape[3]),
+            dtype=local_layers_router_map.dtype,
+            device=local_layers_router_map.device,
+        )
+        padded[:, :, :local_moe_layers, :] = local_layers_router_map
+        del local_layers_router_map
+        local_layers_router_map = padded
+
     layers_topk_idx_global_list = [
         torch.empty(
             size=local_layers_router_map.shape,
@@ -265,13 +353,20 @@ def pp_gather(local_layers_router_map, tf_config):
         group=pp_group,
         async_op=False,
     )
+
+    # Slice each rank's tensor back to its actual MoE layer count
+    for i in range(world_size):
+        actual = moe_layers_per_pp[i]
+        if actual < max_moe_layers:
+            layers_topk_idx_global_list[i] = layers_topk_idx_global_list[i][:, :, :actual, :]
+
     vp_size = tf_config.virtual_pipeline_model_parallel_size
     if vp_size is not None:
         vpp_router_map_offset = [[] for _ in range(pp_size)]
         for pp_stage in range(pp_size):
             vpp_router_map_offset[pp_stage].append(0)
             for vp_stage in range(vp_size):
-                num_layers_to_build = get_num_layers_to_build(tf_config, vp_stage, pp_stage)
+                num_layers_to_build = get_moe_num_layers_to_build(tf_config, vp_stage, pp_stage)
                 vpp_router_map_offset[pp_stage].append(num_layers_to_build + vpp_router_map_offset[pp_stage][-1])
         layers_topk_idx_global = []
         for vp_stage in range(vp_size):
@@ -312,13 +407,12 @@ class RouterReplayHelper:
             for pre_vp_stage in range(vp_size):
                 if pre_vp_stage == vp_rank:
                     break
-                num_layers_to_build = get_num_layers_to_build(tf_config, pre_vp_stage)
-                offset += num_layers_to_build
+                offset += get_moe_num_layers_to_build(tf_config, pre_vp_stage)
         else:
             offset = 0
 
-        num_layers_to_build = get_num_layers_to_build(tf_config, vp_rank)
-        router_instances_list = RouterReplay.global_router_replay_instances[offset : offset + num_layers_to_build]
+        num_layers_to_build = get_moe_num_layers_to_build(tf_config, vp_rank)
+        router_instances_list = RouterReplay.global_router_replay_instances[offset: offset + num_layers_to_build]
         return router_instances_list
 
     @staticmethod
@@ -355,4 +449,3 @@ class RouterReplayHelper:
             router_instances_list
             and router_instances_list[0].router_replay_action == RouterReplayAction.REPLAY_BACKWARD
         )
-

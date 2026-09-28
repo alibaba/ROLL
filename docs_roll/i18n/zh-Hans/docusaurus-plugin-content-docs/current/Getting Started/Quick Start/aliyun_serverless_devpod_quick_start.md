@@ -14,7 +14,7 @@
 
 1.  点击 **创建模型 - 自定义开发**。
 2.  选择 **自定义环境**，并按如下配置：
-    *   **容器镜像**：选择不可公开访问的自定义镜像 - 容器镜像地址 - `roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-vllm084`
+    *   **容器镜像**：选择不可公开访问的自定义镜像 - 容器镜像地址 - `roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-25.06-py3-torch280-vllm0110`
     *   **模型名称**：输入一个名称，例如 `roll-dev`
     *   **模型来源**：选中 `无模型`
     *   **启动命令**：保持默认，无需修改
@@ -35,7 +35,7 @@ git clone https://github.com/alibaba/ROLL.git
 
 # 2. 安装项目依赖
 cd ROLL
-pip install -r requirements_torch260_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/
+pip install -r requirements_torch280_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/
 ```
 
 ### 运行 pipeline 示例

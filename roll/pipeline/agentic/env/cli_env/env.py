@@ -27,7 +27,7 @@ class CLIEnv(Env):
         max_steps: int = 20,
         workspace_dir: str = "/tmp/cli_workspace",
         sandbox_image: str = "hub.docker.alibaba-inc.com/chatos/iflow-cli:4.0",  # version
-        sandbox_base_url: str = "https://xrl-sandbox.alibaba-inc.com",
+        sandbox_base_url: str = "http://localhost:8080",
         auto_clear_seconds: int = 60 * 20,  # 20 minutes
         format_penalty: float = -0.1,
         debug_info: bool = False,

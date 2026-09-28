@@ -1,7 +1,10 @@
 import argparse
 
 from dacite import from_dict
-from hydra.experimental import compose, initialize
+try:
+    from hydra import compose, initialize
+except ImportError:
+    from hydra.experimental import compose, initialize
 from omegaconf import OmegaConf
 
 from roll.distributed.scheduler.initialize import init

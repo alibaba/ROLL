@@ -18,8 +18,8 @@ ROLL 框架支持 **RemoteBatch**，一种惰性数据传输机制，将数据�
 - **ColumnRemoteBatch**：以**列 ID** 为键存储数据的具体 `RemoteBatch` 实现（每个字段/列一个键）。**RayMemoryStore** 后端使用此实现。
 - **BatchProxy**：包装本地 `TensorDict`（或 `dict`）和 `RemoteBatch` 的代理对象，支持透明的回退查找。访问键时，先检查本地 batch，再回退到远程 batch。
 - **传输后端（Transfer Backend）**：负责 `put`、`get` 和 `delete` 操作的可插拔存储后端。目前支持的后端：
-  - `None`（Dummy）：无远程存储，数据保留在本地（默认）。
-  - `TransferQueue`：使用 [TransferQueue](https://github.com/kvcache-ai/TransferQueue) 库进行高性能分布式键值传输。
+  - `None`（Dummy）：无远程存储，数据保留在本地。需显式设置 `backend_name: null` 才会启用。
+  - `TransferQueue`（默认）：使用 [TransferQueue](https://github.com/kvcache-ai/TransferQueue) 库进行高性能分布式键值传输。
 
 ### 工作原理
 
@@ -30,7 +30,7 @@ ROLL 框架支持 **RemoteBatch**，一种惰性数据传输机制，将数据�
 
 ## 配置
 
-传输后端通过 ROLL 顶层配置中的 `transfer_backend` 字段进行配置：
+传输后端通过 ROLL 顶层配置中的 `transfer_backend` 字段进行配置。下面这段就是默认值，因此可以直接省略：
 
 ```yaml
 transfer_backend:
@@ -42,10 +42,14 @@ transfer_backend:
 ```
 
 - `backend_name`：要使用的传输后端名称。
-  - `null`（默认）：禁用远程传输，所有数据保留在本地。未配置 `transfer_backend` 时的默认行为。
-  - `TransferQueue`：使用 TransferQueue 库进行高性能数据传输。
+  - `TransferQueue`（默认）：使用 TransferQueue 库进行高性能数据传输。未配置 `transfer_backend` 时的默认行为。
+  - `null`：禁用远程传输，所有数据保留在本地。只有 `rlvr`、`rlvr_vlm`、`agentic` 和 `diffusion` 会调用 `to_remote`，其他 pipeline 无论怎么配都仍走本地路径。
 - `backend_config`：后端特定的配置字典。对于 TransferQueue，对应 TransferQueue 的初始化配置。
-  - `backend.SimpleStorage.num_data_storage_units`：数据分片的存储单元数量。可以根据 CPU 核数和集群节点数进行配置。`msgpack` 序列化单个对象有最大 4GB 的限制，因此传输大数据时需要更多的 storage unit 来将 `non_tensor_batch` 分片成更小的块。
+  - `backend.SimpleStorage.num_data_storage_units`：数据分片的存储单元数量（默认 16）。每个 unit 是一个绑定 1 个 CPU 的 Ray actor，put/get 会按 unit 并行 scatter。`msgpack` 序列化单个对象有最大 4GB 的限制，因此传输大数据时需要更多的 storage unit 来将 `non_tensor_batch` 分片成更小的块。
+
+:::caution CPU 资源要求
+每个 unit 预留 1 个 CPU，controller 再加 1 个。由于 `ResourceManager` 已经预留了每个节点一半的 CPU，16 个 unit 大约需要单节点 34 个以上 CPU。CPU 不够时 ROLL 会在启动阶段直接抛出 `RuntimeError`，**不会自动降级**（TransferQueue 内部 `ray.get(pg.ready())` 没有超时，否则只会静默卡死）。报错信息里会给出当前能配置的最大值，需要手动把 `num_data_storage_units` 调小后重新启动。
+:::
 
 ### Agentic Pipeline 优化
 

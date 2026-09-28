@@ -3,6 +3,7 @@ On-Policy Distill Pipeline Launcher
 
 Supports both RLVR and Agentic pipelines based on `pure_opd_pipeline_type` config field:
 - 'rlvr' (default): Uses RLVRConfig + RLVRPipeline
+- 'rlvr_vlm': Uses RLVRConfig + RLVRVLMPipeline
 - 'agentic': Uses AgenticConfig + AgenticPipeline
 """
 
@@ -15,6 +16,7 @@ from omegaconf import OmegaConf
 from roll.distributed.scheduler.initialize import init
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.rlvr_pipeline import RLVRPipeline
+from roll.pipeline.rlvr.rlvr_vlm_pipeline import RLVRVLMPipeline
 from roll.pipeline.agentic.agentic_config import AgenticConfig
 from roll.pipeline.agentic.agentic_pipeline import AgenticPipeline
 
@@ -23,7 +25,7 @@ def main():
     parser.add_argument(
         "--config_path",
         type=str,
-        default="examples/qwen3-8B-onpolicy-distill-megatron",
+        default="distill/on_policy/llm",
         help="Directory path where the config file is located"
     )
     parser.add_argument(
@@ -62,6 +64,10 @@ def main():
         print("OPD pipeline type: agentic")
         pipeline_config = from_dict(data_class=AgenticConfig, data=config_dict, config=dacite_config)
         pipeline_cls = AgenticPipeline
+    elif pure_opd_pipeline_type == "rlvr_vlm":
+        print("OPD pipeline type: rlvr_vlm")
+        pipeline_config = from_dict(data_class=RLVRConfig, data=config_dict, config=dacite_config)
+        pipeline_cls = RLVRVLMPipeline
     else:
         print("OPD pipeline type: rlvr")
         pipeline_config = from_dict(data_class=RLVRConfig, data=config_dict, config=dacite_config)

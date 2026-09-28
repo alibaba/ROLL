@@ -160,15 +160,15 @@ actor_infer:
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      distributed_executor_backend: ray
       gpu_memory_utilization: 0.85
       max_model_len: 20480
       load_format: dummy
-      tensor_parallel_size: 16
+      tensor_parallel_size: 8
       pipeline_parallel_size: 1
-      optimization_level: 1
+      data_parallel_size: 4
+      enable_expert_parallel: true
       sleep_level: 2  # 2 will destroy model parameter and kv_cache after generate to save cpu memory, 1 will destroy kv_cache only.
-  device_mapping: list(range(256,320))
+  device_mapping: list(range(256,288))
   infer_batch_size: 1
 
 reference:

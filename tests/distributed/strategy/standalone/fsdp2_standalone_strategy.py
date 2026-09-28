@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
-from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 
 from roll.platforms import current_platform
 from roll.utils.context_parallel import get_ulysses_group, set_upg_manager
@@ -182,8 +182,8 @@ class StandaloneFSDP2Strategy:
         }
 
     def _pick_model_class(self, cfg) -> Any:
-        if type(cfg) in AutoModelForVision2Seq._model_mapping.keys():  # assume built-in models
-            return AutoModelForVision2Seq
+        if type(cfg) in AutoModelForImageTextToText._model_mapping.keys():  # assume built-in models
+            return AutoModelForImageTextToText
         return AutoModelForCausalLM
 
     def _apply_roll_model_patches(self, model: torch.nn.Module, cfg) -> None:

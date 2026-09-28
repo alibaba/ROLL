@@ -62,7 +62,6 @@ class WorkerBase:
     def custom_init_worker(self, *args, **kwargs):
         self.weight_loaded: bool = True
         self.kv_cache_loaded: bool = True
-        self.buffers = None
         self.buffer_cache = None
         self.tensor_lora_manager = TensorLoraManager()
 
@@ -74,10 +73,6 @@ class WorkerBase:
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # before updating the parameters, we need to reinitialize the previously released model
         self.reload_model()
-        if vllm.__version__ < "0.8.5":
-            from roll.third_party.vllm.vllm_utils import patch_vllm_moe_model_weight_loader
-
-            patch_vllm_moe_model_weight_loader(self.model_runner.model)
 
         # Convert to list for multiple iterations (draft model also needs the same weights)
         weights_list = list(weights)
@@ -97,22 +92,11 @@ class WorkerBase:
         if not self.kv_cache_loaded:
             self.wake_up(["kv_cache"])
             self.kv_cache_loaded = True
-        if vllm.__version__ < "0.8.5" and self.buffers is not None:
-            # https://github.com/vllm-project/vllm/issues/16564
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self.buffers:
-                    buffer.data.copy_(self.buffers[name].data)
-            self.buffers = None
 
     def offload_states(self, level):
         assert (self.weight_loaded and self.kv_cache_loaded) or (not self.weight_loaded and not self.kv_cache_loaded)
         if not self.weight_loaded:
             return
-        if vllm.__version__ < "0.8.5" and level == 2:
-            # https://github.com/vllm-project/vllm/issues/16564
-            model = self.model_runner.model
-            self.buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
         self.sleep(level)
         self.weight_loaded = False
         self.kv_cache_loaded = False
@@ -121,6 +105,7 @@ class WorkerBase:
         clear_memory()
 
     def setup_collective_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        assert torch.distributed.is_initialized()
         group_rank = self.rank + rank_offset
         collective.init_collective_group(
             world_size,
@@ -153,7 +138,10 @@ class WorkerBase:
 
     def update_parameter_in_bucket(self, serialized_named_tensors, is_lora=False):
         monkey_patch_torch_reductions()
-        bucket_with_meta = MultiprocessingSerializer.deserialize(serialized_named_tensors[self.rank])
+        assert torch.distributed.is_initialized()
+        bucket_with_meta = MultiprocessingSerializer.deserialize(
+            serialized_named_tensors[self.rank]
+        )
         named_params = named_tensors_from_bucket(**bucket_with_meta)
         if is_lora:
             for name, weight in named_params:

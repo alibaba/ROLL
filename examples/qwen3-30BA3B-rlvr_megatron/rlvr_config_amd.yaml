@@ -79,6 +79,9 @@ whiten_advantages: true
 pretrain: Qwen/Qwen3-30B-A3B-Base
 reward_pretrain: Qwen/Qwen3-30B-A3B-Base
 
+is_offload_states: true
+offload_backend: local  # 1/world pinned chunk per rank + NCCL all-gather on reload
+
 validation:
   data_args:
     template: qwen2_5

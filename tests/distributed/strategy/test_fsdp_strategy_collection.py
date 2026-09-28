@@ -509,7 +509,7 @@ def test_clip_grad_norm_cpu_offload_uses_dummy_helper(
         fsdp2_strategy, "_clip_grads_with_norm_", fake_clip_grads_with_norm_
     )
 
-    returned_norm = strategy._clip_grad_norm(max_norm=1.0)
+    returned_norm = strategy.clip_grad_norm(max_norm=1.0)
 
     assert "total_norm_args" in recorded
     grads_arg, norm_type, err_flag, foreach_flag = recorded["total_norm_args"]
@@ -571,7 +571,7 @@ def _fsdp2_cpu_offload_grad_clip_worker(rank, world_size, port):
         strategy.model = model
         strategy.cpu_offload_enabled = offload_policy is not None
 
-        total_norm = strategy._clip_grad_norm(max_norm=0.5)
+        total_norm = strategy.clip_grad_norm(max_norm=0.5)
         scalar_norm = (
             total_norm.to_local() if hasattr(total_norm, "to_local") else total_norm
         )
@@ -738,7 +738,7 @@ def test_load_states_moves_model_and_optimizer(
     assert captured["non_blocking"] is True
 
 
-def test_offload_states_moves_to_cpu_and_clears_cuda_cache(
+def test_offload_states_puts_model_to_backend_and_clears_cuda_cache(
     strategy_factory, monkeypatch, platform_stub
 ):
     strategy = strategy_factory(FSDP2StrategyBase)
@@ -755,11 +755,30 @@ def test_offload_states_moves_to_cpu_and_clears_cuda_cache(
         FSDP2StrategyBase, "_move_optimizer_states", fake_move
     )
 
+    calls = []
+
+    def fake_offload(self):
+        calls.append("offload")
+        self._offload_keys = [("key", (torch.float32, None))]
+
+    monkeypatch.setattr(
+        FSDP2StrategyBase, "_offload_model_params_to_backend", fake_offload
+    )
+    monkeypatch.setattr(
+        FSDP2StrategyBase,
+        "_reload_model_params_from_backend",
+        lambda self: calls.append("reload"),
+    )
+    monkeypatch.setattr(
+        FSDP2StrategyBase, "_log_offload_summary", lambda self: None
+    )
+
     cache_cleared = {"flag": False}
     monkeypatch.setattr(
-        fsdp2_strategy.torch.cuda,
+        platform_stub,
         "empty_cache",
         lambda: cache_cleared.__setitem__("flag", True),
+        raising=False,
     )
 
     strategy.offload_states(
@@ -770,9 +789,122 @@ def test_offload_states_moves_to_cpu_and_clears_cuda_cache(
         non_blocking=True,
     )
 
-    assert strategy.model.to_calls == [("cpu", True)]
-    assert captured == {}
+    assert calls == ["offload"]
+    assert captured["device"] == torch.device("cpu")
+    assert captured["non_blocking"] is True
     assert cache_cleared["flag"] is True
+
+    # reload comes back from the backend once keys exist
+    strategy.load_states(include=[OffloadStateType.model_params])
+    assert calls == ["offload", "reload"]
+    assert strategy.model.to_calls == []
+
+
+class _FakeDTensorData:
+    """Duck-typed DTensor: only the mesh dim names matter for dedup tagging."""
+
+    def __init__(self, mesh_dim_names):
+        self.device_mesh = SimpleNamespace(mesh_dim_names=list(mesh_dim_names))
+
+
+class _FakeParam:
+    def __init__(self, dtype, data):
+        self.dtype = dtype
+        self.data = data
+
+
+class _FakeMeshDim:
+    def __init__(self, group):
+        self._group = group
+
+    def get_group(self):
+        return self._group
+
+
+class _FakeMesh:
+    def __init__(self, dim_names, groups):
+        self.mesh_dim_names = list(dim_names)
+        self._dims = {name: _FakeMeshDim(group) for name, group in zip(dim_names, groups)}
+
+    def __getitem__(self, name):
+        return self._dims[name]
+
+
+class _RecordingBackend:
+    def __init__(self):
+        self.put_calls = []
+        self.get_calls = []
+        self.delete_calls = []
+
+    def put_tensors(self, key, tensors, replicated_over=True):
+        self.put_calls.append((key, list(tensors), replicated_over))
+
+    def get_tensors(self, key, tensors, device, replicated_over=True):
+        self.get_calls.append((key, list(tensors), device, replicated_over))
+
+    def delete_tensors(self, key, replicated_over=True):
+        self.delete_calls.append((key, replicated_over))
+
+
+def test_param_dedup_tag(monkeypatch):
+    monkeypatch.setattr(fsdp2_strategy, "DTensor", _FakeDTensorData)
+
+    dense = _FakeParam(torch.float32, _FakeDTensorData(["ddp", "fsdp"]))
+    expert = _FakeParam(torch.float32, _FakeDTensorData(["eddp", "efsdp"]))
+    pure_fsdp = _FakeParam(torch.float32, _FakeDTensorData(["fsdp"]))
+    plain = _FakeParam(torch.float32, torch.zeros(1))
+
+    assert FSDP2StrategyBase._param_dedup_tag(dense) == "ddp"
+    assert FSDP2StrategyBase._param_dedup_tag(expert) == "eddp"
+    assert FSDP2StrategyBase._param_dedup_tag(pure_fsdp) is None
+    assert FSDP2StrategyBase._param_dedup_tag(plain) is None
+
+
+def test_offload_model_params_dedup_groups(strategy_factory, monkeypatch):
+    ddp_group, eddp_group = object(), object()
+    backend = _RecordingBackend()
+
+    strategy = strategy_factory(FSDP2StrategyBase)
+    strategy.worker.cluster_name = "actor"
+    strategy.device_mesh = _FakeMesh(["ddp", "fsdp"], [ddp_group, object()])
+    strategy.moe_device_mesh = _FakeMesh(
+        ["eddp", "efsdp", "ep"], [eddp_group, object(), object()]
+    )
+
+    dense = _FakeParam(torch.float32, _FakeDTensorData(["ddp", "fsdp"]))
+    expert = _FakeParam(torch.float32, _FakeDTensorData(["eddp", "efsdp"]))
+    unique = _FakeParam(torch.float32, torch.zeros(1))
+    strategy.model = SimpleNamespace(
+        named_parameters=lambda: iter(
+            [("dense", dense), ("expert", expert), ("unique", unique)]
+        )
+    )
+
+    monkeypatch.setattr(
+        FSDP2StrategyBase, "_get_offload_backend", lambda self: backend
+    )
+
+    expected = [
+        ("fsdp2_actor_params_float32_ddp", ddp_group),
+        ("fsdp2_actor_params_float32_eddp", eddp_group),
+        ("fsdp2_actor_params_float32_nodedup", False),
+    ]
+
+    strategy._offload_model_params_to_backend()
+    assert [(key, group) for key, _, group in backend.put_calls] == expected
+
+    # write-once: keys still live, so re-offload only frees GPU memory
+    backend.put_calls.clear()
+    strategy._offload_model_params_to_backend()
+    assert backend.put_calls == []
+    assert all(p.data.numel() == 0 for p in (dense, expert, unique))
+
+    strategy._reload_model_params_from_backend()
+    assert [(key, group) for key, _, _, group in backend.get_calls] == expected
+
+    strategy._cleanup_offloaded_model_params()
+    assert backend.delete_calls == expected
+    assert strategy._offload_keys == []
 
 
 def test_rng_state_roundtrip(monkeypatch, platform_stub):

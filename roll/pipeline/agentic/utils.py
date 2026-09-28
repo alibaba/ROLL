@@ -21,6 +21,7 @@ from roll.utils.logging import get_logger
 from roll.utils.functionals import (
     masked_whiten,
     compute_gae_advantage_return,
+    compute_skip_observation_gae,
     compute_clip_fraction,
     compute_reinforce_return,
     compute_approx_kl,
@@ -536,6 +537,13 @@ def agentic_compute_advantage(
             data.batch["values"] = values * response_mask
             advantages, returns = compute_gae_advantage_return(
                 token_level_rewards=token_level_rewards, values=values, gamma=gamma, lambd=lambd
+            )
+        elif adv_estimator == "skip_obs_gae":
+            values = data.batch["values"].float()
+            data.batch["values"] = values * response_mask
+            advantages, returns = compute_skip_observation_gae(
+                token_level_rewards=token_level_rewards, values=values,
+                gamma=gamma, lambd=lambd, response_mask=response_mask
             )
         elif adv_estimator in ["reinforce", "grpo", "gigpo", "step_reinforce"]:
             advantages, returns = compute_reinforce_return(

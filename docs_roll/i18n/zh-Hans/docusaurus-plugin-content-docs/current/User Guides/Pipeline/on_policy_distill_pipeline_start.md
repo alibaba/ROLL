@@ -30,6 +30,7 @@
   - [Multi-Teacher OPD](#️multi-teacher-opd多教师蒸馏)
     - [配置示例](#配置示例)
     - [核心机制](#核心机制)
+  - [OPSD（On-Policy Self-Distillation）](#️opsdon-policy-self-distillation)
   - [常见问题](#️常见问题)
   - [参考资料](#参考资料)
 
@@ -132,18 +133,19 @@ advantages = -reverse_kl  # 负号：最小化 KL = 最大化 advantage
 
 纯 OPD 模式复用现有的 Pipeline，根据 `pure_opd_pipeline_type` 配置选择：
 
-- **RLVR 模式**（默认）：使用 `RLVRConfig` + `RLVRPipeline`
+- **RLVR 模式**（默认）：使用 `RLVRConfig` + `RLVRPipeline`（LLM）
+- **RLVR VLM 模式**：使用 `RLVRConfig` + `RLVRVLMPipeline`（视觉语言模型）
 - **Agentic 模式**：使用 `AgenticConfig` + `AgenticPipeline`
 
 主要区别在于：
 
 * **奖励计算方式**：使用 Teacher Model 的 log probabilities 替代外部奖励模型
 * **Advantage 计算**：`advantage = teacher_log_prob - student_log_prob`
-* **Worker 映射**：`student_train` → `actor_train`，`student_infer` → `actor_infer`，`teacher` → `reference`
+* **Worker 映射**：`student_train` → `actor_train`，`student_infer` → `actor_infer`，`teacher` 和/或 `reference` → `reference`（合并到统一的 `_reference_configs`）
 
 **源代码**：
 - 启动脚本：`examples/start_onpolicy_distill_pipeline.py`
-- Pipeline：`roll/pipeline/rlvr/rlvr_pipeline.py` 或 `roll/pipeline/agentic/agentic_pipeline.py`
+- Pipeline：`roll/pipeline/rlvr/rlvr_pipeline.py`（LLM）、`roll/pipeline/rlvr/rlvr_vlm_pipeline.py`（VLM）或 `roll/pipeline/agentic/agentic_pipeline.py`
 - 配置处理：`roll/configs/base_config.py` 中的 `_handle_opd_mapping()` 方法
 
 ---
@@ -187,7 +189,8 @@ token_level_rewards = -reverse_kl  # 纯 KL 信号，无外部奖励
 ```
 
 **支持的 Pipeline 类型**：通过 `pure_opd_pipeline_type` 配置：
-- `"rlvr"`（默认）：使用 RLVRConfig + RLVRPipeline
+- `"rlvr"`（默认）：使用 RLVRConfig + RLVRPipeline（LLM）
+- `"rlvr_vlm"`：使用 RLVRConfig + RLVRVLMPipeline（视觉语言模型）
 - `"agentic"`：使用 AgenticConfig + AgenticPipeline
 
 
@@ -248,9 +251,9 @@ On-Policy Distillation 的 Worker 角色根据模式有所不同：
 |----------|----------|------|
 | `student_train` | `actor_train` | 训练学生模型，使用 Teacher KL 计算损失 |
 | `student_infer` | `actor_infer` | 生成轨迹，计算 student log_probs |
-| `teacher` | `reference` / `references` | 计算 teacher log_probs（支持单个 WorkerConfig 或多 teacher Dict） |
+| `teacher` 和/或 `reference` | `reference` / `references` | 计算 teacher log_probs（支持单个 WorkerConfig 或多 teacher Dict） |
 
-**注意**：配置文件中使用 `student_train`、`student_infer`、`teacher` 名称，系统会自动映射。多 teacher 时 `teacher` 为 `Dict[str, WorkerConfig]`，内部归一化为 `self.references: Dict[str, Cluster]`。
+**注意**：配置文件中使用 `student_train`、`student_infer`、`teacher` 名称，系统会自动映射。`reference` 可与 `teacher` 同时或单独配置——两者合并到统一的 `_reference_configs` 字典（`reference` → `"reference"`，单个 `teacher` → `"default"`，字典 `teacher` → 按字典键）。多 teacher 时 `teacher` 为 `Dict[str, WorkerConfig]`，内部归一化为 `self.references: Dict[str, Cluster]`。
 
 #### 混合模式
 
@@ -303,14 +306,14 @@ On-Policy Distillation 的数据格式与 RLVR 完全相同，**不包含 respon
 ```bash
 # 确保在项目根目录
 python examples/start_onpolicy_distill_pipeline.py \
-    --config_path examples/qwen3-8B-onpolicy-distill-megatron \
+    --config_path distill/on_policy/llm \
     --config_name onpolicy_distill_config
 ```
 
 ### 方法2：使用辅助Shell脚本
 
 ```bash
-bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.sh
+bash examples/distill/on_policy/llm/run_onpolicy_distill_pipeline.sh
 ```
 
 ---
@@ -325,10 +328,10 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `pure_opd_pipeline_type` | Pipeline 类型，可选 `"rlvr"` 或 `"agentic"` | `"rlvr"` |
+| `pure_opd_pipeline_type` | Pipeline 类型，可选 `"rlvr"`、`"rlvr_vlm"` 或 `"agentic"`。仅纯 OPD 模式下可配置，其他模式下配置会直接报错 | `"rlvr"`（未设置时自动填充） |
 | `student_train` | 学生模型训练配置（映射到 actor_train） | 必须配置 |
 | `student_infer` | 学生模型推理配置（映射到 actor_infer） | 必须配置 |
-| `teacher` | 教师模型配置（映射到 reference） | 必须配置 |
+| `teacher` 或 `reference` | 教师/参考模型配置（合并到 _reference_configs） | 必须配置 |
 
 #### 混合模式
 
@@ -337,7 +340,7 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `use_opd` | 启用混合模式 OPD（将 Teacher KL 添加到奖励中） | `false` |
-| `teacher` | 教师模型配置（自动映射到 reference） | 必须配置 |
+| `teacher` 或 `reference` | 教师/参考模型配置（合并到 _reference_configs） | 必须配置 |
 
 #### Multi-Teacher 模式参数
 
@@ -348,6 +351,23 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 | `teacher.{name}.tag_included` | 该教师负责的 tag 列表，空表示全量 | `[]` |
 | `tag_to_template` | 按 tag 选择不同的 chat template | `{}` |
 
+#### 通用 OPD 参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `opd_token_kld_clip` | 可选：在 advantage 计算前将 per-token teacher KL 散度 clamp 到 ±clip，抑制重尾散度。纯 OPD / 混合 OPD / OPSD 模式均生效 | `None` |
+
+#### OPSD 模式参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `opsd_mode` | 启用 OPSD（teacher prompt 注入参考解 y\*）。自动启用 `is_pure_opd=True`；如需混合模式（外部奖励 + KL）显式设 `use_opd=True` | `false` |
+| `opsd_solution_key` | 数据集中参考解字段的列名 | `"reference_solution"` |
+| `opsd_teacher_template` | Teacher prompt 格式化模板，占位符 `{problem}` 和 `{solution}` | 内置默认模板 |
+| `global_template` | Chat 模板名称，用于 teacher prompt 格式化；未设置时回退到 actor 的 `data_args.template` | — |
+| `sequence_length` | Batch 张量总长度。OPSD teacher prompt（problem + y\*）比 student prompt 更长，需设为大于 `prompt_length + response_length` 的值留出 buffer | `prompt_length + response_length` |
+| `opsd_max_solution_length` | 参考解（y\*）的最大 token 长度（可选硬上限）。设置后超过此长度的 solution 会在构建 teacher prompt 前被截断。不设置则自动按 `sequence_length` 截断（动态测量模板 overhead） | `None` |
+
 
 ---
 
@@ -355,7 +375,7 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 
 ### 步骤1：配置设置
 
-* 文件：`examples/qwen3-8B-onpolicy-distill-megatron/onpolicy_distill_config.yaml`
+* 文件：`examples/distill/on_policy/llm/onpolicy_distill_config.yaml`
 * 关键部分包括 `exp_name`、`seed`、`output_dir`、模型路径、`student_train`、`student_infer`、`teacher` 和奖励配置。
 
 * 特别注意这些配置部分：
@@ -380,7 +400,7 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 
 ```bash
 python examples/start_onpolicy_distill_pipeline.py \
-       --config_path examples/qwen3-8B-onpolicy-distill-megatron \
+       --config_path distill/on_policy/llm \
        --config_name onpolicy_distill_config
 ```
 
@@ -568,6 +588,138 @@ teacher:
 
 ---
 
+## ✨️OPSD（On-Policy Self-Distillation）
+
+### 概述
+
+OPSD 是 OPD 的扩展模式：Teacher 在评估 student 生成的 response 时，prompt 中包含**参考解 y\***（特权信息），而非仅原始问题。这让 teacher "知道答案"，从而对通向正确答案的推理路径赋予更高概率，提供更精准的蒸馏信号。
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    OPSD 数据流                                     │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│   Student Infer:                                                 │
+│     prompt = 原始问题（不含 y*）                                   │
+│     → 生成 response                                              │
+│                                                                   │
+│   Teacher Forward:                                               │
+│     prompt = 原始问题 + y* + 指令（特权信息）                      │
+│     + 同一 response tokens                                        │
+│     → 计算 ref_log_probs                                         │
+│     → 对齐回 student 布局                                         │
+│                                                                   │
+│   Advantage = -KL(student || teacher)                            │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**与标准 OPD 的区别**：
+
+| 特性 | 标准 OPD | OPSD |
+|------|---------|------|
+| Teacher prompt | 仅原始问题 | 原始问题 + 参考解 y\* |
+| 特权信息 | 无 | 有（y* 注入 teacher prompt） |
+| 蒸馏信号 | 通用行为对齐 | 引导推理路径走向正确答案 |
+| 配置 | `is_pure_opd=True` 或 `use_opd=True` | `opsd_mode=True`（自动启用 `is_pure_opd=True`） |
+
+### 配置参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `opsd_mode` | 启用 OPSD 模式（teacher prompt 注入 y\*）。自动启用 `is_pure_opd=True`；如需混合模式（外部奖励 + KL）显式设 `use_opd=True` | `false` |
+| `opsd_solution_key` | 数据集中参考解字段的列名 | `"reference_solution"` |
+| `opsd_teacher_template` | Teacher prompt 的格式化字符串模板，支持 `{problem}` 和 `{solution}` 占位符 | 内置默认模板 |
+| `global_template` | Chat 模板名称（如 `qwen3`），用于 teacher prompt 格式化；未设置时回退到 actor 的 `data_args.template` | — |
+| `opsd_max_solution_length` | 参考解（y\*）token 长度硬上限（可选）；不设置则自动按 `sequence_length` 截断 | `None` |
+| `teacher.data_args.enable_thinking` | 渲染 OPSD teacher prompt 时使用的 thinking 模式。LoRA 模式下 teacher 别名为 `student_train`，继承 student 的设置 | — |
+
+### 数据要求
+
+数据集 JSONL 中必须包含 `reference_solution` 字段（或 `opsd_solution_key` 指定的字段名），其内容作为特权信息注入 teacher prompt，无格式要求（完整推理过程、最终答案或简短提示均可）：
+
+```json
+{
+    "id": "0",
+    "prompt": "证明对于所有正整数 n，n^3 - n 能被 6 整除",
+    "messages": "[{\"role\": \"user\", \"content\": \"证明对于所有正整数 n，n^3 - n 能被 6 整除\"}]",
+    "ground_truth": "证明完成",
+    "reference_solution": "n^3 - n = n(n-1)(n+1) = (n-1)n(n+1)...\n因此 n^3 - n 是三个连续整数之积，必被 6 整除。",
+    "tag": "math_opsd"
+}
+```
+
+### Teacher Prompt 构建
+
+Teacher prompt 由 `opsd_teacher_template` 格式化后，通过 `global_template` 指定的 chat 模板包装：
+
+```
+opsd_teacher_template.format(problem=..., solution=...)
+  → user_content（问题 + y* + 指令）
+  → [{"role": "user", "content": user_content}]
+  → get_chat_template(global_template, tokenizer)(..., add_generation_prompt=True)
+  → teacher_prompt_text（含 chat 格式 token）
+```
+
+默认模板引导学生独立推理而非复制参考解。自定义模板时，用 `{problem}` 和 `{solution}` 作为占位符。
+
+### 配置示例
+
+```yaml
+# OPSD 配置
+opsd_mode: true  # 自动启用 is_pure_opd（纯自蒸馏）
+opsd_solution_key: "reference_solution"
+global_template: qwen3  # teacher prompt 使用 qwen3 chat 模板（含 thinking）
+# 可选：solution 长度硬上限。不设置则自动按 sequence_length 截断。
+opsd_max_solution_length: 2048
+
+# OPSD teacher prompt（problem + y*）比 student prompt 更长。
+# 设 sequence_length > prompt_length + response_length 留出 buffer。
+prompt_length: 2048
+response_length: 4096
+sequence_length: 6656  # 2048 + 4096 + 512 buffer for teacher prompt
+
+student_train:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  data_args:
+    file_name:
+      - data/openthoughts_math_opsd.jsonl  # 必须含 reference_solution 字段
+    domain_interleave_probs:
+      math_rule: 1.0
+  # ...
+
+student_infer:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  # ...
+
+teacher:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B  # 自蒸馏：teacher = student 初始权重
+  data_args:
+    enable_thinking: true  # teacher prompt 以开放的 think block 渲染
+  # ...
+```
+
+### 兼容性
+
+- **Pipeline 支持**：OPSD 目前仅在 RLVR pipeline（`roll/pipeline/rlvr/rlvr_pipeline.py`）中生效。在 `rlvr_vlm` / `agentic` pipeline 上配置 `opsd_mode=true` 能通过配置校验，但不会注入 y\*——teacher log probs 按 student prompt 计算，即退化为普通纯 OPD 行为
+- **多 Teacher**：不支持。OPSD 目前仅支持单 teacher（y\* 变换和 teacher thinking 模式对整个 batch 只应用一次）。多 teacher 路由请使用标准 OPD（`opsd_mode=False`）
+- **Reference + Teacher**：OPSD 模式下不支持（配置校验会直接报错）。同时配置仅在标准 OPD（`opsd_mode=False`）下可用，两者合并到统一的 `_reference_configs` 字典并按 `opd_kl_coef` 加权
+- **混合模式**：OPSD 可与 `use_opd=True` 混合使用，advantage = `rl_advantages - total_weighted_kld`
+
+### 注意事项
+
+- OPSD teacher prompt（problem + y\*）比 student prompt 更长。需设置 `sequence_length` 大于 `prompt_length + response_length` 留出 buffer。Solution 超限时自动截断：系统动态测量模板 overhead（构建空 solution 的 prompt），计算 solution 可用空间，截断 solution 文本——保留 OPSD 模板结构完整。可选设置 `opsd_max_solution_length` 作为 solution 长度硬上限。若空 solution 的 prompt 本身仍超出可用空间，最终会对 token 化后的 prompt 本身做截断。
+- `opsd_teacher_template` 中的字面花括号需用 `{{` 和 `}}` 转义（Python `.format()` 标准）
+- OPSD 模式不支持同时配置 `reference` 和 `teacher`
+- OPSD 同时支持 LoRA 和非 LoRA 分支：
+  - **非 LoRA 分支**：teacher 是独立 cluster
+  - **LoRA 分支**：teacher 是 actor 模型自身（adapter disabled），无需配置 `teacher`
+
+---
+
 ## ✨️常见问题
 
 ### Q1: 混合模式如何配置？
@@ -585,7 +737,8 @@ rewards:
     worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
     tag_included: [math]
 
-# Teacher 配置（自动映射到 reference）
+# Teacher 或 reference 配置（自动映射到 reference）
+# 两者可同时配置——合并到 _reference_configs
 teacher:
   model_args:
     model_name_or_path: Qwen/Qwen3-32B
@@ -625,7 +778,7 @@ teacher:
 启动命令：
 ```bash
 python examples/start_onpolicy_distill_pipeline.py \
-    --config_path examples/qwen3-8B-onpolicy-distill-megatron \
+    --config_path distill/on_policy/llm \
     --config_name onpolicy_distill_config
 ```
 

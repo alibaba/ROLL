@@ -55,7 +55,7 @@ class ModelServiceHarborTrial(HarborTrial):
         ms_config = ModelServiceConfig(
             enabled=True,
             type="local",
-            install_cmd=f"pip install {shlex.quote('rl-rock[model-service]')} --timeout 600",
+            install_cmd="pip install 'rl-rock' fastapi uvicorn psutil 'openai>=1.50.0' httpx --timeout 600",
             start_cmd=(
                 f"rock model-service start --type local"
                 f" --host 0.0.0.0 --port {self._model_service_port}"
@@ -103,6 +103,9 @@ class PullModeRunner(RockAgentRunner):
             "model_service_port", _DEFAULT_MODEL_SERVICE_PORT
         )
 
+    def _generate_callback_url(self) -> Optional[str]:
+        return None
+
     def run_job(self, seed: int) -> EpisodeResult:
         """Load data, submit a Harbor job in pull mode, and return the result."""
         data_item = self._load_data_item(seed)
@@ -147,53 +150,105 @@ class PullModeRunner(RockAgentRunner):
         asyncio.ensure_future(model_service.watch_agent(pid=harbor_pid))
 
         instance_id = task_config.get("data_config", {}).get("instance_id", "unknown")
-        self.logger.info(f"[ModelServiceRunner] Starting inference loop for {instance_id}")
-        async with httpx.AsyncClient(timeout=3600.0) as http_client:
-            await self._inference_loop(model_service, http_client)
-
-        self.logger.info("[ModelServiceRunner] Inference loop done, waiting for Harbor result...")
-        result = await job.wait()
-
-        metrics = self._extract_metrics(result, job_id, instance_id)
-
         try:
-            pass_rate = await self._read_pass_rate_from_sandbox(trial_client.sandbox, config)
-            if pass_rate is not None:
-                metrics["pass_rate"] = pass_rate
-        except Exception as e:
-            self.logger.warning(f"[ModelServiceRunner] Failed to read report.json: {e}")
+            self.logger.info(f"[ModelServiceRunner] Starting inference loop for {instance_id}")
+            async with httpx.AsyncClient(timeout=3600.0) as http_client:
+                cancelled = await self._inference_loop(model_service, http_client, job_id=job_id)
 
-        return metrics
+            if cancelled:
+                self.logger.info(f"[ModelServiceRunner] Episode cancelled, cancelling job {job_id}")
+                await self._cancel_job(job, job_id)
+                return {
+                    "status": "Cancelled",
+                    "score": 0.0,
+                    "agent_exit_reason": "episode_cancelled",
+                    "job_id": job_id,
+                    "instance_id": instance_id,
+                }
 
-    async def _inference_loop(self, model_service: ModelService, http_client: httpx.AsyncClient) -> None:
-        """Drive LLM inference for the agent via the ModelService file-based protocol."""
-        self.logger.info("[InferenceLoop] Waiting for first LLM request from agent...")
+            self.logger.info("[ModelServiceRunner] Inference loop done, waiting for Harbor result...")
+            result = await job.wait()
+
+            metrics = self._extract_metrics(result, job_id, instance_id)
+
+            try:
+                pass_rate = await self._read_pass_rate_from_sandbox(trial_client.sandbox, config)
+                if pass_rate is not None:
+                    metrics["pass_rate"] = pass_rate
+            except Exception as e:
+                self.logger.warning(f"[ModelServiceRunner] Failed to read report.json: {e}")
+
+            return metrics
+        finally:
+            try:
+                await model_service.stop()
+            except Exception as e:
+                self.logger.warning(f"[ModelServiceRunner] Failed to stop model service for job {job_id}: {e}")
+            await self._cleanup_sandbox(job, job_id)
+
+    async def _inference_loop(self, model_service: ModelService, http_client: httpx.AsyncClient,
+                              job_id: str = "") -> bool:
+        """Drive LLM inference for the agent via the ModelService file-based protocol.
+
+        Returns True if the episode was cancelled, False on normal completion.
+        """
+        self.logger.info(f"[InferenceLoop] Waiting for first LLM request from agent, job={job_id}")
         current_index = 0
         current_response_payload: Optional[str] = None
 
         max_retries = 3
         retry_delay = 1.0
 
+        _CANCEL_POLL_INTERVAL = 30
+
         while True:
+            if await self._is_episode_cancelled():
+                self.logger.info(f"[InferenceLoop] Episode cancelled, exiting. job={job_id}")
+                return True
+
+            is_startup = current_index == 0 and current_response_payload is None
+
             raw_output = None
             for attempt in range(max_retries):
                 try:
-                    raw_output = await model_service.anti_call_llm(
+                    llm_task = asyncio.ensure_future(model_service.anti_call_llm(
                         index=current_index,
                         response_payload=current_response_payload,
-                    )
+                        call_timeout=600,
+                    ))
+                    poll_count = 0
+                    while not llm_task.done():
+                        await asyncio.wait({llm_task}, timeout=_CANCEL_POLL_INTERVAL)
+                        if llm_task.done():
+                            break
+                        poll_count += 1
+                        if is_startup:
+                            self.logger.info(
+                                f"[InferenceLoop] Waiting for agent startup "
+                                f"({poll_count * _CANCEL_POLL_INTERVAL}s), job={job_id}"
+                            )
+                        if await self._is_episode_cancelled():
+                            self.logger.info(f"[InferenceLoop] Episode cancelled during anti_call_llm, exiting. job={job_id}")
+                            llm_task.cancel()
+                            try:
+                                await llm_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                            return True
+                    raw_output = llm_task.result()
                     break
                 except Exception as e:
                     if attempt < max_retries - 1:
                         self.logger.warning(
                             f"[InferenceLoop] anti_call_llm error at index {current_index} "
-                            f"(attempt {attempt + 1}/{max_retries}), retrying in {retry_delay * (2 ** attempt):.1f}s: {e}"
+                            f"(attempt {attempt + 1}/{max_retries}), retrying in {retry_delay * (2 ** attempt):.1f}s, "
+                            f"job={job_id}: {e}"
                         )
                         await asyncio.sleep(retry_delay * (2 ** attempt))
                     else:
                         self.logger.error(
                             f"[InferenceLoop] anti_call_llm failed after {max_retries} attempts "
-                            f"at index {current_index}: {e}"
+                            f"at index {current_index}, job={job_id}: {e}"
                         )
             if raw_output is None:
                 break
@@ -235,7 +290,8 @@ class PullModeRunner(RockAgentRunner):
             current_index += 1
             current_response_payload = json.dumps(response_dict, ensure_ascii=False)
 
-        self.logger.info("[InferenceLoop] Exited.")
+        self.logger.info(f"[InferenceLoop] Exited. job={job_id}")
+        return False
 
     def _parse_llm_request(self, raw_output: str, index: int) -> Optional[Dict[str, Any]]:
         """Parse the request JSON returned by ModelClient.anti_call_llm()."""

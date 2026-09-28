@@ -59,7 +59,6 @@ reward_pretrain: Qwen/Qwen3.5-2B
 actor_train:
   model_args:
     # fa2 doesn't work for now
-    flash_attn: sdpa
     attn_implementation: sdpa
     disable_gradient_checkpointing: false
     dtype: bf16
@@ -88,7 +87,6 @@ actor_train:
 
 actor_infer:
   model_args:
-    flash_attn: sdpa
     attn_implementation: sdpa
     disable_gradient_checkpointing: true
     dtype: bf16

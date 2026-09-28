@@ -66,7 +66,6 @@ async def _run_vllm_offload():
             dtype="bfloat16",
             gpu_memory_utilization=0.8,
             tensor_parallel_size=2,
-            distributed_executor_backend="ray",
             disable_custom_all_reduce=True,
             enable_sleep_mode=True,
             enforce_eager=current_platform.is_npu(),

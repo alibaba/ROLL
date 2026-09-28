@@ -13,8 +13,8 @@
 CUDA 版本 >= 12.4
 cuDNN 版本 >= 9.1.0
 PyTorch >= 2.5.1
-SGlang >= 0.4.3
-vLLM >= 0.7.3
+SGlang >= 0.4.10.post2
+vLLM >= 0.11.0
 
 # 克隆仓库并安装
 git clone https://github.com/alibaba/ROLL.git

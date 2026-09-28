@@ -50,7 +50,29 @@ def _init_platform() -> Platform:
 # Global singleton representing the current platform in use.
 current_platform: Platform = _init_platform()
 
+
+def get_gpu_type() -> str:
+    """Return a normalized accelerator model name, e.g. "H20", "MI308X", "910B".
+
+    Returns "" when no accelerator is available or detection fails.
+    """
+    try:
+        device_module = getattr(torch, current_platform.device_type, None)
+        if device_module is None or not device_module.is_available():
+            return ""
+        name = device_module.get_device_name(0)
+        name = name.upper().replace(" ", "-")
+        for prefix in ("NVIDIA-", "AMD-"):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        return name
+    except Exception as e:
+        logger.warning(f"Failed to detect gpu type: {e}")
+        return ""
+
+
 __all__ = [
     "Platform",
     "current_platform",
+    "get_gpu_type",
 ]

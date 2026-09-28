@@ -1,0 +1,6 @@
+data/ocr/train.json filter=lfs diff=lfs merge=lfs -text
+data/ocr/test.json filter=lfs diff=lfs merge=lfs -text
+data/geneval/train.jsonl filter=lfs diff=lfs merge=lfs -text
+data/geneval/test.jsonl filter=lfs diff=lfs merge=lfs -text
+data/geo3k/train.parquet filter=lfs diff=lfs merge=lfs -text
+data/geo3k/test.parquet filter=lfs diff=lfs merge=lfs -text

@@ -12,7 +12,6 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
-from vllm.model_executor.utils import set_weight_attrs
 from vllm._custom_ops import scaled_fp8_quant as per_tensor_fp8_quant
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import requantize_with_max_scale
 
@@ -227,12 +226,10 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
     w13_weight_loader = layer.w13_weight.weight_loader
     w13_weight_loader = partial(_fp8_moe_w13_weight_loader, weakref.ref(layer), w13_weight_loader)
     layer.w13_weight.weight_loader = w13_weight_loader
-    set_weight_attrs(layer.w13_weight, {"roll_skip_patch_moe": True}) # TODO: remove once vllm 0.8.4 is deprecated
 
     w2_weight_loader = layer.w2_weight.weight_loader
     w2_weight_loader = partial(_fp8_moe_w2_weight_loader, weakref.ref(layer), w2_weight_loader)
     layer.w2_weight.weight_loader = w2_weight_loader
-    set_weight_attrs(layer.w2_weight, {"roll_skip_patch_moe": True}) # TODO: remove once vllm 0.8.4 is deprecated
 
     # do not need patch weight loader of scale
     assert type(layer.w13_weight_scale_inv) == Parameter

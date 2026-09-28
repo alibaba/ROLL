@@ -1,278 +1,312 @@
-# 自定义Env
+# 自定义环境
 
-## 强化学习Env
-在强化学习中，环境（Environment）是智能体（Agent）进行交互的世界。它定义了智能体可以感知的状态（State）、可以执行的动作（Action）、以及智能体每次交互后获得的奖励（Reward）。环境负责模拟真实世界的动态，并根据智能体的动作更新状态并给出反馈。
+ROLL 的 Agentic Pipeline 使用 [GEM](https://github.com/axon-rl/gem) 环境。一个环境是注册到某个 `env_type` 的 `gem.Env` 实现；环境管理器通过 `gem.make()` 创建实例，并不断把模型输出传给 `step()`。
 
-为了帮助您快速入门并了解我们ROLL框架的 Agentic Pipeline 在不同任务场景下的适应性与性能表现，我们特地提供了两类核心示例环境：
-- 基于离散动作的传统RL环境 (继承自 BaseDiscreteActionEnv)：如 Sokoban（推箱子） 和 FrozenLake（冰湖）。它们代表了离散动作控制、不确定状态转移等经典RL挑战。
-- 基于自然语言交互的复杂环境 (继承自 BaseLanguageBasedEnv)：如 WebShop（模拟在线购物） 和 Countdown（数字游戏）。它们代表了复杂自然语言理解与生成、多步规划和推理等先进的LLM Agent挑战。
+本文描述 `roll/pipeline/agentic/env` 与 `roll/pipeline/agentic/env_manager` 当前采用的契约。旧版文档中的 `BaseDiscreteActionEnv` / `BaseLanguageBasedEnv` 分类已经不再使用。
 
-## 核心功能
-一个标准的Env通常需要实现以下功能：
-- 观察空间（Observation Space）
-  - 定义智能体可以从环境中获取的信息的格式、范围和类型。
-  - 示例：Box(low=0, high=255, shape=(84, 84, 3)) 用于图像输入，或 Text(max_length=8192) 用于长文本输入。
-- 动作空间（Action Space）
-  - 定义智能体可以执行的动作的类型和范围。
-  - 示例：Discrete(n=4) 用于离散动作（如上下左右），或 Text(max_length=256) 用于文本生成动作。
-- reset() 方法
-  - 在每个训练回合（Episode）开始时调用。
-  - 将环境重置到初始状态，并返回初始观测。
-  - 标准返回：initial_observation, info （其中 info 是可选的辅助信息字典）。
-- step(action) 方法
-  - 在智能体执行一个动作后调用。
-  - 根据智能体的动作更新环境状态，计算奖励，并判断回合是否结束。
-  - 标准返回： 
-    - next_observation: 执行动作后的新观测。
-    - reward: 智能体因执行该动作获得的奖励（浮点数）。
-    - terminated: 布尔值，表示回合是否因达到终止条件而结束（如游戏失败，达到目标）。
-    - truncated: 布尔值，表示回合是否因时间限制等非自然终止条件而结束。
-    - info: 字典，包含诊断信息（例如调试数据，不应作为智能体的输入）。
-- render() 方法 (可选)
-    - 用于可视化环境状态，例如在屏幕上显示图形界面。
-    - 对于无头（headless）训练场景，此方法通常无需实现。
-- close() 方法 (可选)
-    - 用于清理环境资源，例如关闭渲染窗口或释放文件句柄。
+## 运行流程
 
-## 代码示例
+标准 `TrajEnvManager` 中的单个 Episode 流程如下：
 
-### Sokoban 环境：离散动作的经典解谜任务
-1. 环境配置 SokobanEnvConfig
-```python
-class SokobanEnvConfig:
-    # 房间的尺寸 (行, 列)
-    dim_room: Tuple[int, int] = (6, 6) 
-    # 每个回合的最大步数
-    max_steps: int = 100 
-    # 房间中箱子的数量
-    num_boxes: int = 3 
-    # 用于生成可解房间时的搜索深度
-    search_depth: int = 300 
-    # 网格元素的整数ID到字符表示的映射，用于文本渲染
-    grid_lookup: Optional[Dict[int, str]] = field(
-        default_factory=lambda: {0: "#", 1: "_", 2: "O", 3: "√", 4: "X", 5: "P", 6: "S"}
-    )
-    # 网格元素的字符到可读名称的映射
-    grid_vocab: Optional[Dict[str, str]] = field(
-        default_factory=lambda: {
-            "#": "wall",
-            "_": "empty",
-            "O": "target",
-            "√": "box on target",
-            "X": "box",
-            "P": "player",
-            "S": "player on target",
-        }
-    )
-    # 动作ID到动作名称的映射 (1:上, 2:下, 3:左, 4:右)
-    action_lookup: Optional[Dict[int, str]] = field(
-        default_factory=lambda: {1: "Up", 2: "Down", 3: "Left", 4: "Right"}
-    )
-    # 允许通过dim_x, dim_y设置dim_room的兼容性字段
-    dim_x: Optional[int] = None
-    dim_y: Optional[int] = None
-    render_mode: str = "text"
+```text
+gem.make(env_type, **env_config)
+  -> reset(seed)
+  -> 根据 observation 和 info["env_instruction"] 构造提示词
+  -> 模型生成动作字符串
+  -> step(action_string)
+  -> 重复，直到 terminated 或达到 max_steps
 ```
 
-2. 环境实现 SokobanEnv
-这是一个标准的强化学习环境实现，它继承了框架中的 BaseDiscreteActionEnv（用于离散动作环境的通用接口）和 GymSokobanEnv（Sokoban 游戏的核心逻辑）。
-- 定义工作空间：4个离散动作，ID从1开始 (1, 2, 3, 4)
+环境实例运行在 Environment Worker 中，并且可能并发执行。不要依赖可变的全局状态，并保证 `reset(seed)` 可复现。若环境持有外部资源，应实现可重复调用的 `close()`；具体是在每个 Episode 后还是退出时调用取决于所选环境管理器，因此有严格生命周期要求的环境还应在终止和异常路径中清理资源。
+
+## 环境接口契约
+
+继承 `gem.Env` 并实现以下方法：
+
 ```python
-self.ACTION_SPACE = gym.spaces.discrete.Discrete(4, start=1)
+from typing import Any
+from gem import Env
+
+
+class MyEnv(Env):
+    def __init__(self, max_steps: int = 10, **kwargs): ...
+
+    def reset(self, seed: int | None = None) -> tuple[Any, dict[str, Any]]: ...
+
+    def step(
+        self, action: str
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]: ...
+
+    def close(self) -> None: ...
 ```
 
-- reset方法：生成一个新的Sokoban房间布局，并重置游戏内部状态
-```python
-def reset(self, seed=None):
-    try:
-        # 使用all_seed确保房间生成的可复现性
-        with all_seed(seed):
-            # 调用generate_room生成新的房间布局
-            self.room_fixed, self.room_state, self.box_mapping, action_sequence = generate_room(
-                dim=self.dim_room,
-                num_steps=self.num_gen_steps, # 房间生成所需的步数
-                num_boxes=self.num_boxes,
-                search_depth=self.search_depth,
-            )
-        # 重置回合相关计数器和状态
-        self.num_env_steps, self.reward_last, self.boxes_on_target = 0, 0, 0
-        self.player_position = np.argwhere(self.room_state == 5)[0] # 找到玩家位置
-        
-        # 返回初始观测（通过render方法获取）
-        return self.render()
-    except (RuntimeError, RuntimeWarning) as e:
-        # 如果生成房间失败，尝试使用新种子重新生成
-        next_seed = abs(hash(str(seed))) % (2**32) if seed is not None else None
-        return self.reset(next_seed)
-``` 
+### `__init__(**env_config)`
 
-- step方法：根据智能体执行的动作更新环境状态。
-```python
-def step(self, action: int):
-    # 记录玩家旧位置，用于判断动作是否有效
-    previous_pos = self.player_position
-    
-    # 调用父类GymSokobanEnv的step方法来执行动作
-    _, reward, done, _ = GymSokobanEnv.step(self, action)
-    
-    # 获取执行动作后的新观测
-    next_obs = self.render()
-    
-    # 判断动作是否实际改变了玩家位置
-    action_effective = not np.array_equal(previous_pos, self.player_position)
-    
-    # 构造并返回额外信息字典
-    info = {
-        "action_is_effective": action_effective, # 动作是否实际移动了玩家或箱子
-        "action_is_valid": True, # 传入的动作ID是否合法（即使撞墙）
-        "success": self.boxes_on_target == self.num_boxes, # 是否所有箱子都在目标上（游戏胜利）
-    }
+`custom_envs.<tag>.env_config` 下的配置会由下面的代码直接传给构造函数：
 
-    # 返回标准的强化学习环境step结果 (next_observation, reward, terminated, info)
-    return next_obs, reward, done, info
+```python
+gem.make(env_id=env_config["env_type"], **env_config["config"])
 ```
 
-- render方法：将当前环境状态渲染为文本或图像。
+构造函数应只接收有意义的选项并尽早校验。包装第三方环境时，可以保留 `**kwargs` 以传递其参数。
+
+### `reset(seed)`
+
+适用时先调用 GEM 基类实现，重置 Episode 的所有状态，然后返回：
+
 ```python
-def render(self, mode=None):
-    # 使用指定模式或默认模式
-    render_mode = mode if mode is not None else self.render_mode 
-    
-    if render_mode == "text":
-        # 文本渲染：将内部数字表示的房间状态转换为ASCII字符网格
-        room = np.where((self.room_state == 5) & (self.room_fixed == 2), 6, self.room_state)
-        return "\n".join("".join(self.GRID_LOOKUP.get(cell, "?") for cell in row) for row in room.tolist())
-    elif render_mode == "rgb_array":
-        # 图像渲染：委托给父类GymSokobanEnv的get_image方法
-        return self.get_image(mode="rgb_array", scale=1)
-    else:
-        raise ValueError(f"Invalid mode: {render_mode}")
+(observation, info)
 ```
 
-3. 模块测试
+- `observation` 是当前要展示给 Agent 的状态；对 `TrajEnvManager` 而言通常是字符串。
+- `info` 必须是字典。可将稳定的任务说明或动作格式要求放入 `info["env_instruction"]`，标准管理器会在第一轮将其加入提示词。
+- 仅在没有可用 Episode 时返回 `(None, info)`；管理器会将其视为本次没有 Rollout。
+- 所有影响任务生成的随机源都应使用传入的 seed。同一个 Rollout Group 内的环境会收到相同的 Episode seed。
+
+### `step(action)`
+
+标准管理器传入的是模型解码后的完整响应，而不是离散动作 ID。环境需自行解析并校验文本，然后返回 Gymnasium 风格的五元组：
+
 ```python
-import matplotlib.pyplot as plt
-# 创建一个Sokoban环境配置
-config = SokobanEnvConfig(dim_room=(6, 6), num_boxes=1, max_steps=100, search_depth=10)
-# 使用该配置创建Sokoban环境实例
-env = SokobanEnv(config)
-# 循环10次，每次使用不同的种子重置环境，并打印初始状态，以观察不同房间布局。
-for i in range(10):
-    # 重置环境并传入种子
-    print(env.reset(seed=1010 + i))
-    print()
-# 进入一个交互循环，允许用户通过键盘输入控制智能体。  
-while True:
-    keyboard = input("Enter action: ")
-    if keyboard == "q":
-        break
-    # 将输入转换为整数动作ID  
-    action = int(keyboard)
-    assert action in env.ACTION_LOOKUP, f"Invalid action: {action}"
-    # 执行动作，获取新的观测、奖励、结束状态和信息
-    obs, reward, done, info = env.step(action)
-    print(obs, reward, done, info)
-# 如果环境支持RGB数组渲染，则获取最终的游戏画面图像  
-np_img = env.get_image("rgb_array")
-# 保存图像
-plt.imsave("sokoban1.png", np_img)
+(observation, reward, terminated, truncated, info)
 ```
 
-### WebShop 环境：自然语言驱动的复杂交互任务
+- `observation`：动作执行后的状态。
+- `reward`：本轮的标量奖励；ROLL 会将各轮奖励相加得到 Episode score。
+- `terminated`：任务因成功或失败等自然终止条件结束。
+- `truncated`：因超时等外部限制结束。在当前标准 `TrajEnvManager` 中，只有 `truncated=True` 不会停止循环；环境自身发生超时时，应同时返回 `terminated=True, truncated=True`。达到 `custom_envs.<tag>.max_steps` 时，管理器也会强制结束并设置 truncation。
+- `info`：本轮附加信息。
 
-WebShop 是一个模拟在线购物的任务环境，要求智能体根据自然语言指令完成搜索、选择商品、查看详细信息并下单等操作。每个轨迹最多包含 50 步，对模型的上下文理解能力和任务执行效率提出了较高要求。
+内置环境通常使用以下可选 `info` 字段：
 
-下面重点讲解和Sokoban不同的地方：
-
-1. WebShop会解析环境中的可用动作，并将其转换为智能体可生成的文本字符串列表。
 ```python
-def get_available_actions(self):
-    # 从底层WebShop模拟器获取原始可用操作信息
-    # 与Sokoban的固定动作集不同，WebShop的动作空间是动态的。
-    orig_available_actions = WebAgentTextEnv.get_available_actions(self) 
-    available_actions = []
-    # 定义搜索动作的文本格式
-    if orig_available_actions["has_search_bar"]:
-        available_actions.append("search[<content>]") 
-    # 定义点击动作的文本格式
-    for clickable in orig_available_actions["clickables"]:
-        if clickable != "search":
-            available_actions.append(f"click[{clickable}]") 
-    # 返回字符串列表，指导Agent生成哪个字符串      
-    return available_actions
-```
-
-2. WebShop的reset可指定会话ID和初始指令文本。
-```python
-def reset(
-    self, seed=None, session: Optional[Union[str, int]] = None, instruction_text: Optional[str] = None
-) -> any:
-  
-    # 会话ID管理：如果未提供，则随机生成一个
-    if session is None:
-        with all_seed(seed):
-            session = "".join(random.choices(string.ascii_lowercase, k=10))
-    
-    # 调用父类WebAgentTextEnv的reset，它会返回文本观测
-    obs, _ = WebAgentTextEnv.reset(self, session=session, instruction_text=instruction_text)
-    
-    # 准备渲染缓存：将初始指令添加到缓存，用于render方法
-    self.prepare_render_cache(WebAgentTextEnv.get_instruction_text(self))
-    return obs
-```
-
-3. WebShop的action是一个自然语言文本字符串。
-```python
-def step(self, action):
-    # 调用父类WebAgentTextEnv的step，它解析并执行文本动作
-    state, reward, done, info = WebAgentTextEnv.step(self, action)
-    
-    # 准备渲染缓存：更新缓存的观测
-    self.prepare_render_cache(self.observation)
-    
-    # 构造额外信息字典
-    info = {
-        "action_is_effective": tuple(self.get_available_actions()) 
-        == ("click[back to search]", "click[< prev]", "click[next >]"), 
+info = {
+    "action_desc": "动作结果的可读描述",
+    "metrics": {
         "action_is_valid": True,
-        "success": done, 
-    }
-    return self.observation, reward, done, info
+        "action_is_effective": True,
+        "success": False,
+    },
+    "metrics_agg_mode": {
+        "action_is_valid": "mean",
+        "action_is_effective": "mean",
+        "success": "last",
+    },
+    # "suffix": "当 agent_template 包含 {suffix} 时渲染的额外状态",
+}
 ```
 
-## 创建自定义Env
+`metrics` 的值应为数值或布尔值，`metrics_agg_mode` 指定 ROLL 如何在整条轨迹上聚合各项指标。遇到格式错误的动作时，通常保持 observation 不变、返回格式惩罚、设置 `action_is_valid=False`，并允许 Episode 继续。
 
-### 步骤概述
-1. 选择基类：根据您的任务类型（离散动作或语言交互）选择继承 BaseDiscreteActionEnv 或 BaseLanguageBasedEnv
+### Observation 格式
 
-2. 定义 init：初始化环境参数，定义 observation_space 和 action_space
+`TrajEnvManager` 期望文本类 observation，并由管理器构造对话历史。`AgentNativeStepEnvManager` 用于由环境自行维护对话的场景，此类环境返回 OpenAI 风格的消息列表，例如 `[{'role': 'user', 'content': '...'}]`。环境和管理器必须成对选择，不要混用两种契约。使用 Tool Call 的环境还应配置对应的 `ToolCallRunner` 或 Native Runner。
 
-3. 实现 reset()：定义环境的初始状态
+## 多模态 Observation
 
-4. 实现 step(action)：定义环境如何根据动作更新状态、计算奖励和判断回合结束
+环境需要返回图片或视频时，使用 `roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager`。它沿用相同的 `reset()` 和五元组 `step()` 契约，但支持以下 observation 形式：
 
-5. 实现 render()：定义环境的渲染逻辑
+- `str`：纯文本的一轮。
+- `numpy.ndarray`：单张 RGB 图片。数组必须能传给 `PIL.Image.fromarray(obs, mode="RGB")`，通常为 `H x W x 3` 的 `uint8` 数组。
+- `dict`：多模态的一轮。`prompt` 保存文本或 Chat 风格内容，`image` 和/或 `video` 保存模型 Transformers processor 能接收的媒体对象。
 
-6. 实现 close()：定义资源清理逻辑
+典型的图片 observation 如下：
 
-### 设计建议
-1. 状态表示
-   - 离散动作环境：结构化的网格状态、位置信息等。
-   - 语言环境：文本观测应包含所有相关上下文（例如完整的网页内容、指令），并考虑上下文窗口限制。冗余信息过多会导致LLM效率下降或无法处理。
-2. 动作空间设计
-   - 离散动作环境：动作是预定义的整数或枚举值。
-   - 语言环境：动作是自然语言文本。这要求智能体具备自然语言生成能力，并且环境需要能够解析和验证这些文本动作。
-3. 奖励函数设计
-   - 明确的目标：奖励应清晰地引导智能体实现您期望的行为。
-   - 稀疏奖励 vs. 密集奖励：
-     - 离散动作环境：奖励通常在完成子目标或最终目标时给予。
-     - 语言环境：
-        - WebShop 可能奖励稀疏，但也可设计中间奖励。
-        - Countdown 使用分层奖励（0，格式分，满分）来引导学习。
-    - 避免奖励欺骗（Reward Hacking）： 确保智能体无法通过非预期的方式获得高奖励。
-    - 格式惩罚项：在语言环境中，对不符合预期格式的文本动作施加惩罚至关重要，它能有效引导 LLM 生成结构化且可解析的输出。
-4. 回合终止条件
-   - 清晰定义成功、失败或超时等条件，以结束一个训练回合。使用 terminated 和 truncated 分别表示自然终止和非自然终止。
-   - WebShop 还有最大步数限制
-5. 不确定性/随机性：如果环境包含不确定性（如FrozenLake），确保其行为是可预测的概率分布，并能在 reset 中通过 seed 控制随机性。
-6. 可复现性：使用 seed 参数初始化随机数生成器，以确保每次运行环境时其行为都是可复现的。
+```python
+from PIL import Image
+
+
+class VisualQuestionEnv(Env):
+    image_placeholder = "<image>"
+
+    def reset(self, seed=None):
+        super().reset(seed)
+        image = Image.open(self.image_path).convert("RGB")
+        observation = {
+            "prompt": "<image>\nWhat object is highlighted?",
+            "image": [image],
+        }
+        return observation, {
+            "env_instruction": "Answer directly, or request a visual tool action."
+        }
+```
+
+字典的 key 使用单数形式：`image` 和 `video`。值可以是单个对象或 list/tuple；建议始终使用列表，当 prompt 中包含多个媒体占位符时也必须使用列表。媒体值的顺序必须与 prompt 中占位符的顺序一致。
+
+如果 prompt 使用显式占位符，应声明对应的类属性：
+
+```python
+class MyMultimodalEnv(Env):
+    image_placeholder = "<image>"
+    video_placeholder = "<video>"
+```
+
+`VLTrajEnvManager` 会将环境占位符替换成 `DataCollatorWithPaddingForMM` 要求的特殊 token。它按照轨迹顺序累积所有轮次的媒体，使用策略模型的 `ProcessorMixin` 构造模型输入，并将处理后的多模态字段保留在 Rollout 中。环境应该返回原始媒体和文本，不要自行返回预计算的 `pixel_values`、token ID 或设备上的 tensor。
+
+需要结构化 Chat 内容时，`prompt` 也可以是 content item 列表：
+
+```python
+observation = {
+    "prompt": [
+        {"type": "text", "text": "Inspect this image:"},
+        {"type": "image"},
+        {"type": "text", "text": "What changed?"},
+    ],
+    "image": [image],
+}
+```
+
+视觉语言环境需要配置 `VLTrajEnvManager` 及其两个轮次模板：
+
+```yaml
+custom_envs:
+  VisualQuestion:
+    env_type: visual_question
+    env_manager_cls: roll.pipeline.agentic.env_manager.vl_traj_env_manager.VLTrajEnvManager
+    max_steps: 4
+    max_tokens_per_step: 256
+    agent_system_template: "You are a visual reasoning agent."
+    pre_step_template: "\nTurn {turn_idx}:\n"
+    next_step_template: |
+      You have {actions_left} actions left.
+      Keep the response within {max_response_length} tokens.
+    env_config:
+      image_path: /path/to/image.png
+```
+
+Actor 必须是拥有兼容 tokenizer/processor 的视觉语言模型。`VLTrajEnvManager` 当前只为图片和视频提供了明确的 Collation 路径；音频或新的媒体类型需要扩展管理器和多模态 Collator。媒体加载可能失败时，应在 `reset()`/`step()` 中校验并返回受控的终止结果，避免 prompt 与错误媒体静默配对。
+
+## 最小实现
+
+```python
+import random
+import re
+from typing import Any
+
+from gem import Env
+
+
+class GuessNumberEnv(Env):
+    def __init__(self, low: int = 1, high: int = 10, format_penalty: float = -0.1, **kwargs):
+        self.low = low
+        self.high = high
+        self.format_penalty = format_penalty
+        self.target = None
+        self.done = False
+
+    def reset(self, seed: int | None = None) -> tuple[str, dict[str, Any]]:
+        super().reset(seed)
+        self.target = random.Random(seed).randint(self.low, self.high)
+        self.done = False
+        return (
+            f"Guess an integer from {self.low} to {self.high}.",
+            {"env_instruction": "Reply with <answer>number</answer>."},
+        )
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        match = re.search(r"<answer>\s*(-?\d+)\s*</answer>", action)
+        valid = match is not None
+        guess = int(match.group(1)) if valid else None
+        success = valid and guess == self.target
+        self.done = success
+
+        if not valid:
+            observation, reward = "Invalid format; try again.", self.format_penalty
+        elif guess < self.target:
+            observation, reward = "Too small.", 0.0
+        elif guess > self.target:
+            observation, reward = "Too large.", 0.0
+        else:
+            observation, reward = "Correct.", 1.0
+
+        info = {
+            "metrics": {"action_is_valid": valid, "success": success},
+            "metrics_agg_mode": {"action_is_valid": "mean", "success": "last"},
+        }
+        return observation, reward, self.done, False, info
+
+    def close(self) -> None:
+        pass
+```
+
+## 注册环境
+
+在环境包中导出该类，并在 `roll/pipeline/agentic/env/__init__.py` 中添加 GEM 延迟注册：
+
+```python
+gem.register(
+    "guess_number",
+    entry_point="roll.pipeline.agentic.env.guess_number:GuessNumberEnv",
+)
+```
+
+注册名必须与 `env_type` 完全一致。不要在包的 `__init__.py` 中导入重量级或可选依赖；只有 `gem.make()` 创建环境时才应加载 entry point。若环境依赖可选组件，可参考现有可选环境的受保护注册方式。
+
+## 配置环境
+
+在 `custom_envs` 下添加一个 tag（`examples/config` 中部分公共配置片段使用单数 `custom_env`，由上层配置合并到 `custom_envs`）：
+
+```yaml
+env_manager_cls: roll.pipeline.agentic.env_manager.traj_env_manager.TrajEnvManager
+
+custom_envs:
+  GuessNumber:
+    env_type: guess_number
+    env_manager_cls: ${env_manager_cls}
+    agent_runner_cls: null
+    max_steps: 8
+    max_tokens_per_step: 32
+    agent_system_template: "You are a careful game-playing agent."
+    agent_template: |
+      Turn {turn_idx}:
+      Observation: {observation}
+      You have {actions_left} actions left.
+      Respond with one action only.
+    env_config:
+      low: 1
+      high: 20
+      format_penalty: -0.1
+
+train_env_manager:
+  num_env_groups: 32
+  group_size: 4
+  tags: [GuessNumber]
+  num_groups_partition: [32]
+```
+
+配置分为两层：
+
+- `max_steps`、`max_tokens_per_step`、模板、`env_manager_cls` 和 `agent_runner_cls` 等字段由 Rollout 框架使用。
+- 只有 `env_config` 内的字段会传给环境构造函数。
+- `tags` 按 `custom_envs` 的 key 选择配置，`env_type` 则选择已注册的 GEM 类。
+- `num_groups_partition` 必须与 `tags` 一一对应，且总和等于 `num_env_groups`；同一 Group 的成员共享配置和 seed。
+
+初始化或执行步骤不是线程安全时，设置 `use_thread_lock: true`。昂贵的共享后端可用 `max_env_step_concurrent` 限制并发调用数。
+
+## 验证清单
+
+在完整训练前先验证环境契约：
+
+```python
+import roll.pipeline.agentic.env  # 执行 ROLL 的 GEM 注册
+import gem
+
+env = gem.make(env_id="guess_number", low=1, high=3)
+obs, info = env.reset(seed=42)
+assert isinstance(info, dict)
+
+obs, reward, terminated, truncated, info = env.step("<answer>2</answer>")
+assert isinstance(reward, (int, float))
+assert isinstance(terminated, bool) and isinstance(truncated, bool)
+assert isinstance(info, dict)
+env.close()
+```
+
+还需检查：
+
+- 相同 seed 是否生成相同初始任务；
+- 合法动作、非法动作、自然终止、超时和最大步数路径；
+- 每次 `step()` 是否严格返回五个值；
+- 各步的 metric key 和聚合模式是否保持一致；
+- 异常和 `close()` 后是否正确释放资源；
+- 使用所选 Environment Manager 与 Runner 的小规模 Rollout 是否能完整运行。

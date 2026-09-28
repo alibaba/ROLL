@@ -15,7 +15,7 @@ if is_peft_available():
     )
 else:
 
-    def apply_megatron_lora():
+    def apply_megatron_lora(*args, **kwargs):
         raise ValueError("PEFT is not available. Please install PEFT to use LoRA adapters.")
 
     def find_all_linear_modules(model):

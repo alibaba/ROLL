@@ -13,6 +13,7 @@ class ModelUpdateGroup:
         self.frequency = frequency
         self.pipeline_config = pipeline_config
         self.model_update_name = f"model_update/{self.src_cluster.cluster_name}_2_{self.tgt_cluster.cluster_name}"
+        self._has_updated = False
         train_devices = set(src_cluster.worker_config.device_mapping or [])
         infer_devices = set(tgt_cluster.worker_config.device_mapping or [])
 
@@ -29,7 +30,7 @@ class ModelUpdateGroup:
         )
 
     def model_update(self, step=None):
-        if step % self.frequency != 0:
+        if self._has_updated and step % self.frequency != 0:
             return {}
 
         dataprotos: list[DataProto] = ray.get(
@@ -38,4 +39,5 @@ class ModelUpdateGroup:
                 for train_worker in self.src_cluster.workers
             ]
         )
+        self._has_updated = True
         return reduce_metrics_list([dataproto.meta_info["metrics"] for dataproto in dataprotos])

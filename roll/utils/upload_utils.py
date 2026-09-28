@@ -32,6 +32,9 @@ class FileSystemUploader:
         shutil.copytree(local_state_path, ckpt_id_output_dir, dirs_exist_ok=True)
         logger.info(f"{local_state_path} save to {ckpt_id_output_dir}, done...")
 
+    def register(self, ckpt_info):
+        pass
+
     def get_latest_ckpt(self):
         content = os.listdir(self.output_dir)
         checkpoints = [

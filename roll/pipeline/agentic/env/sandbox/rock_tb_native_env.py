@@ -28,7 +28,7 @@ class RockTBNativeEnv(Env):
         max_steps: int = 80,
         mode: str = "train",
         xrl_authorization: str = "",
-        sandbox_base_url: str = "https://xrl.alibaba-inc.com",
+        sandbox_base_url: str = "http://localhost:8080",
         user_id: str = "0000",
         experiment_id: str = "test",
         auto_clear_seconds: int = 60 * 60,

@@ -1,10 +1,3 @@
-defaults:
-  - ../../examples/config/envs@_here_
-  - ../../examples/config/deepspeed_zero@_here_
-  - ../../examples/config/deepspeed_zero2@_here_
-  - ../../examples/config/deepspeed_zero3@_here_
-  - ../../examples/config/deepspeed_zero3_cpuoffload@_here_
-
 hydra:
   run:
     dir: .
@@ -79,8 +72,12 @@ actor_train:
   data_args:
     template: qwen2_5
   strategy_args:
-    strategy_name: deepspeed_train
-    strategy_config: ${deepspeed_zero2}
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
   device_mapping: list(range(0,1))
   infer_batch_size: 1
 
@@ -108,7 +105,6 @@ actor_infer:
       max_num_batched_tokens: 512
       max_num_seqs: 1
       tensor_parallel_size: 1
-      distributed_executor_backend: ray
       disable_custom_all_reduce: true
   device_mapping: list(range(1,2))
   infer_batch_size: 1

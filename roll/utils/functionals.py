@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -14,15 +15,52 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.autograd.function import once_differentiable
 from tensordict import TensorDict
 
 from roll.configs.base_config import PPOConfig
+from roll.datasets.chat_template import get_chat_template
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.platforms import current_platform
 from roll.utils.kl_controller import AdaptiveKLController
 from roll.utils.logging import get_logger
 
 logger = get_logger()
+
+
+def parse_dtype(dtype):
+    if dtype is None:
+        return None
+
+    if isinstance(dtype, torch.dtype):
+        return dtype
+
+    if isinstance(dtype, str):
+        dtype_lower = dtype.lower()
+        dtype_map = {
+            "bf16": torch.bfloat16,
+            "bfloat16": torch.bfloat16,
+            "fp16": torch.float16,
+            "float16": torch.float16,
+            "half": torch.float16,
+            "fp32": torch.float32,
+            "float32": torch.float32,
+            "float": torch.float32,
+            "fp64": torch.float64,
+            "float64": torch.float64,
+        }
+
+        if dtype_lower in dtype_map:
+            return dtype_map[dtype_lower]
+        else:
+            if hasattr(torch, dtype):
+                return getattr(torch, dtype)
+            else:
+                raise ValueError(
+                    f"Unsupported dtype string: '{dtype}'. " f"Supported values: {list(dtype_map.keys())}"
+                )
+
+    return dtype
 
 
 def tensor_to_cpu_visitor(obj, path):
@@ -197,6 +235,7 @@ def compute_approx_kl(
         log_ratio = 0.5 * (log_probs - log_probs_base).square()
     elif kl_penalty == "k3":
         kl = log_probs_base - log_probs
+        kl = torch.clamp(kl, min=-20, max=20)
         ratio = torch.exp(kl)
         kld = (ratio - kl - 1).contiguous()
         log_ratio = torch.clamp(kld, min=-10, max=10)
@@ -211,15 +250,159 @@ def compute_approx_kl(
     return log_ratio
 
 
-def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+class _ChunkedLogProbsFromLogits(torch.autograd.Function):
+    """Sequence-dim chunked ``log_softmax + gather`` with a hand-written backward.
+
+    Motivation: computing per-token log-probs materializes two fp32 ``[B, T, V]``
+    intermediates (the upcast logits and the log_softmax output), e.g. ~36GB at
+    T=32k, V=152k. A plain python loop only helps under ``no_grad``: with grad
+    enabled, autograd retains every chunk's log_softmax output for backward, so
+    nothing is saved. This Function bounds the fp32 ``[B, T, V]`` intermediates
+    to a single chunk in BOTH passes: forward saves only the (bf16)
+    logits/labels references and discards all fp32 intermediates; backward
+    recomputes softmax chunk by chunk (the returned dlogits itself is still a
+    full ``[B, T, V]`` allocation by design, see Note below).
+
+    Math (per position t, vocab v; y = label, p = softmax(x), g = upstream grad):
+        lp_t              = x_{t,y} - logsumexp(x_t)
+        d lp_t / d x_{t,v} = 1[v == y_t] - p_{t,v}
+        => dlogits_{t,v}   = g_t * (1[v == y_t] - p_{t,v})
+    Implemented as ``-g * p`` then ``scatter_add_`` of ``+g`` at the label index.
+    """
+
+    @staticmethod
+    def forward(ctx, logits: torch.Tensor, labels: torch.Tensor, chunk_size: int) -> torch.Tensor:
+        B, T, _ = logits.shape
+        # fp32 compute for low-precision inputs; keep fp64 as-is so gradcheck stays exact.
+        compute_dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
+        log_probs_labels = torch.empty(B, T, dtype=compute_dtype, device=logits.device)
+        for start in range(0, T, chunk_size):
+            end = min(start + chunk_size, T)
+            chunk_log_probs = F.log_softmax(logits[:, start:end, :].to(compute_dtype), dim=-1)
+            log_probs_labels[:, start:end] = chunk_log_probs.gather(
+                dim=-1, index=labels[:, start:end].unsqueeze(-1)
+            ).squeeze(-1)
+        ctx.save_for_backward(logits, labels)
+        ctx.chunk_size = chunk_size
+        return log_probs_labels
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output: torch.Tensor):
+        if not ctx.needs_input_grad[0]:
+            return None, None, None
+        logits, labels = ctx.saved_tensors
+        chunk_size = ctx.chunk_size
+        T = logits.shape[1]
+        compute_dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
+        grad_logits = torch.empty_like(logits)
+        for start in range(0, T, chunk_size):
+            end = min(start + chunk_size, T)
+            # Recompute softmax for this chunk only; torch.softmax allocates a fresh
+            # tensor, so the in-place ops below never touch `logits`.
+            grad_chunk = torch.softmax(logits[:, start:end, :].to(compute_dtype), dim=-1)
+            # NB: `g` may alias `grad_output` when dtypes already match -- it must stay read-only.
+            g = grad_output[:, start:end].unsqueeze(-1).to(compute_dtype)
+            grad_chunk.mul_(-g)  # -g * p, in place
+            grad_chunk.scatter_add_(-1, labels[:, start:end].unsqueeze(-1), g)  # +g at label
+            grad_logits[:, start:end] = grad_chunk.to(grad_logits.dtype)
+        return grad_logits, None, None
+
+
+class _ChunkedEntropyFromLogits(torch.autograd.Function):
+    """Sequence-dim chunked entropy with a hand-written backward.
+
+    Same rationale as ``_ChunkedLogProbsFromLogits``; entropy is even more
+    memory-hungry since the ``p * logits`` term holds two fp32 ``[B, T, V]``
+    tensors at once.
+
+    Math (per position t; p = softmax(x), S = sum_v p_v * x_v, g = upstream grad):
+        H_t             = logsumexp(x_t) - S_t
+        d H_t / d x_{t,v} = p_{t,v} * (S_t - x_{t,v})
+        => dlogits_{t,v}  = g_t * p_{t,v} * (S_t - x_{t,v})
+    """
+
+    @staticmethod
+    def forward(ctx, logits: torch.Tensor, chunk_size: int) -> torch.Tensor:
+        B, T, _ = logits.shape
+        compute_dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
+        entropy = torch.empty(B, T, dtype=compute_dtype, device=logits.device)
+        for start in range(0, T, chunk_size):
+            end = min(start + chunk_size, T)
+            chunk = logits[:, start:end, :].to(compute_dtype)
+            pd = torch.softmax(chunk, dim=-1)
+            entropy[:, start:end] = torch.logsumexp(chunk, dim=-1) - torch.sum(pd * chunk, dim=-1)
+        ctx.save_for_backward(logits)
+        ctx.chunk_size = chunk_size
+        return entropy
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output: torch.Tensor):
+        if not ctx.needs_input_grad[0]:
+            return None, None
+        (logits,) = ctx.saved_tensors
+        chunk_size = ctx.chunk_size
+        T = logits.shape[1]
+        compute_dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
+        grad_logits = torch.empty_like(logits)
+        for start in range(0, T, chunk_size):
+            end = min(start + chunk_size, T)
+            # copy=True is load-bearing: when dtypes already match (e.g. fp32/fp64
+            # logits), .to() would return a VIEW of `logits` and the in-place math
+            # below would corrupt the input tensor (and trip autograd's version
+            # check when `logits` is shared with other saved nodes). The bf16
+            # production path pays this copy anyway.
+            chunk = logits[:, start:end, :].to(compute_dtype, copy=True)
+            pd = torch.softmax(chunk, dim=-1)
+            s = torch.sum(pd * chunk, dim=-1, keepdim=True)  # S_t
+            # NB: `g` may alias `grad_output` when dtypes already match -- it must stay read-only.
+            g = grad_output[:, start:end].unsqueeze(-1).to(compute_dtype)
+            # g * p * (S - x), computed in place on the private `chunk` copy
+            chunk.neg_().add_(s)  # S - x
+            chunk.mul_(pd).mul_(g)
+            grad_logits[:, start:end] = chunk.to(grad_logits.dtype)
+        return grad_logits, None
+
+
+def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, chunk_size: int = 0) -> torch.Tensor:
+    """Gather per-token log-probs of ``labels`` from ``logits``.
+
+    When ``chunk_size > 0`` and the input is a long ``[B, T, V]`` tensor, the
+    computation is delegated to ``_ChunkedLogProbsFromLogits``, which slices
+    along the sequence dim in both forward and backward so that the fp32
+    intermediates (upcast logits + log_softmax output, e.g. ~36GB at T=32k,
+    V=152k) never exceed a single chunk. Forward values match the single-pass
+    computation; gradients are numerically equivalent up to floating-point
+    rounding (the analytic backward composes the same math in a different
+    order). ``chunk_size <= 0`` (the default) or a sequence not longer than one
+    chunk falls back to the original single-pass path, so the default behavior
+    for existing callers is unchanged. (fp64 inputs: the chunked path computes
+    in fp64 while the single-pass fallback downcasts via ``.float()``; this
+    only matters for gradcheck-style testing.)
+    """
+    if chunk_size > 0 and logits.dim() == 3 and logits.shape[1] > chunk_size:
+        return _ChunkedLogProbsFromLogits.apply(logits, labels, chunk_size)
     logits = logits.float()
     log_probs = F.log_softmax(logits, dim=-1)
     log_probs_labels = log_probs.gather(dim=-1, index=labels.unsqueeze(-1))
     return log_probs_labels.squeeze(-1)
 
 
-def entropy_from_logits(logits: torch.Tensor):
-    """Calculate entropy from logits."""
+def entropy_from_logits(logits: torch.Tensor, chunk_size: int = 0):
+    """Calculate entropy from logits.
+
+    When ``chunk_size > 0`` and the input is a long ``[B, T, V]`` tensor, the
+    computation is delegated to ``_ChunkedEntropyFromLogits`` (see its docstring;
+    entropy is even more memory-hungry than log-probs because the ``p * logits``
+    term holds two fp32 ``[B, T, V]`` tensors at once). ``chunk_size <= 0`` (the
+    default) or a short sequence falls back to the original single-pass path, so
+    the default behavior for existing callers is unchanged. (fp64 inputs: the
+    chunked path computes in fp64 while the single-pass fallback downcasts via
+    ``.float()``; this only matters for gradcheck-style testing.)
+    """
+    if chunk_size > 0 and logits.dim() == 3 and logits.shape[1] > chunk_size:
+        return _ChunkedEntropyFromLogits.apply(logits, chunk_size)
     logits = logits.float()
     pd = torch.nn.functional.softmax(logits, dim=-1)
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
@@ -538,6 +721,53 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
+def compute_skip_observation_gae(
+    token_level_rewards: torch.Tensor,
+    values: torch.Tensor,
+    gamma: torch.Tensor,
+    lambd: torch.Tensor,
+    response_mask: torch.Tensor,
+):
+    """Skip-Observation GAE: Bellman backup skips observation tokens (response_mask=0),
+    connecting action spans directly for advantage propagation.
+
+    Args:
+        token_level_rewards: shape (bs, response_length)
+        values: shape (bs, response_length)
+        gamma: discount factor
+        lambd: GAE lambda
+        response_mask: shape (bs, response_length), 1 for action tokens, 0 for observation tokens
+
+    Returns:
+        advantages: shape (bs, response_length), non-zero only on action tokens
+        returns: shape (bs, response_length)
+    """
+    with torch.no_grad():
+        bs, gen_len = token_level_rewards.shape
+        advantages = torch.zeros_like(token_level_rewards)
+
+        for b in range(bs):
+            lastgaelam = 0
+            for t in reversed(range(gen_len)):
+                if response_mask[b, t] == 0:
+                    continue
+                # Find next action token's value as bootstrap target
+                next_action_idx = None
+                for k in range(t + 1, gen_len):
+                    if response_mask[b, k] == 1:
+                        next_action_idx = k
+                        break
+                nextvalues = values[b, next_action_idx] if next_action_idx is not None else 0.0
+
+                delta = token_level_rewards[b, t] + gamma * nextvalues - values[b, t]
+                lastgaelam = delta + gamma * lambd * lastgaelam
+                advantages[b, t] = lastgaelam
+
+        returns = advantages + values
+
+    return advantages, returns
+
+
 def expand_to_token_level(data: "DataProto"):
     response_level_rewards = data.batch["response_level_rewards"].clone().detach()
     batch_size = data.batch.batch_size[0]
@@ -800,6 +1030,73 @@ def build_domain_to_teacher_names(
     return domain_to_teacher_names
 
 
+def _reattach_routed_experts(batch, holder) -> None:
+
+    from roll.distributed.scheduler.remote_protocol import RemoteBatch
+
+    if isinstance(holder, RemoteBatch):
+        batch._remote_batch = batch._remote_batch.union(holder) if batch._remote_batch is not None else holder
+    else:
+        batch.batch["routed_experts"] = holder
+
+
+def attach_routed_experts(batch, source) -> None:
+    """Move routed_experts from another DataProto into batch.
+
+    Prefers keeping the field in the TransferQueue remote view so the recorded
+    indices never materialize on the driver; workers fetch them at consumption.
+    """
+    if source._remote_batch is not None and "routed_experts" in source._remote_batch:
+        _reattach_routed_experts(batch, source._remote_batch.pop(["routed_experts"]))
+    elif "routed_experts" in source.batch:
+        batch.batch["routed_experts"] = source.batch.pop("routed_experts")
+
+
+@contextmanager
+def hold_aside_routed_experts(batch, realign_key: Optional[str] = None, realign_indices=None):
+    """Temporarily pop routed_experts from batch so cheap CPU ops
+    (reorder/group_by/dispatch) don't drag the huge tensor around; it is
+    re-attached automatically on context exit (also on exception).
+
+    If the batch rows are reordered while detached, pass ``realign_key`` (a batch
+    field holding the original row indices) or ``realign_indices`` so the holder
+    (local tensor or RemoteBatch handle) is re-aligned on restore.
+    Yields a restore() callable for early restore.
+    """
+    if batch._remote_batch is not None and "routed_experts" in batch._remote_batch:
+        holder = batch._remote_batch.pop(["routed_experts"])
+        # Avoid dispatching an empty remote-batch shell: workers crash in
+        # materialize() when cache is None and there are no fields to fetch.
+        if len(batch._remote_batch.fields) == 0:
+            batch._remote_batch = None
+    else:
+        holder = batch.batch.pop("routed_experts", None)
+
+    restored = False
+
+    def restore(target=None) -> None:
+        nonlocal restored
+        if restored or holder is None:
+            return
+        restored = True
+        target = target if target is not None else batch
+        indices = realign_indices if realign_indices is not None else (
+            target.batch[realign_key] if realign_key is not None else None
+        )
+        payload = holder
+        if indices is not None:
+            # For RemoteBatch this only permutes the handle (row_ids/cache or a
+            # SelectPlan), no data is fetched; required because union() merges
+            # caches positionally after batch.reorder changed the row order.
+            payload = holder[indices]
+        _reattach_routed_experts(target, payload)
+
+    try:
+        yield restore
+    finally:
+        restore()
+
+
 def build_domain_routing_context(
     batch: "DataProto",
     pipeline_config,
@@ -925,6 +1222,222 @@ def clusters_have_disjoint_devices(clusters: Union[Dict[str, object], List[objec
             return False
         seen_devices |= devices
     return True
+
+
+# === OPSD (On-Policy Self-Distillation) ===
+
+_DEFAULT_OPSD_TEMPLATE = (
+    "{problem}\n\n"
+    "Here is a reference solution to this problem:\n"
+    "=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n"
+    "\n\nAfter reading the reference solution above, make sure you truly understand "
+    "the reasoning behind each step — do not copy or paraphrase it. Now, using your "
+    "own words and independent reasoning, derive the same final answer to the problem above. "
+    "Think step by step, explore different approaches, and don't be afraid to backtrack "
+    "or reconsider if something doesn't work out:\n"
+)
+
+
+def _build_teacher_prompt_text(problem, solution, tokenizer, pipeline_config, enable_thinking=True):
+    opsd_teacher_template = getattr(pipeline_config, "opsd_teacher_template", _DEFAULT_OPSD_TEMPLATE)
+    user_content = opsd_teacher_template.format(problem=problem, solution=solution)
+    messages = [{"role": "user", "content": user_content}]
+    template_name = (
+        getattr(pipeline_config, "global_template", None)
+        or pipeline_config.actor_train.data_args.template
+    )
+    chat_template_fn = get_chat_template(template_name, tokenizer)
+    return chat_template_fn(
+        conversation=messages, add_generation_prompt=True, enable_thinking=enable_thinking
+    )
+
+
+def _align_response_log_probs(teacher_log_probs, teacher_resp_mask, student_resp_mask):
+    bs = teacher_log_probs.shape[0]
+    student_seq_len = student_resp_mask.shape[1]
+    aligned = torch.zeros(
+        bs, student_seq_len - 1,
+        dtype=teacher_log_probs.dtype, device=teacher_log_probs.device,
+    )
+    # Shift by 1: log_probs[i] predicts token i+1, so action positions are mask[1:]
+    teacher_action = teacher_resp_mask[:, 1:].bool()
+    student_action = student_resp_mask[:, 1:].bool()
+    for i in range(bs):
+        values = teacher_log_probs[i][teacher_action[i]]
+        positions = student_action[i].nonzero(as_tuple=True)[0]
+        copy_len = min(len(values), len(positions))
+        if copy_len > 0:
+            aligned[i, positions[:copy_len]] = values[:copy_len]
+    return aligned
+
+
+def _prepare_opsd_teacher_batch(batch, tokenizer, pipeline_config, enable_thinking=True):
+    # Transform batch from student format to teacher format: replace student prompt
+    # with teacher prompt (containing reference solution y*), keep response tokens unchanged.
+    device = batch.batch.device
+    input_ids = batch.batch["input_ids"]
+    response_mask = batch.batch["response_mask"]
+    attention_mask = batch.batch["attention_mask"]
+    bs, seq_len = input_ids.shape
+
+    saved = {
+        "input_ids": input_ids.clone(),
+        "attention_mask": attention_mask.clone(),
+        "response_mask": response_mask.clone(),
+        "_original_keys": set(batch.batch.keys()),
+    }
+    if "position_ids" in batch.batch:
+        saved["position_ids"] = batch.batch["position_ids"].clone()
+
+    prompts = batch.non_tensor_batch["prompt"]
+    solutions = batch.non_tensor_batch[pipeline_config.opsd_solution_key]
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+    new_input_ids = []
+    new_attention_masks = []
+    new_response_masks = []
+
+    for i in range(bs):
+        resp_mask_i = response_mask[i].bool()
+        response_ids = input_ids[i][resp_mask_i]
+        num_response = response_ids.shape[0]
+        max_prompt_len = seq_len - num_response
+
+        problem_text = prompts[i] if isinstance(prompts[i], str) else str(prompts[i])
+        solution_text = solutions[i] if isinstance(solutions[i], str) else str(solutions[i])
+
+        # Stage 1: optional hard cap on solution length (user-configured)
+        opsd_max_solution_length = getattr(pipeline_config, "opsd_max_solution_length", None)
+        if opsd_max_solution_length is not None:
+            solution_tokens = tokenizer.encode(solution_text, add_special_tokens=False)
+            if len(solution_tokens) > opsd_max_solution_length:
+                logger.warning(
+                    f"OPSD: truncated solution from {len(solution_tokens)} to "
+                    f"{opsd_max_solution_length} tokens (opsd_max_solution_length) for sample {i}."
+                )
+                solution_text = tokenizer.decode(
+                    solution_tokens[:opsd_max_solution_length], skip_special_tokens=True
+                )
+
+        # Stage 2: build teacher prompt, auto-truncate solution if still too long
+        teacher_prompt_text = _build_teacher_prompt_text(
+            problem_text, solution_text, tokenizer, pipeline_config,
+            enable_thinking=enable_thinking,
+        )
+        teacher_prompt_ids = torch.tensor(
+            tokenizer.encode(teacher_prompt_text, add_special_tokens=False),
+            dtype=input_ids.dtype, device=device,
+        )
+
+        if len(teacher_prompt_ids) > max_prompt_len:
+            # Measure template overhead: problem + OPSD template + chat template, no solution.
+            # This dynamically accounts for the actual template length (user-configurable).
+            empty_prompt_text = _build_teacher_prompt_text(
+                problem_text, "", tokenizer, pipeline_config,
+                enable_thinking=enable_thinking,
+            )
+            empty_ids = tokenizer.encode(empty_prompt_text, add_special_tokens=False)
+            available_for_solution = max_prompt_len - len(empty_ids)
+
+            if available_for_solution > 0:
+                solution_tokens = tokenizer.encode(solution_text, add_special_tokens=False)
+                if len(solution_tokens) > available_for_solution:
+                    logger.warning(
+                        f"OPSD: auto-truncating solution from {len(solution_tokens)} to "
+                        f"{available_for_solution} tokens to fit sequence_length for sample {i}."
+                    )
+                    solution_text = tokenizer.decode(
+                        solution_tokens[:available_for_solution], skip_special_tokens=True
+                    )
+                    teacher_prompt_text = _build_teacher_prompt_text(
+                        problem_text, solution_text, tokenizer, pipeline_config,
+                        enable_thinking=enable_thinking,
+                    )
+                    teacher_prompt_ids = torch.tensor(
+                        tokenizer.encode(teacher_prompt_text, add_special_tokens=False),
+                        dtype=input_ids.dtype, device=device,
+                    )
+
+            # Final fallback: problem + template overhead alone exceeds max_prompt_len.
+            # Truncate the tokenized prompt — no solution to cut further.
+            if len(teacher_prompt_ids) > max_prompt_len:
+                logger.warning(
+                    f"OPSD: teacher prompt ({len(teacher_prompt_ids)} tokens) still exceeds "
+                    f"available space ({max_prompt_len}) even with empty solution. "
+                    f"Truncating tokenized prompt. Sample index: {i}."
+                )
+                teacher_prompt_ids = teacher_prompt_ids[:max_prompt_len]
+        num_teacher_prompt = teacher_prompt_ids.shape[0]
+
+        teacher_seq = torch.cat([teacher_prompt_ids, response_ids])
+        total_len = teacher_seq.shape[0]
+        pad_len = seq_len - total_len
+        if pad_len > 0:
+            teacher_seq = torch.cat([
+                teacher_seq,
+                torch.full((pad_len,), pad_token_id, dtype=input_ids.dtype, device=device),
+            ])
+
+        new_input_ids.append(teacher_seq)
+
+        attn = torch.zeros(seq_len, dtype=attention_mask.dtype, device=device)
+        attn[:total_len] = 1
+        new_attention_masks.append(attn)
+
+        resp = torch.zeros(seq_len, dtype=response_mask.dtype, device=device)
+        resp[num_teacher_prompt:num_teacher_prompt + num_response] = 1
+        new_response_masks.append(resp)
+
+    batch.batch["input_ids"] = torch.stack(new_input_ids)
+    batch.batch["attention_mask"] = torch.stack(new_attention_masks)
+    batch.batch["response_mask"] = torch.stack(new_response_masks)
+    batch.batch["position_ids"] = torch.clip(
+        torch.cumsum(batch.batch["attention_mask"], dim=-1) - 1, min=0
+    )
+    return saved
+
+
+def _restore_opsd_student_batch(batch, saved, pipeline_config):
+    teacher_resp_mask = batch.batch["response_mask"]
+    student_resp_mask = saved["response_mask"]
+    original_keys = saved["_original_keys"]
+    expected_action_len = teacher_resp_mask.shape[1] - 1
+
+    # Align keys added by teacher forward (ref_log_probs*) from teacher to student response positions.
+    # Skip keys that pre-existed (in original_keys) or are masks — they just need restoration below.
+    for key in list(batch.batch.keys()):
+        if key in original_keys:
+            continue
+        if key.endswith("_mask"):
+            continue
+        tensor = batch.batch[key]
+        if not torch.is_tensor(tensor) or tensor.dim() != 2:
+            continue
+        if tensor.shape[1] != expected_action_len:
+            continue
+        batch.batch[key] = _align_response_log_probs(
+            tensor, teacher_resp_mask, student_resp_mask
+        )
+
+    batch.batch["input_ids"] = saved["input_ids"]
+    batch.batch["attention_mask"] = saved["attention_mask"]
+    batch.batch["response_mask"] = saved["response_mask"]
+    if saved.get("position_ids") is not None:
+        batch.batch["position_ids"] = saved["position_ids"]
+
+
+@contextmanager
+def opsd_teacher_context(batch, tokenizer, pipeline_config, enable_thinking=True):
+    """Transform batch to teacher format (prompt with y*) on enter,
+    restore to student format with aligned ref_log_probs on exit.
+
+    Ensures batch is restored even if teacher forward raises an exception.
+    """
+    saved = _prepare_opsd_teacher_batch(batch, tokenizer, pipeline_config, enable_thinking)
+    try:
+        yield batch
+    finally:
+        _restore_opsd_student_batch(batch, saved, pipeline_config)
 
 
 def compute_ref_log_probs_with_routing(
@@ -1148,6 +1661,18 @@ def compute_advantage(
                 )
                 total_weighted_kld += kl_coef_i * kld_i
 
+        opd_metrics = data.meta_info.setdefault("metrics", {})
+        opd_metrics["critic/opd_kld_mean"] = masked_mean(total_weighted_kld, mask=response_mask).item()
+        opd_metrics["critic/opd_kld_max"] = total_weighted_kld[response_mask.bool()].max().item() if response_mask.any() else 0.0
+
+        opd_token_kld_clip = getattr(pipeline_config, "opd_token_kld_clip", None) if pipeline_config else None
+        if opd_token_kld_clip is not None:
+            pre_clip = total_weighted_kld[response_mask.bool()]
+            opd_metrics["critic/opd_kld_clip_frac"] = (pre_clip.abs() > opd_token_kld_clip).float().mean().item() if pre_clip.numel() > 0 else 0.0
+            total_weighted_kld = torch.clamp(total_weighted_kld, -opd_token_kld_clip, opd_token_kld_clip)
+
+        data.meta_info["metrics"] = opd_metrics
+
     # For pure OPD mode, advantage is directly -total_weighted_kld
     if is_pure_opd:
         advantages = -total_weighted_kld
@@ -1185,7 +1710,7 @@ def compute_advantage(
 
     if advantage_clip is not None:
         adv_clip_frac = compute_clip_fraction(values=advantages, clip_min=-advantage_clip, clip_max=advantage_clip)
-        data.meta_info["metrics"] = {"critic/advantage_clip_frac": adv_clip_frac}
+        data.meta_info.setdefault("metrics", {})["critic/advantage_clip_frac"] = adv_clip_frac
         advantages = torch.clamp(advantages, min=-advantage_clip, max=advantage_clip)
 
     data.batch["advantages"] = advantages
@@ -1202,6 +1727,7 @@ def postprocess_generate(
     fill_eos_token=False,
     output_logprobs: Optional[list[list[float]]] = None,
     routed_experts: Optional[list[torch.Tensor]]=None,
+    num_moe_experts: Optional[int]=None,
     pad_to_seq_len=True,
 ) -> "DataProto":
     from roll.distributed.scheduler.protocol import DataProto
@@ -1261,10 +1787,13 @@ def postprocess_generate(
     expert_dtype = None
     if routed_experts is not None:
         _, layer_num, topk = routed_experts[0].size()
-        # Select minimal dtype based on actual max expert index to reduce data size.
-        max_expert_idx = max(int(re.max().item()) for re in routed_experts)
-        from roll.third_party.megatron.router_replay_utils import get_routed_experts_dtype
-        expert_dtype = get_routed_experts_dtype(max_expert_idx)
+        from roll.third_party.megatron.router_replay_utils import get_expert_dtype
+        if num_moe_experts is not None:
+            expert_dtype = get_expert_dtype(num_moe_experts)
+        else:
+            # No static expert count on the rollout path; one fused max still shrinks the dtype.
+            max_expert_idx = int(torch.stack([re.max() for re in routed_experts]).max().item())
+            expert_dtype = get_expert_dtype(max_expert_idx + 1)
         new_routed_experts = (
             torch.zeros(
                 [output_batch_size, sequence_length, layer_num, topk],
@@ -1295,11 +1824,13 @@ def postprocess_generate(
                 output_logprobs[i][:response_length], dtype=logprobs.dtype
             )
         if new_routed_experts is not None:
-            # new_routed_experts[i, :valid_length - 1] = routed_experts[i]
-            routed_experts_len = routed_experts[i].size(0)
-            if routed_experts_len != (valid_length - 1):
-                logger.info(f"Warning: {routed_experts_len=} != {(valid_length - 1)=}.")
-            new_routed_experts[i, :routed_experts_len] = routed_experts[i].to(expert_dtype)
+            # vLLM records an extra trailing row for the final decode step; SGLang already returns exactly valid_length-1 rows.
+            new_routed_experts[i, : valid_length - 1] = routed_experts[i][: valid_length - 1].to(expert_dtype)
+            # Padding positions (>= valid_length-1) have no recorded routing. All-zero routing causes duplicate top-k indices,
+            # collapsing routing_map and breaking the dropless AllToAll dispatcher due to size mismatch. Fill padding
+            # rows with distinct expert indices to keep routing_map dense. This is safe since padding is masked from loss.
+            if valid_length - 1 < sequence_length:
+                new_routed_experts[i, valid_length - 1 :] = torch.arange(topk, dtype=expert_dtype).view(1, 1, topk)
         if position_ids.dim() == 3 and shift > 0:
             # shift as output to convert to right padding
             # NOTE: left shift without clear right might lead to unclean values
@@ -1698,5 +2229,4 @@ def batch_balance(batch: DataProto, dp_size, minibatch_size, logging_prefix="glo
     metrics = {}
     metrics.update(global_balance_stats)
     return metrics
-
 

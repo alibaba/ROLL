@@ -253,24 +253,28 @@ This layered optimization ensures balanced workloads from global to local levels
 
 ## 4. Configuration Parameters
 
-### 4.1 How to Enable Sequence Packing
+### 4.1 Sequence Packing Is Enabled by Default
 
-To use Sequence Packing, simply set `use_sequence_packing: true` in your configuration file.
+Sequence Packing is **enabled by default** with the `load_balance` algorithm. No explicit configuration is needed — simply using a `megatron_train` or `megatron_infer` strategy activates packing automatically.
+
+To **disable** packing, set `use_sequence_packing: false` in your worker configuration.
+
+> **Note**: The DPO pipeline does not support sequence packing and will automatically force it off regardless of the configuration. Multimodal models that do not inherit `MultimodalEmbeddingMixin` (e.g., `qwen2_vl`, `qwen2_5_vl`, `kimi_k25`) will also auto-disable packing with a warning.
 
 ### 4.2 Parameter Details (Plain Language)
 
 #### `algorithm` (Packing Algorithm)
-- **`none`**: Default simple packing—sequences are packed in their original order.
-- **`load_balance`**: Intelligent load-balanced packing—reorders data to balance computational load across micro-batches. **Recommended**.
+- **`load_balance`** (default): Intelligent load-balanced packing—reorders data to balance computational load across micro-batches. **Recommended**.
+- **`none`**: Simple packing—sequences are packed in their original order.
 
 #### `max_packed_sequence_length_train` (Max Packed Length for Training)
 - Controls the maximum allowed length of a packed sequence during training.
-- E.g., setting to 8192 means no packed sequence will exceed 8192 tokens.
-- Choose a reasonable value to avoid out-of-memory errors while maintaining packing efficiency.
+- When set to `None` (default), auto-computed as `sequence_length * per_device_train_batch_size`, matching the memory budget of non-packing mode.
+- Explicitly set a value to override the auto-computed default.
 
 #### `max_packed_sequence_length_forward` (Max Packed Length for Inference)
 - Same as above, but applied during inference.
-- Typically set to the same value as the training parameter.
+- When set to `None` (default), auto-computed as `sequence_length * infer_batch_size`.
 
 #### `min_num_micro_batches_train` (Minimum Micro-Batches for Training)
 - Specifies the minimum number of micro-batches per mini-batch during training.
@@ -280,40 +284,45 @@ To use Sequence Packing, simply set `use_sequence_packing: true` in your configu
 #### `min_num_micro_batches_forward` (Minimum Micro-Batches for Inference)
 - Same as above, but for inference.
 
-### 4.3 Full Configuration Example
+### 4.3 Configuration Example
+
+Packing is on by default — no explicit configuration needed:
 
 ```yaml
 actor_train:
-  # Enable sequence packing
-  use_sequence_packing: True
-  
-  # Sequence packing configuration
-  sequence_packing_args:
-    # Use load-balancing algorithm for better performance
-    algorithm: load_balance
-    
-    # Max packed sequence length during training
-    max_packed_sequence_length_train: 8192
-    
-    # Max packed sequence length during inference
-    max_packed_sequence_length_forward: 8192
-    
-    # Minimum 1 micro-batch during training (no constraint)
-    min_num_micro_batches_train: 1
-    
-    # Minimum 1 micro-batch during inference
-    min_num_micro_batches_forward: 1
-  
-  # Sequence packing requires megatron strategy
   strategy_args:
     strategy_name: megatron_train
+  # use_sequence_packing: True  # already the default
+  # sequence_packing_args:       # auto-computed when None
+  #   algorithm: load_balance    # already the default
+  #   max_packed_sequence_length_train: null    # auto = seq_len * per_device_train_batch_size
+  #   max_packed_sequence_length_forward: null  # auto = seq_len * infer_batch_size
+```
+
+To override defaults or disable packing:
+
+```yaml
+actor_train:
+  # Disable packing entirely
+  use_sequence_packing: false
+
+  # Or customize packing parameters
+  use_sequence_packing: True
+  sequence_packing_args:
+    algorithm: load_balance
+    max_packed_sequence_length_train: 8192
+    max_packed_sequence_length_forward: 8192
+    min_num_micro_batches_train: 1
+    min_num_micro_batches_forward: 1
 ```
 
 ### 4.4 Usage Recommendations
 
-1. **Mandatory Condition**: Only supported under `megatron_train` or `megatron_infer` strategies.
-2. **Recommended Setting**: Use `algorithm: load_balance` for optimal performance.
-3. **Length Tuning**: Set `max_packed_sequence_length` based on your GPU memory capacity—typically equal to the model’s maximum supported sequence length.
-4. **Custom Loss Functions**: If using a custom loss function with sequence packing, refer to the custom loss documentation and ensure `apply_loss_scale` is correctly configured.
+1. **Default Behavior**: Packing is on by default with `load_balance` algorithm and auto-computed `max_packed_sequence_length`. No configuration needed for megatron strategies.
+2. **Strategy Requirement**: Only `megatron_train` and `megatron_infer` strategies implement packing. Other strategies (fsdp2, vllm, sglang) will log a warning and ignore the flag.
+3. **DPO Exclusion**: The DPO pipeline automatically forces packing off — no user action needed.
+4. **VLM Exclusion**: Multimodal models without `MultimodalEmbeddingMixin` (e.g., `qwen2_vl`, `qwen2_5_vl`, `kimi_k25`) auto-disable packing with a warning.
+5. **Memory Budget**: The auto-computed `max_packed_sequence_length` matches the non-packing memory footprint (`seq_len * batch_size`). Packing only removes wasted padding — it does not increase peak memory.
+6. **Custom Loss Functions**: If using a custom loss function with sequence packing, refer to the custom loss documentation and ensure `apply_loss_scale` is correctly configured.
 
 With proper configuration, Sequence Packing significantly boosts training efficiency—especially in RL scenarios with highly variable sequence lengths—while maintaining model performance.

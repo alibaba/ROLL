@@ -1,0 +1,152 @@
+# Requires at least 80GB GPU VARM
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+# Training hyperparameters aligned with the geneval YAMLs in ROLL
+# (examples/qwen-image-flowgrpo/{rlboost,hyp,dancegrpo}_geneval*.yaml).
+lr: 3e-6
+wd: 1.0e-4
+ga_steps: 1
+
+exp_name: "qwen_image_flow_grpo_geneval_fsdp2_lr_${lr}_ga_steps_${ga_steps}"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+checkpoint_config:
+  type: mos
+
+track_with: ml_tracker
+tracker_kwargs:
+ project: roll_qwenimage_diffusion # ml_tracker的实验名，
+ notes: "scale aligner qwenimage diffusion rl geneval"
+ tags: # mltracker job tags，后续方便管理实验
+   - pipeline
+   - roll
+   - diffusion
+   - diffusion_qwen_image
+   - geneval
+
+max_steps: 100
+eval_steps: 5
+save_steps: 5
+rollout_batch_size: 32
+prompt_length: 1058
+sequence_length: 1059
+ppo_epochs: 1
+pg_clip: 0.0001
+advantage_clip: 5.0
+
+adv_estimator: flowgrpo
+enable_reference: false
+use_kl_loss: false
+kl_loss_coef: 0.0
+is_offload_optimizer_states_in_train_step: true
+pretrain: Qwen/Qwen-Image
+num_return_sequences_in_group: 16
+is_num_return_sequences_expand: true
+diffusion_model_variant: qwen_image
+val_before_train: true
+
+dump_step_output_type: ["val"]
+dump_step_output_idx: "list(range(0,100))"
+dump_step_output_path: ./output/dump/
+
+actor_train:
+  infer_batch_size: 32
+  model_args:
+    model_name_or_path: Qwen/Qwen-Image
+    model_type: diffusion_model
+    dtype: bf16
+  training_args:
+    learning_rate: ${lr}
+    lr_scheduler_type: constant
+    warmup_ratio: 0.0
+    warmup_steps: 0
+    weight_decay: ${wd}
+    per_device_train_batch_size: 4
+    gradient_accumulation_steps: ${ga_steps}
+    num_train_epochs: 1
+  data_args:
+    template: native
+    file_name:
+      - data/geneval/train.jsonl
+    messages: prompt
+    preprocessing_num_workers: 1
+  strategy_args:
+    strategy_name: fsdp2_diffusion_train
+    strategy_config:
+      fsdp_size: 8
+      reshard_after_forward: true
+      offload_policy: false
+      per_block_optimizer_metrics: true
+  device_mapping: list(range(0,8))
+
+actor_infer:
+  worker_cls: roll.pipeline.base_worker.InferWorker
+  infer_batch_size: 32
+  model_args:
+    model_name_or_path: Qwen/Qwen-Image
+    model_type: diffusion_model
+    dtype: bf16
+  generating_args:
+    num_return_sequences: ${num_return_sequences_in_group}
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 50
+    max_length: 1058
+    max_sequence_length: 1058
+    max_new_tokens: 1
+    height: 512
+    width: 512
+    num_inference_steps: 10
+    guidance_scale: 1.0
+    extra_args:
+      logprobs: true
+      noise_level: 1.2
+      sde_type: sde
+      sde_window_size: 2
+      sde_window_range: [0, 5]
+  data_args:
+    template: native
+  strategy_args:
+    strategy_name: vllm_omni
+    strategy_config:
+      enforce_eager: true
+      load_format: safetensors
+      sleep_level: 2
+      vllm_omni:
+        custom_pipeline: roll.pipeline.diffusion.models.qwen_image.vllm_omni_qwen_image_adapter.QwenImagePipelineWithLogProb
+  device_mapping: "list(range(0,8))"
+
+validation:
+  data_args:
+    template: native
+    file_name:
+      - data/geneval/test.jsonl
+    messages: prompt
+    preprocessing_num_workers: 1
+  generating_args:
+    num_return_sequences: 1
+    num_inference_steps: 10
+    height: 512
+    width: 512
+    max_sequence_length: 1058
+    guidance_scale: 1.0
+
+# Geneval reward requires extra runtime deps (lazy-loaded, only when this
+# reward is configured): mmdet (+mmcv/mmengine), open_clip_torch, clip_benchmark.
+# Download the detector and CLIP assets, then set model_name_or_path to the local bundle.
+# The expected internal layout is fixed by GenevalRewardWorker.
+rewards:
+  geneval:
+    name: geneval
+    worker_cls: roll.pipeline.diffusion.rewards.geneval_reward_worker.GenevalRewardWorker
+    tag_included: [geneval_counting, geneval_position, geneval_color_attr, geneval_colors, geneval_two_object, geneval_single_object]
+    model_args:
+      model_name_or_path: path/to/geneval_assets
+    device_mapping: "list(range(0,8))"
+    # TODO: make infer batch size effective
+    # infer_batch_size: 32

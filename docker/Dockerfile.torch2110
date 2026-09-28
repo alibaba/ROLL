@@ -1,0 +1,38 @@
+FROM nvcr.io/nvidia/pytorch:26.03-py3
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm-256color
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV PIP_CONSTRAINT=""
+
+RUN pip install --upgrade --ignore-installed --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    pip setuptools setuptools_scm wheel
+
+RUN pip uninstall -y torch torchvision torchao torch-tensorrt pytorch-triton transformer_engine
+
+RUN pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+
+RUN apt-get update && apt-get install -y iproute2 tmux zip
+
+RUN apt-get install -y openjdk-21-jdk
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+
+# NOTE: need dev branch for qwen3.5(GDN) CP/packing
+RUN pip install --no-build-isolation "megatron-core @ git+https://github.com/NVIDIA/Megatron-LM.git@77c0f8cb3"
+
+RUN MAX_JOBS=8 pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    --no-build-isolation "flash-attn==2.8.3"
+
+RUN pip install --trusted-host mirrors.aliyun.com --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    --no-build-isolation "flash-linear-attention" "transformer-engine[pytorch]"
+# pre-built transformer-engine uses cublasLt symbol not undefined in cublasLt imported by cu130/torch==2.11.0
+ENV LD_PRELOAD="/usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so.13:/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so.13"
+
+RUN pip install --index-url https://mirrors.aliyun.com/pypi/simple/ vllm==0.23.0
+
+# FIXME: vllm==0.23.0 requires transformers!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.*,!=5.4.*,!=5.5.0,>=4.56.0
+# while ROLL is not compatible with some higher version of transformers temporarily
+RUN pip install --index-url https://mirrors.aliyun.com/pypi/simple/ transformers==5.2.0
+
+# some apt installed pkg conflict with pip installed pkg in requirements file
+RUN apt-get remove -y python3-yaml || true

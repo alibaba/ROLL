@@ -71,7 +71,7 @@ class MathEnv(GEMMathEnv):
             action_is_valid = False
         else:
             res = self.mp_pool.apply_async(
-                self.check_correct, (model_answer, self.answer)
+                self.check_correct, (action, self.answer)
             )
             try:
                 is_correct = res.get(timeout=1)

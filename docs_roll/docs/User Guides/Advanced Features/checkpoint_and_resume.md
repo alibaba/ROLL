@@ -34,6 +34,8 @@ The ROLL framework automatically saves checkpoints in the following situations:
 
 3. **Manual Saving**: Checkpoints can be manually saved by calling the appropriate API in the code
 
+For FSDP2 asynchronous DCP saves (`strategy_config.async_save_ckpt: true`), storage-level staging reads the real DTensor local storage while retaining the mesh, placements, shape and view offsets. With `offload_backend: local`, model parameters are offloaded once and DCP writes the existing CPU flat buffers directly, so it does not allocate a second model snapshot on the CPU. The strategy keeps those buffers alive until the asynchronous write finishes before recycling them. Optimizer, scheduler, and non-store tensors still use normal isolated CPU staging. `local_dedup` continues to use that staging path because each rank stores only a chunk and must reconstruct its local shard. No GPU shard copies or additional checkpoint collectives are introduced, and the checkpoint format and resume settings do not change.
+
 ## Resuming Training Configuration
 
 To resume training from a checkpoint, set the `resume_from_checkpoint` parameter:

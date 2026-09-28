@@ -202,7 +202,6 @@ class FSDPVLMLayerStatesPipeline(BasePipeline):
             batch: DataProto = DataProto.from_single_dict(batch_dict)
             batch.meta_info = {
                 "global_step": global_step,
-                "_broadcast_non_tensor_batch": True,
                 "loss_mask_keys": ["response_mask"],
             }
             batch.batch["response_mask"] = batch.batch["attention_mask"].clone()

@@ -176,9 +176,13 @@ output/
 
 .roo/
 .claude/
+.codex/
+.qoder/
 .history/
 *.excp
 logs/
 tmp/
 .ml_tracker/
 :/
+
+.qoder

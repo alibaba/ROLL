@@ -19,7 +19,7 @@ def is_distribute_initialized():
 
 def _set_random_seed(seed_):
     """Set random seed for reproducability."""
-    if seed_ is not None and seed_ > 0:
+    if seed_ is not None and seed_ >= 0:
         seed = seed_  # TuningFactory dataloader requires seed be the same for all ranks
         # # Ensure that different pipeline MP stages get different seeds.
         # seed = seed_ + (100 * mpu.get_pipeline_model_parallel_rank())
@@ -32,7 +32,7 @@ def _set_random_seed(seed_):
         if current_platform.device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(seed)
     else:
-        raise ValueError("Seed ({}) should be a positive integer.".format(seed))
+        raise ValueError("Seed ({}) should be a non-negative integer.".format(seed_))
 
 
 def initialize_megatron(args: "TrainingArguments"):

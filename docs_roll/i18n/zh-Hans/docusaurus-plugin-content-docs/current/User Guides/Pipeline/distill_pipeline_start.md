@@ -58,7 +58,7 @@
 
 #### 配置文件结构与组织
 
-配置文件（如 `examples/qwen2.5-7B-distill_megatron/distill_megatron.yaml`）按功能模块组织，主要包含以下部分：
+配置文件（如 `examples/distill/off_policy/llm/distill_megatron.yaml`）按功能模块组织，主要包含以下部分：
 
 1. **实验基本设置**
    * `exp_name`：实验名称，用于标识一次具体训练任务
@@ -129,7 +129,7 @@ DistillPipeline要求训练数据以 **JSON** 文件形式存储。
 主要方法是使用 `examples/start_distill_pipeline.py` 脚本。该脚本利用 Hydra 加载并管理配置。
 
 1. **选择或创建配置文件**  
-   从示例 YAML（如 `examples/qwen2.5-7B-distill_megatron/distill_megatron.yaml`）开始，或创建自己的配置。
+   从示例 YAML（如 `examples/distill/off_policy/llm/distill_megatron.yaml`）开始，或创建自己的配置。
 
 2. **执行 Python 启动脚本**
 
@@ -138,7 +138,7 @@ DistillPipeline要求训练数据以 **JSON** 文件形式存储。
    # export PYTHONPATH=$(pwd):$PYTHONPATH
    
    python examples/start_distill_pipeline.py \
-          --config_path examples/qwen2.5-7B-distill_megatron \
+          --config_path distill/off_policy/llm \
           --config_name distill_megatron
    ```
 
@@ -153,10 +153,10 @@ DistillPipeline要求训练数据以 **JSON** 文件形式存储。
 
 ```bash
 #!/bin/bash
-# 示例：examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
+# 示例：examples/distill/off_policy/llm/run_distill_pipeline.sh
 
 CONFIG_NAME="distill_megatron"                         # distill_megatron.yaml
-CONFIG_PATH="examples/qwen2.5-7B-distill_megatron"
+CONFIG_PATH="distill/off_policy/llm"
 
 # 设置环境变量及其他配置
 
@@ -169,7 +169,7 @@ python examples/start_distill_pipeline.py \
 运行方式：
 
 ```bash
-bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
+bash examples/distill/off_policy/llm/run_distill_pipeline.sh
 ```
 
 ---
@@ -178,7 +178,7 @@ bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
 
 ### 步骤 1：配置设置
 
-* 文件：`examples/qwen2.5-7B-distill_megatron/distill_megatron.yaml`  
+* 文件：`examples/distill/off_policy/llm/distill_megatron.yaml`
   关键部分包括 `exp_name`、`seed`、`output_dir`、模型路径、`student` 和 `teacher` 配置。
 
 * 特别注意这些配置段：
@@ -202,7 +202,7 @@ bash examples/qwen2.5-7B-distill_megatron/run_distill_pipeline.sh
 
 ```bash
 python examples/start_distill_pipeline.py \
-       --config_path examples/qwen2.5-7B-distill_megatron \
+       --config_path distill/off_policy/llm \
        --config_name distill_megatron
 ```
 

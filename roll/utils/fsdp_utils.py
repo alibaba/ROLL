@@ -41,6 +41,27 @@ fully_shard_module = torch.distributed.fsdp._fully_shard._fully_shard
 TOKEN_GROUP_ALIGN_SIZE_M = 8
 
 
+def resolve_fsdp_param_groups(state) -> list:
+    """FSDPState's param-group container differs across torch versions:
+    <= 2.6 keeps a single group in `_fsdp_param_group`; newer torch keeps a
+    list in `_fsdp_param_groups` (per-param mesh support)."""
+    param_groups = getattr(state, "_fsdp_param_groups", None)
+    if param_groups is not None:
+        return param_groups
+    group = getattr(state, "_fsdp_param_group", None)
+    return [group] if group is not None else []
+
+
+def iter_fsdp_params(model: nn.Module):
+    """Yield every FSDPParam managed by an FSDP2-wrapped module in `model`."""
+    from torch.distributed.fsdp import FSDPModule
+
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            for group in resolve_fsdp_param_groups(module._get_fsdp_state()):
+                yield from group.fsdp_params
+
+
 use_grouped_mm = False
 
 def set_use_grouped_mm(moe_use_grouped_mm):
@@ -162,6 +183,39 @@ def _fsdp_kwargs_for_module(fsdp_kwargs: dict, module: nn.Module) -> dict:
     return new_kwargs
 
 
+def _configure_fsdp2_forward_prefetch(transformer_modules: list[nn.Module], config: dict) -> None:
+    """Configure explicit depth-one forward prefetch for sequential FSDP2 modules."""
+    forward_prefetch = config.get("forward_prefetch", False)
+    if not isinstance(forward_prefetch, bool):
+        raise ValueError(
+            f"FSDP2 strategy_config.forward_prefetch must be a bool, got {type(forward_prefetch).__name__}"
+        )
+    if not forward_prefetch:
+        return
+
+    fsdp_module_cls = getattr(fully_shard_module, "FSDPModule", None)
+    if fsdp_module_cls is None or not hasattr(fsdp_module_cls, "set_modules_to_forward_prefetch"):
+        raise RuntimeError(
+            "FSDP2 strategy_config.forward_prefetch=true requires a PyTorch version that supports "
+            "FSDPModule.set_modules_to_forward_prefetch()"
+        )
+
+    fsdp_modules = [module for module in transformer_modules if isinstance(module, fsdp_module_cls)]
+    if len(fsdp_modules) < 2:
+        logger.warning(
+            "[FSDP2] forward_prefetch is enabled, but fewer than two sequential FSDP modules were wrapped"
+        )
+        return
+
+    for current_module, next_module in zip(fsdp_modules, fsdp_modules[1:]):
+        current_module.set_modules_to_forward_prefetch([next_module])
+
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        logger.info(
+            f"[FSDP2] Enabled depth-one forward prefetch for {len(fsdp_modules)} sequential FSDP modules"
+        )
+
+
 def apply_fsdp2(model, fsdp_kwargs, moe_fsdp_kwargs, config, is_lora=False):
     """
     model: AutoModelForCausalLM
@@ -266,6 +320,11 @@ def apply_fsdp2(model, fsdp_kwargs, moe_fsdp_kwargs, config, is_lora=False):
             non_leaf.add(".".join(parts[:i]))
 
     modules = [m for n, m in selected if n not in non_leaf]
+    transformer_modules = [
+        module
+        for name, module in selected
+        if name not in non_leaf and module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap
+    ]
 
     wrapped_ids = set()
 
@@ -305,6 +364,8 @@ def apply_fsdp2(model, fsdp_kwargs, moe_fsdp_kwargs, config, is_lora=False):
     root_kwargs = dict(fsdp_kwargs)
     root_kwargs["mp_policy"] = _clone_mp_policy(root_kwargs.get("mp_policy", None), cast_forward_inputs=False)
     _wrap_once(model, root_kwargs)
+
+    _configure_fsdp2_forward_prefetch(transformer_modules, config)
 
 
 def fsdp2_load_full_state_dict(

@@ -10,14 +10,14 @@ from codetiming import Timer
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
+from roll.datasets.dataset import update_dataset_domain
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.generate_scheduler import DynamicSamplingScheduler
 from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
-from roll.pipeline.rlvr.rlvr_pipeline import RLVRPipeline, get_encode_function, preprocess_dataset, \
-    update_dataset_domain
+from roll.pipeline.rlvr.rlvr_pipeline import RLVRPipeline, get_encode_function, preprocess_dataset
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 

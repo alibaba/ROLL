@@ -23,16 +23,22 @@ class StrategyArguments:
     strategy_name: Literal[
         "hf_infer",
         "vllm",
+        "vllm_omni",
         "sglang",
         "megatron_infer",
         "megatron_train",
         "fsdp2_train",
         "fsdp2_infer",
+        "fsdp2_diffusion_train",
+        "fsdp2_diffusion_infer",
+        "veomni_train",
+        "veomni_infer",
     ] = field(
         default="fsdp2_train",
         metadata={
             "help": "The name of the strategy. Options: 'hf_infer', 'vllm', 'sglang', "
-            "'megatron_infer', 'megatron_train', 'fsdp2_train', 'fsdp2_infer'."
+            "'vllm_omni', 'megatron_infer', 'megatron_train', 'fsdp2_train', 'fsdp2_infer', "
+            "'fsdp2_diffusion_train', 'fsdp2_diffusion_infer', 'veomni_train', 'veomni_infer'."
         },
     )
     strategy_config: Optional[Dict] = field(
@@ -48,11 +54,9 @@ class StrategyArguments:
 @dataclass
 class SequencePackingConfig:
     algorithm: str = field(
-        default="none",
-        metadata={"help": "Sequence packing algorithm: 'none' (default partitioning) or 'load_balance' "
-                          "(redistribute sentences across microbatches for better load balancing). "
-                          "Note: 'load_balance' requires proper loss scaling as microbatches contain "
-                          "different numbers of sentences."}
+        default="load_balance",
+        metadata={"help": "Sequence packing algorithm: 'none' (simple in-order partitioning) or 'load_balance' "
+                          "(default; redistribute sequences across microbatches for better load balancing)."}
     )
 
     max_packed_sequence_length_forward: int = field(
@@ -192,15 +196,19 @@ class WorkerConfig:
     )
     offload_nccl: bool = field(
         default=False,
-        metadata={"help": "Whether offload nccl buffer to save gpu memory."},
+        metadata={
+            "help": "Release NCCL communicator dynamic GPU memory while states are offloaded. "
+            "Requires NCCL >= 2.29.7 (ncclCommSuspend/Resume)."
+        },
     )
 
     # sequence packing
     use_sequence_packing: bool = field(
-        default=False,
+        default=True,
         metadata={
             "help": "Concatenates multiple sequences into a single “packed” sequence, eliminating most padding. "
-            "Only supported in the megatron strategy"
+            "Only supported in the megatron strategy. Uses the 'load_balance' algorithm by default. "
+            "max_packed_sequence_length_forward/train auto-compute as sequence_length * batch_size when None."
         },
     )
 
@@ -216,6 +224,23 @@ class WorkerConfig:
         default=False,
         metadata={
             "help": "Force logits dtype to Float"
+        }
+    )
+
+    use_logits_chunking: bool = field(
+        default=False,
+        metadata={
+            "help": "Chunk log_probs_from_logits/entropy_from_logits along the sequence dim to reduce peak "
+                    "memory on long sequences. Disabled by default (single-pass path); enable for long-sequence "
+                    "training that would otherwise OOM on the fp32 [B, T, V] intermediates."
+        }
+    )
+    logits_chunk_size: int = field(
+        default=2048,
+        metadata={
+            "help": "Sequence-dim chunk size for log_probs_from_logits/entropy_from_logits when chunking is "
+                    "enabled. Larger values use more peak memory but fewer iterations; only takes effect "
+                    "when seq_len exceeds it."
         }
     )
 
@@ -242,13 +267,15 @@ class WorkerConfig:
     )
 
     # MTP training configuration
-    mtp_training_mode: Optional[Literal["disabled", "standalone", "joint"]] = field(
+    mtp_training_mode: Optional[Literal["disabled", "standalone", "joint", "mtp_only"]] = field(
         default="disabled",
         metadata={
             "help": "MTP training mode for this worker. "
             "'disabled': MTP is loaded but not trained (default). "
             "'standalone': MTP is trained independently with truncated gradients (no gradient flow to main model). "
-            "'joint': MTP participates in main model updates with full gradient flow."
+            "'joint': MTP participates in main model updates with full gradient flow. "
+            "'mtp_only': the main model is frozen and only MTP parameters are trained "
+            "(requires mtp_num_layers > 0, Megatron strategy only)."
         },
     )
 
@@ -260,7 +287,6 @@ class WorkerConfig:
             "Defaults to 1.0 if not set."
         },
     )
-
     # Tags this teacher handles for multi-teacher OPD routing
     tag_included: List[str] = field(
         default_factory=list,
@@ -272,28 +298,48 @@ class WorkerConfig:
     )
 
     def __post_init__(self):
-        self.offload_nccl = False
-        logger.info(f"force set offload_nccl=False.")
+        if self.use_sequence_packing and (self.use_dynamic_batching_in_train or self.use_dynamic_batching_in_infer):
+            # Dynamic batching and sequence packing are mutually exclusive: the
+            # strategy picks one for micro-batch layout, but leftover packing flags
+            # still trigger packing-only post-processing (restore_results_order,
+            # cu_seqlens handling), which breaks under dynamic batching.
+            logger.warning(
+                "use_sequence_packing=True conflicts with dynamic batching, forcing use_sequence_packing=False."
+            )
+            self.use_sequence_packing = False
+        if (
+            self.offload_nccl
+            and self.strategy_args is not None
+            and self.strategy_args.strategy_name in {"vllm", "vllm_omni"}
+        ):
+            raise ValueError("offload_nccl is not supported for vLLM; set offload_nccl=False for this worker")
+        if self.use_sequence_packing and self.strategy_args is not None:
+            if "megatron" not in self.strategy_args.strategy_name:
+                logger.warning(
+                    f"use_sequence_packing=True but strategy_name={self.strategy_args.strategy_name}; "
+                    "packing is only implemented for megatron strategies, forcing use_sequence_packing=False."
+                )
+                self.use_sequence_packing = False
+
         if self.strategy_args is not None:
-            if self.strategy_args.strategy_name not in ["hf_infer", "vllm", "sglang"] and self.num_gpus_per_worker > 1:
+            if self.strategy_args.strategy_name not in ["hf_infer", "vllm", "vllm_omni", "sglang"] and self.num_gpus_per_worker > 1:
                 logger.info(
                     f"strategy_name={self.strategy_args.strategy_name}, force set num_gpus_per_worker={self.num_gpus_per_worker} to 1."
                 )
                 self.num_gpus_per_worker = 1
-            if self.strategy_args.strategy_name == "vllm":
+            if self.strategy_args.strategy_name in ["vllm", "vllm_omni"]:
                 strategy_config = self.strategy_args.strategy_config
                 tensor_parallel_size = strategy_config.get("tensor_parallel_size", 1)
                 pipeline_parallel_size = strategy_config.get("pipeline_parallel_size", 1)
                 self.num_gpus_per_worker = tensor_parallel_size * pipeline_parallel_size
                 logger.info(
-                    f"set vllm num_gpus_per_worker to {self.num_gpus_per_worker}, "
+                    f"set {self.strategy_args.strategy_name} num_gpus_per_worker to {self.num_gpus_per_worker}, "
                     f"tensor_parallel_size: {tensor_parallel_size}, "
                     f"pipeline_parallel_size: {pipeline_parallel_size}"
                 )
 
             # Validate router_replay configuration
             if self.router_replay.mode == "R2":
-                raise NotImplementedError("Not support R2 now")
                 if self.strategy_args.strategy_name not in ["megatron_train", "megatron_infer"]:
                     logger.warning(
                         f"router_replay [R2] is only supported for megatron_train and megatron_infer strategy, "
@@ -301,15 +347,16 @@ class WorkerConfig:
                         f"router_replay will be ignored."
                     )
             elif self.router_replay.mode == "R3":
-                if self.strategy_args.strategy_name not in ["megatron_train", "sglang"]:
+                if self.strategy_args.strategy_name not in ["megatron_train", "sglang", "vllm"]:
                     logger.warning(
-                        f"router_replay [R3] is only supported for megatron_train and sgalng strategy, "
+                        f"router_replay [R3] is only supported for megatron_train, sglang and vllm strategy, "
                         f"but current strategy is {self.strategy_args.strategy_name}. "
                         f"router_replay will be ignored."
                     )
 
         if self.device_mapping is not None:
-            self.device_mapping = eval(self.device_mapping)
+            if isinstance(self.device_mapping, str):
+                self.device_mapping = eval(self.device_mapping)
             assert (
                 len(self.device_mapping) % self.num_gpus_per_worker == 0
             ), f"len(device_mapping)={len(self.device_mapping)} must be divisible by num_gpus_per_worker={self.num_gpus_per_worker}."
@@ -330,6 +377,25 @@ class WorkerConfig:
                 self.training_args.bf16 = True
             elif self.model_args.dtype == "fp16":
                 self.training_args.fp16 = True
+
+    def _auto_fill_packing_lengths(self, sequence_length: int):
+        """Auto-compute max_packed_sequence_length_* when None.
+
+        Called from BaseConfig.__post_init__ after sequence_length is computed.
+        forward: sequence_length * infer_batch_size
+        train: sequence_length * per_device_train_batch_size
+        """
+        if self.use_sequence_packing:
+            sp = self.sequence_packing_args
+            if sp.max_packed_sequence_length_forward is None:
+                sp.max_packed_sequence_length_forward = sequence_length * self.infer_batch_size
+            if sp.max_packed_sequence_length_train is None:
+                sp.max_packed_sequence_length_train = sequence_length * self.training_args.per_device_train_batch_size
+            logger.info(
+                f"[{self.name}] sequence packing enabled: algorithm={sp.algorithm}, "
+                f"max_packed_sequence_length_forward={sp.max_packed_sequence_length_forward}, "
+                f"max_packed_sequence_length_train={sp.max_packed_sequence_length_train}"
+            )
 
 
 def is_actor_infer_overlapping_with_any_cluster(actor_infer: WorkerConfig, actor_train: WorkerConfig = None, reference: WorkerConfig = None, critic: WorkerConfig = None) -> bool:
@@ -360,4 +426,3 @@ def is_actor_infer_overlapping_with_any_cluster(actor_infer: WorkerConfig, actor
                 return True
 
     return False
-

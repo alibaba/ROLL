@@ -4,6 +4,7 @@ import itertools
 import os
 import random
 import math
+import time
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, fields
@@ -33,6 +34,10 @@ from roll.utils.telemetry import get_tracer, inject_trace_context, attach_trace_
 logger = get_logger()
 
 
+SCHEDULER_DATA_LOAD_TIME_METRIC = "scheduler/time/get_next_dataset_item"
+SCHEDULER_DATA_LOAD_RATIO_METRIC = "scheduler/time/get_next_dataset_item_ratio"
+
+
 def expand_requests(data: DataProto, num_return_sequences, is_num_return_sequences_expand):
     """
     Args:
@@ -41,13 +46,14 @@ def expand_requests(data: DataProto, num_return_sequences, is_num_return_sequenc
     assert "generation_config" in data.meta_info, f"data {data.meta_info} should have key 'generation_config'"
     generation_config = data.meta_info["generation_config"]
     target_requests = []
-    if is_num_return_sequences_expand:
-        generation_config["num_return_sequences"] = 1
-        for _ in range(num_return_sequences):
-            target_requests.append(copy.deepcopy(data))
-    else:
-        generation_config["num_return_sequences"] = num_return_sequences
-        target_requests.append(copy.deepcopy(data))
+    generation_config["num_return_sequences"] = (
+        1 if is_num_return_sequences_expand else num_return_sequences
+    )
+    request_count = num_return_sequences if is_num_return_sequences_expand else 1
+    for sample_idx in range(request_count):
+        request = data.clone()
+        request.meta_info["_sample_idx"] = sample_idx
+        target_requests.append(request)
     return target_requests
 
 def expand_responses(response: Optional[Union[DataProto, List[DataProto]]]) -> List[DataProto]:
@@ -174,9 +180,12 @@ class ReplayBuffer:
         self,
         async_generation_ratio,
         is_use_additional_prompts,
-        max_additional_running_prompts
+        max_additional_running_prompts,
+        next_prompt_id: int = 0,
     ):
-        self.pid = 0
+        if isinstance(next_prompt_id, bool) or not isinstance(next_prompt_id, int) or next_prompt_id < 0:
+            raise ValueError(f"next_prompt_id must be a non-negative integer, got {next_prompt_id!r}")
+        self.pid = next_prompt_id
         self.current_step = None
         self.groups: Dict[int, ItemsGroup] = {}
         self.prompt_id_to_start_step: Dict[int, int] = {} # only store map info for running prompts
@@ -257,11 +266,11 @@ class ReplayBuffer:
         """
         Will blocking wait when can not send new request and is not in shutdown stage.
         """
-        prompt_id = self._next_pid()
         while True:
             if self._shutdown:
                 raise asyncio.CancelledError
             elif self._check_send_new_request():
+                prompt_id = self._next_pid()
                 self.prompt_id_to_start_step[prompt_id] = None
                 return prompt_id
             self.event.clear()
@@ -488,9 +497,16 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         self.dataset_epoch = 0
         self.dataset_iter = None
         self.dataset_iter_count = 0
-        if state is not None and state.get("dataset_iter_count", 0) > 0:
-            for _ in range(state["dataset_iter_count"]):
-                self.get_next_dataset_item()
+        self.idx_in_epoch = 0
+        self.dataloader = None
+        self.dataloader_iter = None
+        self.input_data_batch = None
+        self.idx_in_batch = 0
+        self._get_batch_data_load_time = 0.0
+        self._is_tracking_get_batch_data_load_time = False
+        scheduler_state = state or {}
+        if scheduler_state.get("dataset_iter_count", 0) > 0:
+            self.restore_dataset_iter(scheduler_state["dataset_iter_count"])
 
         self.async_sending_task = None
 
@@ -500,7 +516,13 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             async_generation_ratio=self.pipeline_config.async_generation_ratio if not is_val else 0,
             is_use_additional_prompts=self.pipeline_config.is_use_additional_prompts if not is_val else False,
             max_additional_running_prompts=self.pipeline_config.max_additional_running_prompts if not is_val else 0,
+            next_prompt_id=scheduler_state.get("next_prompt_id", 0),
         )
+        if scheduler_state.get("dataset_iter_count", 0) > 0 and "next_prompt_id" not in scheduler_state:
+            logger.warning(
+                "Scheduler checkpoint does not contain next_prompt_id; prompt ids restart from 0 and deterministic "
+                "rollout seeds may not match the uninterrupted run."
+            )
 
         self.router_manager = RouterManager(self.actor_cluster, router_args=self.pipeline_config.router_args,
                                             num_gpus_per_node=self.pipeline_config.num_gpus_per_node)
@@ -563,9 +585,11 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         await self.async_sending_task
 
     async def get_batch_opt_level_0(self, data: DataProto, batch_size: int) -> DataProto:
+        get_batch_start_time = time.perf_counter()
         generation_config = copy.deepcopy(data.meta_info["generation_config"])
         completed_data: List[DataProto] = []
         query_use_count = 0
+        data_load_time = 0.0
         if self.is_val:
             query_filter_fn = lambda data_list, config: True
         else:
@@ -574,8 +598,10 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         query_filter_count = 0
 
         while len(completed_data) < batch_size:
+            data_load_start_time = time.perf_counter()
             data_item_list = [self.get_next_dataset_item() for _ in range(batch_size)]
             collect_data = self.collect_fn(data_item_list)
+            data_load_time += time.perf_counter() - data_load_start_time
             request_data: DataProto = DataProto.from_single_dict(collect_data, meta_info=data.meta_info)
             request_data.batch["prompt_id"] = torch.arange(request_data.batch.batch_size[0], device=request_data.batch.device)
 
@@ -589,6 +615,7 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             )
             for key in generate_non_tensor_batch_keys:
                 request_data.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
+                
             gen_batch.meta_info = request_data.meta_info
             num_return_sequences = generation_config["num_return_sequences"]
             request_data = request_data.repeat(repeat_times=num_return_sequences)
@@ -621,6 +648,11 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             f"scheduler/collect_query_count": batch_size,
             f"scheduler/query_use_count": query_use_count,
         }
+        get_batch_time = time.perf_counter() - get_batch_start_time
+        batch.meta_info["metrics"][SCHEDULER_DATA_LOAD_TIME_METRIC] = data_load_time
+        batch.meta_info["metrics"][SCHEDULER_DATA_LOAD_RATIO_METRIC] = (
+            data_load_time / get_batch_time if get_batch_time > 0 else 0.0
+        )
         return batch
 
     async def get_batch(self, data: DataProto, global_step: int, batch_size: int) -> DataProto:
@@ -643,9 +675,15 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             ),
         ):
             inject_trace_context(data.meta_info)
-            return await self._get_batch_impl(data, global_step, batch_size)
+            self._get_batch_data_load_time = 0.0
+            self._is_tracking_get_batch_data_load_time = True
+            try:
+                return await self._get_batch_impl(data, global_step, batch_size)
+            finally:
+                self._is_tracking_get_batch_data_load_time = False
 
     async def _get_batch_impl(self, data: DataProto, global_step: int, batch_size: int) -> DataProto:
+        get_batch_start_time = time.perf_counter()
         num_return_sequences = data.meta_info["generation_config"]["num_return_sequences"]
         self.meta_info = copy.deepcopy(data.meta_info)
         self.meta_info["collect_non_finish"] = self.pipeline_config.async_generation_ratio > 0
@@ -707,6 +745,11 @@ class DynamicSamplingScheduler(RolloutMockMixin):
         with get_tracer("scheduler").start_as_current_span("to_remote"):
             loop = asyncio.get_running_loop()
             batch = await loop.run_in_executor(None, DataProto.to_remote, batch)
+        get_batch_time = time.perf_counter() - get_batch_start_time
+        metrics = batch.meta_info.setdefault("metrics", {})
+        data_load_time = self._get_batch_data_load_time
+        metrics[SCHEDULER_DATA_LOAD_TIME_METRIC] = data_load_time
+        metrics[SCHEDULER_DATA_LOAD_RATIO_METRIC] = data_load_time / get_batch_time if get_batch_time > 0 else 0.0
         return batch
 
     def collect_items_as_batch(self, finished_items: List[ExperienceItem]) -> DataProto:
@@ -767,29 +810,75 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             await self.router_manager.abort_all()
             # Implicitly wait until all running tasks finished when TaskGroup context exit.
 
-    def get_next_data_item_by_dataloader(self, batch_size: int = 1, use_collect_fn: bool = False, num_workers=8):
-        # use Dataloader to parallel and prefetch
+    def get_epoch_indices(self, dataset_epoch: int) -> List[int]:
+        """Return the deterministic shuffled dataset indices for one dataset epoch."""
+        epoch_indices = list(self.indices)
+        rng = random.Random(self.pipeline_config.seed + dataset_epoch)
+        rng.shuffle(epoch_indices)
+        return epoch_indices
+
+    def restore_dataset_iter(self, dataset_iter_count: int) -> None:
+        """Restore dataset iterator position without materializing skipped dataset samples."""
+        dataset_size = len(self.indices)
+        if dataset_size <= 0:
+            raise ValueError("Cannot restore dataset iterator for an empty dataset")
+
+        self.dataset_iter_count = dataset_iter_count
+        self.dataset_epoch = dataset_iter_count // dataset_size
+        self.idx_in_epoch = dataset_iter_count % dataset_size
+        self.dataset_iter = iter(self.get_epoch_indices(self.dataset_epoch)[self.idx_in_epoch :])
+        self.dataloader = None
+        self.dataloader_iter = None
+        self.input_data_batch = None
+        self.idx_in_batch = 0
+        logger.info(
+            f"restore dataset iterator: count={self.dataset_iter_count}, "
+            f"epoch={self.dataset_epoch}, idx_in_epoch={self.idx_in_epoch}"
+        )
+
+    def reset_dataloader_iter(self, batch_size: int, use_collect_fn: bool, num_workers: int) -> None:
+        """Create a DataLoader over the remaining deterministic indices in the current epoch."""
         from torch.utils.data import DataLoader
         from roll.datasets.collator import collate_fn_to_dict_list
 
-        if getattr(self, "dataloader", None) is None:
-            self.dataloader = DataLoader(
-                self.dataset,
+        sampler = self.get_epoch_indices(self.dataset_epoch)[self.idx_in_epoch :]
+        self.dataloader = DataLoader(
+            self.dataset,
+            batch_size=batch_size,
+            collate_fn=self.collect_fn if use_collect_fn else collate_fn_to_dict_list,
+            sampler=sampler,
+            drop_last=False,
+            num_workers=num_workers,
+        )
+        self.dataloader_iter = iter(self.dataloader)
+        self.input_data_batch = None
+        self.idx_in_batch = 0
+
+    def get_next_data_item_by_dataloader(
+        self,
+        batch_size: int = 1,
+        use_collect_fn: bool = False,
+        num_workers: int = 8,
+    ) -> Dict[str, Any]:
+        # use Dataloader to parallel and prefetch
+        if self.dataloader is None:
+            self.reset_dataloader_iter(
                 batch_size=batch_size,
-                collate_fn=self.collect_fn if use_collect_fn else collate_fn_to_dict_list,
-                shuffle=True,
-                drop_last=False,
+                use_collect_fn=use_collect_fn,
                 num_workers=num_workers,
             )
-            self.dataloader_iter = iter(self.dataloader)
-            self.input_data_batch = None
         if not (self.input_data_batch and self.idx_in_batch < len(list(self.input_data_batch.values())[0])):
             self.idx_in_batch = 0
             try:
                 self.input_data_batch = next(self.dataloader_iter)
             except StopIteration:
                 self.dataset_epoch += 1
-                self.dataloader_iter = iter(self.dataloader)
+                self.idx_in_epoch = 0
+                self.reset_dataloader_iter(
+                    batch_size=batch_size,
+                    use_collect_fn=use_collect_fn,
+                    num_workers=num_workers,
+                )
                 self.input_data_batch = next(self.dataloader_iter)
         data_item = dict(
             (
@@ -799,10 +888,11 @@ class DynamicSamplingScheduler(RolloutMockMixin):
             for k, v in self.input_data_batch.items()
         )
         self.idx_in_batch += 1
+        self.idx_in_epoch += 1
         self.dataset_iter_count += 1
         return data_item
 
-    def get_next_dataset_item(self):
+    def get_next_dataset_item(self) -> Any:
         if self.get_data_item_kwargs.get("use_dataloader", False):
             return self.get_next_data_item_by_dataloader(
                 batch_size=self.get_data_item_kwargs.get("batch_size", 1),
@@ -810,25 +900,27 @@ class DynamicSamplingScheduler(RolloutMockMixin):
                 num_workers=self.get_data_item_kwargs.get("num_workers", 8),
             )
         if self.dataset_iter is None:
-            random.seed(self.pipeline_config.seed + self.dataset_epoch)
-            random.shuffle(self.indices)
-            self.dataset_iter = iter(self.indices)
+            self.idx_in_epoch = 0
+            self.dataset_iter = iter(self.get_epoch_indices(self.dataset_epoch))
             logger.info(f"{'-'.join(self.reward_clusters.keys())} dataset epoch: {self.dataset_epoch}")
 
         try:
             dataset_item = self.dataset[next(self.dataset_iter)]
         except StopIteration:
             self.dataset_epoch += 1
-            random.seed(self.pipeline_config.seed + self.dataset_epoch)
-            random.shuffle(self.indices)
-            self.dataset_iter = iter(self.indices)
+            self.idx_in_epoch = 0
+            self.dataset_iter = iter(self.get_epoch_indices(self.dataset_epoch))
             dataset_item = self.dataset[next(self.dataset_iter)]
             logger.info(f"{'-'.join(self.reward_clusters.keys())} dataset epoch: {self.dataset_epoch}")
+        self.idx_in_epoch += 1
         self.dataset_iter_count += 1
         return dataset_item
 
     def get_scheduler_state(self):
-        return {"dataset_iter_count": self.dataset_iter_count}
+        return {
+            "dataset_iter_count": self.dataset_iter_count,
+            "next_prompt_id": self.replay_buffer.pid,
+        }
 
 
 class RolloutContext:
@@ -897,11 +989,14 @@ class RolloutContext:
         # export system/prompt level meta info and config to user
         self.prompt_id = prompt_id
         self.meta_info = copy.deepcopy(meta_info) # user may change config in meta_info
+        self.num_return_sequences = self.meta_info["generation_config"]["num_return_sequences"]
         self.pipeline_config = scheduler.pipeline_config
         self.is_val = scheduler.is_val
         self.sequence_length = scheduler.sequence_length
         self.prompt_length = scheduler.pipeline_config.prompt_length
         self.is_num_return_sequences_expand = scheduler.pipeline_config.is_num_return_sequences_expand
+        router_args = getattr(scheduler.pipeline_config, "router_args", None)
+        self.enable_sample_level_affinity = getattr(router_args, "enable_sample_level_affinity", False)
 
         # User can call reward worker of different domain in for a single data, but ExperienceItem.domain is bind to dataset
         self.domain = None
@@ -922,6 +1017,7 @@ class RolloutContext:
         else:
             self.got_data: bool = True
 
+        data_load_start_time = time.perf_counter()
         dataset_item = self._scheduler.get_next_dataset_item()
         if self._scheduler.get_data_item_kwargs.get(
             "use_dataloader", False
@@ -931,6 +1027,9 @@ class RolloutContext:
         else:
             domain = dataset_item.get("domain", "default")
             collect_data = self._scheduler.collect_fn([dataset_item])
+        data_load_time = time.perf_counter() - data_load_start_time
+        if self._scheduler._is_tracking_get_batch_data_load_time:
+            self._scheduler._get_batch_data_load_time += data_load_time
         self.domain = domain
         return DataProto.from_single_dict(collect_data, meta_info=meta_info), domain
 
@@ -942,7 +1041,7 @@ class RolloutContext:
         # Assume sampling_start_step of all samples of this prompt are the same, however
         # the real sampling_start_step can be different from self.sampling_start_step.
         self.sampling_start_step = await self._scheduler.replay_buffer.begin(prompt_id=self.prompt_id)
-        self.inflight_requests = set()
+        self.inflight_requests: Dict[str, Any] = {}
         try:
             yield
         finally:
@@ -955,7 +1054,24 @@ class RolloutContext:
         domain: str,
     ) -> DataProto:
         assert self._in_do_generate_and_reward
+        generation_config = req.meta_info["generation_config"]
+        if "_request_seed" not in req.meta_info:
+            base_seed = generation_config.get("seed")
+            if base_seed is None:
+                base_seed = self.pipeline_config.seed
+            # Keep sampling reproducible regardless of DP placement or global request order.
+            group_seed = (base_seed + self.prompt_id * self.num_return_sequences) & 0x7FFFFFFF
+            req.meta_info["_request_seed"] = group_seed + req.meta_info.get("_sample_idx", 0)
+        generation_config["seed"] = req.meta_info["_request_seed"]
         request_id = self._scheduler.next_request_id()
+        if self.enable_sample_level_affinity:
+            # Request metadata survives partial and multi-turn rollouts, while request_id changes per generate call.
+            routing_uid = req.meta_info.setdefault(
+                "_routing_uid",
+                f"{self.prompt_id}_{request_id}",
+            )
+        else:
+            routing_uid = self.prompt_id
         with (
             self._scheduler.generate_timer[domain].track(),
             get_tracer("scheduler").start_as_current_span(
@@ -970,11 +1086,15 @@ class RolloutContext:
             inject_trace_context(req.meta_info)
             req.meta_info["request_id"] = request_id
             logger.debug(f"generate_and_reward: {self.prompt_id=} {request_id} generate_request")
-            self.inflight_requests.add(request_id)
+            self.inflight_requests[request_id] = routing_uid
             try:
-                return await self._scheduler.router_client.generate_request(req=req, request_id=request_id, uid=self.prompt_id)
+                return await self._scheduler.router_client.generate_request(
+                    req=req,
+                    request_id=request_id,
+                    uid=routing_uid,
+                )
             finally:
-                self.inflight_requests.remove(request_id)
+                self.inflight_requests.pop(request_id, None)
 
     async def compute_rewards(
         self,
@@ -1011,4 +1131,12 @@ class RolloutContext:
         """
         assert self._in_do_generate_and_reward
         assert self.prompt_id is not None
-        self._scheduler.router_manager.abort_requests(request_ids=list(self.inflight_requests), uid=self.prompt_id)
+        request_ids_by_uid = defaultdict(list)
+        for request_id, routing_uid in list(self.inflight_requests.items()):
+            request_ids_by_uid[routing_uid].append(request_id)
+        await asyncio.gather(
+            *(
+                self._scheduler.router_manager.abort_requests(request_ids=request_ids, uid=routing_uid)
+                for routing_uid, request_ids in request_ids_by_uid.items()
+            )
+        )

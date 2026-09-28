@@ -33,9 +33,11 @@ from roll.utils.functionals import (
     RunningMoments,
     clusters_have_disjoint_devices,
     agg_loss,
+    attach_routed_experts,
     build_domain_routing_context,
     compute_ref_log_probs_with_routing,
     compute_token_reward,
+    hold_aside_routed_experts,
     masked_mean,
     reduce_metrics,
     batch_balance,
@@ -100,7 +102,7 @@ class AgenticPipeline(BasePipeline):
             self.reference = self.references[list(self.references.keys())[0]]
 
 
-        if self.pipeline_config.adv_estimator == "gae":
+        if self.pipeline_config.use_critic:
             self.critic: Any = Cluster(
                 name=self.pipeline_config.critic.name,
                 worker_cls=self.pipeline_config.critic.worker_cls,
@@ -176,7 +178,7 @@ class AgenticPipeline(BasePipeline):
         # INIT PHASE: Initialize Clusters
         refs: List[ray.ObjectRef] = []
         refs.extend(self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        if self.pipeline_config.adv_estimator == "gae":
+        if self.pipeline_config.use_critic:
             refs.extend(self.critic.initialize(pipeline_config=self.pipeline_config, blocking=False))
         ray.get(refs)
 
@@ -206,7 +208,7 @@ class AgenticPipeline(BasePipeline):
             frequency=self.pipeline_config.actor_train.model_update_frequency,
         )
 
-        if self.pipeline_config.adv_estimator == "gae":
+        if self.pipeline_config.use_critic:
             self.set_checkpoint_clusters(self.actor_train, self.critic)
         else:
             self.set_checkpoint_clusters(self.actor_train)
@@ -239,7 +241,7 @@ class AgenticPipeline(BasePipeline):
             ):
                 with tps_timer:
                     # PHASE 1: Offload States
-                    if self.pipeline_config.adv_estimator == "gae":
+                    if self.pipeline_config.use_critic:
                         self.critic.offload_states(blocking=True)
                     self.actor_train.offload_states(blocking=True)
 
@@ -273,7 +275,7 @@ class AgenticPipeline(BasePipeline):
                         target_gpus = []
                         if hasattr(self.actor_train.worker_config, 'device_mapping') and self.actor_train.worker_config.device_mapping:
                             target_gpus.extend(self.actor_train.worker_config.device_mapping)
-                        if self.pipeline_config.adv_estimator == "gae":
+                        if self.pipeline_config.use_critic:
                             if hasattr(self.critic.worker_config, 'device_mapping') and self.critic.worker_config.device_mapping:
                                 target_gpus.extend(self.critic.worker_config.device_mapping)
 
@@ -312,7 +314,6 @@ class AgenticPipeline(BasePipeline):
                     metrics["time/step_rollout"] = rollout_timer.last
                     metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
                     batch.meta_info["global_step"] = global_step
-                    batch.meta_info["_broadcast_non_tensor_batch"] = True
                     batch.meta_info["loss_mask_keys"] = ["response_mask"]
 
                     if val_future is not None:
@@ -347,7 +348,7 @@ class AgenticPipeline(BasePipeline):
                             if hasattr(self.actor_train.worker_config, 'device_mapping') and self.actor_train.worker_config.device_mapping:
                                 target_gpus.extend(self.actor_train.worker_config.device_mapping)
                             # Collect critic GPUs if using GAE
-                            if self.pipeline_config.adv_estimator == "gae":
+                            if self.pipeline_config.use_critic:
                                 if hasattr(self.critic.worker_config, 'device_mapping') and self.critic.worker_config.device_mapping:
                                     target_gpus.extend(self.critic.worker_config.device_mapping)
 
@@ -392,20 +393,20 @@ class AgenticPipeline(BasePipeline):
                                 metrics.update(reduce_metrics(ref_log_probs.meta_info.pop("metrics", {})))
                                 metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
                             else:
-                                saved_routed_experts = batch.batch.pop("routed_experts", None)
-                                domain_to_teacher_names, domain_values = build_domain_routing_context(
-                                    batch, self.pipeline_config, domain_key="tags"
-                                )
-                                batch = compute_ref_log_probs_with_routing(
-                                    batch=batch,
-                                    references=self.references,
-                                    pipeline_config=self.pipeline_config,
-                                    domain_to_teacher_names=domain_to_teacher_names,
-                                    domain_values=domain_values,
-                                    metrics_fn=metrics.update,
-                                )
-                                if saved_routed_experts is not None:
-                                    batch.batch["routed_experts"] = saved_routed_experts
+                                # Hold aside routed_experts without materializing it: when it lives in
+                                # the TransferQueue remote view, pop the view only (no TQ GET).
+                                with hold_aside_routed_experts(batch):
+                                    domain_to_teacher_names, domain_values = build_domain_routing_context(
+                                        batch, self.pipeline_config, domain_key="tags"
+                                    )
+                                    batch = compute_ref_log_probs_with_routing(
+                                        batch=batch,
+                                        references=self.references,
+                                        pipeline_config=self.pipeline_config,
+                                        domain_to_teacher_names=domain_to_teacher_names,
+                                        domain_values=domain_values,
+                                        metrics_fn=metrics.update,
+                                    )
 
                                 avg_ref_log_prob = masked_mean(batch.batch["ref_log_probs"], batch.batch["response_mask"][:, 1:])
                                 metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
@@ -432,6 +433,9 @@ class AgenticPipeline(BasePipeline):
                                 metrics.update(dynamic_batching_metrics)
                             old_log_probs: DataProto = self.actor_train.compute_log_probs(batch, blocking=True)
                             batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
+                            # R2 mode: extract routed_experts from compute_log_probs output,
+                            # keeping it in the TQ remote view when possible.
+                            attach_routed_experts(batch, old_log_probs)
                             avg_old_log_prob = masked_mean(batch.batch["old_log_probs"], batch.batch["response_mask"][:, 1:])
                             metrics.update({"critic/old_log_prob/mean": avg_old_log_prob.item()})
                             metrics.update(reduce_metrics(old_log_probs.meta_info.pop("metrics", {})))
@@ -444,10 +448,10 @@ class AgenticPipeline(BasePipeline):
                         else:
                             batch.batch["old_log_probs"] = torch.zeros_like(batch.batch["attention_mask"][:, 1:])
 
-                        if self.pipeline_config.adv_estimator == "gae":
+                        if self.pipeline_config.use_critic:
                             values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
 
-                        if self.pipeline_config.adv_estimator == "gae":
+                        if self.pipeline_config.use_critic:
                             values = DataProto.materialize_concat(data_refs=values_refs)
                             batch = batch.union(values)
                             metrics.update(reduce_metrics(values.meta_info.pop("metrics", {})))
@@ -517,7 +521,7 @@ class AgenticPipeline(BasePipeline):
                     # PHASE 14: Training (critic + actor)
                     with Timer(name="train_timer", logger=None) as train_timer, \
                             tracer.start_as_current_span("train"):
-                        if self.pipeline_config.adv_estimator == "gae":
+                        if self.pipeline_config.use_critic:
                             critic_train_metrics_refs: List[ray.ObjectRef] = self.critic.train_step(batch, blocking=False)
 
                         # implement critic warmup
@@ -543,7 +547,7 @@ class AgenticPipeline(BasePipeline):
                             actor_train_metrics: DataProto = DataProto.materialize_concat(data_refs=actor_train_metrics_refs)
                             metrics.update(reduce_metrics(actor_train_metrics.meta_info.pop("metrics", {})))
 
-                        if self.pipeline_config.adv_estimator == "gae":
+                        if self.pipeline_config.use_critic:
                             critic_train_metrics = DataProto.materialize_concat(data_refs=critic_train_metrics_refs)
                             metrics.update(reduce_metrics(critic_train_metrics.meta_info.pop("metrics", {})))
                         tps_timer.push_units_processed(n=torch.sum(batch.batch["attention_mask"]).detach().item())
@@ -692,7 +696,7 @@ class AgenticPipeline(BasePipeline):
             ref_infer_bsz = self.pipeline_config.reference.infer_batch_size * self.reference.dp_size
         critic_train_bsz = 1
         critic_infer_bsz = 1
-        if self.pipeline_config.adv_estimator == "gae":
+        if self.pipeline_config.use_critic:
             critic_train_bsz = self.pipeline_config.critic.training_args.per_device_train_batch_size * self.pipeline_config.critic.training_args.gradient_accumulation_steps * self.critic.dp_size
             critic_infer_bsz = self.pipeline_config.critic.infer_batch_size * self.critic.dp_size
 

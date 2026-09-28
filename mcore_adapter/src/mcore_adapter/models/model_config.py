@@ -311,6 +311,12 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         }
     )
 
+
+    use_value_head: bool = field(
+        default=False,
+        metadata={"help": "Whether to replace the language-model head with a value head."},
+    )
+
     def __post_init__(self):
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:
             self.overlap_p2p_comm = False
@@ -391,6 +397,9 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 layout=self.pipeline_model_parallel_layout,
                 pipeline_model_parallel_size=self.pipeline_model_parallel_size,
             )
+        if self.use_value_head:
+            logger.warning("Using value head, output layer will be replaced with value head, and not be tied with embedding weights.")
+            self.tie_embeddings_and_output_weights = False
 
         super().__post_init__()
         pipeline_size = self.pipeline_model_parallel_size

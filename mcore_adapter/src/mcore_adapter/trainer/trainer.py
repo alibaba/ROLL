@@ -17,6 +17,7 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
+from megatron.core.dist_checkpointing.strategies.torch import TorchDistSaveShardedStrategy
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig, finalize_model_grads
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -115,7 +116,7 @@ class McaTrainer(Trainer):
         self.forward_backward_func = get_forward_backward_func()
         if self.args.use_distributed_optimizer:
             self.save_strategy = FullyParallelSaveStrategyWrapper(
-                dist_checkpointing.serialization.get_default_save_sharded_strategy(),
+                TorchDistSaveShardedStrategy(backend="torch_dist", version=1),
                 mpu.get_data_parallel_group(with_context_parallel=True),
                 do_cache_distribution=True,  # don't support change model structure during training
             )

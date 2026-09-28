@@ -17,9 +17,10 @@ from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.distributed.scheduler.transfer_backend import init_transfer_backend
 from roll.utils.checkpoint_manager import CheckpointManager, download_model, get_latest_ckpt
 from roll.utils.functionals import reduce_metrics
+from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
 from roll.utils.telemetry import init_telemetry, shutdown_telemetry, start_otel_collector
-from roll.utils.tracking import create_tracker
+from roll.utils.tracking import create_tracker, inject_gpu_type_info
 from roll.utils.worker_state import WorkerState
 
 logger = get_logger()
@@ -36,11 +37,15 @@ class BasePipeline:
             num_nodes=self.pipeline_config.num_nodes, num_gpus_per_node=self.pipeline_config.num_gpus_per_node
         )
         self.state = WorkerState()
-        self.checkpoint_manager = CheckpointManager(checkpoint_config=self.pipeline_config.checkpoint_config)
+        self.checkpoint_manager = CheckpointManager(checkpoint_config=self.pipeline_config.checkpoint_config, register=True)
+        self.tracker_config = self.pipeline_config.to_dict()
+        self.tracker_kwargs = dict(self.pipeline_config.tracker_kwargs)
+        if os.environ.get("ROLL_TAG_GPU_TYPE", "0") == "1":
+            inject_gpu_type_info(self.tracker_kwargs, self.tracker_config, self.pipeline_config.exp_name)
         self.tracker = create_tracker(
             tracker_name=self.pipeline_config.track_with,
-            config=self.pipeline_config.to_dict(),
-            **self.pipeline_config.tracker_kwargs,
+            config=self.tracker_config,
+            **self.tracker_kwargs,
         )
 
         # Initialize OpenTelemetry tracing on driver if enabled
@@ -61,15 +66,16 @@ class BasePipeline:
         self.executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=5)
         self.resume_futures = []
 
-        if self.pipeline_config.resume_from_checkpoint:
-            if self.pipeline_config.resume_from_checkpoint is True:
-                latest_ckpt = get_latest_ckpt(self.pipeline_config.checkpoint_config)
-                if latest_ckpt:
-                    self.resume_from_checkpoint = download_model(latest_ckpt)
-                else:
-                    self.resume_from_checkpoint = False
-            elif isinstance(self.pipeline_config.resume_from_checkpoint, str):
-                self.resume_from_checkpoint = download_model(self.pipeline_config.resume_from_checkpoint)
+        if self.pipeline_config.resume_from_checkpoint or self.pipeline_config.auto_resume:
+            ckpt_uri = None
+            if self.pipeline_config.auto_resume or self.pipeline_config.resume_from_checkpoint is True:
+                ckpt_uri = get_latest_ckpt(self.pipeline_config.checkpoint_config)
+            if ckpt_uri is None and isinstance(self.pipeline_config.resume_from_checkpoint, str):
+                ckpt_uri = self.pipeline_config.resume_from_checkpoint
+            if ckpt_uri:
+                self.resume_from_checkpoint = download_model(ckpt_uri)
+            else:
+                self.resume_from_checkpoint = False
 
         if self.resume_from_checkpoint:
             logger.info(f"resume_from_checkpoint: {self.resume_from_checkpoint}")
@@ -81,6 +87,48 @@ class BasePipeline:
                     self.tracker.log(values=metrics, step=metrics["system/step"])
 
             self.resume_futures.append(self.executor.submit(resume_metrics))
+
+    def create_clusters_parallel(self, cluster_specs: List[tuple]) -> Dict[str, Cluster]:
+        """Create all clusters in parallel via ThreadPoolExecutor.
+
+        Args:
+            cluster_specs: List of (label, name, worker_cls, worker_config) tuples.
+
+        Returns:
+            Dict mapping label to created Cluster instance.
+        """
+        num_clusters = len(cluster_specs)
+
+        # Pre-import all worker classes sequentially in the main thread to avoid
+        # concurrent importlib.import_module() deadlocks when modules have cross
+        # dependencies (e.g. rewards/__init__.py imports from multiple submodules).
+        # After pre-import, worker_cls is resolved to an actual class object,
+        # so Cluster.__init__ skips the safe_import_class() call entirely.
+        resolved_specs = []
+        for label, name, worker_cls, worker_config in cluster_specs:
+            if isinstance(worker_cls, str):
+                worker_cls = safe_import_class(worker_cls)
+                assert worker_cls is not None, (
+                    f"Failed to pre-import worker class for cluster '{label}' ({name})"
+                )
+            resolved_specs.append((label, name, worker_cls, worker_config))
+
+        with futures.ThreadPoolExecutor(max_workers=num_clusters) as executor:
+            future_to_label = {
+                executor.submit(
+                    Cluster,
+                    name=name,
+                    worker_cls=worker_cls,
+                    resource_manager=self.resource_manager,
+                    worker_config=worker_config,
+                ): label
+                for label, name, worker_cls, worker_config in resolved_specs
+            }
+            results: Dict[str, Cluster] = {}
+            for future in futures.as_completed(future_to_label):
+                label = future_to_label[future]
+                results[label] = future.result()
+        return results
 
     def run(self):
         pass
@@ -106,9 +154,12 @@ class BasePipeline:
 
         metrics = self.state.log_history[-1]
         metrics["system/step"] = global_step
-        if global_step > 0 and (
+        if self.pipeline_config.save_steps > 0 and global_step > 0 and (
             global_step % self.pipeline_config.save_steps == 0 or global_step == self.pipeline_config.max_steps - 1
         ):
+            total_workers = sum(cluster.world_size for cluster in self.checkpoint_clusters)
+            self.checkpoint_manager.init_register_counter(total_workers+1) # 1 means pipeline state
+
             ckpt_metrics_refss = []
             for cluster in self.checkpoint_clusters:
                 ckpt_metrics_refss.append(
@@ -198,8 +249,8 @@ class BasePipeline:
                         node2pg[node_rank] = pg["placement_group"]
                         if cluster.worker_config.model_args.model_name_or_path:
                             node2model_names[node_rank].add(cluster.worker_config.model_args.model_name_or_path)
-                        if self.pipeline_config.resume_from_checkpoint:
-                            node2model_names[node_rank].add(self.pipeline_config.resume_from_checkpoint)
+                        if self.resume_from_checkpoint:
+                            node2model_names[node_rank].add(self.resume_from_checkpoint)
         ray.get(
             [
                 download_models.options(

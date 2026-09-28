@@ -1,3 +1,5 @@
+import asyncio
+import concurrent.futures
 import json
 import os
 from typing import Any, Dict, Optional
@@ -42,6 +44,10 @@ class RockAgentRunner(AgentRunner):
     ):
         super().__init__(base_url, env_id, env_config, worker_config=worker_config, **kwargs)
         self.logger = get_logger()
+        self._cancel_output_queue = None
+        self._cancel_group_id: int = -1
+        self._cancel_episode_id: int = -1
+        self._stopped_sandboxes: list = []
 
         config = dict(env_config.get("config", {}))
 
@@ -65,6 +71,65 @@ class RockAgentRunner(AgentRunner):
 
         self.listen_port = env_config.get("proxy_port", 8000)
         self.infer_callback_url = self._generate_callback_url()
+
+    # ------------------------------------------------------------------
+    # Episode cancel context
+    # ------------------------------------------------------------------
+
+    def set_episode_context(self, output_queue, group_id: int, episode_id: int) -> None:
+        """Set cancel-check context for the current episode. Called before each run_job."""
+        self._cancel_output_queue = output_queue
+        self._cancel_group_id = group_id
+        self._cancel_episode_id = episode_id
+
+    async def _is_episode_cancelled(self) -> bool:
+        """Check if the current episode is done (group full or batch expired)."""
+        if self._cancel_output_queue is None:
+            return False
+        return await self._cancel_output_queue.is_episode_done.remote(
+            self._cancel_group_id, self._cancel_episode_id
+        )
+
+    async def _cancel_job(self, job, job_id: str) -> None:
+        """Cancel job and verify the agent process is killed."""
+        try:
+            await job.cancel()
+        except Exception as e:
+            if "No such process" not in str(e):
+                raise
+            self.logger.info(f"[RockRunner] Process already exited before cancel, job={job_id}")
+        try:
+            tc = job._job_client.trials[0]
+            await tc.sandbox.arun(cmd=f"kill -0 {tc.pid}", session=tc.session)
+            self.logger.warning(f"[RockRunner] Process {tc.pid} still alive after cancel, job={job_id}")
+        except Exception:
+            self.logger.info(f"[RockRunner] Process killed confirmed, job={job_id}")
+
+    async def _cleanup_sandbox(self, job, job_id: str) -> None:
+        """Stop sandbox to release resources after job completion or cancellation."""
+        try:
+            sandbox = job._job_client.trials[0].sandbox
+            sandbox_id = sandbox.sandbox_id
+        except Exception as e:
+            self.logger.warning(f"[RockRunner] Cannot access sandbox for job {job_id}: {e}")
+            return
+
+        try:
+            await sandbox.stop()
+            self._stopped_sandboxes.append(sandbox)
+            self.logger.info(f"[RockRunner] Sandbox stop called: sandbox_id={sandbox_id}, job={job_id}")
+        except Exception as e:
+            self.logger.warning(f"[RockRunner] Failed to stop sandbox: sandbox_id={sandbox_id}, job={job_id}: {e}")
+            return
+
+        try:
+            status = await sandbox.get_status()
+            if status.is_alive:
+                self.logger.warning(
+                    f"[RockRunner] Sandbox still alive after stop: sandbox_id={sandbox_id}, job={job_id}"
+                )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Data loading
@@ -123,7 +188,7 @@ class RockAgentRunner(AgentRunner):
             AgentConfig(
                 name="swe-agent-internal",
                 model_name="openai/{}".format(llm_config.get("model_name", "default_model")),
-                max_timeout_sec=runtime_config.get("task_timeout_sec", 300),
+                override_timeout_sec=runtime_config.get("task_timeout_sec", 300),
                 kwargs={
                     "api_key": llm_config.get("api_key", ""),
                     "api_base": task_config.get("infer_callback_url", ""),
@@ -345,9 +410,6 @@ class RockAgentRunner(AgentRunner):
 
         Shared boilerplate for both Push and Pull runners.
         """
-        import asyncio
-        import concurrent.futures
-
         try:
             loop = asyncio.new_event_loop()
             private_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)

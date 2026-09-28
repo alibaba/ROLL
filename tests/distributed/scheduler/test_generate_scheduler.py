@@ -120,7 +120,7 @@ class MockCluster:
     def __init__(self, workers: List[MockWorker]):
         self.workers = workers
         self.worker_rank_info = [RankInfo() for _ in range(4)]
-        self.worker_config = WorkerConfig(model_args=ModelArguments(model_type="diffusion_module"))
+        self.worker_config = WorkerConfig(model_args=ModelArguments(model_type="diffusion_model"))
 
     def get_rank_info(self, rank):
         return self.worker_rank_info[rank]
@@ -147,7 +147,7 @@ class MockPipelineConfig:
     is_num_return_sequences_expand: bool = True # this unit test only support is_num_return_sequences_expand
     is_use_additional_prompts: bool = False
     max_additional_running_prompts: int = 0
-    user_defined_rollout_loop_cls: str = "roll.distributed.scheduler.user_defined_rollout_loop.UserDefinedRolloutLoop"
+    user_defined_rollout_loop_cls: str = "tests.distributed.scheduler.test_generate_scheduler.MockRolloutLoop"
 
     seed: int = 0
     sequence_length: int = 0
@@ -160,11 +160,14 @@ def postprocess_paused_data(pre_data, data: DataProto, sequence_length, prompt_l
     return data
 udrl.postprocess_paused_data = postprocess_paused_data
 
-def postprocess_output_data(request, data: DataProto, sequence_length) -> DataProto:
-    return data
-udrl.postprocess_output_data = postprocess_output_data
 
-class UserDefinedRolloutLoopWithFilter(UserDefinedRolloutLoopBase):
+class MockRolloutLoop(UserDefinedRolloutLoopBase):
+    """Test rollout loop with no-op postprocess for simplified testing."""
+    def postprocess_output_data(self, request, data, sequence_length):
+        return data
+
+
+class UserDefinedRolloutLoopWithFilter(MockRolloutLoop):
     def __init__(self):
         super().__init__()
         self.used_prompt = 0
@@ -177,7 +180,7 @@ class UserDefinedRolloutLoopWithFilter(UserDefinedRolloutLoopBase):
         else:
             return ret
 
-class UserDefinedRolloutLoopWithDynamicSamplen(UserDefinedRolloutLoopBase):
+class UserDefinedRolloutLoopWithDynamicSamplen(MockRolloutLoop):
     async def process_new_prompt(self, context: RolloutContext) -> Optional[DataProto|List[DataProto]]:
         ret = await super().process_new_prompt(context)
         assert isinstance(ret, list)

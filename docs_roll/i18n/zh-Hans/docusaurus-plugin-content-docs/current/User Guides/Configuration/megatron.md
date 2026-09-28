@@ -86,6 +86,11 @@ reference:
    - `recompute_granularity`: 激活值重计算粒度（'full' 或 'selective'）
    - `overlap_grad_reduce`: 是否在分布式优化器中将梯度 All-reduce 过程与反向传播计算重叠
 
+   safetensors 格式的 Hugging Face checkpoint 默认逐个转换参数并直接加载到 Megatron，避免在 Host 内存中
+   构造完整的 rank-local state dict。最新版 ROLL 仅支持 safetensors 格式的 Hugging Face checkpoint。
+   需要 meta parameter 加载语义的模型会回退到兼容的完整 state 路径；PEFT adapter 则在 base model
+   加载完成后单独注入和恢复。
+
 3. **device_mapping**: 指定使用的 GPU 设备 ID 列表
 
 4. **infer_batch_size**: 推理时的批次大小

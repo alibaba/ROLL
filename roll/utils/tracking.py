@@ -1,5 +1,6 @@
 from concurrent import futures
 import json
+import os
 from functools import wraps
 from typing import Optional, Dict, Any
 
@@ -10,6 +11,26 @@ from roll.utils.logging import get_logger
 logger = get_logger()
 
 tracker_registry: Dict[str, Any] = {}
+
+
+def inject_gpu_type_info(tracker_kwargs: dict, tracker_config: dict, exp_name: str) -> None:
+    """Detect the accelerator model and append it to tracker name, tags and config.
+
+    The base name of the run is taken from the ROLL_JOB_NAME env (passed through
+    by CI submit scripts), falling back to the existing tracker name, then exp_name.
+    """
+    from roll.platforms import get_gpu_type
+
+    gpu_type = get_gpu_type()
+    if not gpu_type:
+        logger.warning("track_gpu_type enabled but failed to detect gpu type")
+        return
+    job_name = os.environ.get("ROLL_JOB_NAME")
+    base_name = job_name or tracker_kwargs.get("name") or exp_name
+    tracker_kwargs["name"] = f"{base_name}-{gpu_type}"
+    tracker_kwargs["tags"] = [*list(tracker_kwargs.get("tags") or []), gpu_type]
+    tracker_config["gpu_type"] = gpu_type
+    logger.info(f"track_gpu_type enabled, tagged tracker with gpu type: {gpu_type}")
 
 
 def _strip_metric_tag(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -67,6 +88,10 @@ class TensorBoardTracker(BaseTracker):
 
     def __init__(self, config: dict, **kwargs):
         log_dir = kwargs.pop("log_dir")
+        # Tracker metadata unsupported by SummaryWriter; ignore so callers can
+        # pass a uniform kwargs shape to every tracker.
+        for key in ("project", "name", "tags", "notes"):
+            kwargs.pop(key, None)
         from torch.utils import tensorboard
 
         kwargs["max_queue"] = 1000
@@ -76,7 +101,10 @@ class TensorBoardTracker(BaseTracker):
         for k in list(self.config.keys())[:]:
             if not isinstance(self.config[k], (int, float, str, bool, torch.Tensor)):
                 self.config[k] = str(self.config[k])
-        self.writer.add_hparams(hparam_dict=self.config, metric_dict={})
+        # self.writer.add_hparams(hparam_dict=self.config, metric_dict={})
+         # Avoid SummaryWriter.add_hparams(), which creates a timestamped child run
+        # directory under log_dir. Keep config in the main event file instead.
+        self.writer.add_text("hparams", json.dumps(self.config, ensure_ascii=False, indent=2), global_step=0)
         self.writer.flush()
         self.executor = futures.ThreadPoolExecutor(max_workers=1)
 
@@ -132,8 +160,10 @@ class SwanlabTracker(BaseTracker):
         self.config = config
         project = kwargs.pop("project", None)
         workspace = kwargs.pop("workspace", None)
-        experiment_name = kwargs.pop("experiment_name", None)
+        name = kwargs.pop("name", None)
+        experiment_name = kwargs.pop("experiment_name", None) or name
         description = kwargs.pop("description", None)
+        kwargs.pop("notes", None)
         tags = kwargs.pop("tags", None)
         logdir = kwargs.pop("logdir", None)
         login_kwargs = kwargs.pop("login_kwargs", None)

@@ -20,46 +20,134 @@ from roll.third_party.fsdp2.qwen3_moe_patch import _iter_convert_fsdps_moe_weigh
 logger = get_logger()
 
 
-def gather_fsdp2_weights(model, buffer_size, is_lora=False):
+def _gather_dtensor_full(param_data):
+    """Gather full tensor from DTensor shard.
+
+    If shard is on CPU, move it to GPU first so that the all-gather
+    collective uses NCCL instead of gloo.
     """
-    Gather FSDP2 weights for model update.
-    For FSDP2, we need to get the full tensor from the sharded parameters.
-    Also converts FSDP MoE weights from FSDP format to HF/vLLM expected format.
+    if not isinstance(param_data, DTensor):
+        return param_data
+    if param_data.device.type == "cpu" and current_platform.device_type != "cpu":
+        param_data = param_data.to(current_platform.current_device())
+    return param_data.full_tensor()
 
-    Yields batches of (name, tensor) pairs whose total size does not exceed
-    buffer_size. Expert DTensor parameters are gathered lazily (one layer at a
-    time) to avoid materializing all expert weights on GPU simultaneously.
-    """
-    if is_lora:
-        from peft.utils import get_peft_model_state_dict
 
-        lora_state_dict = get_peft_model_state_dict(model)
-        named_params = [(name, param) for name, param in lora_state_dict.items()]
-    else:
-        named_params = [(name, param) for name, param in model.named_parameters()]
-
+def _iter_bucketed_weights(named_params, buffer_size):
+    """Yield batches of (name, full_tensor) pairs whose total size stays under buffer_size."""
     waiting_params, waiting_params_size = [], 0
-    need_convert_moe = (
-        version.parse(transformers.__version__) >= version.parse("5.2.0")
-        and getattr(model.config, "model_type", "") in ("qwen3_moe", "qwen3_next")
-    )
-    params_iter = _iter_convert_fsdps_moe_weights(named_params) if need_convert_moe else named_params
-    for name, param in params_iter:
+    for name, param in named_params:
         full_tensor_size = param.numel() * param.element_size()
         if waiting_params and waiting_params_size + full_tensor_size > buffer_size:
-            yield [(n, p.data if not isinstance(p.data, DTensor) else p.data.full_tensor()) for n, p in waiting_params]
+            yield [(n, _gather_dtensor_full(p.data)) for n, p in waiting_params]
             waiting_params, waiting_params_size = [], 0
 
         waiting_params_size += full_tensor_size
         waiting_params.append((name, param))
 
     if waiting_params:
-        yield [(n, p.data if not isinstance(p.data, DTensor) else p.data.full_tensor()) for n, p in waiting_params]
+        yield [(n, _gather_dtensor_full(p.data)) for n, p in waiting_params]
+
+
+def _base_weight_target_name(name: str) -> str:
+    """Map a frozen LoRA-injected parameter name to the infer-side name.
+
+    Two train-side conventions exist, distinguished by the PeftModel wrapper
+    prefix:
+    - PeftModel-wrapped LLM (get_peft_model; names start with
+      "base_model.model."): the colocated vLLM worker keeps its own LoRA
+      injection, so its base parameters stay peft-style and are keyed WITH
+      ".base_layer." (e.g. model.layers.N.self_attn.qkv_proj.base_layer.
+      weight). Drop only the wrapper prefix and keep ".base_layer."
+      untouched; q/k/v and gate/up are NOT fused here because the worker's
+      update_parameter_in_bucket maps unfused members (q_proj/k_proj/v_proj
+      -> qkv_proj, gate_proj/up_proj -> gate_up_proj) and concatenates them
+      itself. Sending pre-fused qkv_proj names makes its member-rule match
+      inside "qkv_proj" and double-apply (qkqkv_proj KeyError).
+    - In-place adapter injection (no wrapper prefix, e.g. the Qwen-Image
+      diffusion transformer via inject_adapter_in_model): strip
+      ".base_layer." so names resolve through vLLM's LoRA wrappers, matching
+      QwenImageAdapter.load_transformer_base_weights, which keys its
+      params_dict with ".base_layer." stripped.
+    """
+    if name.startswith("base_model.model."): # for LLM 
+        name = name[len("base_model.model."):]
+        if name.startswith(("layers.", "embed_tokens.", "norm.")):
+            # Bare-inner-model naming; the infer side is the full causal LM.
+            name = "model." + name
+        return name
+    return name.replace(".base_layer.", ".") # for diffusion
+
+
+def gather_fsdp2_base_weights(model, buffer_size):
+    """Gather frozen base weights from a LoRA-injected FSDP2 model (LoRA mode).
+    Used to restore the infer-side transformer base after a level-2 sleep.
+
+    Names are mapped by _base_weight_target_name to the receiving infer
+    backend's convention (colocated vLLM for PeftModel-wrapped LLMs; the
+    Qwen-Image pipeline for in-place-injected diffusion transformers); see
+    its docstring for the contract.
+    """
+    named_params = [
+        (_base_weight_target_name(name), param)
+        for name, param in model.named_parameters()
+        if "lora_" not in name
+    ]
+    logger.info(
+        "gather_fsdp2_base_weights: num_params=%s sample_names=%s",
+        len(named_params),
+        [n for n, _ in named_params[:3]],
+    )
+    yield from _iter_bucketed_weights(named_params, buffer_size)
+
+
+def gather_fsdp2_lora_weights(model, buffer_size, adapter_name="default"):
+    """Gather one LoRA adapter's weights from a LoRA-injected FSDP2 model.
+
+    For DiffNFT (adapter_name="ema_lora"), gathers the EMA shadow adapter's
+    weights instead of the live "default" adapter so the rollout samples
+    under the off-policy EMA weights, matching the paper's design.
+    """
+    from peft.utils import get_peft_model_state_dict
+
+    lora_state_dict = get_peft_model_state_dict(model, adapter_name=adapter_name)
+    named_params = [(name, param) for name, param in lora_state_dict.items()]
+    logger.info(
+        "gather_fsdp2_lora_weights(adapter_name=%s): num_params=%s, "
+        "sample_names=%s, all_contain_lora=%s",
+        adapter_name,
+        len(named_params),
+        [n for n, _ in named_params[:5]],
+        all("lora_" in n for n, _ in named_params),
+    )
+    yield from _iter_bucketed_weights(named_params, buffer_size)
+
+
+def gather_fsdp2_full_weights(model, buffer_size):
+    """Gather all model weights (plain full-parameter model update).
+
+    For FSDP2, we need to get the full tensor from the sharded parameters.
+    Also converts FSDP MoE weights from FSDP format to HF/vLLM expected format.
+    """
+    named_params = [(name, param) for name, param in model.named_parameters()]
+    need_convert_moe = (
+        version.parse(transformers.__version__) >= version.parse("5.2.0")
+        and getattr(model.config, "model_type", "") in ("qwen3_moe", "qwen3_next")
+    )
+    params_iter = _iter_convert_fsdps_moe_weights(named_params) if need_convert_moe else named_params
+    yield from _iter_bucketed_weights(params_iter, buffer_size)
 
 
 class FSDP2WeightUpdater:
     def __init__(
-        self, pipeline_config: PPOConfig, infer_cluster, worker_config, model_update_name: str, model, is_lora
+        self,
+        pipeline_config: PPOConfig,
+        infer_cluster,
+        worker_config,
+        model_update_name: str,
+        model,
+        is_lora,
+        adapter_name: str = "default",
     ):
         self.pipeline_config = pipeline_config
         self.worker_config = worker_config
@@ -70,6 +158,7 @@ class FSDP2WeightUpdater:
             pipeline_config.model_update_buffer_size_mb * 1024 * 1024
         )  # Convert MB to bytes
         self.is_lora = is_lora
+        self.adapter_name = adapter_name
         self.infer_worker_config = infer_cluster.worker_config
         self.infer_cluster = infer_cluster
         self.is_colocated = is_actor_infer_overlapping_with_any_cluster(
@@ -219,12 +308,34 @@ class FSDP2WeightUpdater:
         logger.info(f"Init weights update group {self.model_update_group_name}")
 
     def _colocated_model_update(self):
+        if self.is_lora:
+            # LoRA mode sends two streams: the frozen transformer base first
+            # (so the infer side can restore it after a level-2 sleep without
+            # disk reads), then the adapter weights consumed by custom_add_lora.
+            self._colocated_stream_weights(
+                gather_fsdp2_base_weights(self.model, buffer_size=self._model_update_buffer_size),
+                is_lora=False,
+            )
+            self._colocated_stream_weights(
+                gather_fsdp2_lora_weights(
+                    self.model, buffer_size=self._model_update_buffer_size, adapter_name=self.adapter_name
+                ),
+                is_lora=True,
+            )
+        else:
+            self._colocated_stream_weights(
+                gather_fsdp2_full_weights(self.model, buffer_size=self._model_update_buffer_size),
+                is_lora=False,
+            )
+        self._add_lora_to_infer_workers()
+        torch.cuda.empty_cache()
+        return {}
+
+    def _colocated_stream_weights(self, named_weights_iter, is_lora: bool):
         refs = []
         infer_parallel_size = dist.get_world_size(self._infer_parallel_cpu_group)
         co_infer_rank = dist.get_rank(self._infer_parallel_cpu_group)
-        for named_weights in gather_fsdp2_weights(
-            self.model, buffer_size=self._model_update_buffer_size, is_lora=self.is_lora
-        ):
+        for named_weights in named_weights_iter:
             if self._co_infer_worker is not None:
                 serialized_tensors = serialize_named_weights(
                     named_weights, infer_strategy=self.infer_worker_config.strategy_args.strategy_name
@@ -285,27 +396,26 @@ class FSDP2WeightUpdater:
                     infer_parallel_tensors = [serialized_tensors]
                 refs.append(
                     self._co_infer_worker.update_parameter_in_bucket.remote(
-                        infer_parallel_tensors, is_lora=self.is_lora
+                        infer_parallel_tensors, is_lora=is_lora
                     )
                 )
             if self._broadcast_workers:
-                refs.extend(self._broadcast_to_infer_workers(named_weights))
+                refs.extend(self._broadcast_to_infer_workers(named_weights, is_lora=is_lora))
         if refs:
             ray.get(refs)
-        self._add_lora_to_infer_workers()
-        torch.cuda.empty_cache()
-        return {}
 
-    def _broadcast_to_infer_workers(self, named_weights) -> list[ray.ObjectRef]:
+    def _broadcast_to_infer_workers(self, named_weights, is_lora: bool | None = None) -> list[ray.ObjectRef]:
         if not self._broadcast_workers:
             return []
+        if is_lora is None:
+            is_lora = self.is_lora
         refs = [
             worker.broadcast_parameter.remote(
                 group_name=self.model_update_group_name,
                 names=[n for n, _ in named_weights],
                 dtypes=[w.dtype for _, w in named_weights],
                 shapes=[w.shape for _, w in named_weights],
-                is_lora=self.is_lora,
+                is_lora=is_lora,
             )
             for worker in self._broadcast_workers
         ]
@@ -329,16 +439,35 @@ class FSDP2WeightUpdater:
 
     def _separated_model_update(self):
         logger.info(f"start broadcast model update {self.model_update_group_name}")
-        for named_weights in gather_fsdp2_weights(
-            self.model, buffer_size=self._model_update_buffer_size, is_lora=self.is_lora
-        ):
-            refs = self._broadcast_to_infer_workers(named_weights)
-            ray.get(refs)
+        if self.is_lora:
+            # Same two-stream order as the colocated path: base first, then adapter.
+            self._separated_stream_weights(
+                gather_fsdp2_base_weights(self.model, buffer_size=self._model_update_buffer_size),
+                is_lora=False,
+            )
+            self._separated_stream_weights(
+                gather_fsdp2_lora_weights(
+                    self.model, buffer_size=self._model_update_buffer_size, adapter_name=self.adapter_name
+                ),
+                is_lora=True,
+            )
+        else:
+            self._separated_stream_weights(
+                gather_fsdp2_full_weights(self.model, buffer_size=self._model_update_buffer_size),
+                is_lora=False,
+            )
         self._add_lora_to_infer_workers()
         torch.cuda.empty_cache()
         return {}
 
+    def _separated_stream_weights(self, named_weights_iter, is_lora: bool):
+        for named_weights in named_weights_iter:
+            refs = self._broadcast_to_infer_workers(named_weights, is_lora=is_lora)
+            ray.get(refs)
+
     def _add_lora_to_infer_workers(self):
+        if self.is_lora and self.is_colocated:
+            dist.barrier()
         if dist.get_rank() != 0 or not self.is_lora:
             return
         peft_config = self.model.peft_config.get("default", None)

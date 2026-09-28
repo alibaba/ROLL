@@ -34,8 +34,7 @@ actor_train:
     strategy_name: fsdp2_train
     strategy_config:
       fsdp_size: 16
-      param_dtype: bf16
-      reduce_dtype: float32
+      enable_mix_precision: true
       reshard_after_forward: true
       offload_policy: false
   device_mapping: list(range(0,16))
@@ -56,8 +55,6 @@ reference:
     strategy_name: fsdp2_infer
     strategy_config:
       fsdp_size: 4
-      param_dtype: bf16
-      reduce_dtype: float32
       reshard_after_forward: true
       offload_policy: false
   device_mapping: list(range(0,8))
@@ -86,8 +83,7 @@ actor_train:
     strategy_name: fsdp2_train
     strategy_config:
       fsdp_size: 4  # FSDP sharding size
-      param_dtype: bf16
-      reduce_dtype: float32
+      enable_mix_precision: true
       reshard_after_forward: true
       offload_policy: false
   device_mapping: list(range(0,8))
@@ -111,8 +107,16 @@ In this example:
    - `fsdp_size`: Number of FSDP shards
      - If `fsdp_size >= world_size` or `fsdp_size <= 1`: pure FSDP2 mode
      - If `fsdp_size < world_size`: HSDP mode with DDP replicas
-   - `param_dtype`: Parameter data type (e.g., `bf16`, `fp16`, `float32`)
-   - `reduce_dtype`: Data type for gradient reduction (e.g., `float32`)
+   - `enable_mix_precision`: Recommended mix precision setting for `fsdp2_train`
+     - `true`: Use `param_dtype=bf16` and `reduce_dtype=float32`
+     - `false`: Use `param_dtype=bf16` and `reduce_dtype=bf16`
+     - If `param_dtype` or `reduce_dtype` is explicitly configured, those explicit values are used and `enable_mix_precision` does not take effect.
+   - `param_dtype`: Optional parameter data type (e.g., `bf16`, `fp16`, `float32`)
+     - For `fsdp2_train`, configure this only when you need a custom precision setup instead of `enable_mix_precision`.
+     - For `fsdp2_infer`, the default is `bf16`; set `param_dtype` only when you need a different inference precision.
+   - `reduce_dtype`: Optional gradient reduction data type override for `fsdp2_train` (e.g., `bf16`, `fp16`, `float32`)
+     - For `fsdp2_train`, configure this only when you need a custom precision setup instead of `enable_mix_precision`.
+     - This is not needed for `fsdp2_infer` because inference does not perform gradient reduction.
    - `reshard_after_forward`: Whether to reshard parameters after forward pass
      - `true`: Reshard after forward
      - `false`: Keep parameters gathered
@@ -196,8 +200,7 @@ strategy_config:
 ```yaml
 strategy_config:
   fsdp_size: 16
-  param_dtype: bf16
-  reduce_dtype: float32
+  enable_mix_precision: true
   wrap_policy:
     transformer_layer_cls_to_wrap: ["Qwen3DecoderLayer"]
 ```
@@ -215,8 +218,7 @@ actor_train:
     strategy_name: fsdp2_train
     strategy_config:
       fsdp_size: 4
-      param_dtype: bf16
-      reduce_dtype: float32
+      enable_mix_precision: true
       # Vision tower blocks automatically have cast_forward_inputs disabled
 ```
 
@@ -227,8 +229,7 @@ MoE models require the expert patch to prevent deadlocks:
 ```yaml
 strategy_config:
   fsdp_size: 16
-  param_dtype: bf16
-  reduce_dtype: float32
+  enable_mix_precision: true
   apply_expert_patch: true  # Critical for MoE models if wrap each expert separately
   wrap_policy:
     moe_experts: ["Qwen3MoeMLP"]

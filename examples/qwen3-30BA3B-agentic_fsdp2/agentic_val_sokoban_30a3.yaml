@@ -81,9 +81,8 @@ actor_train:
   strategy_args:
     strategy_name: fsdp2_train
     strategy_config:
+      enable_mix_precision: true
       fsdp_size: 16
-      param_dtype: bf16
-      reduce_dtype: bf16
       offload_policy: true
       apply_expert_patch: true
       apply_tiled_mlp: true
@@ -134,8 +133,6 @@ reference:
     strategy_name: fsdp2_infer
     strategy_config:
       fsdp_size: 16
-      param_dtype: bf16
-      reduce_dtype: bf16
       apply_tiled_mlp: true
       tiled_num_shards: 8
       reshard_after_forward: true

@@ -49,6 +49,16 @@ class RouterArguments:
         default=128,
         metadata={"help": "The maximum number of running requests."}
     )
+    enable_sample_level_affinity: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Route separately submitted samples in a prompt group independently while keeping partial or "
+                "multi-turn requests for the same sample on the same inference worker. Only affects "
+                "affinity-aware routers."
+            )
+        },
+    )
 
 @dataclass
 class ScheduleConfig:
@@ -84,12 +94,12 @@ class ScheduleConfig:
 
 @dataclass
 class TransferBackendArguments:
-    backend_name: str = field(
-        default=None,
-        metadata={"help": "The registered backend for transfer."}
+    backend_name: Optional[str] = field(
+        default="TransferQueue",
+        metadata={"help": "The registered backend for transfer. Set to null to disable remote transfer."}
     )
     backend_config: Dict = field(
-        default_factory=dict,
+        default_factory=lambda: {"backend": {"SimpleStorage": {"num_data_storage_units": 16}}},
         metadata={"help": "Configuration dictionary for the backend."}
     )
 
@@ -130,13 +140,17 @@ class BaseConfig(ScheduleConfig):
         default_factory=dict,
         metadata={"help": "Additional keyword arguments to pass to the Tracker class."}
     )
+    dump_run_name: str = field(
+        default="",
+        metadata={"help": "Global run identifier for dump directories. Auto-generated once at init if empty."},
+    )
     max_steps: int = field(
         default=500,
         metadata={"help": "If > 0: set total number of pipeline steps"},
     )
     save_steps: int = field(
         default=50,
-        metadata={"help": "Save checkpoint every X update steps."}
+        metadata={"help": "Save checkpoint every X update steps. Set to 0 to disable checkpointing."}
     )
     max_ckpt_to_keep: int = field(
         default=0,
@@ -155,7 +169,10 @@ class BaseConfig(ScheduleConfig):
     )
     max_running_requests: int = field(
         default=128,
-        metadata={"help": "The maximum number of running requests."}
+        metadata={
+            "help": "The maximum number of running requests. Aligned to max(128, max_num_seqs for vllm "
+            "or max_running_requests for sglang) when configured in actor_infer strategy_config."
+        }
     )
     val_batch_size: int = field(
         default=128,
@@ -168,9 +185,17 @@ class BaseConfig(ScheduleConfig):
         default=False,
         metadata={"help": "load the last checkpoint in *output_dir* as saved by a previous instance or MOS URI."},
     )
+    auto_resume: bool = field(
+        default=False,
+        metadata={"help": "If True, auto-find and resume from the latest checkpoint via get_latest_ckpt()."},
+    )
     checkpoint_config: Optional[Dict] = field(
         default_factory=dict,
         metadata={"help": "Configuration checkpoint, this field will be written to worker_config."},
+    )
+    reward_system_config: Optional[Dict] = field(
+        default_factory=dict,
+        metadata={"help": "Configuration reward system, this field will be written to worker_config."},
     )
     prompt_length: Optional[int] = field(
         default=1024,
@@ -216,6 +241,11 @@ class BaseConfig(ScheduleConfig):
             )
         }
     )
+    offload_backend: str = field(
+        default="local",
+        metadata={"help": "Offload store: 'local' (per-rank pinned CPU memory), "
+                          "'local_dedup' (1/world pinned chunk per rank + NCCL all-gather, DP-deduplicated)."}
+    )
 
     length_profiler_dir: str = field(
         default='./output/profiler',
@@ -259,8 +289,8 @@ class BaseConfig(ScheduleConfig):
     )
 
     transfer_backend: Optional[TransferBackendArguments] = field(
-        default=None,
-        metadata={"help": "Transfer backend configuration."}
+        default_factory=TransferBackendArguments,
+        metadata={"help": "Transfer backend configuration. Defaults to TransferQueue; set backend_name to null to disable."}
     )
 
 
@@ -274,6 +304,11 @@ class BaseConfig(ScheduleConfig):
         if self.sequence_length is None:
             self.sequence_length = self.response_length + self.prompt_length
 
+        for f in dataclasses.fields(self):
+            value = getattr(self, f.name, None)
+            if isinstance(value, WorkerConfig):
+                value._auto_fill_packing_lengths(self.sequence_length)
+
         if self.response_length is not None:
             self.response_length = None
 
@@ -286,9 +321,15 @@ class BaseConfig(ScheduleConfig):
             assert self.val_sequence_length, "val_prompt_length and val_sequence_length must be set simultaneously"
 
 
+        # Generate a single run timestamp for this pipeline run, shared across all workers.
+        # This ensures dump directories are consistent regardless of track_with type.
+        run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        if not self.dump_run_name:
+            self.dump_run_name = f"{self.exp_name}_{run_timestamp}"
+
         if self.track_with == "tensorboard":
             self.tracker_kwargs["log_dir"] = os.path.join(
-                self.tracker_kwargs.get("log_dir", self.output_dir), self.exp_name, datetime.now().strftime("%Y%m%d-%H%M%S")
+                self.tracker_kwargs.get("log_dir", self.output_dir), self.exp_name, run_timestamp
             )
             logger.info(f"add timestamp to tensorboard log_dir {self.tracker_kwargs['log_dir']}")
 
@@ -305,8 +346,8 @@ class BaseConfig(ScheduleConfig):
             output_dir = self.checkpoint_config.get("output_dir")
             self.checkpoint_config["output_dir"] = os.path.join(output_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
             logger.info(f"add timestamp to output_dir {self.checkpoint_config['output_dir']}")
-        if self.resume_from_checkpoint is True:
-            logger.info("ensure async_upload=False when resume_from_checkpoint=True and auto resume from lastest ckpt")
+        if self.resume_from_checkpoint is True or self.auto_resume:
+            logger.info("ensure async_upload=False when auto_resume=True and auto resume from latest ckpt")
             self.checkpoint_config["async_upload"] = False
 
         for attribute_name in dir(self):
@@ -387,7 +428,16 @@ class BaseConfig(ScheduleConfig):
 
         if hasattr(self, 'actor_infer') and isinstance(self.actor_infer, WorkerConfig) and self.actor_infer.strategy_args is not None:
             strategy_name = self.actor_infer.strategy_args.strategy_name
-            assert strategy_name in ["vllm", "sglang"]
+            assert strategy_name in ["vllm", "vllm_omni", "sglang"]
+
+            engine_max_running_requests = self.actor_infer.strategy_args.strategy_config.get(
+                "max_running_requests" if strategy_name == "sglang" else "max_num_seqs"
+            )
+            if engine_max_running_requests is not None:
+                self.max_running_requests = max(max(128, engine_max_running_requests), self.max_running_requests)
+                if self.router_args is not None:
+                    self.router_args.max_running_requests = self.max_running_requests
+                logger.info(f"Set router max_running_requests to {self.max_running_requests} ")
             # Use max_running_requests+1 to reserve extra one for abort_requests.
             # 1000 is ray_constants.DEFAULT_MAX_CONCURRENCY_ASYNC.
             max_concurrency = max(self.max_running_requests + 1, 1000)
@@ -545,8 +595,8 @@ class PPOConfig(BaseConfig):
     whiten_rewards: bool = field(default=False, metadata={"help": "Whiten the rewards before compute advantages."})
     whiten_advantages: bool = field(default=False, metadata={"help": "Whiten the advantage."})
     advantage_clip: float = field(default=None, metadata={"help": "advantage_clip value"})
-    adv_estimator: Literal["gae", "reinforce", "grpo", "gigpo", "step_reinforce", "agentic_reinforce"] = field(
-        default="gae", metadata={"help": "advantage estimator: gae (GAE)."}
+    adv_estimator: Literal["gae", "skip_obs_gae", "reinforce", "grpo", "gigpo", "step_reinforce", "agentic_reinforce", "flowgrpo", "diffnft"] = field(
+        default="gae", metadata={"help": "advantage estimator: gae (GAE), skip_obs_gae (SAO-style skip-observation GAE)."}
     )
     norm_mean_type: Literal["batch", "group", "running", None] = field(
         default=None,
@@ -565,6 +615,7 @@ class PPOConfig(BaseConfig):
         default=0,
         metadata={"help": "Pre-training step for critic model"},
     )
+    critic_epochs: int = field(default=1, metadata={"help": "Number of critic update epochs per policy step."})
     use_kl_loss: bool = field(default=False, metadata={"help": "Use kl loss"})
     kl_loss_coef: float = field(default=0, metadata={"help": "Loss coefficient for kl loss"})
     entropy_loss_coef: float = field(default=0, metadata={"help": "Loss coefficient for entropy loss"})
@@ -590,11 +641,13 @@ class PPOConfig(BaseConfig):
     )
 
     # OPD (On-Policy Distillation) Configuration
-    pure_opd_pipeline_type: Literal["rlvr", "agentic"] = field(
-        default="rlvr",
+    pure_opd_pipeline_type: Optional[Literal["rlvr", "rlvr_vlm", "agentic"]] = field(
+        default=None,
         metadata={"help": "Pipeline type for pure On-Policy Distillation. Used by start_onpolicy_distill_pipeline.py "
-                 "to determine which config class and pipeline to use. "
-                 "'rlvr': RLVRConfig + RLVRPipeline, 'agentic': AgenticConfig + AgenticPipeline"}
+                 "to determine which config class and pipeline to use. Only configurable in pure OPD mode; "
+                 "defaults to 'rlvr' when unset. "
+                 "'rlvr': RLVRConfig + RLVRPipeline, 'rlvr_vlm': RLVRConfig + RLVRVLMPipeline, "
+                 "'agentic': AgenticConfig + AgenticPipeline"}
     )
     teacher: Union[Dict[str, WorkerConfig], WorkerConfig] = field(
         default_factory=WorkerConfig,
@@ -626,6 +679,48 @@ class PPOConfig(BaseConfig):
                  "The OPD KL is computed as: reverse_kl = student_logp - teacher_logp, "
                  "and added to token_level_rewards as: reward - opd_kl_coef * reverse_kl"}
     )
+    opsd_mode: bool = field(
+        default=False,
+        metadata={"help": "Enable OPSD (On-Policy Self-Distillation): teacher prompt includes "
+                 "reference solution y* as privileged information before evaluating student response. "
+                 "Auto-enables is_pure_opd=True (pure self-distillation); set use_opd=True "
+                 "explicitly for mixed mode (external rewards + Teacher KL)."}
+    )
+    opsd_solution_key: str = field(
+        default="reference_solution",
+        metadata={"help": "non_tensor_batch key for the reference solution (y*, full CoT). "
+                 "Must be present in the dataset JSONL."}
+    )
+    opsd_teacher_template: str = field(
+        default=(
+            "{problem}\n\n"
+            "Here is a reference solution to this problem:\n"
+            "=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n"
+            "\n\nAfter reading the reference solution above, make sure you truly understand "
+            "the reasoning behind each step — do not copy or paraphrase it. Now, using your "
+            "own words and independent reasoning, derive the same final answer to the problem above. "
+            "Think step by step, explore different approaches, and don't be afraid to backtrack "
+            "or reconsider if something doesn't work out:\n"
+        ),
+        metadata={"help": "Format string for OPSD teacher user message content. "
+                 "Placeholders: {problem} (original problem text), {solution} (reference solution y*). "
+                 "The result is wrapped via the chat template (global_template)."}
+    )
+    opsd_max_solution_length: Optional[int] = field(
+        default=None,
+        metadata={"help": "Max token length of the reference solution (y*) in OPSD teacher prompt. "
+                 "If set, solutions exceeding this are tokenized, truncated, and decoded back to text "
+                 "before building the teacher prompt — preserving the template structure. "
+                 "If None, no truncation (rely on sequence_length buffer + tokenized fallback)."}
+    )
+    opd_token_kld_clip: Optional[float] = field(
+        default=None,
+        metadata={"help": "Per-token KL clip threshold for OPD/OPSD advantage. "
+                 "Style tokens (e.g. 'think', 'wait') can have 6-15x higher per-token KL "
+                 "and dominate the gradient. When set, total_weighted_kld is clamped to "
+                 "[-opd_token_kld_clip, opd_token_kld_clip] before computing advantages. "
+                 "Default None = no clipping."}
+    )
 
     def __post_init__(self):
         super().__post_init__()
@@ -656,10 +751,21 @@ class PPOConfig(BaseConfig):
             self.enable_reference = True
         if self.force_disable_old_logprobs_recompute:
             self.enable_old_logprobs_recompute = False
-        elif self.adv_estimator in ['step_reinforce', "gigpo"]:
+        elif getattr(self.actor_train, "pg_variant", None) == "sao":
+            # SAO uses rollout logprobs as ratio denominator, no need to recompute
+            self.enable_old_logprobs_recompute = False
+        elif self.adv_estimator in ['step_reinforce', "gigpo", "flowgrpo"]:
             self.enable_old_logprobs_recompute = True
         else:
             self.set_old_logprobs_status()
+
+        if getattr(self.actor_train.router_replay, "mode", "disable") == "R2" and not self.enable_old_logprobs_recompute:
+            # R2 records routing during the megatron compute_log_probs forward;
+            # skipping recompute means no routing is ever recorded.
+            logger.warning("router_replay mode is R2, force enable_old_logprobs_recompute = True")
+            self.enable_old_logprobs_recompute = True
+
+        self.use_critic: bool = self.adv_estimator in ("gae", "skip_obs_gae")
 
         logger.info(f"enable_old_logprobs_recompute: {self.enable_old_logprobs_recompute}\tenable_reference: {self.enable_reference}")
 
@@ -684,16 +790,75 @@ class PPOConfig(BaseConfig):
                 "or use_opd=True for mixed mode (external rewards + Teacher KL)."
             )
 
-        if has_teachers and has_teacher:
-            raise ValueError("Cannot configure both multi-teacher dict and single-teacher WorkerConfig.")
+        # OPSD is pure self-distillation by default: auto-enable is_pure_opd so opsd_mode
+        # alone is sufficient. Set use_opd=True explicitly to keep the mixed (RL + OPD) mode.
+        if self.opsd_mode and not (self.is_pure_opd or self.use_opd):
+            logger.info("opsd_mode=True: auto-enabling is_pure_opd=True (pure self-distillation)")
+            self.is_pure_opd = True
 
-        # Step 1: Normalize teacher to _reference_configs dict (always Dict[str, WorkerConfig])
+        # pure_opd_pipeline_type is only consumed by the pure OPD launcher
+        # (start_onpolicy_distill_pipeline.py); reject it in non-pure-OPD configs.
+        if self.is_pure_opd:
+            if self.pure_opd_pipeline_type is None:
+                self.pure_opd_pipeline_type = "rlvr"
+        elif self.pure_opd_pipeline_type is not None:
+            raise ValueError(
+                "pure_opd_pipeline_type is only used in pure OPD mode "
+                "(launch via examples/start_onpolicy_distill_pipeline.py). "
+                "Remove it from this config."
+            )
+
+        # OPSD mode: only teacher receives the OPSD transform (y* in prompt).
+        # reference would incorrectly receive y* too, so forbid coexistence.
+        if self.opsd_mode and has_reference_configured and (has_teacher or has_teachers):
+            raise ValueError(
+                "OPSD mode (opsd_mode=True) does not support configuring both 'reference' and 'teacher'. "
+                "In OPSD mode, only 'teacher' receives the reference solution y* in its prompt. "
+                "If you need a reference model without OPSD, use pure OPD mode (opsd_mode=False)."
+            )
+
+        # OPSD assumes a single teacher: the OPSD transform (y* in prompt) and the
+        # teacher thinking mode are applied once for the whole batch, so multiple
+        # teachers with different settings cannot be expressed.
+        if self.opsd_mode and has_teachers:
+            raise ValueError(
+                "opsd_mode=True currently supports a single teacher only: the OPSD transform "
+                "(y* in prompt) and teacher enable_thinking are applied once for all references. "
+                "Configure a single teacher, or drop opsd_mode for multi-teacher OPD."
+            )
+
+        # OPSD is only wired into the RLVR pipeline.
+        if self.opsd_mode and self.is_pure_opd and self.pure_opd_pipeline_type != "rlvr":
+            raise ValueError(
+                "opsd_mode=True is currently only supported with pure_opd_pipeline_type='rlvr'. "
+                "The rlvr_vlm and agentic pipelines do not apply the OPSD transform (y* in prompt)."
+            )
+
+        # Step 1: Merge reference + teacher into unified _reference_configs dict.
+        # reference → "reference", single teacher → "default", dict teacher → by keys.
+        self._reference_configs = {}
+        if has_reference_configured:
+            self._reference_configs["reference"] = self.reference
         if has_teachers:
-            self._reference_configs = self.teacher
+            if has_reference_configured and "reference" in self.teacher:
+                raise ValueError(
+                    "Naming collision: 'reference' key exists in both the reference config "
+                    "and the teacher dict. Please rename the teacher dict key."
+                )
+            self._reference_configs.update(self.teacher)
         elif has_teacher:
-            self._reference_configs = {"default": self.teacher}
-        else:
-            self._reference_configs = {}
+            self._reference_configs["default"] = self.teacher
+
+        # Step 1a: LoRA auto-reference — no separate teacher/reference config needed,
+        # teacher = actor_train with adapter disabled at runtime
+        if not self._reference_configs and (self.is_pure_opd or self.use_opd):
+            is_lora = (
+                self.student_train.is_configured
+                and self.student_train.model_args.lora_target is not None
+            )
+            if is_lora:
+                logger.info("OPD + LoRA: no separate teacher, using student_train as reference")
+                self._reference_configs = {"reference": self.student_train}
 
         # Step 1.5: Build tag → teacher_names routing map for multi-teacher OPD
         self._tag_to_teacher_names: Dict[str, List[str]] = {}
@@ -711,20 +876,20 @@ class PPOConfig(BaseConfig):
         # Step 2: Pure OPD mode
         if self.is_pure_opd:
             if not self._reference_configs:
-                raise ValueError("Pure OPD requires teacher config.")
+                raise ValueError("Pure OPD requires teacher or reference config.")
             if not (self.student_train.is_configured and self.student_infer.is_configured):
                 raise ValueError(
                     "In pure OPD mode (is_pure_opd=True), 'student_train', 'student_infer' "
-                    "and teacher must be configured.\n"
+                    "and teacher/reference must be configured.\n"
                 )
             logger.info(f"Pure OPD mode: mapping student_train to actor_train, "
                         f"student_infer to actor_infer, "
-                        f"{len(self._reference_configs)} teacher(s) to reference")
+                        f"{len(self._reference_configs)} reference(s) to reference")
             self.actor_train = self.student_train
             self.actor_infer = self.student_infer
             self.reference = next(iter(self._reference_configs.values()))
             self.enable_reference = True
-            # Propagate opd_kl_coef default (1.0) to each teacher if not explicitly set
+            # Propagate opd_kl_coef default (1.0) to each reference if not explicitly set
             for ref_cfg in self._reference_configs.values():
                 if ref_cfg.opd_kl_coef is None:
                     ref_cfg.opd_kl_coef = 1.0
@@ -732,15 +897,11 @@ class PPOConfig(BaseConfig):
         # Step 3: Mixed OPD mode
         elif self.use_opd:
             if not self._reference_configs:
-                raise ValueError("Mixed OPD requires teacher config.")
-            if has_reference_configured:
-                raise ValueError(
-                    "In mixed OPD mode (use_opd=True), 'reference' should NOT be configured. "
-                )
-            logger.info(f"Mixed OPD mode: mapping {len(self._reference_configs)} teacher(s) to reference")
+                raise ValueError("Mixed OPD requires teacher or reference config.")
+            logger.info(f"Mixed OPD mode: mapping {len(self._reference_configs)} reference(s) to reference")
             self.reference = next(iter(self._reference_configs.values()))
             self.enable_reference = True
-            # Propagate opd_kl_coef default (1.0) to each teacher if not explicitly set
+            # Propagate opd_kl_coef default (1.0) to each reference if not explicitly set
             for ref_cfg in self._reference_configs.values():
                 if ref_cfg.opd_kl_coef is None:
                     ref_cfg.opd_kl_coef = 1.0
@@ -825,9 +986,10 @@ class PPOConfig(BaseConfig):
     @property
     def reference_configs(self) -> Dict[str, WorkerConfig]:
         """Always returns Dict[str, WorkerConfig] for unified pipeline usage.
-        Single teacher is normalized to {"default": cfg}, multi-teacher to {name: cfg, ...}."""
+        Single teacher is normalized to {"default": cfg}, multi-teacher to {name: cfg, ...}.
+        Reference config is named "reference"."""
         if not hasattr(self, '_reference_configs') or not self._reference_configs:
-            self._reference_configs = {"default": self.reference}
+            self._reference_configs = {"reference": self.reference}
         return self._reference_configs
 
     @property
@@ -851,6 +1013,8 @@ class PPOConfig(BaseConfig):
     @property
     def needs_teacher_routing(self) -> bool:
         """Whether any teacher has non-empty tag_included (requires routing logic)."""
+        if not hasattr(self, '_tag_to_teacher_names'):
+            return False
         return bool(self._tag_to_teacher_names)
 
     @property
