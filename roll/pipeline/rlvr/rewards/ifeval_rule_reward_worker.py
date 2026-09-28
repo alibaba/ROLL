@@ -612,25 +612,26 @@ class GeneralRuleRewardWorker(Worker):
                 func_name = constraint_dict.get("func_name", None)
                 if not func_name or func_name not in IF_FUNCTIONS_MAP:
                     self.logger.warning("constraint missing func_name")
-                    # 如果无 func_name 或没找到对应函数
-                    # 那么这里我们将结果记为 0.0（也可做别的处理）
-                    results[i] = 0.0
-                    continue
-
-                # 移除 func_name，其它参数传给函数
-                constraint_dict.pop("func_name")
-                func = IF_FUNCTIONS_MAP[func_name]
-                # print(f"Running function {func_name} with Response text: {resp_text}")
-                # print(f"Response text: {resp_text}")
-
-                # 调用函数进行验证
-                try:
-                    result = call_ifeval_function(func, resp_text, constraint_dict)
-                except Exception as e:
-                    self.logger.error(f"Error in function {func_name}: {e}")
+                    # 如果无 func_name 或没找到对应函数，结果记为 False（即 0.0）
+                    # 但仍需继续走到下面的 append，保持 results 与
+                    # repetition_penalty_rewards 长度一致
                     result = False
+                else:
+                    # 移除 func_name，其它参数传给函数
+                    constraint_dict.pop("func_name")
+                    func = IF_FUNCTIONS_MAP[func_name]
+                    # print(f"Running function {func_name} with Response text: {resp_text}")
+                    # print(f"Response text: {resp_text}")
+
+                    # 调用函数进行验证
+                    try:
+                        result = call_ifeval_function(func, resp_text, constraint_dict)
+                    except Exception as e:
+                        self.logger.error(f"Error in function {func_name}: {e}")
+                        result = False
             else:
                 self.logger.warning(f"Unknown tag: {tag}")
+                result = False
 
             # 将结果转为 float: bool -> (1.0/0.0), 数值 -> float(...), 其他结构 -> bool(...)
             if isinstance(result, bool):
