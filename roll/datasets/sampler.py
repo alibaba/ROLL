@@ -22,7 +22,6 @@ class BatchStratifiedSampler(Sampler):
         self.batch_size = batch_size
         self.drop_last = drop_last
         self.domain_ratios = copy.deepcopy(domain_ratios)
-        sum_values = sum(domain_ratios.values())
 
         # 按domain分组样本索引
         self.domain_indices = defaultdict(list)
@@ -36,7 +35,10 @@ class BatchStratifiedSampler(Sampler):
         domain_indices_count = {key: len(value) for key, value in self.domain_indices.items()}
         print(f"domain_indices count: {domain_indices_count}")
 
-        self.domain_ratios = {key: value / sum_values for key, value in domain_ratios.items()}
+        # Renormalize pruned ratios (do not reuse the constructor arg).
+        sum_values = sum(self.domain_ratios.values())
+        assert sum_values > 0, "No domains left after removing empty domain_ratios entries."
+        self.domain_ratios = {key: value / sum_values for key, value in self.domain_ratios.items()}
         # 计算每个domain在每个batch中的样本数
         self.domain_batch_num = {}
         accumulated = 0
