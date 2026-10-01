@@ -78,7 +78,7 @@ def test_strategy_rejects_processed_temperature_override():
         strategy._validate_bounded_rl_token_statistics_request()
 
 
-def test_inner_forward_step_keeps_shared_microbatch_forward_args_immutable():
+def test_inner_forward_step_keeps_shared_microbatch_forward_args_immutable(monkeypatch):
     from tensordict import TensorDict
 
     from roll.distributed.scheduler.protocol import DataProto
@@ -109,6 +109,11 @@ def test_inner_forward_step_keeps_shared_microbatch_forward_args_immutable():
     strategy._bounded_rl_token_statistics_enabled = True
     strategy.enable_router_replay = False
     strategy.worker_config = SimpleNamespace(apply_loss_scale=False)
+    strategy.model = SimpleNamespace(config=SimpleNamespace(virtual_pipeline_model_parallel_size=None))
+    monkeypatch.setattr(
+        "roll.distributed.strategy.megatron_strategy.RouterReplayHelper.is_r2_record_action",
+        staticmethod(lambda *_args, **_kwargs: False),
+    )
 
     calls = []
 

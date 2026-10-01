@@ -94,6 +94,16 @@ def _install_mock_vllm_modules(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm.inputs.data", inputs_data)
     monkeypatch.setitem(sys.modules, "vllm.utils", utils)
     monkeypatch.setitem(sys.modules, "roll.third_party.vllm", Mock())
+    compat = ModuleType("roll.third_party.vllm.compat")
+
+    async def call_maybe_await(function, *args, **kwargs):
+        import inspect
+
+        result = function(*args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+    compat.call_maybe_await = call_maybe_await
+    monkeypatch.setitem(sys.modules, "roll.third_party.vllm.compat", compat)
     monkeypatch.setitem(sys.modules, "roll.third_party.vllm.gdn_patcher", gdn_patcher)
 
 

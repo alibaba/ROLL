@@ -267,6 +267,7 @@ def test_factory_from_pretrained_and_save_pretrained_run_asset_hooks(tmp_path, m
 
     class TinyConfig:
         virtual_pipeline_model_parallel_size = None
+        use_value_head = False
         padded_vocab_size = 32
         tie_embeddings_and_output_weights = False
 
@@ -306,6 +307,9 @@ def test_factory_from_pretrained_and_save_pretrained_run_asset_hooks(tmp_path, m
                 "embedding.ngram_heads_vocab_sizes": torch.full((4,), 3, dtype=torch.long),
                 "embedding.ngram_heads_offsets": torch.zeros(4, dtype=torch.long),
             }
+
+        def iter_mca_state_dict_from_hf(self, model_name_or_path, vp_stage=0):
+            return iter(self.load_mca_state_dict_from_hf(model_name_or_path, vp_stage).items())
 
     empty_state = {"model": EmptyConverter(None).load_mca_state_dict_from_hf(source)}
 
