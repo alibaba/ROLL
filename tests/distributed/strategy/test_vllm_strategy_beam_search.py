@@ -375,6 +375,7 @@ class TestVllmStrategyBeamSearch:
         create_async_llm = AsyncMock(return_value=model)
         monkeypatch.setattr(vllm_strategy_module, "create_async_llm", create_async_llm)
         monkeypatch.setattr(vllm_strategy_module, "module_has_attributes", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(vllm_strategy_module.dist, "is_initialized", lambda: False)
         vllm_strategy_module.vllm.__version__ = "0.1.dev20073+g8e685d198"
 
         asyncio.run(vllm_strategy_module.VllmStrategy(mock_worker).initialize(None))
