@@ -182,6 +182,9 @@ def test_distributed_hybrid_phase_matches_uninterrupted_trajectory(hybrid_parall
         assert dist.get_world_size(dense.data_parallel_group) == world
         assert dist.get_world_size(expert.data_parallel_group) == world // ep
         bind_megatron_offload_states_func(optimizer)
+        from roll.distributed.store.local.backend import CPUOffloadBackend
+        optimizer._offload_backend = CPUOffloadBackend()
+        optimizer._offload_key_prefix = "test_phase"
         return model, wrapped, optimizer
 
     actual, actual_ddp, optimizer = build(from_master)

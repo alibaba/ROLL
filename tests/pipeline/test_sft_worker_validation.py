@@ -112,6 +112,7 @@ def test_sft_initialize_restores_next_optimizer_update(tmp_path, monkeypatch, re
     monkeypatch.setattr(sft_worker, "download_model", lambda path: path, raising=False)
     config = SimpleNamespace(
         resume_from_checkpoint=str(checkpoint) if resume == "explicit" else resume,
+        auto_resume=False,
         checkpoint_config={"type": "file_system", "output_dir": str(tmp_path)},
     )
     worker.initialize(config)

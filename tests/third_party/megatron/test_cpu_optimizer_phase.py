@@ -179,6 +179,9 @@ def test_roll_distributed_cpu_optimizer_update_and_phase(tmp_path, monkeypatch, 
         assert all(isinstance(leaf.optimizer, HybridDeviceOptimizer) for leaf in leaves)
         assert all(leaf.optimizer.bounded_cpu_grad_staging is bounded for leaf in leaves)
         bind_megatron_offload_states_func(optimizer)
+        from roll.distributed.store.local.backend import CPUOffloadBackend
+        optimizer._offload_backend = CPUOffloadBackend()
+        optimizer._offload_key_prefix = "test_phase"
         ids = torch.arange(32, device="cuda").remainder(15).add(1).unsqueeze(0)
         before = model.embedding.word_embeddings.weight.detach().clone()
         for step in range(2):

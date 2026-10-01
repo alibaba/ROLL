@@ -23,6 +23,7 @@ from roll.utils.qwen38_gdn import configure_qwen38_gdn_backend
 logger = get_logger()
 vllm_version = Version(vllm.__version__)
 legacy_ray_executor_package = None
+dev_build_ray_executor = False
 
 if vllm_version.release[:2] == (0, 17):
     # vLLM 0.17.x initializes multi-node queues before distributed groups.
@@ -43,7 +44,7 @@ elif module_has_attributes(
 ):
     # Development builds report a pre-release version but expose the modern
     # ray executor API; detect the capability rather than the version string.
-    legacy_ray_executor_package = "roll.third_party.vllm"
+    dev_build_ray_executor = True
 elif vllm_version < Version("0.11.0"):
     logger.warning(f"ROLL does not support vLLM version {vllm.__version__}.")
 else:
@@ -57,6 +58,11 @@ if legacy_ray_executor_package is not None:
     )
     ray_executor_class_v1 = safe_import_class(
         f"{legacy_ray_executor_package}.v1.ray_distributed_executor.CustomRayDistributedExecutor"
+    )
+
+if dev_build_ray_executor:
+    ray_executor_class_v1 = safe_import_class(
+        "roll.third_party.vllm.ray_distributed_executor.CustomRayDistributedExecutor"
     )
 
 logger.info(f"Using vllm version {vllm.__version__}")

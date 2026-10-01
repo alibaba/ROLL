@@ -25,7 +25,7 @@ def cpu_driver_platform(monkeypatch):
 
 def pipeline(resume):
     obj=object.__new__(RLVRPipeline)
-    obj.pipeline_config=SimpleNamespace(async_pipeline=False,max_steps=1,adv_estimator='grpo')
+    obj.pipeline_config=SimpleNamespace(async_pipeline=False,max_steps=1,adv_estimator='grpo',reward_system_config=None)
     obj.resume_from_checkpoint=str(resume) if resume else False
     obj.state=WorkerState()
     def stop(**kwargs):

@@ -28,8 +28,12 @@ class SFTWorker(Worker):
         self.strategy = create_strategy(worker=self)
         self.strategy.initialize(model_provider=default_actor_model_provider)
         resume = self.pipeline_config.resume_from_checkpoint
-        if resume:
-            checkpoint = get_latest_ckpt(self.pipeline_config.checkpoint_config) if resume is True else resume
+        auto_resume = self.pipeline_config.auto_resume
+        if resume or auto_resume:
+            latest = auto_resume or resume is True
+            checkpoint = get_latest_ckpt(self.pipeline_config.checkpoint_config) if latest else None
+            if checkpoint is None and isinstance(resume, str):
+                checkpoint = resume
             if checkpoint:
                 self.strategy.load_checkpoint(load_dir=download_model(checkpoint), tag="checkpoint")
         self.logger.info(f"{self.worker_name} initialized")
