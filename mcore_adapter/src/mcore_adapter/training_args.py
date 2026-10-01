@@ -170,9 +170,10 @@ class DistributingParallelArguments:
             "and group-limited topk. This is an experimental feature and only for benchmark."}
     )
     moe_permute_fusion: Optional[bool] = field(
-        default=False,
+        default=None,
         metadata={
-            "help": "Fuse token rearrangement ops during token dispatching."
+            "help": "Fuse token rearrangement ops during token dispatching. None keeps the model config's "
+                    "default; a non-None value overrides it."
         }
     )
     moe_grouped_gemm: Optional[bool] = field(
