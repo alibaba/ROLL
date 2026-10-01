@@ -2,6 +2,7 @@ import inspect
 import os
 import threading
 import time
+from functools import partial
 from typing import Dict, Optional, Union, List
 
 import ray
@@ -17,6 +18,7 @@ from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import (
     default_actor_model_provider,
+    default_diffusion_model_provider,
     default_reward_model_provider,
     default_value_model_provider,
 )
@@ -25,11 +27,14 @@ from roll.utils.checkpoint_manager import download_model, get_latest_ckpt
 from roll.utils.context_managers import state_offload_manger, log_gpu_memory_usage
 from roll.utils.dynamic_batching import make_mini_batch_iter_for_dynamic_batching
 from roll.utils.functionals import agg_loss, append_to_dict, compute_approx_kl, flatten_sum, masked_mean, postprocess_generate, reduce_metrics
-from roll.utils.offload_nccl import reload_process_groups
+from roll.utils.nccl_suspend import resume_nccl_communicators
 from roll.utils.offload_states import OffloadStateType
 
 
 class ActorWorker(Worker):
+    # LoRA adapter whose weights are broadcast to the rollout side on model_update.
+    rollout_adapter_name: str = "default"
+
     def __init__(self, worker_config: WorkerConfig):
         super().__init__(worker_config=worker_config)
         self.tokenizer = None
@@ -42,24 +47,31 @@ class ActorWorker(Worker):
 
         self.strategy = create_strategy(worker=self)
 
-        self.strategy.initialize(model_provider=default_actor_model_provider)
+        if self.worker_config.model_args.model_type == "diffusion_model":
+            self.strategy.initialize(
+                model_provider=partial(
+                    default_diffusion_model_provider,
+                    diffusion_model_variant=self.pipeline_config.diffusion_model_variant,
+                )
+            )
+        else:
+            self.strategy.initialize(model_provider=default_actor_model_provider)
 
         self.tokenizer = self.strategy.tokenizer
-        if self.pipeline_config.resume_from_checkpoint:
-            load_dir = None
-            if self.pipeline_config.resume_from_checkpoint is True:
-                latest_ckpt = get_latest_ckpt(self.pipeline_config.checkpoint_config)
-                if latest_ckpt:
-                    load_dir = download_model(latest_ckpt)
-            elif isinstance(self.pipeline_config.resume_from_checkpoint, str):
-                load_dir = download_model(self.pipeline_config.resume_from_checkpoint)
-            if load_dir:
+        if self.pipeline_config.resume_from_checkpoint or self.pipeline_config.auto_resume:
+            ckpt_uri = None
+            if self.pipeline_config.auto_resume or self.pipeline_config.resume_from_checkpoint is True:
+                ckpt_uri = get_latest_ckpt(self.pipeline_config.checkpoint_config)
+            if ckpt_uri is None and isinstance(self.pipeline_config.resume_from_checkpoint, str):
+                ckpt_uri = self.pipeline_config.resume_from_checkpoint
+            if ckpt_uri:
+                load_dir = download_model(ckpt_uri)
                 self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
         self.logger.info(f"{self.worker_name} initialized")
 
         self.strategy.offload_states()
 
-    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, trace=True, prefetch=False, to_remote=False)
+    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, trace=True, prefetch=True, to_remote=False)
     def train_step(self, data: DataProto):
         """
         return DataProto(meta_info={'metrics': metrics})
@@ -76,9 +88,6 @@ class ActorWorker(Worker):
             is_offload_states=is_offload_states,
             load_kwargs={"include": [OffloadStateType.model_params, OffloadStateType.other_params]},
         ):
-            data = data.to(current_platform.device_type)
-            data = self.strategy.get_data_input(data)
-            data.prefetch()
             data = data.to(current_platform.device_type)
             per_device_train_batch_size = self.worker_config.training_args.per_device_train_batch_size
             backward_batch_size = (
@@ -102,7 +111,7 @@ class ActorWorker(Worker):
             for batch_idx, backward_batch in tqdm(enumerate(dataloader),
                                                   desc=f"{self.worker_name} train global step {global_step}",
                                                   total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size):
-                pg_metrics = self.strategy.train_step(batch=backward_batch, loss_func=self.loss_func)
+                pg_metrics = self._run_strategy_train_step(backward_batch)
                 if self.worker_config.use_dynamic_batching_in_train or self.worker_config.use_sequence_packing:
                     pg_metrics = reduce_metrics(pg_metrics)
                 append_to_dict(metrics, pg_metrics)
@@ -126,7 +135,7 @@ class ActorWorker(Worker):
         output = DataProto(meta_info={"metrics": metrics})
         return output
 
-    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, trace=True, prefetch=False, to_remote=True)
+    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, trace=True, prefetch=True, to_remote=True)
     def compute_log_probs(self, data: DataProto):
         """
         return DataProto.from_dict(tensors={'log_probs': output})
@@ -141,8 +150,6 @@ class ActorWorker(Worker):
             is_offload_states=is_offload_states,
             load_kwargs={"include": [OffloadStateType.model_params]},
         ):
-            data = self.strategy.get_data_input(data)
-            data.prefetch()
             data = data.to(current_platform.device_type)
             data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
 
@@ -152,9 +159,12 @@ class ActorWorker(Worker):
                 )
             if results is None:
                 return DataProto(batch=None, meta_info={"metrics": metrics})
-            output = DataProto.from_dict(tensors={"log_probs": results["log_probs"], "entropy": results["entropy"]})
+            output = DataProto.from_dict(
+                tensors={key: value for key, value in results.items() if torch.is_tensor(value)}
+            )
             output = output.to("cpu")
             data.to("cpu")
+            metrics.update(data.meta_info.pop('sequence_packing_metrics', {}))
         output.meta_info = {"metrics": metrics}
         return output
 
@@ -209,6 +219,14 @@ class ActorWorker(Worker):
                     self._logprobs_cache[sample_uuid] = old_log_probs[i : i + 1].cpu()
 
         return old_log_probs
+
+    def _run_strategy_train_step(self, backward_batch):
+        """Run strategy.train_step with this worker's loss_func.
+
+        Diffusion workers may override this to pass ``forward_and_backward``
+        instead of ``loss_func`` for per-step backward.
+        """
+        return self.strategy.train_step(batch=backward_batch, loss_func=self.loss_func)
 
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
@@ -326,7 +344,7 @@ class ActorWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_checkpoint(self, global_step, is_last_step=None):
         if self.worker_config.offload_nccl:
-            reload_process_groups()
+            resume_nccl_communicators()
         with Timer("do_checkpoint") as total_timer:
             ckpt_id = f"checkpoint-{global_step}"
 
@@ -481,6 +499,15 @@ class InferWorker(Worker):
     async def add_lora(self, *args, **kwargs):
         return await self.strategy.add_lora(*args, **kwargs)
 
+    async def set_ema_decay(self, ema_decay: float):
+        if hasattr(self.strategy, "set_ema_decay"):
+            await self.strategy.set_ema_decay(ema_decay)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def set_global_steps(self, global_step: int):
+        if hasattr(self.strategy, "set_global_steps"):
+            await self.strategy.set_global_steps(global_step)
+
     @register(dispatch_mode=Dispatch.DP_MP_COMPUTE)
     async def generate(self, data: DataProto):
         """
@@ -560,17 +587,14 @@ class CriticWorker(Worker):
         self.strategy.initialize(model_provider=default_value_model_provider)
         self.tokenizer = self.strategy.tokenizer
 
-        if self.pipeline_config.resume_from_checkpoint:
-            load_dir = None
-            if self.pipeline_config.resume_from_checkpoint is True:
-                latest_ckpt = get_latest_ckpt(self.pipeline_config.checkpoint_config)
-                if latest_ckpt:
-                    load_dir = download_model(latest_ckpt)
-            elif isinstance(self.pipeline_config.resume_from_checkpoint, str):
-                load_dir = download_model(self.pipeline_config.resume_from_checkpoint)
-            load_dir = os.path.join(load_dir, self.cluster_name)
-
-            if load_dir:
+        if self.pipeline_config.resume_from_checkpoint or self.pipeline_config.auto_resume:
+            ckpt_uri = None
+            if self.pipeline_config.auto_resume or self.pipeline_config.resume_from_checkpoint is True:
+                ckpt_uri = get_latest_ckpt(self.pipeline_config.checkpoint_config)
+            if ckpt_uri is None and isinstance(self.pipeline_config.resume_from_checkpoint, str):
+                ckpt_uri = self.pipeline_config.resume_from_checkpoint
+            if ckpt_uri:
+                load_dir = os.path.join(download_model(ckpt_uri), self.cluster_name)
                 self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
 
         self.logger.info(f"{self.worker_name} initialized")
@@ -602,11 +626,12 @@ class CriticWorker(Worker):
             output = DataProto.from_dict(tensors={"values": results["values"]})
             data.to("cpu")
             output = output.to("cpu")
+            metrics.update(data.meta_info.pop('sequence_packing_metrics', {}))
 
         output.meta_info = {"metrics": metrics}
         return output
 
-    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, trace=True, prefetch=True, to_remote=True)
+    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, trace=True, prefetch=True, to_remote=False)
     def train_step(self, data: DataProto):
         """
         return DataProto(meta_info={'metrics': metrics})
@@ -629,7 +654,7 @@ class CriticWorker(Worker):
 
             dataloader = data.make_iterator(
                 mini_batch_size=backward_batch_size,
-                epochs=1,
+                epochs=getattr(self.pipeline_config, "critic_epochs", 1),
                 seed=self.pipeline_config.seed,
                 dataloader_kwargs={"shuffle": True},
             )
@@ -637,7 +662,7 @@ class CriticWorker(Worker):
             for batch_idx, data in tqdm(
                 enumerate(dataloader),
                 desc=f"{self.worker_name} train global step {global_step}",
-                total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size,
+                total=data.batch.batch_size[0] * getattr(self.pipeline_config, "critic_epochs", 1) // backward_batch_size,
             ):
                 vf_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
                 append_to_dict(metrics, vf_metrics)
@@ -771,6 +796,7 @@ class RewardWorker(Worker):
 
             data.to("cpu")
             output = output.to("cpu")
+            metrics.update(data.meta_info.pop('sequence_packing_metrics', {}))
 
         output.meta_info = {"metrics": metrics}
         return output

@@ -1,10 +1,6 @@
 # Atropos + GSM8K + GRPO
 # Optimized for Qwen2.5-0.5B-Instruct on 2x 3090.
 # Lightweight, high-concurrency reasoning training.
-
-defaults:
-  - ../config/deepspeed_zero2@_here_
-
 exp_name: "atropos_gsm8k_grpo_qwen25_0_5b_v21"
 seed: 42
 max_steps: 100

@@ -163,6 +163,18 @@ class DistributingParallelArguments:
         default=None,
         metadata={"help": "Scaling coefficient for the aux loss."},
     )
+    moe_router_force_load_balancing: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "[Experimental] Force load balancing with random logits for MoE router, supports naive topk"
+            "and group-limited topk. This is an experimental feature and only for benchmark."}
+    )
+    moe_permute_fusion: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "Fuse token rearrangement ops during token dispatching."
+        }
+    )
     moe_grouped_gemm: Optional[bool] = field(
         default=None,
         metadata={
@@ -295,6 +307,17 @@ class DistributingParallelArguments:
                 f"Token dispatcher type: {self.moe_token_dispatcher_type} does not support "
                 f"variable sequence length, please use alltoall dispatcher instead."
             )
+
+        if (
+            self.virtual_pipeline_model_parallel_size is not None
+            and self.virtual_pipeline_model_parallel_size <= 1
+        ):
+            logger.warning(
+                f"{self.virtual_pipeline_model_parallel_size=} is equivalent to no virtual pipeline "
+                "parallelism. Normalizing it to None so that the non-interleaved pipeline schedule "
+                "is used, since the interleaved schedule requires num_model_chunks >= 2."
+            )
+            self.virtual_pipeline_model_parallel_size = None
 
         if (
             self.pipeline_model_parallel_layout is not None
@@ -474,8 +497,12 @@ class TrainingArguments(MegatronArguments, HFTrainingArguments):
             self.accumulate_allreduce_grads_in_fp32 = bool(self.bf16)
 
         self.deepspeed = None
+        # HF 5.2.0 migrates warmup_ratio->warmup_steps when warmup_ratio is not None, clobbering a user-set warmup_steps via roll's default warmup_ratio=0.0
+        _warmup_steps = self.warmup_steps
         MegatronArguments.__post_init__(self)
         HFTrainingArguments.__post_init__(self)
+        if _warmup_steps > 0:
+            self.warmup_steps = _warmup_steps
         if self.report_to is not None:
             self.report_to = [k for k in self.report_to if k != "wandb"]
 

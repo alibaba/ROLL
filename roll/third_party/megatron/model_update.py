@@ -1,6 +1,6 @@
 import time
 from dataclasses import asdict
-from typing import Optional
+from typing import Any, Optional
 
 import ray
 import torch
@@ -26,6 +26,24 @@ if is_peft_available():
     from peft import PeftModel, get_peft_model_state_dict
 
 logger = get_logger()
+
+
+def _get_peft_lora_rank(model: Any) -> Optional[int]:
+    if not is_peft_available() or not isinstance(model, PeftModel):
+        return None
+
+    peft_config = next(iter(getattr(model, "peft_config", {}).values()), None)
+    return None if peft_config is None else peft_config.r
+
+
+def _get_hf_convert_kwargs(models: list[McaGPTModel], kwargs: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    convert_kwargs = dict(kwargs or {})
+    lora_rank = _get_peft_lora_rank(models[0])
+    if lora_rank is None:
+        return convert_kwargs
+
+    convert_kwargs.setdefault("lora_rank", lora_rank)
+    return convert_kwargs
 
 
 def gather_and_convert_weights(
@@ -189,11 +207,12 @@ def gather_pp_stage_hf_weights(models: list[McaGPTModel], buffer_size, weight_pr
     if not mpu.model_parallel_is_initialized():
         raise RuntimeError("Model parallelism must be initialized before save as hf inflight.")
 
+    convert_kwargs = _get_hf_convert_kwargs(models, kwargs)
     model_config = models[0].config
     model_converter = ModelConverter(model_config, to_hf=True, efficient_mode=True)
     yield from _gather_hf_weights(
         model_converter, list(_iter_vp_stage_named_weights(models, model_converter)), buffer_size,
-        weight_provider=weight_provider, **kwargs
+        weight_provider=weight_provider, **convert_kwargs
     )
 
 
@@ -242,14 +261,11 @@ def gather_all_hf_weights(models: list[McaGPTModel], buffer_size: int, weights_m
     if not mpu.model_parallel_is_initialized():
         raise RuntimeError("Model parallelism must be initialized before save as hf inflight.")
 
-    kwargs = {}
-    if is_peft_available() and isinstance(models[0], PeftModel):
-        lora_rank = next(iter(models[0].peft_config.values())).r
-        kwargs = {"lora_rank": lora_rank}
+    convert_kwargs = _get_hf_convert_kwargs(models)
 
     pp_size = models[0].config.pipeline_model_parallel_size
     if pp_size <= 1:
-        yield from gather_pp_stage_hf_weights(models, buffer_size, weight_provider=weight_provider, **kwargs)
+        yield from gather_pp_stage_hf_weights(models, buffer_size, weight_provider=weight_provider, **convert_kwargs)
         return
 
     if weight_provider is not None:
@@ -275,7 +291,7 @@ def gather_all_hf_weights(models: list[McaGPTModel], buffer_size: int, weights_m
             )
         for handle in handles:
             handle.wait()
-        yield from _gather_hf_weights(model_converter, named_weights, **kwargs)
+        yield from _gather_hf_weights(model_converter, named_weights, **convert_kwargs)
 
     waiting_weights, waiting_weights_size = [], 0
     for weight_meta in weights_meta:
@@ -494,6 +510,8 @@ class MegatronWeightUpdater:
     def _separated_model_update(self, weight_provider=None):
 
         logger.info(f"start broadcast model update {self.model_update_name}")
+        is_lora = self.worker_config.model_args.lora_target is not None
+        peft_config = self.models_unwrapped[0].peft_config.get("default", None) if is_lora else None
         for hf_named_weights in gather_pp_stage_hf_weights(
             self.models_unwrapped, buffer_size=self._model_update_buffer_size, weight_provider=weight_provider,
         ):
@@ -506,4 +524,16 @@ class MegatronWeightUpdater:
             refs = self._broadcast_to_infer_workers(hf_named_weights)
             ray.get(refs)
             ray.get(self._model_update_locker.release.remote())
+        if is_lora:
+            dist.barrier(group=mpu.get_pipeline_model_parallel_group())
+            if (
+                self._broadcast_workers
+                and mpu.get_pipeline_model_parallel_rank() == 0
+                and mpu.get_expert_data_parallel_rank() == 0
+            ):
+                refs = [
+                    worker.add_lora.remote(peft_config=asdict(peft_config))
+                    for worker in self._broadcast_workers
+                ]
+                ray.get(refs)
         return {}

@@ -19,6 +19,8 @@ def create_strategy(worker: Worker, sync_wrapper: bool = False) -> Union[Inferen
         from roll.distributed.strategy.hf_strategy import HfInferStrategy as strategy_cls
     elif strategy_name == "vllm":
         from roll.distributed.strategy.vllm_strategy import VllmStrategy as strategy_cls
+    elif strategy_name == "vllm_omni":
+        from roll.distributed.strategy.vllm_omni_strategy import VllmOmniStrategy as strategy_cls
     elif strategy_name == "sglang":
         from roll.distributed.strategy.sglang_strategy import SgLangStrategy as strategy_cls
     elif strategy_name == "megatron_infer":
@@ -31,6 +33,14 @@ def create_strategy(worker: Worker, sync_wrapper: bool = False) -> Union[Inferen
         from roll.distributed.strategy.fsdp2_strategy import FSDP2InferStrategy as strategy_cls
     elif strategy_name == "fsdp2_train":
         from roll.distributed.strategy.fsdp2_strategy import FSDP2TrainStrategy as strategy_cls
+    elif strategy_name == "fsdp2_diffusion_infer":
+        from roll.distributed.strategy.fsdp2_diffusion_strategy import FSDP2DiffusionInferStrategy as strategy_cls
+    elif strategy_name == "fsdp2_diffusion_train":
+        from roll.distributed.strategy.fsdp2_diffusion_strategy import FSDP2DiffusionTrainStrategy as strategy_cls
+    elif strategy_name == "veomni_infer":
+        from roll.distributed.strategy.veomni_strategy import VeOmniInferStrategy as strategy_cls
+    elif strategy_name == "veomni_train":
+        from roll.distributed.strategy.veomni_strategy import VeOmniTrainStrategy as strategy_cls
     else:
         raise ValueError(f"Unknown strategy name: {strategy_name}")
 

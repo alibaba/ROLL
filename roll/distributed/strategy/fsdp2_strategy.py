@@ -1,9 +1,10 @@
 import contextlib
 import os
 import random
+import types
 from collections import defaultdict
 from contextlib import nullcontext
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from abc import abstractmethod, ABC
 
 import accelerate
@@ -33,6 +34,7 @@ from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
 from roll.datasets.collator import collate_fn_to_dict_list
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto
+from roll.distributed.store.base import relink_dtensor_local, shrink_cuda_storage
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import (
     clear_fsdp2_init_context,
@@ -41,6 +43,11 @@ from roll.models.model_providers import (
     set_fsdp2_init_context,
 )
 from roll.platforms import current_platform
+from roll.third_party.fsdp2.checkpoint import (
+    async_save_dtensor,
+    supports_passthrough_staging,
+    tensor_storage_key,
+)
 from roll.third_party.fsdp2.model_update import FSDP2WeightUpdater
 from roll.utils.checkpoint_manager import CheckpointManager, download_model
 from roll.utils.collective import collective
@@ -52,52 +59,35 @@ from roll.utils.fsdp_utils import (
     get_init_weight_context_manager,
     get_shard_placement_fn,
     get_shard_placement_fn_ep,
+    iter_fsdp_params,
     _permute,
     _unpermute,
     register_experts_forward_in_ExpertsInterface,
     set_use_grouped_mm,
 )
-from roll.utils.functionals import append_to_dict, log_probs_from_logits
+from roll.utils.functionals import append_to_dict, log_probs_from_logits, parse_dtype
 from roll.utils.logging import get_logger
-from roll.utils.offload_states import OffloadStateType
-from roll.utils.constants import IGNORE_INDEX
+from roll.utils.offload_states import OffloadStateType, clear_memory
+from roll.utils.constants import IGNORE_INDEX, RNG_STATE_DIR
 
 logger = get_logger()
 
 
-def _parse_dtype(dtype):
-    if dtype is None:
-        return None
+def _patch_peft_enable_adapters():
+    from peft.tuners.tuners_utils import BaseTunerLayer
+    if hasattr(BaseTunerLayer, "original_enable_adapters"):
+        return
 
-    if isinstance(dtype, torch.dtype):
-        return dtype
-
-    if isinstance(dtype, str):
-        dtype_lower = dtype.lower()
-        dtype_map = {
-            "bf16": torch.bfloat16,
-            "bfloat16": torch.bfloat16,
-            "fp16": torch.float16,
-            "float16": torch.float16,
-            "half": torch.float16,
-            "fp32": torch.float32,
-            "float32": torch.float32,
-            "float": torch.float32,
-            "fp64": torch.float64,
-            "float64": torch.float64,
-        }
-
-        if dtype_lower in dtype_map:
-            return dtype_map[dtype_lower]
+    def enable_adapters_keep_requires_grad(self, enabled: bool) -> None:
+        if enabled:
+            self.set_adapter(self.active_adapters)
+            self._disable_adapters = False
         else:
-            if hasattr(torch, dtype):
-                return getattr(torch, dtype)
-            else:
-                raise ValueError(
-                    f"Unsupported dtype string: '{dtype}'. " f"Supported values: {list(dtype_map.keys())}"
-                )
+            self._disable_adapters = True
 
-    return dtype
+    BaseTunerLayer.original_enable_adapters = BaseTunerLayer.enable_adapters
+    BaseTunerLayer.enable_adapters = enable_adapters_keep_requires_grad
+    logger.info("Patched PEFT BaseTunerLayer.enable_adapters to keep requires_grad=True in FSDP2 LoRA inference.")
 
 
 def create_device_mesh_with_ep(world_size: int, fsdp_size: int, efsdp_size: int, ep_size: int):
@@ -326,10 +316,16 @@ class FSDP2StrategyBase(InferenceStrategy):
         self.cpu_offload_enabled: bool = False
         if not hasattr(self, "checkpoint_manager") or self.checkpoint_manager is None:
             checkpoint_config = getattr(self.worker_config, "checkpoint_config", None)
-            self.checkpoint_manager = CheckpointManager(checkpoint_config=checkpoint_config)
+            self.checkpoint_manager = CheckpointManager(
+                checkpoint_config=checkpoint_config, register=True
+            )
         self._model_update_device_buffer: Optional[torch.Tensor] = None
         self.weight_updaters = {}
         self._dcp_process_group: Optional[dist.ProcessGroup] = None
+        self._offload_backend = None
+        self._offload_keys: list = []          # [(backend_key, (dtype, dedup_tag)), ...] one flat key per param group
+        self._offload_param_groups = None      # (dtype, dedup_tag) -> [Parameter], rebuilt at each re-put
+        self._replication_groups: dict = {}    # dedup_tag ("ddp"/"eddp") -> ProcessGroup, resolved lazily
 
     def _get_dcp_process_group(self) -> Optional[dist.ProcessGroup]:
         if self._dcp_process_group is None:
@@ -341,6 +337,214 @@ class FSDP2StrategyBase(InferenceStrategy):
         if rank_info is not None and getattr(rank_info, "dp_rank", None) is not None:
             return rank_info.dp_rank
         return dist.get_rank()
+
+    def _get_offload_backend(self):
+        """Get or initialize the offload backend (lazy, based on config).
+
+        Pure FSDP (1D mesh): every rank holds a distinct shard, nothing to
+        dedup; dp_group=None keeps barrier a no-op. HSDP: dense shards are
+        replicated across the ddp mesh dim, so pass that group for DP
+        deduplication (dedup-aware backends store 1/ddp_size per rank). The
+        constructor group is only the default; param puts pass their own group
+        per key (dense over ddp, MoE expert over eddp).
+        """
+        if self._offload_backend is None:
+            from roll.distributed.store.factory import get_offload_backend
+            dp_rank, dp_group = 0, None
+            if self.device_mesh is not None and "ddp" in self.device_mesh.mesh_dim_names:
+                ddp_mesh = self.device_mesh["ddp"]
+                dp_rank = ddp_mesh.get_local_rank()
+                dp_group = ddp_mesh.get_group()
+            self._offload_backend = get_offload_backend(self.worker, dp_rank=dp_rank, dp_group=dp_group)
+        return self._offload_backend
+
+    @staticmethod
+    def _param_dedup_tag(param) -> Optional[str]:
+        """Replication group a param's local shard is duplicated over: 'ddp'
+        for HSDP dense params, 'eddp' for MoE expert params (they live on the
+        MoE mesh and replicate along eddp, a different rank set from ddp), or
+        None when the shard is unique to this rank."""
+        d = param.data
+        if not isinstance(d, DTensor):
+            return None
+        dim_names = d.device_mesh.mesh_dim_names or ()
+        if "ddp" in dim_names:
+            return "ddp"
+        if "eddp" in dim_names:
+            return "eddp"
+        return None
+
+    def _replication_group(self, tag: Optional[str]):
+        """Resolve a dedup tag to its ProcessGroup (False = store per-rank)."""
+        if tag is None:
+            return False
+        if tag not in self._replication_groups:
+            if tag == "ddp":
+                self._replication_groups[tag] = self.device_mesh["ddp"].get_group()
+            else:
+                self._replication_groups[tag] = self.moe_device_mesh["eddp"].get_group()
+        return self._replication_groups[tag]
+
+    def _reset_fsdp_sharded_params(self):
+        """After a reload, re-derive FSDPParam._sharded_param_data (the all-gather
+        copy-in source) from the new _local_tensor; it still views the old buffer."""
+        for fsdp_param in iter_fsdp_params(self.model):
+            fsdp_param.reset_sharded_param()
+
+    def _cleanup_offloaded_model_params(self):
+        """Clean up stale model parameters from backend after gradient updates."""
+        if not self._offload_keys:
+            return
+
+        # A direct async checkpoint reads these CPU store buffers. Do not
+        # recycle them until the background writer has finished.
+        if self.checkpoint_future is not None and self._checkpoint_reads_offload_store:
+            self.checkpoint_future.result()
+            self._checkpoint_reads_offload_store = False
+
+        backend = self._get_offload_backend()
+        for key, (_dtype, tag) in self._offload_keys:
+            backend.delete_tensors(key, replicated_over=self._replication_group(tag))
+
+        self._offload_keys = []
+
+    def invalidate_offloaded_model_params(self):
+        """Drop cached host copies of offloaded model params.
+
+        Call after mutating params on-GPU outside of train_step (e.g. DiffNFT
+        preflight adapter seeding) so the next offload_states() re-puts the
+        updated values instead of taking the write-once fast path in
+        _offload_model_params_to_backend (which would keep the stale host
+        copies and lose the update on the next load_states).
+        """
+        self._cleanup_offloaded_model_params()
+
+    def _offload_model_params_to_backend(self):
+        """Group params by (dtype, replication group) and offload each group as
+        one flat backend key. put_tensors records DTensor meta and detaches the
+        params from device memory (plain .data rebind / DTensor _local_tensor
+        swap + storage shrink), so GPU memory is actually released. HSDP dense
+        groups dedup over the ddp group and MoE expert groups over the eddp
+        group (every member holds an exact replica); pure-FSDP and MoE-mesh
+        groups whose mesh has no eddp dim store independently.
+        one flat backend key. put_tensors records DTensor meta and detaches the
+        params from device memory (plain .data rebind / DTensor _local_tensor
+        swap + storage shrink), so GPU memory is actually released. HSDP dense
+        groups dedup over the ddp group and MoE expert groups over the eddp
+        group (every member holds an exact replica); pure-FSDP and MoE-mesh
+        groups whose mesh has no eddp dim store independently.
+
+        Write-once: keys survive reloads and are only deleted after optimizer
+        updates (_cleanup_offloaded_model_params), so when keys still exist the
+        host copies are current — just free GPU memory, no re-put."""
+        if self._offload_keys:
+            for params in self._offload_param_groups.values():
+                for p in params:
+                    if isinstance(p, DTensor):
+                        old_local = p._local_tensor
+                        relink_dtensor_local(p, None)
+                        # shrink old storage: _sharded_param_data still views it
+                        shrink_cuda_storage(old_local)
+                    else:
+                        p.data = torch.empty(0, dtype=p.dtype, device="cpu")
+            return
+
+        backend = self._get_offload_backend()
+
+        # param set may change between cycles (e.g. LoRA merge/unmerge)
+        groups = {}
+        for _, p in self.model.named_parameters():
+            groups.setdefault((p.dtype, self._param_dedup_tag(p)), []).append(p)
+        self._offload_param_groups = groups
+
+        key_prefix = f"fsdp2_{self.worker.cluster_name}"
+        self._offload_keys = []
+        for (dtype, tag), params in self._offload_param_groups.items():
+            key = f"{key_prefix}_params_{str(dtype).split('.')[-1]}_{tag or 'nodedup'}"
+            backend.put_tensors(key, params, replicated_over=self._replication_group(tag))
+            self._offload_keys.append((key, (dtype, tag)))
+
+    def _reload_model_params_from_backend(self):
+        """One flat H2D transfer per group; the backend rebuilds the params (see
+        get_tensors). Keys are kept: train_step deletes them after the update."""
+        backend = self._get_offload_backend()
+        for key, (dtype, tag) in self._offload_keys:
+            backend.get_tensors(key, self._offload_param_groups[(dtype, tag)],
+                                device=current_platform.device_type, replicated_over=self._replication_group(tag))
+        self._reset_fsdp_sharded_params()
+
+    def _can_checkpoint_from_store(self, asynchronous: bool) -> bool:
+        """Use the zero-copy checkpoint path only for a local, full CPU store."""
+        if self.cpu_offload_enabled or not getattr(self.worker.pipeline_config, "is_offload_states", False):
+            return False
+        backend = self._get_offload_backend()
+        if not backend.supports_direct_checkpoint:
+            return False
+        return not asynchronous or supports_passthrough_staging()
+
+    def _build_checkpoint_state_from_store(
+        self,
+    ) -> Tuple[Dict[str, Tensor], Set[Tuple[int, int]]]:
+        """Build the model state dict as views over existing CPU store buffers."""
+        if not self._offload_keys:
+            raise RuntimeError("Direct checkpoint requires model parameters in the offload store")
+
+        try:
+            named_parameters = self.model.named_parameters(remove_duplicate=False)
+        except TypeError:  # torch <= 2.0 compatibility
+            named_parameters = self.model.named_parameters()
+
+        names_by_param: Dict[int, List[str]] = defaultdict(list)
+        for name, param in named_parameters:
+            names_by_param[id(param)].append(name)
+
+        state_dict = self.model.state_dict()
+        backend = self._get_offload_backend()
+        passthrough_storages: Set[Tuple[int, int]] = set()
+        replaced_params: Set[int] = set()
+
+        for key, (dtype, tag) in self._offload_keys:
+            flat, tensor_meta = backend.get_state(key)
+            storage_key = tensor_storage_key(flat)
+            if storage_key is not None:
+                passthrough_storages.add(storage_key)
+
+            params = self._offload_param_groups[(dtype, tag)]
+            if len(params) != len(tensor_meta):
+                raise RuntimeError(
+                    f"Offload metadata mismatch for '{key}': {len(params)} params, "
+                    f"{len(tensor_meta)} metadata entries"
+                )
+
+            offset = 0
+            for param, (_, _, local_shape) in zip(params, tensor_meta):
+                numel = local_shape.numel()
+                local = flat.narrow(0, offset, numel).view(local_shape)
+                value = DTensor(local, param._spec, requires_grad=False) if isinstance(param, DTensor) else local
+
+                matched = False
+                for name in names_by_param.get(id(param), []):
+                    candidates = [name]
+                    if name.startswith("pretrained_model."):
+                        candidates.append(name.removeprefix("pretrained_model."))
+                    for candidate in candidates:
+                        if candidate in state_dict:
+                            state_dict[candidate] = value
+                            matched = True
+                if not matched:
+                    raise RuntimeError(f"Offloaded parameter has no state_dict entry: {names_by_param.get(id(param))}")
+                replaced_params.add(id(param))
+                offset += numel
+
+            if offset != flat.numel():
+                raise RuntimeError(
+                    f"Offload flat-buffer size mismatch for '{key}': consumed {offset}, stored {flat.numel()}"
+                )
+
+        missing = [names for param_id, names in names_by_param.items() if param_id not in replaced_params]
+        if missing:
+            raise RuntimeError(f"Parameters missing from offload checkpoint state: {missing[:8]}")
+        return state_dict, passthrough_storages
 
     def _build_checkpoint_paths(
         self,
@@ -368,9 +572,34 @@ class FSDP2StrategyBase(InferenceStrategy):
             cpu_offload=True,
         )
 
-    def _save_checkpoint_with_dcp(self, checkpoint_dir: str, is_last_step: bool):
+    @staticmethod
+    def _is_diffusers_model(model) -> bool:
+        try:
+            from diffusers.models.modeling_utils import ModelMixin
+        except Exception:
+            return False
+        return isinstance(model, ModelMixin)
+
+    @contextlib.contextmanager
+    def _patch_diffusers_state_dict(self, model, full_model_state: Dict[str, torch.Tensor]):
+        original_state_dict = model.state_dict
+        def patched_state_dict(self, *args, **kwargs):
+            return full_model_state
+        model.state_dict = types.MethodType(patched_state_dict, model)
+        try:
+            yield
+        finally:
+            model.state_dict = original_state_dict
+
+    def _save_checkpoint_with_dcp(
+        self,
+        checkpoint_dir: str,
+        is_last_step: bool,
+        model_state_dict: Optional[Dict[str, Tensor]] = None,
+        passthrough_storages: Optional[Set[Tuple[int, int]]] = None,
+    ):
         state_dict = {
-            **self.model.state_dict(),
+            **(model_state_dict if model_state_dict is not None else self.model.state_dict()),
         }
 
         optimizer = getattr(self, "optimizer", None)
@@ -381,27 +610,29 @@ class FSDP2StrategyBase(InferenceStrategy):
         if scheduler is not None:
             state_dict["scheduler"] = scheduler
 
-        rng_state = self.get_rng_state()
-        state_dict["rng_state"] = rng_state
         dcp_process_group = self._get_dcp_process_group()
 
         if not self.async_save_strategy or is_last_step:
             if self.checkpoint_future is not None:
                 self.checkpoint_future.result()
                 self.checkpoint_future = None
+                self._checkpoint_reads_offload_store = False
             dcp.save(
                 state_dict=state_dict,
                 checkpoint_id=checkpoint_dir,
                 process_group=dcp_process_group,
             )
-        else:
-            if self.checkpoint_future is not None:
-                self.checkpoint_future.result()
-            self.checkpoint_future = dcp.async_save(
-                state_dict=state_dict,
-                checkpoint_id=checkpoint_dir,
-                process_group=dcp_process_group,
-            )
+            return
+
+        if self.checkpoint_future is not None:
+            self.checkpoint_future.result()
+        self.checkpoint_future = async_save_dtensor(
+            state_dict=state_dict,
+            checkpoint_id=checkpoint_dir,
+            process_group=dcp_process_group,
+            passthrough_storages=passthrough_storages,
+        )
+        self._checkpoint_reads_offload_store = bool(passthrough_storages)
 
     def _load_checkpoint_with_dcp(self, checkpoint_dir: str):
         state_dict = {
@@ -416,7 +647,6 @@ class FSDP2StrategyBase(InferenceStrategy):
         if scheduler is not None:
             state_dict["scheduler"] = scheduler
 
-        state_dict["rng_state"] = {}
         dcp_process_group = self._get_dcp_process_group()
 
         dcp.load(
@@ -425,15 +655,12 @@ class FSDP2StrategyBase(InferenceStrategy):
             process_group=dcp_process_group,
         )
 
-        if "rng_state" in state_dict and state_dict["rng_state"]:
-            self.load_rng_state(state_dict["rng_state"])
-
         info = self.model.load_state_dict(state_dict, strict=False)
         missing_keys = info.missing_keys
         unexpected_keys = info.unexpected_keys
 
         filtered_unexpected_keys = [
-            key for key in unexpected_keys if key not in ("optimizer", "scheduler", "rng_state")
+            key for key in unexpected_keys if key not in ("optimizer", "scheduler")
         ]
 
         if missing_keys:
@@ -500,6 +727,68 @@ class FSDP2StrategyBase(InferenceStrategy):
 
         return {}
 
+    @staticmethod
+    def _is_trl_value_head_model(model: torch.nn.Module) -> bool:
+        return hasattr(model, "pretrained_model") and hasattr(model, "v_head")
+
+    @staticmethod
+    def _with_module_state_dict(model: torch.nn.Module, fn: Callable):
+        original_state_dict = model.__dict__.get("state_dict", None)
+        had_instance_state_dict = "state_dict" in model.__dict__
+
+        model.state_dict = torch.nn.Module.state_dict.__get__(model, type(model))
+        try:
+            return fn()
+        finally:
+            if had_instance_state_dict:
+                model.state_dict = original_state_dict
+            else:
+                delattr(model, "state_dict")
+
+    def _get_hf_full_model_state_dict(self, model: torch.nn.Module, options: StateDictOptions):
+        if not self._is_trl_value_head_model(model):
+            return get_model_state_dict(model=model, options=options), None
+
+        # TRL value-head wrappers override state_dict() and strip the
+        # `pretrained_model.` prefix. DCP resolves keys against nn.Module FQNs,
+        # so use the standard module state_dict while exporting full weights.
+        state_dict = self._with_module_state_dict(
+            model,
+            lambda: get_model_state_dict(model=model, options=options),
+        )
+        return self._split_trl_value_head_state_dict(state_dict)
+
+    @staticmethod
+    def _split_trl_value_head_state_dict(state_dict: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
+        full_model_state = {}
+        value_head_state = {
+            name: tensor
+            for name, tensor in state_dict.items()
+            if name.startswith("v_head.")
+        }
+        for name, tensor in state_dict.items():
+            if name.startswith("v_head."):
+                continue
+            if name.startswith("pretrained_model."):
+                full_model_state[name.removeprefix("pretrained_model.")] = tensor
+            else:
+                full_model_state[name] = tensor
+        return full_model_state, value_head_state
+
+    @staticmethod
+    def _save_trl_value_head_state_dict(value_head_state: Dict[str, Tensor], save_dir: str):
+        from safetensors.torch import save_file
+
+        if not value_head_state:
+            raise RuntimeError("No v_head.* keys found when saving TRL value head checkpoint.")
+
+        # Keep the v_head. prefix: ROLL's non-resume initialization loads this
+        # file with the wrapper's default load_state_dict(strict=False).
+        save_file(
+            {name: tensor.detach().cpu().contiguous() for name, tensor in value_head_state.items()},
+            os.path.join(save_dir, "value_head.safetensors"),
+        )
+
     def save_checkpoint(self, save_dir, global_step, ckpt_id, tag="checkpoint", local_state_path=None, **kwargs):
         """
         Save the sharded (DTensor) checkpoint as well as HF-compatible full weights.
@@ -527,31 +816,53 @@ class FSDP2StrategyBase(InferenceStrategy):
             logger.info("Waiting for previous async checkpoint to complete...")
             self.checkpoint_future.result()
             self.checkpoint_future = None
+            self._checkpoint_reads_offload_store = False
 
         os.makedirs(save_dir, exist_ok=True)
+
+        direct_store_checkpoint = (
+            not self.save_only_model
+            and self._can_checkpoint_from_store(
+                asynchronous=self.async_save_strategy and not is_last_step,
+            )
+        )
+        direct_offload_time = 0.0
 
         with Timer("load", logger=None) as load_timer:
             self.load_states()
 
         with Timer("hf_save", logger=None) as hf_timer:
             full_state_options = self._get_dcp_state_dict_options(full_state_dict=True)
-            full_model_state = get_model_state_dict(
-                model=self.model,
+            underlying_model = self.unwrap_model()
+            full_model_state, vhead_params = self._get_hf_full_model_state_dict(
+                model=underlying_model,
                 options=full_state_options,
             )
 
             if dist.get_rank() == 0:
-                underlying_model = self.unwrap_model()
-                underlying_model.save_pretrained(
-                    save_dir,
-                    state_dict=full_model_state,
-                    safe_serialization=True,
-                )
+                if self._is_diffusers_model(underlying_model):
+                    logger.info("is diffusers model")
+                    with self._patch_diffusers_state_dict(underlying_model, full_model_state):
+                        underlying_model.save_pretrained(
+                            save_dir,
+                            safe_serialization=True
+                        )
+                else:
+                    underlying_model.save_pretrained(
+                        save_dir,
+                        state_dict=full_model_state,
+                        safe_serialization=True,
+                    )
+                if vhead_params is not None:
+                    self._save_trl_value_head_state_dict(vhead_params, save_dir)
                 self.tokenizer.save_pretrained(save_dir)
                 if getattr(self, "processor", None):
                     self.processor.save_pretrained(save_dir)
+            del full_model_state, vhead_params
 
-        if self.save_only_model and dist.is_initialized():
+
+        clear_memory(clear_host_memory=True)
+        if dist.is_initialized():
             dist.barrier()
 
         dcp_save_time = 0
@@ -560,8 +871,27 @@ class FSDP2StrategyBase(InferenceStrategy):
             dcp_checkpoint_dir = self._get_dcp_checkpoint_dir(save_dir)
             os.makedirs(dcp_checkpoint_dir, exist_ok=True)
 
+            self._save_rank_rng_state(save_dir)
+            model_state_dict = None
+            passthrough_storages = None
+            if direct_store_checkpoint:
+                with Timer("store_offload", logger=None) as store_offload_timer:
+                    self.offload_states(include=[OffloadStateType.model_params])
+                direct_offload_time = store_offload_timer.last
+                model_state_dict, passthrough_storages = self._build_checkpoint_state_from_store()
+                logger.info(
+                    "Saving DCP directly from CPU offload buffers: keys=%d storages=%d",
+                    len(self._offload_keys),
+                    len(passthrough_storages),
+                )
+
             with Timer("dcp_save", logger=None) as dcp_timer:
-                self._save_checkpoint_with_dcp(checkpoint_dir=dcp_checkpoint_dir, is_last_step=is_last_step)
+                self._save_checkpoint_with_dcp(
+                    checkpoint_dir=dcp_checkpoint_dir,
+                    is_last_step=is_last_step,
+                    model_state_dict=model_state_dict,
+                    passthrough_storages=passthrough_storages,
+                )
             dcp_save_time = dcp_timer.last
 
             # PumpkinComment:
@@ -570,7 +900,7 @@ class FSDP2StrategyBase(InferenceStrategy):
             dcp_save_future = self.checkpoint_future if (self.async_save_strategy and not is_last_step) else None
 
         checkpoint_config = getattr(self.worker_config, "checkpoint_config", None) or {}
-        async_upload = checkpoint_config.get("async_upload", True)
+        async_upload = checkpoint_config.get("async_upload", True) and not is_last_step
         keep_local_file = checkpoint_config.get("keep_local_file", False)
         if dcp_save_future is not None and async_upload:
 
@@ -595,6 +925,11 @@ class FSDP2StrategyBase(InferenceStrategy):
             if dcp_save_future is not None:
                 dcp_save_future.result()
 
+            if not self.save_only_model:
+                clear_memory(clear_host_memory=True)
+                if dist.is_initialized():
+                    dist.barrier()
+
             if async_upload:
                 self.thread_executor.submit(
                     self.checkpoint_manager.upload,
@@ -617,7 +952,7 @@ class FSDP2StrategyBase(InferenceStrategy):
 
         return {
             "load": load_timer.last,
-            "offload": offload_timer.last,
+            "offload": direct_offload_time + offload_timer.last,
             "dcp_save": dcp_save_time,
             "hf_save": hf_timer.last,
         }
@@ -630,28 +965,27 @@ class FSDP2StrategyBase(InferenceStrategy):
         logger.warning(f"Optional checkpoint shard missing, skipping: {path}")
         return None
 
-    def load_checkpoint(self, load_dir, tag="checkpoint", **kwargs):
-        """
-        Load checkpoint from a shared directory where all ranks' sharded checkpoints are stored.
+    def _save_rank_rng_state(self, save_dir: str) -> None:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        rng_path = os.path.join(save_dir, RNG_STATE_DIR, f"rng_state_{rank}.pth")
+        os.makedirs(os.path.dirname(rng_path), exist_ok=True)
+        torch.save(self.get_rng_state(), rng_path)
+        logger.info("Saved rank-specific RNG state: rank=%s path=%s", rank, rng_path)
 
-        In FSDP, synchronize the load_dir across all ranks to ensure they load from the same location.
-        """
-        logger.info(f"load_dir: {load_dir}")
-
-        dcp_checkpoint_dir = self._get_dcp_checkpoint_dir(load_dir)
-        used_dcp = False
-        if os.path.isdir(dcp_checkpoint_dir):
-            if dist.is_initialized():
-                dist.barrier()
-
-            self._load_checkpoint_with_dcp(
-                checkpoint_dir=dcp_checkpoint_dir,
+    def _load_rank_rng_state(self, load_dir: str) -> None:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        rng_path = os.path.join(load_dir, RNG_STATE_DIR, f"rng_state_{rank}.pth")
+        if not os.path.exists(rng_path):
+            logger.warning(
+                "Rank-specific RNG state not found; RNG was not restored: rank=%s path=%s",
+                rank,
+                rng_path,
             )
-            used_dcp = True
-            logger.info(f"Loaded DCP checkpoint from {dcp_checkpoint_dir}")
-            if dist.is_initialized():
-                dist.barrier()
             return
+
+        rng_state = torch.load(rng_path, weights_only=False)
+        self.load_rng_state(rng_state)
+        logger.info("Restored rank-specific RNG state: rank=%s path=%s", rank, rng_path)
 
     @staticmethod
     def get_rng_state():
@@ -720,6 +1054,8 @@ class FSDP2StrategyBase(InferenceStrategy):
             return
         for state in optimizer.state.values():
             for key, value in state.items():
+                if key == "step":
+                    continue
                 if torch.is_tensor(value):
                     state[key] = value.to(device, non_blocking=non_blocking)
 
@@ -739,33 +1075,11 @@ class FSDP2StrategyBase(InferenceStrategy):
         device_view.copy_(weight_cpu, non_blocking=True)
         return device_view
 
-    def get_data_input(self, batch: DataProto):
-        """Ensure Ulysses/context-parallel ranks receive identical data."""
-
-        def broadcast_obj(obj, group):
-            obj_list = [obj if dist.get_rank(group) == 0 else None]
-            src_rank = dist.get_process_group_ranks(group)[0]
-            dist.broadcast_object_list(obj_list, src=src_rank, group=group)
-            return obj_list[0]
-
-        if getattr(self.worker.rank_info, "cp_size", 1) <= 1:
-            return batch
-
-        broadcast_non_tensor_batch = batch.meta_info.get("_broadcast_non_tensor_batch", False)
-        if broadcast_non_tensor_batch:
-            tmp_batch = broadcast_obj(batch, get_ulysses_group())
-            batch.batch = tmp_batch.batch
-            batch.non_tensor_batch = tmp_batch.non_tensor_batch
-        else:
-            batch.batch = broadcast_obj(batch.batch, get_ulysses_group())
-        return batch
-
     def _prepare_fsdp2_model(
         self,
         model_provider,
         *,
         is_trainable: bool,
-        default_model_dtype: torch.dtype,
         warmup_collective: bool = False,
     ):
 
@@ -822,12 +1136,15 @@ class FSDP2StrategyBase(InferenceStrategy):
         if cp_size > 1 and global_rank == 0:
             logger.debug(f"FSDP2 CP(Ulysses) enabled: cp_size={cp_size}, dp_size={self.worker.rank_info.dp_size}")
 
-        self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
-        self.processor = default_processor_provider(model_args=self.worker_config.model_args)
-
-        torch_dtype = self.worker_config.strategy_args.strategy_config.get("param_dtype", default_model_dtype)
-        torch_dtype = _parse_dtype(torch_dtype)
-        self.worker_config.model_args.compute_dtype = torch_dtype
+        init_tokenizer_processor = self.worker_config.strategy_args.strategy_config.get(
+            "init_tokenizer_processor", True
+        )
+        if init_tokenizer_processor:
+            self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
+            self.processor = default_processor_provider(model_args=self.worker_config.model_args)
+        else:
+            self.tokenizer = None
+            self.processor = None
 
         fsdp_size = self.worker_config.strategy_args.strategy_config.get("fsdp_size", 1)
         assert fsdp_size >= cp_size, "fsdp size should be greater than cp size."
@@ -857,15 +1174,30 @@ class FSDP2StrategyBase(InferenceStrategy):
         self.device_mesh, self.moe_device_mesh = create_device_mesh_with_ep(world_size=world_size, fsdp_size=fsdp_size, efsdp_size=efsdp_size, ep_size=ep_size)
 
         model_name_or_path = download_model(self.worker_config.model_args.model_name_or_path)
-        config = AutoConfig.from_pretrained(
-            model_name_or_path,
-            trust_remote_code=True,
-            **self.worker_config.model_args.model_config_kwargs,
-        )
+        try:
+            config = AutoConfig.from_pretrained(
+                model_name_or_path,
+                trust_remote_code=True,
+                **self.worker_config.model_args.model_config_kwargs,
+            )
+        except (OSError, ValueError):
+            if init_tokenizer_processor:
+                raise
+            config = None
+            logger.info(
+                "FSDP2 skips Transformers AutoConfig because tokenizer/processor initialization is disabled. "
+                "The model_provider is expected to return a fully constructed nn.Module."
+            )
 
-        self._validate_ulysses_compat(config, cp_size)
-
-        use_meta_tensor = not getattr(config, "tie_word_embeddings", False) and not self.ep_enabled
+        if config is not None:
+            self._validate_ulysses_compat(config, cp_size)
+            use_meta_tensor = not getattr(config, "tie_word_embeddings", False) and not self.ep_enabled
+        else:
+            if cp_size > 1:
+                raise NotImplementedError(
+                    "FSDP2 provider-built non-Transformers models do not support Ulysses context parallelism."
+                )
+            use_meta_tensor = False
         # accelerate v1.7.0 don't support _is_hf_initialized which is needed by use_meta_tensor
         if version.parse(accelerate.__version__) == version.parse("1.7.0"):
             use_meta_tensor = False
@@ -886,18 +1218,18 @@ class FSDP2StrategyBase(InferenceStrategy):
 
         self.is_lora = self.worker_config.model_args.lora_target is not None
 
-        # Set _experts_implementation
-        layers = self._get_layers(model)
+        if self.ep_enabled or moe_use_grouped_mm:
+            if moe_use_grouped_mm:
+                assert version.parse(transformers.__version__) >= version.parse("5.2.0"), (
+                    "moe_use_grouped_mm requires transformers>=5.2.0"
+                )
+            layers = self._get_layers(model)
+            layers[0].mlp.experts.config._experts_implementation = "ep" if self.ep_enabled else "grouped_mm"
 
-        if self.ep_enabled:
-            layers[0].mlp.experts.config._experts_implementation = "ep"
-        elif moe_use_grouped_mm:
-            assert version.parse(transformers.__version__) >= version.parse("5.2.0"), "moe_use_grouped_mm requires transformers>=5.2.0"
-            layers[0].mlp.experts.config._experts_implementation = "grouped_mm"
-
-        return model, torch_dtype, cp_size
+        return model
 
     def _get_layers(self, model):
+        model = getattr(model, "pretrained_model", model)  # TRL AutoModelForCausalLMWithValueHead
         if self.is_lora: # PeftModel
             base_model = model.base_model.model.model
         else:
@@ -931,40 +1263,39 @@ class FSDP2StrategyBase(InferenceStrategy):
         )
 
     def load_states(self, include=None, non_blocking=False):
-        if not self.cpu_offload_enabled:
-            if include is None or OffloadStateType.model_params in include:
+        """Load states from offload backend."""
+        if self.cpu_offload_enabled:
+            # FSDP CPU offload policy handles model params; only optimizer states need management
+            if include is None or OffloadStateType.optimizer_states in include:
+                self._move_optimizer_states(current_platform.current_device(), non_blocking=non_blocking)
+            return
+
+        if include is None or OffloadStateType.model_params in include:
+            if self._offload_keys:
+                self._reload_model_params_from_backend()
+            else:
+                # Simple device move (no prior backend offload)
                 device = current_platform.current_device()
                 self.model.to(device, non_blocking=non_blocking)
-            # When cpu_offload is disabled, always keep optimizer states on GPU
+
+        if include is None or OffloadStateType.optimizer_states in include:
             self._move_optimizer_states(current_platform.current_device(), non_blocking=non_blocking)
-        else:
-            # When cpu_offload is enabled, only load optimizer states if requested
-            if include is None or OffloadStateType.optimizer_states in include:
-                self._move_optimizer_states(
-                    current_platform.current_device(),
-                    non_blocking=non_blocking,
-                )
 
     def offload_states(self, include=None, non_blocking=False):
-        """ "
-        PumpkinComment:
-
-        If CPUOFFloadPolicy is True: Every thing about offload /load model param is built from FSDP2.
-        If CPUOFFloadPolicy is False: The model param in on GPU, we need to mvoe the optimizer to GPU as well.
-
-        Therefore, we actually could leave model param. offload/onload logic to FSDP2 during training
-        But here, I maintain mannual support and compatible with FSDP2 CPUOFFloadPolicy for other offload logic.
-        """
-        if not self.cpu_offload_enabled:
-            if include is None or OffloadStateType.model_params in include:
-                self.model.to("cpu", non_blocking=non_blocking)
-                current_platform.empty_cache()
-            # When cpu_offload is disabled, optimizer states should stay on GPU
-            # Only offload optimizer states if cpu_offload is enabled
-        else:
-            # When cpu_offload is enabled, offload optimizer states
+        """Offload states to backend."""
+        if self.cpu_offload_enabled:
+            # FSDP CPU offload policy handles model params; only optimizer states need management
             if include is None or OffloadStateType.optimizer_states in include:
                 self._move_optimizer_states(torch.device("cpu"), non_blocking=non_blocking)
+            return
+
+        if include is None or OffloadStateType.model_params in include:
+            self._offload_model_params_to_backend()
+            clear_memory()
+            self._log_offload_summary()
+
+        if include is None or OffloadStateType.optimizer_states in include:
+            self._move_optimizer_states(torch.device("cpu"), non_blocking=non_blocking)
 
 
 class FSDP2InferStrategy(FSDP2StrategyBase):
@@ -973,48 +1304,85 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
     def __init__(self, worker: Worker):
         super().__init__(worker)
         self.device_mesh = None
+        self.moe_device_mesh = None
         self.fsdp_config = None
 
     def initialize(self, model_provider):
-        model, torch_dtype, _ = self._prepare_fsdp2_model(
+        model = self._prepare_fsdp2_model(
             model_provider,
             is_trainable=False,
-            default_model_dtype=torch.bfloat16,
         )
+
+        self.setup_fsdp2_configuration(is_trainable=False)
+        # Cast model parameters if users set param dtype
+        logger.info(f"[FSDP2] Casting inference model parameters to {self.param_dtype}")
+        model = model.to(dtype=self.param_dtype)
 
         # Initialize expert parallel model (must be before FSDP2 wrapping)
         if self.ep_enabled:
             self.apply_moe_ep(model)
 
-        self.setup_fsdp2_configuration()
         self.initialize_fsdp2_model(model)
 
         dist.barrier()
 
-    def setup_fsdp2_configuration(self):
+    def setup_fsdp2_configuration(self, is_trainable: bool = False):
         """Setup FSDP-2 configuration"""
         # ckpt strategy
         async_save_strategy = self.worker_config.strategy_args.strategy_config.get("async_save_ckpt", True)
         self.async_save_strategy = async_save_strategy
-        if self.async_save_strategy:
-            self.checkpoint_future = None
+        self.checkpoint_future = None
+        self._checkpoint_reads_offload_store = False
         self.save_only_model = self.worker_config.strategy_args.strategy_config.get("save_only_model", False)
 
         # Get mixed precision settings from config
-        param_dtype = self.worker_config.strategy_args.strategy_config.get("param_dtype", torch.bfloat16)
-        reduce_dtype = self.worker_config.strategy_args.strategy_config.get("reduce_dtype", torch.float32)
+        if is_trainable:
+            enable_mix_precision = self.worker_config.strategy_args.strategy_config.get("enable_mix_precision", True)
+            if enable_mix_precision:
+                param_dtype = torch.bfloat16
+                reduce_dtype = torch.float32
+            else:
+                param_dtype = torch.bfloat16
+                reduce_dtype = torch.bfloat16
+            param_dtype_from_config = self.worker_config.strategy_args.strategy_config.get("param_dtype", None)
+            reduce_dtype_from_config = self.worker_config.strategy_args.strategy_config.get("reduce_dtype", None)
+            if param_dtype_from_config is not None:
+                logger.info(
+                    f"[FSDP2] Override param_dtype from enable_mix_precision default: "
+                    f"{param_dtype} -> {param_dtype_from_config}"
+                )
+                param_dtype = param_dtype_from_config
+            if reduce_dtype_from_config is not None:
+                logger.info(
+                    f"[FSDP2] Override reduce_dtype from enable_mix_precision default: "
+                    f"{reduce_dtype} -> {reduce_dtype_from_config}"
+                )
+                reduce_dtype = reduce_dtype_from_config
 
-        # Convert string dtype specifications to torch.dtype
-        param_dtype = _parse_dtype(param_dtype)
-        reduce_dtype = _parse_dtype(reduce_dtype)
-        self.param_dtype = param_dtype
-        self.reduce_dtype = reduce_dtype
+            # Convert string dtype specifications to torch.dtype
+            param_dtype = parse_dtype(param_dtype)
+            reduce_dtype = parse_dtype(reduce_dtype)
+            self.param_dtype = param_dtype
+            self.reduce_dtype = reduce_dtype
 
-        mixed_precision = MixedPrecisionPolicy(
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            cast_forward_inputs=True,
-        )
+            mixed_precision = MixedPrecisionPolicy(
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                cast_forward_inputs=True,
+            )
+        else:
+            logger.info("[FSDP2] Do not use Mixed Precision for inference")
+            mixed_precision = MixedPrecisionPolicy()
+            param_dtype = torch.bfloat16
+            param_dtype_from_config = self.worker_config.strategy_args.strategy_config.get("param_dtype", None)
+            if param_dtype_from_config is not None:
+                logger.info(
+                    f"[FSDP2] Override param_dtype from inference default: "
+                    f"{param_dtype} -> {param_dtype_from_config}"
+                )
+                param_dtype = param_dtype_from_config
+            param_dtype = parse_dtype(param_dtype)
+            self.param_dtype = param_dtype
 
         # Reshard after forward setting (FSDP2 uses this instead of sharding_strategy)
         # FULL_SHARD: reshard_after_forward=True
@@ -1032,7 +1400,7 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
         self.reduce_scatter_during_grad_accumulation = bool(
             self.worker_config.strategy_args.strategy_config.get("reduce_scatter_during_grad_accumulation", True)
         )
-        if self.reduce_scatter_during_grad_accumulation:
+        if is_trainable and self.reduce_scatter_during_grad_accumulation:
             logger.info("[FSDP2] reduce_scatter_during_grad_accumulation is ENABLED")
 
         offload_policy = None
@@ -1126,6 +1494,8 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
         loss_scale = num_microbatches * self.worker.rank_info.dp_size
 
         disable_adapter = batch.meta_info.get("disable_adapter", False)
+        if disable_adapter:
+            _patch_peft_enable_adapters()
         adapter_context = self.unwrap_model().disable_adapter() if disable_adapter else nullcontext()
         losses_reduced = []
 
@@ -1315,6 +1685,12 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
         labels: torch.Tensor = input_ids[:, 1:].clone()
         labels[attention_mask[:, 1:] == 0] = 0  # avoid invalid token id
 
+        lp_chunk_size = (
+            getattr(self.worker_config, "logits_chunk_size", 2048)
+            if getattr(self.worker_config, "use_logits_chunking", False)
+            else 0
+        )
+
         if self.worker.rank_info.cp_size > 1:
             # For CP: slice the shifted labels to match the sharded logits
             # logits are sharded across sequence dimension by Ulysses
@@ -1322,7 +1698,7 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
             labels = self.get_feature_on_cp_rank(labels)["input_ids"]
 
             # Compute log_probs for this CP rank
-            log_probs = log_probs_from_logits(logits, labels)
+            log_probs = log_probs_from_logits(logits, labels, chunk_size=lp_chunk_size)
 
             log_probs = ulysses_gather(
                 log_probs,
@@ -1336,7 +1712,7 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
         else:
             # Non-CP path: original logic
             labels = torch.cat([labels, torch.zeros_like(labels[:, :1])], dim=1)
-            log_probs = log_probs_from_logits(logits, labels)
+            log_probs = log_probs_from_logits(logits, labels, chunk_size=lp_chunk_size)
             log_probs = log_probs[:, :-1] * attention_mask[:, 1:]
 
         return log_probs
@@ -1344,7 +1720,12 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
     def op_compute_entropy(self, logits: torch.Tensor, attention_mask: torch.Tensor):
         from roll.utils.functionals import entropy_from_logits
 
-        entropy = entropy_from_logits(logits)
+        ent_chunk_size = (
+            getattr(self.worker_config, "logits_chunk_size", 2048)
+            if getattr(self.worker_config, "use_logits_chunking", False)
+            else 0
+        )
+        entropy = entropy_from_logits(logits, chunk_size=ent_chunk_size)
         if self.worker.rank_info.cp_size > 1:
             entropy = ulysses_gather(
                 entropy,
@@ -1359,11 +1740,34 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
 class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
     strategy_name = "fsdp2_train"
 
+    def load_checkpoint(self, load_dir, tag="checkpoint", **kwargs):
+        """
+        Load checkpoint from a shared directory where all ranks' sharded checkpoints are stored.
+
+        In FSDP, synchronize the load_dir across all ranks to ensure they load from the same location.
+        """
+        logger.info(f"load_dir: {load_dir}")
+
+        dcp_checkpoint_dir = self._get_dcp_checkpoint_dir(load_dir)
+        used_dcp = False
+        if os.path.isdir(dcp_checkpoint_dir):
+            if dist.is_initialized():
+                dist.barrier()
+
+            self._load_checkpoint_with_dcp(
+                checkpoint_dir=dcp_checkpoint_dir,
+            )
+            self._load_rank_rng_state(load_dir)
+            used_dcp = True
+            logger.info(f"Loaded DCP checkpoint from {dcp_checkpoint_dir}")
+            if dist.is_initialized():
+                dist.barrier()
+            return
+
     def initialize(self, model_provider):
-        model, torch_dtype, _ = self._prepare_fsdp2_model(
+        model = self._prepare_fsdp2_model(
             model_provider,
             is_trainable=True,
-            default_model_dtype=torch.float32,
             warmup_collective=True,
         )
 
@@ -1373,12 +1777,16 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
         )
         logger.info(f"max steps worker train {self.worker_config.training_args.max_steps}")
 
+        # Setup FSDP-2 configuration
+        self.setup_fsdp2_configuration(is_trainable=True)
+
+        # Cast model according to reduce dtype
+        logger.info(f"[FSDP2] Casting trainable model parameters to reduce_dtype={self.reduce_dtype}")
+        model = model.to(dtype=self.reduce_dtype)
+
         # Initialize expert parallel model
         if self.ep_enabled:
             self.apply_moe_ep(model)
-
-        # Setup FSDP-2 configuration
-        self.setup_fsdp2_configuration()
 
         if self.param_dtype == torch.float16:
             from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
@@ -1400,6 +1808,7 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
                 self.worker_config.training_args.adam_beta2,
             ),
             weight_decay=self.worker_config.training_args.weight_decay,
+            fused=self.worker_config.strategy_args.strategy_config.get("fused_optimizer", False),
         )
 
         self.scheduler = get_scheduler(
@@ -1432,7 +1841,8 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
         finally:
             set_sync_fn(True)
 
-    def _clip_grad_norm(self, max_norm: float):
+    def clip_grad_norm(self, max_norm: float) -> torch.Tensor:
+        """Clip gradients across FSDP, expert-parallel, and CPU-offload layouts."""
         if not self.cpu_offload_enabled and not self.ep_enabled:
             grad_norm = clip_grad_norm_(
                 self.model.parameters(),
@@ -1589,6 +1999,7 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
         batch.meta_info["micro_batch_size"] = mini_batch_size
 
         gradient_accumulation_steps = self.worker_config.training_args.gradient_accumulation_steps
+        is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
 
         metrics = {}
         cp_size = max(self.worker.rank_info.cp_size, 1)
@@ -1634,12 +2045,13 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
                     dtype=self.param_dtype,
                 ),
             ):
-                logits = self._fsdp2_forward(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    forward_args=forward_args,
-                )
+                with getattr(self, "model_fwd_context", contextlib.nullcontext()):
+                    logits = self._fsdp2_forward(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        forward_args=forward_args,
+                    )
 
                 loss, loss_reduced = loss_func(data, logits)
                 append_to_dict(metrics, loss_reduced)
@@ -1649,18 +2061,23 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
 
                 loss = loss / gradient_accumulation_steps
 
-                if self.scaler is not None:
-                    self.scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                with getattr(self, "model_bwd_context", contextlib.nullcontext()):
+                    if self.scaler is not None:
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
 
             if sync_boundary:
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
-                grad_norm = self._clip_grad_norm(
+                grad_norm = self.clip_grad_norm(
                     max_norm=self.worker.pipeline_config.max_grad_norm,
                 )
                 metrics[f"{self.worker_config.name}/grad_norm"] = grad_norm.item()
+
+                # Lazy load optimizer states just before step (Megatron pattern)
+                if not self.cpu_offload_enabled:
+                    self.load_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
 
                 if self.scaler is not None:
                     self.scaler.step(self.optimizer)
@@ -1670,9 +2087,15 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
                         logger.warning(f"WARN: rank {dist.get_rank()} grad_norm is not finite: {grad_norm}")
                     else:
                         self.optimizer.step()
-                    self.scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
 
+                # Offload optimizer states after step, before scheduler.step (Megatron pattern)
+                if not self.cpu_offload_enabled and is_offload_optimizer_states_in_train_step:
+                    self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
+                self.scheduler.step()
+                self.optimizer.zero_grad(set_to_none=True)
+
+                # Clean up old offloaded parameters after optimizer update
+                self._cleanup_offloaded_model_params()
 
         # Log cuda memory
         max_memory_allocated = torch.cuda.memory.max_memory_allocated() / (1024 ** 3)
@@ -1691,6 +2114,7 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
             model_update_name=model_update_name,
             model=self.unwrap_model(),
             is_lora=is_lora,
+            adapter_name=self.worker.rollout_adapter_name,
         )
 
     def model_update(self, model_update_name: str):

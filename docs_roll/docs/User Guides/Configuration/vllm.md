@@ -59,9 +59,92 @@ actor_infer:
    - `sleep_level`: Sleep level when sleeping the model
      - 1 (default): Only destroys KV cache, retains model weights
      - 2: Destroys both model weights and KV cache after generation, thus saving memory
+   - `enable_expert_parallel`: Enables vLLM expert parallelism for MoE layers; requires vLLM 0.16.x or later
+   - `data_parallel_size`: Number of DP ranks in each inferred vLLM deployment
 3. **device_mapping**: Specify the list of GPU device IDs to use
 
 4. **infer_batch_size**: Batch size during inference
+
+### Distributed TP, DP, and EP
+
+ROLL uses vLLM's multiprocessing executor by default. Ray also provides resource placement and actor lifecycle; on
+supported vLLM versions earlier than 0.11.1, it additionally preserves cross-node TP/PP execution. Do not configure
+`distributed_executor_backend` or `data_parallel_backend`; ROLL manages them automatically.
+
+Define:
+
+```text
+N = len(device_mapping)
+T = tensor_parallel_size   (default: 1)
+P = pipeline_parallel_size (default: 1)
+D = data_parallel_size     (default: 1)
+W = N / (T * P)            (ROLL InferWorker count)
+K = W / D                  (independent vLLM deployment count)
+```
+
+`N` must be divisible by `T * P`, and `W` must be divisible by `D`. Each InferWorker is one vLLM external-DP rank
+and owns `T * P` GPU placements. Every `D` consecutive InferWorkers form one deployment. ROLL derives the DP rank,
+rendezvous address, and ports, so no internal/external DP mode is exposed to users.
+
+For MoE models on vLLM 0.16.x or later, `enable_expert_parallel: true` uses the MP backend and forms an expert
+group within each deployment. Earlier versions fail early with a message to upgrade vLLM or disable EP:
+
+```text
+EP size = T * D
+```
+
+EP changes the MoE communication layout, not the number of InferWorkers or deployments. With `P=1`, the common
+combinations are:
+
+| DP | TP | EP off | EP on |
+| --- | --- | --- | --- |
+| `D=1` | `T=1` | `N` independent engines | independent EP1 engines |
+| `D=1` | `T>1` | `N/T` independent TP engines | `N/T` deployments, each EP size `T` |
+| `D>1` | `T=1` | `N/D` external-DP deployments | `N/D` deployments, each EP size `D` |
+| `D>1` | `T>1` | `N/(T*D)` external-DP + TP deployments | `N/(T*D)` deployments, each EP size `T*D` |
+
+#### Physical and logical node layout
+
+If one InferWorker's `T * P` GPUs fit on one physical node, its actor launches all local vLLM MP processes. With
+vLLM 0.11.1 or later, an engine spanning `S` physical nodes uses the actor as the MP head on the first node and one
+lightweight headless launcher on each remaining node. Every node must contribute the same number of GPUs.
+
+For vLLM 0.11.0, ROLL automatically uses its legacy Ray executor when one TP/PP engine spans nodes. Users do not
+need to select an executor backend.
+
+With vLLM 0.11.1 or later, vLLM uses a logical node space for the complete external-DP deployment:
+
+```text
+logical nnodes = D * S
+logical node rank = data_parallel_rank * S + node_offset
+```
+
+This rule also applies when several external-DP ranks share one physical node: each rank is still a distinct
+logical node. With vLLM 0.11.1 or later, the same MP path covers same-node DP, cross-node DP, and TP engines that
+span nodes. EP on this MP topology requires vLLM 0.16.x or later.
+With vLLM 0.11.0, ROLL keeps the legacy external-DP rank/address/RPC launch and omits logical-node arguments when
+every TP/PP engine fits on one node.
+
+For example, with vLLM 0.16.x or later and EP enabled, DP2/TP16 on four 8-GPU nodes is laid out as:
+
+```text
+DP rank 0: logical node 0 (head, GPUs 0-7) + logical node 1 (headless, GPUs 8-15)
+DP rank 1: logical node 2 (head, GPUs 0-7) + logical node 3 (headless, GPUs 8-15)
+EP size: 2 * 16 = 32
+```
+
+The supported earlier versions use Ray workers on the same GPU placements instead of MP head/headless processes.
+
+On 128 GPUs with DP16/TP4/EP enabled, ROLL creates 32 InferWorkers and two independent deployments. Each deployment
+contains 16 TP4 engines and forms EP64; the two EP groups do not merge into EP128.
+
+When `data_parallel_size` is omitted, it defaults to 1. For example, 32 GPUs with TP16 create two independent TP16
+engines. Setting DP2 as well groups those two engines into one external-DP deployment.
+
+External DP requires vLLM 0.11.0 or later. A cross-node TP/PP engine uses the legacy Ray executor on vLLM 0.11.0
+and the MP executor on vLLM 0.11.1 or later. EP requires vLLM 0.16.x or later and uses the MP backend. Cross-node
+throughput depends on the interconnect and the selected vLLM All2All implementation; benchmark the target cluster
+rather than assuming EP is always faster.
 
 ## Integration with Other Components
 

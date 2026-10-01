@@ -48,12 +48,11 @@ sft_train:
   strategy_args:
     strategy_name: fsdp2_train
     strategy_config:
+      enable_mix_precision: true
       fsdp_size: 8
       efsdp_size: 1
       ep_size: 8
       moe_use_grouped_mm: false
-      param_dtype: bf16
-      reduce_dtype: bf16
       offload_policy: false
       reshard_after_forward: true
       wrap_policy:

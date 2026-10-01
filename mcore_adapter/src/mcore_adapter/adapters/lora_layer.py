@@ -455,7 +455,6 @@ class LoraRowParallelLinear(LoraParallelLinear):
         in_features = self.in_features * self.tp_size
 
         if self.is_grouped:
-            r = r // self.config.moe_router_topk
             lora_a = TERowParallelGroupedLinear(
                 num_gemms=self.base_layer.num_gemms,
                 input_size=in_features,
@@ -499,7 +498,6 @@ class LoraColumnParallelLinear(LoraParallelLinear):
         out_features = self.out_features * self.tp_size
 
         if self.is_grouped:
-            r = r // self.config.moe_router_topk
             lora_a = TEGroupedLinear(
                 num_gemms=self.base_layer.num_gemms,
                 input_size=self.in_features,

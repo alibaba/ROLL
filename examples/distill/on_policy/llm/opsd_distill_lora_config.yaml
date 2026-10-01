@@ -1,0 +1,149 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+# Global Config
+exp_name: "qwen3-8B-opsd-distill-math-lora"
+output_dir: ./output/
+logging_dir: ./output/logs
+rollout_dump_dir: ./output/rollout_dump
+seed: 42
+system_envs:
+  USE_MODELSCOPE: '1'
+  VLLM_USE_FLASHINFER_SAMPLER: '0'
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/${exp_name}
+
+track_with: tensorboard
+
+num_nodes: 1
+num_gpus_per_node: 8
+
+rpc_timeout: 7200
+
+max_steps: 1024
+save_steps: 100
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+rollout_batch_size: 32
+prompt_length: 2048
+response_length: 4096
+sequence_length: 6656  # prompt_length + response_length + 512 buffer for OPSD teacher prompt (problem + y*)
+
+num_return_sequences_in_group: 1  # OPSD paper: G=1, advantage is purely per-token KL
+ppo_epochs: 1
+
+pretrain: Qwen/Qwen3-8B
+reward_pretrain: Qwen/Qwen3-8B
+
+global_template: qwen3
+
+# OPSD + LoRA: teacher = actor_train with adapter disabled (no separate teacher cluster).
+# No teacher section: use_ref_model = enable_reference AND NOT is_lora_training → False.
+opsd_mode: true
+opsd_solution_key: "reference_solution"
+opsd_max_solution_length: 2048  # Cap y* token length; text-level truncation preserves template structure
+opd_token_kld_clip: 1.0e-4  # Clamp per-token teacher-student KL to bound heavy-tailed divergence
+
+val_prompt_length: 2048
+val_sequence_length: 40960
+
+validation:
+  data_args:
+    file_name:
+      # AIME24/25 + MATH-500, 559 prompts; prefer a smaller validation set (e.g. AIME-only) for faster eval
+      - data/math_benchmarks.jsonl
+    enable_thinking: true  # thinking-mode eval (paper Table 8)
+  generating_args:
+    # Paper Table 8 protocol (Avg@12); requires val_sequence_length >= val_prompt_length + max_new_tokens
+    max_new_tokens: 38912
+    top_p: 0.95
+    top_k: -1
+    num_beams: 1
+    temperature: 1.0
+    num_return_sequences: 12
+
+student_train:
+  model_args:
+    model_name_or_path: ${pretrain}
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+    # LoRA: setting lora_target makes is_lora_training() return True,
+    # triggering the LoRA branch where teacher = actor with disable_adapter=True.
+    lora_target: all-linear
+    lora_rank: 64
+    lora_alpha: 128
+  training_args:
+    learning_rate: 1.0e-4  # LoRA adapters need a much higher LR than full fine-tuning
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 8
+    warmup_steps: 20
+    lr_scheduler_type: constant_with_warmup
+    num_train_epochs: 50
+  data_args:
+    file_name:
+      # Download: https://huggingface.co/datasets/siyanzhao/Openthoughts_math_30k_opsd
+      # ROLL JSONL fields: prompt, messages, ground_truth, reference_solution (full CoT), tag
+      - data/openthoughts_math_opsd.jsonl
+    domain_interleave_probs:
+      math_rule: 1.0
+    dataset_dir: data
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 16
+    enable_thinking: true
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 2
+      context_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+  device_mapping: list(range(0,8))
+  infer_batch_size: 4
+
+student_infer:
+  model_args:
+    model_name_or_path: ${pretrain}
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    # vllm requires specific module names (not all-linear)
+    lora_target: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+    lora_rank: 64
+    lora_alpha: 128
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.7
+      block_size: 16
+      load_format: auto
+      sleep_level: 2
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen3
+    tag_included: [math_opsd]
+    world_size: 8
+    infer_batch_size: 1

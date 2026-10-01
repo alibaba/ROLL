@@ -47,10 +47,11 @@ agents:
       max_observation_length: 10000
       full_history: true
 
+
 orchestrator:
   n_concurrent_trials: 1
 
-agent_setup_timeout_multiplier: 3
+agent_setup_timeout_multiplier: 5.0
 
 verifier:
   mode: native

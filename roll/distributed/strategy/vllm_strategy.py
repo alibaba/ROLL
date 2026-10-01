@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import copy
 import gc
 import os
@@ -9,6 +10,9 @@ from packaging.version import Version
 
 import torch
 import torch.distributed as dist
+import ray
+from ray.runtime_env import RuntimeEnv
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from torch.nn.utils.rnn import pad_sequence
 from transformers import set_seed
 import vllm
@@ -21,6 +25,7 @@ from vllm.utils import random_uuid
 from roll.distributed.executor.worker import Worker
 from roll.distributed.scheduler.protocol import DataProto, list_of_dict_to_dict_of_list
 from roll.distributed.strategy.strategy import InferenceStrategy
+from roll.distributed.strategy.vllm_topology import resolve_vllm_mp_topology
 from roll.third_party.vllm import create_async_llm
 from roll.third_party.vllm.compat import call_maybe_await
 from roll.utils.functionals import (
@@ -31,9 +36,59 @@ from roll.utils.functionals import (
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType, clear_memory
 from roll.platforms import current_platform
+from roll.utils.constants import RAY_NAMESPACE
 
 
 logger = get_logger()
+
+# vllm accepts user provided per item ids since vllm==0.10.2,
+# see: https://github.com/vllm-project/vllm/pull/23394
+SUPPORT_MM_UUIDS = "multi_modal_uuids" in TokensPrompt.__annotations__
+
+
+def build_tokens_prompt(mm_inputs: Dict) -> TokensPrompt:
+    """Build TokensPrompt from infer inputs produced by `DataCollatorWithPaddingForMM`."""
+    prompt = TokensPrompt(
+        prompt_token_ids=mm_inputs["prompt_token_ids"],
+        multi_modal_data=mm_inputs.get("multi_modal_data"),
+        mm_processor_kwargs=mm_inputs.get("mm_processor_kwargs"),
+    )
+    # stable per item ids let vllm hash them instead of the raw media content and reuse its
+    # multi-modal processor cache across requests sharing the same items
+    mm_uuids = mm_inputs.get("multi_modal_uuids")
+    if mm_uuids and SUPPORT_MM_UUIDS:
+        prompt["multi_modal_uuids"] = mm_uuids
+    return prompt
+
+
+class VllmMPHeadlessActor:
+    async def initialize(self, vllm_config):
+        async def run_headless():
+            await asyncio.to_thread(
+                lambda: asyncio.run(
+                    create_async_llm(
+                        resource_placement_groups=[], headless=True, **vllm_config
+                    )
+                )
+            )
+
+        self._task = asyncio.create_task(run_headless())
+        self._task.add_done_callback(self._on_exit)
+        await asyncio.sleep(0)
+        if self._task.done():
+            await self._task
+
+    @staticmethod
+    def _on_exit(task):
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("vLLM mp headless executor exited unexpectedly")
+        else:
+            logger.error("vLLM mp headless executor stopped unexpectedly")
+        os._exit(1)
 
 
 class VllmStrategy(InferenceStrategy):
@@ -46,6 +101,65 @@ class VllmStrategy(InferenceStrategy):
         self._metrics_snapshots = deque(maxlen=3600)
         self._metrics_snapshot_interval = 1.0  # Snapshot every 1 second
         self._metrics_task = None
+        self._headless_workers = []
+        atexit.register(self._shutdown_headless_workers)
+
+    def _shutdown_headless_workers(self):
+        for worker in self._headless_workers:
+            try:
+                ray.kill(worker, no_restart=True)
+            except Exception:
+                pass
+        self._headless_workers.clear()
+
+    async def _start_headless_workers(self, node_groups, vllm_config):
+        init_refs = []
+        for node_offset, node_group in enumerate(node_groups[1:], start=1):
+            env_vars = current_platform.get_custom_env_vars()
+            env_vars.update(self.worker_config.system_envs)
+            env_vars.update(
+                {
+                    "WORLD_SIZE": str(self.worker.world_size),
+                    "RANK": str(self.worker.rank),
+                    "LOCAL_RANK": "0",
+                    "CLUSTER_NAME": self.worker.cluster_name,
+                    "WORKER_NAME": f"{self.worker.worker_name}-headless-{node_offset}",
+                    "VLLM_USE_V1": os.environ["VLLM_USE_V1"],
+                }
+            )
+            if "ROLL_LOG_DIR" in os.environ:
+                env_vars["ROLL_LOG_DIR"] = os.environ["ROLL_LOG_DIR"]
+            gpu_ranks = sorted(placement["gpu_rank"] for placement in node_group)
+            current_platform.update_env_vars_for_visible_devices(env_vars, gpu_ranks)
+
+            actor_options = {
+                "scheduling_strategy": PlacementGroupSchedulingStrategy(
+                    placement_group=node_group[0]["placement_group"]
+                ),
+                "namespace": RAY_NAMESPACE,
+                "runtime_env": RuntimeEnv(env_vars=env_vars),
+                "num_cpus": 0.01,
+            }
+            if current_platform.ray_device_key == "GPU":
+                actor_options["num_gpus"] = 0.01
+            else:
+                actor_options["num_gpus"] = 0
+                actor_options["resources"] = {
+                    current_platform.ray_device_key: 0.01
+                }
+
+            headless_config = copy.deepcopy(vllm_config)
+            headless_config["node_rank"] += node_offset
+            actor = ray.remote(VllmMPHeadlessActor).options(**actor_options).remote()
+            self._headless_workers.append(actor)
+            init_refs.append(actor.initialize.remote(headless_config))
+
+        if init_refs:
+            await asyncio.gather(*init_refs)
+
+        # Engine stats logging infrastructure
+        self._log_stats_interval = 10.0  # Log engine stats every 10 seconds
+        self._log_stats_task = None
 
 
     def get_free_port_for_rank(self) -> int:
@@ -81,19 +195,116 @@ class VllmStrategy(InferenceStrategy):
         os.environ["VLLM_USE_V1"] = str(vllm_config.pop("VLLM_USE_V1", 1))
         self.sleep_level = vllm_config.pop("sleep_level", 1)
 
-        data_parallel_size = vllm_config.get("data_parallel_size", 1)
-        if data_parallel_size > 1:
-            logger.info(
-                f"VllmStrategy {self.worker.cluster_name} enable data parallel {data_parallel_size=} data_parallel_rank={self.worker.rank}"
-                f" data_parallel_address={os.environ['MASTER_ADDR']} data_parallel_rpc_port={os.environ['MASTER_PORT']}"
+        vllm_version = Version(vllm.__version__)
+        if vllm_config.get("enable_expert_parallel", False) and vllm_version.release[:2] < (0, 16):
+            raise RuntimeError(
+                "vLLM expert parallelism with the mp backend requires vLLM 0.16.x or later, "
+                f"but found {vllm.__version__}. Upgrade vLLM or disable enable_expert_parallel."
             )
-            assert data_parallel_size == self.worker.world_size, f"{data_parallel_size=} != {self.worker.world_size=}"
+
+        tensor_parallel_size = vllm_config.get("tensor_parallel_size", 1)
+        pipeline_parallel_size = vllm_config.get("pipeline_parallel_size", 1)
+        placements = self.worker_config.resource_placement_groups
+        data_parallel_size = vllm_config.get("data_parallel_size", 1)
+        topology = resolve_vllm_mp_topology(
+            worker_rank=self.worker.rank,
+            worker_world_size=self.worker.world_size,
+            data_parallel_size=data_parallel_size,
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            resource_placements=placements,
+        )
+        node_groups = topology["node_groups"]
+        deployment_id = topology["deployment_id"]
+        data_parallel_rank = topology["data_parallel_rank"]
+        nodes_per_engine = topology["nodes_per_engine"]
+        logical_node_count = topology["nnodes"]
+        supports_multi_node_mp = vllm_version >= Version("0.11.1")
+        uses_legacy_ray_executor = nodes_per_engine > 1 and not supports_multi_node_mp
+        if data_parallel_size > 1 and vllm_version < Version("0.11.0"):
+            raise RuntimeError("vLLM external data parallelism requires vLLM >= 0.11.0.")
+        if uses_legacy_ray_executor:
+            vllm_config["distributed_executor_backend"] = "ray"
+            logger.info(
+                "vLLM %s uses the legacy Ray executor for a TP/PP engine spanning %s nodes.",
+                vllm.__version__,
+                nodes_per_engine,
+            )
+        endpoint_key = (
+            f"vllm_dp_endpoint:{self.worker.cluster_name}:"
+            f"{self.worker.master_port}:{deployment_id}"
+        )
+
+        if data_parallel_rank == 0:
+            endpoint = {
+                "address": self.worker.get_node_ip(),
+                "rpc_port": self.worker.get_free_port() if data_parallel_size > 1 else None,
+                "master_port": (
+                    self.worker.get_free_port()
+                    if logical_node_count > 1 and supports_multi_node_mp
+                    else None
+                ),
+                "nodes_per_engine": nodes_per_engine,
+            }
+            if data_parallel_size > 1:
+                await self.worker.shared_storage.put.remote(endpoint_key, endpoint)
+        elif data_parallel_size > 1:
+            endpoint = None
+            timeout_at = asyncio.get_running_loop().time() + self.worker_config.backend_timeout * 60
+            while endpoint is None:
+                endpoint = await self.worker.shared_storage.get_if_exists.remote(endpoint_key)
+                if endpoint is None and asyncio.get_running_loop().time() >= timeout_at:
+                    raise TimeoutError(f"Timed out waiting for {endpoint_key}")
+                if endpoint is None:
+                    await asyncio.sleep(1)
+
+        if endpoint["nodes_per_engine"] != nodes_per_engine:
+            raise ValueError(
+                "All vLLM external-DP ranks in a deployment must span the same "
+                f"number of nodes; rank 0 uses {endpoint['nodes_per_engine']}, "
+                f"rank {data_parallel_rank} uses {nodes_per_engine}."
+            )
+
+        if data_parallel_size > 1:
             vllm_config.update(
                 {
-                    "data_parallel_rank": self.worker.rank, # set data_parallel_rank to use external load balancing
-                    "data_parallel_address": os.environ["MASTER_ADDR"],
-                    "data_parallel_rpc_port": os.environ["MASTER_PORT"],
+                    "data_parallel_rank": data_parallel_rank,
+                    "data_parallel_address": endpoint["address"],
+                    "data_parallel_rpc_port": endpoint["rpc_port"],
                 }
+            )
+            logger.info(
+                f"VllmStrategy {self.worker.cluster_name} enable external data parallel "
+                f"deployment_id={deployment_id}, data_parallel_size={data_parallel_size}, "
+                f"data_parallel_rank={data_parallel_rank}"
+            )
+
+        # vLLM 0.11.0 supports external DP, but not MP logical-node args.
+        if logical_node_count > 1 and supports_multi_node_mp:
+            vllm_config.update(
+                {
+                    "nnodes": logical_node_count,
+                    "node_rank": topology["node_rank"],
+                    "master_addr": endpoint["address"],
+                    "master_port": endpoint["master_port"],
+                }
+            )
+            logger.info(
+                "vLLM mp topology: deployment_id=%s, DP=%s, TP=%s, PP=%s, "
+                "nodes_per_engine=%s, nnodes=%s, node_rank=%s",
+                deployment_id,
+                data_parallel_size,
+                tensor_parallel_size,
+                pipeline_parallel_size,
+                nodes_per_engine,
+                logical_node_count,
+                vllm_config["node_rank"],
+            )
+
+        if vllm_config.get("enable_expert_parallel", False):
+            logger.info(
+                f"vLLM expert parallel enabled: TP={tensor_parallel_size}, "
+                f"DP={data_parallel_size}, EP={tensor_parallel_size * data_parallel_size}."
             )
 
         if self.worker_config.model_args.dtype == "fp32":
@@ -104,6 +315,10 @@ class VllmStrategy(InferenceStrategy):
             dtype = "bfloat16"
         else:
             dtype = "auto"
+
+        default_compilation_config = {
+            "pass_config": {"fuse_allreduce_rms": False},
+        }
         vllm_config.update(
             {
                 "model": self.worker_config.model_args.model_name_or_path,
@@ -117,6 +332,7 @@ class VllmStrategy(InferenceStrategy):
                 "enable_prefix_caching": vllm_config.get("enable_prefix_caching", True),
                 "load_format": vllm_config.get("load_format", "dummy"),  # use model update passed value
                 "max_num_batched_tokens": vllm_config.get("max_num_batched_tokens", 8192), # use default value of LLM class usage context
+                "compilation_config": vllm_config.get("compilation_config", default_compilation_config), # disable flashiner fuse_allreduce_rms
             }
         )
 
@@ -130,6 +346,14 @@ class VllmStrategy(InferenceStrategy):
             vllm_config.update(lora_kwargs)
             vllm_config["load_format"] = "auto"  # enables vLLM to load the base model for add_lora
 
+        # Router replay (R3): mirror sglang_strategy.
+        self.enable_rollout_routing_replay = self.worker_config.router_replay.mode != "disable"
+        if self.enable_rollout_routing_replay:
+            vllm_config["enable_return_routed_experts"] = True
+            logger.info(
+                f"{self.enable_rollout_routing_replay=} and {self.worker_config.router_replay.mode=}"
+            )
+
         logger.info(f"vllm_config: {vllm_config}")
         assert not dist.is_initialized()
 
@@ -142,7 +366,15 @@ class VllmStrategy(InferenceStrategy):
             logger.info(f"Allocated vllm_port {vllm_port} for rank {self.worker.rank}")
             os.environ["VLLM_PORT"] = str(vllm_port)
 
-        self.model = await create_async_llm(resource_placement_groups=self.worker_config.resource_placement_groups, **vllm_config)
+        try:
+            if not uses_legacy_ray_executor:
+                await self._start_headless_workers(node_groups, vllm_config)
+            self.model = await create_async_llm(
+                resource_placement_groups=placements, **vllm_config
+            )
+        except Exception:
+            self._shutdown_headless_workers()
+            raise
 
 
         self.tokenizer = await call_maybe_await(self.model.get_tokenizer)
@@ -157,6 +389,8 @@ class VllmStrategy(InferenceStrategy):
             self._metrics_task = asyncio.create_task(self._collect_metrics_snapshot())
         except Exception as e:
             logger.warning(f"Failed to create metrics collector task: {e}")
+
+        self._log_stats_task = asyncio.create_task(self._log_stats_periodically())
 
     def op_compute_log_probs(self, logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         """
@@ -183,7 +417,7 @@ class VllmStrategy(InferenceStrategy):
         attention_mask = batch.batch["attention_mask"]  # left-padded attention_mask
 
         if "multi_modal_data" in batch.non_tensor_batch:
-            prompts = [TokensPrompt(data) for data in batch.non_tensor_batch["multi_modal_data"]]
+            prompts = [build_tokens_prompt(data) for data in batch.non_tensor_batch["multi_modal_data"]]
         else:
             prompts = [TokensPrompt(prompt_token_ids=prompt)
                 for prompt in gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
@@ -244,7 +478,7 @@ class VllmStrategy(InferenceStrategy):
         if "multi_modal_data" in batch.non_tensor_batch:
             # For multimodal data, we need to handle it differently
             # This is a simplified approach - may need refinement based on actual multimodal format
-            prompts = batch.non_tensor_batch["multi_modal_data"]
+            prompts = [build_tokens_prompt(data) for data in batch.non_tensor_batch["multi_modal_data"]]
         else:
             # Convert to token lists format expected by beam_search
             token_lists = gather_unpadded_input_ids(
@@ -288,17 +522,7 @@ class VllmStrategy(InferenceStrategy):
 
     async def generate_request(self, payload: Dict):
         if "multi_modal_data" in payload:
-            multi_modal_data = payload["multi_modal_data"]
-            prompt_token_ids = multi_modal_data["prompt_token_ids"]
-            prompt = TokensPrompt(
-                prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data["multi_modal_data"]
-                if "multi_modal_data" in multi_modal_data
-                else None,
-                mm_processor_kwargs=multi_modal_data["mm_processor_kwargs"]
-                if "mm_processor_kwargs" in multi_modal_data
-                else None,
-            )
+            prompt = build_tokens_prompt(payload["multi_modal_data"])
         else:
             prompt = TokensPrompt(prompt_token_ids=payload["input_ids"])
 
@@ -327,6 +551,12 @@ class VllmStrategy(InferenceStrategy):
                 return {"finish_reasons": ["abort"]}
 
         output_token_ids, finish_reasons, logprobs = [], [], []
+        routed_experts = []
+        if "multi_modal_data" in payload:
+            # Use expanded_prompt_len (vision tokens expanded) for R3 slicing; prompt_token_ids are text-only.
+            prompt_len = payload.get("expanded_prompt_len", len(payload["multi_modal_data"]["prompt_token_ids"]))
+        else:
+            prompt_len = len(payload["input_ids"])
         for completion_output in output.outputs:
             output_token_ids.append(completion_output.token_ids)
             # For compatibility, older version may return unfinished result, set finish_reason of those to 'abort'.
@@ -340,11 +570,28 @@ class VllmStrategy(InferenceStrategy):
                     ]
                 )
 
+            # Router replay (R3): R3 training consumes the next-token-aligned prompt_len + gen_len - 1 rows.
+            re = getattr(completion_output, "routed_experts", None)
+            if re is not None:
+                re = torch.as_tensor(re)
+                expected_rows = prompt_len + len(completion_output.token_ids) - 1
+                assert re.size(0) >= expected_rows, (
+                    f"routed_experts rows {re.size(0)} < expected {expected_rows} "
+                    f"(rid={payload.get('rid')}, prompt_len={prompt_len}, "
+                    f"gen_len={len(completion_output.token_ids)}, finish_reason={finish_reason})"
+                )
+                re = re[:expected_rows]
+            routed_experts.append(re)
+
         result = {
             "output_token_ids": output_token_ids,
             "finish_reasons": finish_reasons,
             "output_logprobs": logprobs,
         }
+
+        # Mirroring sglang_strategy.
+        if any(re is not None for re in routed_experts):
+            result["routed_experts"] = routed_experts
 
         # Add speculative metrics if available
         spec_metrics = self.get_speculative_metrics()
@@ -425,6 +672,17 @@ class VllmStrategy(InferenceStrategy):
             self._metrics_snapshots.append(snapshot)
             await asyncio.sleep(self._metrics_snapshot_interval)
 
+    async def _log_stats_periodically(self):
+        while True:
+            await asyncio.sleep(self._log_stats_interval)
+            # Skip while the engine is offloaded/asleep, there is nothing to report then.
+            if not self.is_model_in_gpu:
+                continue
+            try:
+                await self.model.do_log_stats()
+            except Exception as e:
+                logger.warning(f"Failed to log engine stats: {e}")
+
     def get_metrics(self, metric_names: Optional[List[str]] = None) -> Dict[str, float]:
         """
         Get aggregated metrics for the time interval since last call.
@@ -484,4 +742,5 @@ def create_sampling_params_for_vllm(gen_kwargs, collect_unfinished=False):
         logprobs=gen_kwargs.get("logprobs", 0),
         output_kind=output_kind,
         include_stop_str_in_output=gen_kwargs.get("include_stop_str_in_output", True),
+        seed=gen_kwargs.get("seed"),
     )

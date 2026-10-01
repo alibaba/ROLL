@@ -86,6 +86,11 @@ reference:
    - `recompute_granularity`: Activation value recomputation granularity ('full' or 'selective')
    - `overlap_grad_reduce`: Whether to overlap gradient All-reduce process with backward propagation computation in distributed optimizer
 
+   Safetensors-based Hugging Face checkpoints are loaded into Megatron one converted parameter at a time by default,
+   avoiding construction of a complete rank-local state dict in host memory. The latest ROLL only supports Hugging Face
+   checkpoints in safetensors format. Models requiring meta-parameter loading semantics fall back to the compatible
+   full-state path, while PEFT adapters are attached and restored separately after base-model loading.
+
 3. **device_mapping**: Specify the list of GPU device IDs to use
 
 4. **infer_batch_size**: Batch size during inference

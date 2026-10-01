@@ -1,0 +1,197 @@
+# CICD regression config for DiffNFT on Qwen-Image (diffusion RL with EMA LoRA).
+# Derived from examples/qwen-image-diffusion/diff_nft_fsdp2_80GB.yaml on the
+# flow_grpo_qwen_image.yaml CICD skeleton (file_system checkpoint,
+# TransferQueue backend, roll_pipeline_cicd tracker).
+# Requires 80GB GPU VRAM; runs via start_diffusion_pipeline.py (pytorch2100 + requirements_omni).
+# Exercises the LoRA two-stream model update (frozen base + ema_lora adapter),
+# i.e. the gather_fsdp2_base_weights naming path fixed for v0.4.
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen-image-diff-nft"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+system_envs:
+  USE_MODELSCOPE: '1'
+  DIFFUSION_ATTENTION_BACKEND: 'TORCH_SDPA'
+  VLLM_USE_FLASHINFER_SAMPLER: '0'
+
+transfer_backend:
+  backend_name: TransferQueue
+  backend_config:
+    backend:
+      SimpleStorage:
+        num_data_storage_units: 16
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/${exp_name}
+
+# ml_tracker的实验名，自行设置，不要和别人重复，否则没有权限写入报错
+track_with: ml_tracker
+tracker_kwargs:
+ project: roll_pipeline_cicd # ml_tracker的实验名，
+ notes: "roll v0.4 diffusion nft regression"
+ tags: # mltracker job tags，后续方便管理实验
+   - pipeline
+   - roll
+   - cicd
+   - qwen_image_diff_nft
+
+max_steps: 20
+eval_steps: 5
+save_steps: 10
+rollout_batch_size: 32
+prompt_length: 1058
+sequence_length: 1059
+ppo_epochs: 1
+max_grad_norm: 1.0
+
+# Algorithm selection
+adv_estimator: diffnft
+enable_reference: false
+use_kl_loss: false
+kl_loss_coef: 0.0
+is_offload_optimizer_states_in_train_step: true
+pretrain: Qwen/Qwen-Image
+num_return_sequences_in_group: 16
+is_num_return_sequences_expand: true
+diffusion_model_variant: qwen_image
+val_before_train: false
+
+# DiffNFT hyperparameters
+nft_beta: 0.1
+adv_clip_max: 5.0
+ref_kl_coef: 0.0001
+# EMA decay schedule: control points (ema_range[i], ema_decays[i]).
+# ema_interpolation: step   -> piecewise-constant (jump at each boundary)
+# ema_interpolation: linear -> piecewise-linear ramp between control points,
+#   e.g. delayed linear ramp to 0.999 with slope ~0.0075/step:
+#   ema_range: [0, 75, 208], ema_decays: [0.0, 0.0, 0.999]
+ema_interpolation: step
+ema_range: [0, 75, 208]
+ema_decays: [0.0, 0.0, 0.999]
+old_policy_update_interval: 2
+training_timestep_fraction: 1.0
+shuffle_train_timesteps: true
+use_adaptive_weight: true
+
+dump_step_output_type: []
+dump_step_output_idx: "list(range(0,100))"
+dump_step_output_path: ./output/dump/
+
+actor_train:
+  infer_batch_size: 32
+  model_args:
+    model_name_or_path: Qwen/Qwen-Image
+    model_type: diffusion_model
+    dtype: bf16
+    lora_target: to_q,to_k,to_v,to_out.0,add_q_proj,add_k_proj,add_v_proj,to_add_out,img_mlp.net.0.proj,img_mlp.net.2,txt_mlp.net.0.proj,txt_mlp.net.2
+    lora_rank: 64
+    lora_alpha: 128
+    lora_dropout: 0.0
+    # DiffNFT frozen EMA shadow adapter
+    extra_frozen_lora_adapters: ema_lora
+  training_args:
+    learning_rate: 3e-5
+    lr_scheduler_type: constant
+    warmup_steps: 0
+    weight_decay: 1e-4
+    per_device_train_batch_size: 4
+    gradient_accumulation_steps: 1
+    num_train_epochs: 1
+  data_args:
+    template: native
+    file_name:
+      - data/ocr/train.json
+    messages: prompt
+    preprocessing_num_workers: 1
+  strategy_args:
+    strategy_name: fsdp2_diffusion_train
+    strategy_config:
+      fsdp_size: 8
+      reshard_after_forward: true
+      offload_policy: false
+  device_mapping: list(range(0,8))
+
+actor_infer:
+  worker_cls: roll.pipeline.base_worker.InferWorker
+  infer_batch_size: 32
+  model_args:
+    model_name_or_path: Qwen/Qwen-Image
+    model_type: diffusion_model
+    dtype: bf16
+  generating_args:
+    num_return_sequences: ${num_return_sequences_in_group}
+    temperature: 0
+    top_p: 1.0
+    top_k: 50
+    max_length: 1058
+    max_sequence_length: 1058
+    max_new_tokens: 1
+    height: 512
+    width: 512
+    num_inference_steps: 10
+    guidance_scale: 1.0
+    extra_args:
+      logprobs: false
+      noise_level: 0.0
+      sde_type: ode
+  data_args:
+    template: native
+  strategy_args:
+    strategy_name: vllm_omni
+    strategy_config:
+      enforce_eager: true
+      load_format: safetensors
+      sleep_level: 2
+      vllm_omni:
+        custom_pipeline: roll.pipeline.diffusion.models.qwen_image.vllm_omni_qwen_image_adapter.QwenImagePipelineWithLogProb
+  device_mapping: "list(range(0,8))"
+
+validation:
+  data_args:
+    template: native
+    file_name:
+      - data/ocr/test.json
+    messages: prompt
+    preprocessing_num_workers: 1
+  generating_args:
+    num_return_sequences: 1
+    num_inference_steps: 50
+    height: 512
+    width: 512
+    max_sequence_length: 1058
+    guidance_scale: 1.0
+
+rewards:
+  ocr_reward:
+    name: ocr_reward
+    worker_cls: roll.pipeline.diffusion.rewards.qwen_vl_judge_reward_worker.QwenVLJudgeRewardWorker
+    judge_model_type: inference
+    tag_included: [ocr]
+    model_args:
+      model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
+      dtype: bf16
+    generating_args:
+      max_new_tokens: 32
+      temperature: 0
+      top_p: 0.8
+      num_return_sequences: 1
+    data_args:
+      template: native
+    strategy_args:
+      strategy_name: vllm
+      strategy_config:
+        gpu_memory_utilization: 0.1
+        enforce_eager: false
+        max_model_len: 8192
+        tensor_parallel_size: 4
+        load_format: auto
+        max_num_seqs: 1
+    device_mapping: "list(range(0,8))"
+    infer_batch_size: 128

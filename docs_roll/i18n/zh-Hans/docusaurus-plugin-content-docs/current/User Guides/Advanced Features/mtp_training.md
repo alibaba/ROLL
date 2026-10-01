@@ -92,7 +92,7 @@ MTP:        H(t) + E(t+1) → predict(t+2)
 
 ## 训练模式
 
-ROLL 支持三种 MTP 训练模式，通过 `mtp_training_mode` 参数配置：
+ROLL 支持四种 MTP 训练模式，通过 `mtp_training_mode` 参数配置：
 
 ### 1. disabled（默认）
 
@@ -150,14 +150,34 @@ actor_train:
 - **SFT 训练**：希望主模型和 MTP 同时学习目标任务
 - MTP 作为辅助训练目标
 
+### 4. mtp_only
+
+冻结主模型，只训练 MTP 参数。
+
+```yaml
+actor_train:
+  mtp_training_mode: mtp_only
+```
+
+**特点**：
+- 所有非 MTP 参数（`embedding`、`decoder`、`output_layer` 等）被冻结，仅 `mtp.*` 参数可训练
+- 梯度截断行为与 `standalone` 模式一致（MTP loss 不会回传到主模型）
+- 主 loss 仍会计算并上报用于监控，但不会产生参数梯度
+- 要求 `strategy_config` 中 `mtp_num_layers > 0`，且 `pipeline_model_parallel_size: 1`
+
+**适用场景**：
+- 在固定的主模型之上单独训练 MTP 头（例如为已训练/冻结的策略构建投机采样 drafter），
+  保持主模型分布不变
+
 ## 配置参数
 
 ### 训练参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `mtp_training_mode` | `str` | `disabled` | MTP 训练模式：`disabled`、`standalone`、`joint` |
+| `mtp_training_mode` | `str` | `disabled` | MTP 训练模式：`disabled`、`standalone`、`joint`、`mtp_only` |
 | `mtp_loss_scaling_factor` | `float` | 见下文 | MTP loss 缩放系数 |
+| `mtp_num_layers` | `int` | `0`（禁用） | MTP 层数，必须与模型 `config.json` 中的 `mtp_num_hidden_layers` 一致。配置在 `actor_train` 的 `strategy_config` 中。 |
 
 **mtp_loss_scaling_factor**：
 - 默认值通常为 `0.3`（参考 DeepSeek-V3）
@@ -180,13 +200,13 @@ actor_infer:
         num_speculative_tokens: 4
 ```
 
-另外注意，无论使用哪种模式只要使用 MTP 都需要在 `actor_train` 的 `strategy_config` 中配置 `mtp_num_layers`（模型 config.json 中的相应值）
+注意：`mtp_num_layers` 默认值为 `0`，会覆盖模型 `config.json` 中的值并禁用 MTP。使用 MTP 时必须在 `actor_train` 的 `strategy_config` 中显式设置 `mtp_num_layers`，使其与模型 `config.json` 中的 `mtp_num_hidden_layers` 一致。`mtp_training_mode` 配置在 `actor_train` 顶层（不在 `strategy_config` 中）。
 
 ## 训练示例
 
 ### RLVR Pipeline with MTP
 
-在 RLVR 训练中启用 MTP，需要在 `actor_train` 中配置 `mtp_training_mode: standalone`，在 `actor_infer` 中配置 `speculative_config`：
+在 RLVR 训练中启用 MTP，需要在 `actor_train` 顶层配置 `mtp_training_mode: standalone`，在 `actor_train` 的 `strategy_config` 中配置 `mtp_num_layers`，在 `actor_infer` 中配置 `speculative_config`：
 
 ```yaml
 actor_train:
@@ -195,6 +215,7 @@ actor_train:
     strategy_config:
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
+      mtp_num_layers: 1  # 必须与模型 config.json 中的 mtp_num_hidden_layers 一致
       # ... 其他配置
   # MTP 训练配置（取消注释启用）
   #mtp_training_mode: standalone
@@ -223,7 +244,7 @@ SFT 训练使用 `joint` 模式，让主模型和 MTP 协同学习：
 actor_train:
   model_args:
     model_name_or_path: Qwen/Qwen3.5-7B
-    flash_attn: sdpa
+    attn_implementation: sdpa
     dtype: bf16
   training_args:
     learning_rate: 2.0e-5
@@ -237,6 +258,7 @@ actor_train:
     strategy_config:
       tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 1
+      mtp_num_layers: 1  # 必须与模型 config.json 中的 mtp_num_hidden_layers 一致
   # MTP 联合训练
   mtp_training_mode: joint
   mtp_loss_scaling_factor: 0.3
@@ -270,6 +292,7 @@ MTP 相关配置在模型 checkpoint 中：
 |------|---------|------|
 | RL 训练 | `standalone` | 隔离 RL 梯度，MTP 学习主模型分布 |
 | SFT 训练 | `joint` | 协同优化，MTP 作为辅助目标 |
+| 冻结主模型、只训 MTP | `mtp_only` | 主模型分布保持不变，仅更新 MTP 参数 |
 | 仅推理加速 | `disabled` | 使用预训练 MTP，无需训练 |
 
 ### 2. 性能监控

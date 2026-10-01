@@ -1,5 +1,5 @@
 import os
-from typing import Callable, Union
+from typing import Callable, Dict, Union
 
 from datasets import Dataset, IterableDataset, load_dataset
 
@@ -156,3 +156,18 @@ def default_text_dataset(
     data_files: "DataPaths", split: str = "train", **kwargs
 ) -> Union["Dataset", "IterableDataset"]:
     return load_dataset("text", data_files=data_files, **kwargs)[split]
+
+
+def update_dataset_domain(tag_2_domain: Dict[str, str], row):
+    """Set row['domain'] from tag_2_domain mapping using row['tag'].
+
+    Shared by RLVR and diffusion pipelines. If the row already has a
+    'domain' field, it is preserved. Otherwise, the tag is mapped via
+    tag_2_domain; if the tag is not in the mapping, the tag itself is
+    used as the domain.
+    """
+    if "domain" in row and row["domain"] is not None:
+        return row
+    assert "tag" in row, f"row missing 'tag' field, got keys: {list(row.keys())}"
+    row["domain"] = tag_2_domain.get(row["tag"])
+    return row

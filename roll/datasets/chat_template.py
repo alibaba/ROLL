@@ -53,7 +53,7 @@ def native_nonthinking_chat_template(tokenizer: "PreTrainedTokenizer", conversat
 def qwen3_chat_template(tokenizer: "PreTrainedTokenizer", conversation, tools=None, documents=None, **kwargs):
     kwargs["tokenize"] = False
     kwargs["add_generation_prompt"] = kwargs.get("add_generation_prompt", True)
-    kwargs["enable_thinking"] = True
+    kwargs["enable_thinking"] = kwargs.get("enable_thinking", True)
     return tokenizer.apply_chat_template(conversation, tools, documents, **kwargs)
 
 # TODO: change template name ?

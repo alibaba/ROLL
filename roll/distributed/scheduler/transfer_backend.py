@@ -3,16 +3,12 @@ import threading
 import uuid
 from typing import Any
 
+import numpy as np
 import ray
 import torch
-import numpy as np
-import sys
-
-if sys.version_info < (3, 13):
-    import transfer_queue as tq
-else:
-    tq = None
+import transfer_queue as tq
 from omegaconf import OmegaConf
+from ray.exceptions import GetTimeoutError
 from tensordict import NonTensorStack, TensorDict
 
 from roll.configs.base_config import TransferBackendArguments
@@ -24,14 +20,6 @@ logger = get_logger()
 
 # Global reference to keep SharedStorage actor alive
 _shared_storage = None
-
-
-def _check_transfer_queue_available():
-    if tq is None:
-        raise ImportError(
-            "TransferQueue is not available on Python 3.13+. "
-            "Please use an alternative transfer backend or downgrade to Python <= 3.12."
-        )
 
 
 def init_transfer_backend(config: TransferBackendArguments | None):
@@ -50,7 +38,6 @@ def init_transfer_backend(config: TransferBackendArguments | None):
     if backend_name is None:
         logger.info(f"Initialized dummy transfer backend: {config}")
     elif backend_name == "TransferQueue":
-        _check_transfer_queue_available()
         init_transfer_queue_server(backend_config)
         logger.info(f"Initialized TransferQueue transfer backend: {config}")
     else:
@@ -182,17 +169,40 @@ class RayMemoryStoreClient:
         pass
 
 
+STORAGE_UNITS_PROBE_TIMEOUT = 30.0
+
+
+def check_num_data_storage_units(config):
+    """Raise if the configured units cannot be scheduled; tq.init would hang forever."""
+    requested = config.get("backend", {}).get("SimpleStorage", {}).get("num_data_storage_units")
+    if requested is None:
+        return
+    # +1 CPU for the controller that tq.init creates before the storage units.
+    pg = ray.util.placement_group([{"CPU": 1}] * (int(requested) + 1), strategy="SPREAD")
+    try:
+        ray.get(pg.ready(), timeout=STORAGE_UNITS_PROBE_TIMEOUT)
+    except GetTimeoutError:
+        free = ray.available_resources().get("CPU", 0)
+        raise RuntimeError(
+            f"TransferQueue needs {requested} CPUs for storage units plus 1 for its controller, but "
+            f"only {free} are free (ResourceManager reserves half of every node's CPUs). Set "
+            f"num_data_storage_units to at most {max(int(free) - 1, 0)}."
+        ) from None
+    finally:
+        ray.util.remove_placement_group(pg)
+
+
 def init_transfer_queue_server(config):
     # Must create enough storage units or may encounter:
     # EncodeError: Can't encode Ext objects with data longer than 2**32 - 1.
     # But also cannot set too many storage units that exceed the number of cores of ray cluster.
+    check_num_data_storage_units(config)
     config = OmegaConf.create(config)
     tq.init(config)
 
 
 class TransferQueueClient:
     def __init__(self):
-        _check_transfer_queue_available()
         tq.init()
 
     def put(self, partition, row_ids: list[str], fields: dict[str, torch.Tensor | np.ndarray], batch_size: int):

@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from typing import Any, Dict
 
@@ -5,6 +6,8 @@ from rock.sdk.job import Job
 
 from roll.pipeline.agentic.agent_runner.base import EpisodeResult
 from roll.pipeline.agentic.agent_runner.rock.rock_agent_runner import RockAgentRunner
+
+_CANCEL_POLL_INTERVAL = 30
 
 
 class PushModeRunner(RockAgentRunner):
@@ -45,19 +48,45 @@ class PushModeRunner(RockAgentRunner):
 
         job = Job(config=config)
         self.logger.info("[Harbor] Job instance created, submitting...")
-        await job.submit()
-        result = await job.wait()
-        self.logger.info("[Harbor] Job completed, result: {}".format(result))
 
         instance_id = task_config.get("data_config", {}).get("instance_id", "unknown")
-        metrics = self._extract_metrics(result, job_id, instance_id)
 
         try:
-            sandbox = job._job_client.trials[0].sandbox
-            pass_rate = await self._read_pass_rate_from_sandbox(sandbox, config)
-            if pass_rate is not None:
-                metrics["pass_rate"] = pass_rate
-        except Exception as e:
-            self.logger.warning(f"[Harbor] Failed to read report.json: {e}")
+            await job.submit()
+            job_task = asyncio.ensure_future(job.wait())
+            while not job_task.done():
+                await asyncio.wait({job_task}, timeout=_CANCEL_POLL_INTERVAL)
+                if job_task.done():
+                    break
+                if await self._is_episode_cancelled():
+                    self.logger.info(f"[Harbor] Episode cancelled, cancelling job {job_id}")
+                    await self._cancel_job(job, job_id)
+                    job_task.cancel()
+                    try:
+                        await job_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    return {
+                        "status": "Cancelled",
+                        "score": 0.0,
+                        "agent_exit_reason": "episode_cancelled",
+                        "job_id": job_id,
+                        "instance_id": instance_id,
+                    }
 
-        return metrics
+            result = job_task.result()
+            self.logger.info("[Harbor] Job completed, result: {}".format(result))
+
+            metrics = self._extract_metrics(result, job_id, instance_id)
+
+            try:
+                sandbox = job._job_client.trials[0].sandbox
+                pass_rate = await self._read_pass_rate_from_sandbox(sandbox, config)
+                if pass_rate is not None:
+                    metrics["pass_rate"] = pass_rate
+            except Exception as e:
+                self.logger.warning(f"[Harbor] Failed to read report.json: {e}")
+
+            return metrics
+        finally:
+            await self._cleanup_sandbox(job, job_id)

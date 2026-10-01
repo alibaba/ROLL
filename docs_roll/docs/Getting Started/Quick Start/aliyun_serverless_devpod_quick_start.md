@@ -14,7 +14,7 @@ Before you begin, ensure you have completed the following preparations:
 
 1.  Click **Create Model - Custom Development**.
 2.  Select **Custom Environment** and configure as follows:
-    *   **Container Image**: Choose a non-public custom image - Container Image Address - `roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-vllm084`
+    *   **Container Image**: Choose a non-public custom image - Container Image Address - `roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-25.06-py3-torch280-vllm0110`
     *   **Model Name**: Enter a name, e.g., `roll-dev`
     *   **Model Source**: Select `No Model`
     *   **Startup Command**: Keep the default, no modification needed
@@ -35,7 +35,7 @@ git clone https://github.com/alibaba/ROLL.git
 
 # 2. Install project dependencies
 cd ROLL
-pip install -r requirements_torch260_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/  
+pip install -r requirements_torch280_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/
 ```
 
 ### Run a Pipeline Example

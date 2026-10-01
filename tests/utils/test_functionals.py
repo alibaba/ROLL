@@ -4,7 +4,12 @@ import numpy as np
 import pytest
 import torch
 
-from roll.utils.functionals import traverse_obj, divide_by_chunk_size, pad_to_length
+from roll.utils.functionals import (
+    compute_approx_kl,
+    divide_by_chunk_size,
+    pad_to_length,
+    traverse_obj,
+)
 
 
 def visitor(obj: object, path: Tuple):
@@ -53,6 +58,22 @@ def test_pad_to_length():
 
     padded_tensor = pad_to_length(tensor, length, pad_value, dim=-1)
     print(padded_tensor)
+
+
+def test_compute_approx_kl_k3_clamps_before_exp():
+    log_probs = torch.tensor([-1000.0, 1000.0, 0.0])
+    log_probs_base = torch.tensor([1000.0, -1000.0, 1.0])
+
+    result = compute_approx_kl(
+        log_probs=log_probs,
+        log_probs_base=log_probs_base,
+        kl_penalty="k3",
+    )
+
+    clamped_kl = torch.clamp(log_probs_base - log_probs, min=-20, max=20)
+    expected = torch.clamp(torch.exp(clamped_kl) - clamped_kl - 1, min=-10, max=10)
+    torch.testing.assert_close(result, expected)
+    assert torch.isfinite(result).all()
 
 
 if __name__ == "__main__":

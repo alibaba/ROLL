@@ -56,7 +56,7 @@ reward_pretrain: Qwen/Qwen3-4B-Instruct-2507
 
 actor_train:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: false  # 保持启用梯度检查点
     dtype: bf16
     model_type: ~
@@ -81,7 +81,7 @@ actor_train:
   infer_batch_size: 1
 actor_infer:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
   generating_args:

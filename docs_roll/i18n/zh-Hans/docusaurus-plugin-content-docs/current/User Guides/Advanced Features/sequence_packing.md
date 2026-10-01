@@ -255,24 +255,28 @@ pack部分主要是在strategy中进行处理的，开启`use_sequence_packing`�
 
 ## 4. 参数配置
 
-### 4.1 如何启用SEQUENCE PACKING
+### 4.1 SEQUENCE PACKING默认开启
 
-要使用Sequence Packing功能，只需要在配置文件中设置 `use_sequence_packing: true` 即可。
+Sequence Packing **默认开启**，使用 `load_balance` 算法。无需额外配置——只要使用 `megatron_train` 或 `megatron_infer` 策略，packing就会自动生效。
+
+如需**关闭** packing，在worker配置中设置 `use_sequence_packing: false` 即可。
+
+> **注意**：DPO管线不支持sequence packing，会自动强制关闭。未继承 `MultimodalEmbeddingMixin` 的多模态模型（如 `qwen2_vl`、`qwen2_5_vl`、`kimi_k25`）也会自动关闭packing并输出告警。
 
 ### 4.2 配置参数详解（通俗版）
 
 #### `algorithm`（打包算法）
-- **`none`**：默认的简单打包方式，按照数据原有的顺序进行打包
-- **`load_balance`**：智能负载均衡打包，会重新排列数据使得每个micro batch的计算量更加均衡，推荐使用
+- **`load_balance`**（默认）：智能负载均衡打包，会重新排列数据使得每个micro batch的计算量更加均衡，推荐使用
+- **`none`**：简单打包方式，按照数据原有的顺序进行打包
 
 #### `max_packed_sequence_length_train`（训练时最大打包长度）
-- 这个参数控制在训练时，打包后的序列最长可以有多长
-- 比如设置为8192，意味着打包后的序列总长度不会超过8192个token
-- 设置合理的值可以避免内存溢出，同时保证打包效率
+- 控制训练时打包后的序列最长可以有多长
+- 设为 `None`（默认）时，自动计算为 `sequence_length * per_device_train_batch_size`，与非packing模式的显存预算一致
+- 可手动设置值来覆盖自动计算的默认值
 
 #### `max_packed_sequence_length_forward`（推理时最大打包长度）
-- 和训练时的参数类似，但专门用于推理阶段
-- 通常可以和训练时设置相同的值
+- 和训练时的参数类似，但用于推理阶段
+- 设为 `None`（默认）时，自动计算为 `sequence_length * infer_batch_size`
 
 #### `min_num_micro_batches_train`（训练时最少micro batch数量）
 - 控制每个mini batch至少要分成多少个micro batch
@@ -282,40 +286,45 @@ pack部分主要是在strategy中进行处理的，开启`use_sequence_packing`�
 #### `min_num_micro_batches_forward`（推理时最少micro batch数量）
 - 和训练时的参数类似，但用于推理阶段
 
-### 4.3 完整配置示例
+### 4.3 配置示例
+
+Packing默认开启，无需额外配置：
 
 ```yaml
 actor_train:
-  # 启用sequence packing功能
-  use_sequence_packing: True
-  
-  # sequence packing的具体配置
-  sequence_packing_args:
-    # 使用负载均衡算法，效果更好
-    algorithm: load_balance
-    
-    # 训练时打包后的最大序列长度为8192
-    max_packed_sequence_length_train: 8192
-    
-    # 推理时打包后的最大序列长度为8192  
-    max_packed_sequence_length_forward: 8192
-    
-    # 训练时最少分成1个micro batch（即不限制）
-    min_num_micro_batches_train: 1
-    
-    # 推理时最少分成1个micro batch
-    min_num_micro_batches_forward: 1
-  
-  # 必须使用megatron策略才能支持sequence packing
   strategy_args:
     strategy_name: megatron_train
+  # use_sequence_packing: True  # 已是默认值
+  # sequence_packing_args:       # 为None时自动计算
+  #   algorithm: load_balance    # 已是默认值
+  #   max_packed_sequence_length_train: null    # 自动 = seq_len * per_device_train_batch_size
+  #   max_packed_sequence_length_forward: null  # 自动 = seq_len * infer_batch_size
+```
+
+如需覆盖默认值或关闭packing：
+
+```yaml
+actor_train:
+  # 完全关闭packing
+  use_sequence_packing: false
+
+  # 或自定义packing参数
+  use_sequence_packing: True
+  sequence_packing_args:
+    algorithm: load_balance
+    max_packed_sequence_length_train: 8192
+    max_packed_sequence_length_forward: 8192
+    min_num_micro_batches_train: 1
+    min_num_micro_batches_forward: 1
 ```
 
 ### 4.4 使用建议
 
-1. **必选条件**：只能在`megatron_train`或`megatron_infer`策略下使用
-2. **推荐配置**：建议使用`load_balance`算法，可以获得更好的性能
-3. **长度设置**：`max_packed_sequence_length`应该根据你的GPU显存大小来调整，一般可以设置为模型支持的最大序列长度
-4**自定义Loss函数**：如果是自定义loss func使用sequence packing的话，请参考自定义loss func文档，确保正确设置了`apply_loss_scale`参数
+1. **默认行为**：Packing默认开启，使用 `load_balance` 算法和自动计算的 `max_packed_sequence_length`。megatron策略无需额外配置。
+2. **策略要求**：仅 `megatron_train` 和 `megatron_infer` 策略实现了packing。其他策略（fsdp2、vllm、sglang）会输出告警并忽略该标志。
+3. **DPO排除**：DPO管线会自动强制关闭packing——无需用户干预。
+4. **VLM排除**：未继承 `MultimodalEmbeddingMixin` 的多模态模型（如 `qwen2_vl`、`qwen2_5_vl`、`kimi_k25`）会自动关闭packing并输出告警。
+5. **显存预算**：自动计算的 `max_packed_sequence_length` 与非packing模式的显存占用一致（`seq_len * batch_size`）。Packing只是消除了无效的padding——不会增加峰值显存。
+6. **自定义Loss函数**：如果是自定义loss func使用sequence packing的话，请参考自定义loss func文档，确保正确设置了`apply_loss_scale`参数
 
 通过合理配置Sequence Packing，可以在保持模型性能的同时显著提升训练效率，特别是在处理变长序列的强化学习场景中效果尤为明显。

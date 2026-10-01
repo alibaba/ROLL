@@ -47,6 +47,16 @@ class LoraArguments:
             )
         },
     )
+    extra_frozen_lora_adapters: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Additional frozen LoRA adapter name(s) injected alongside the trainable 'default' adapter. "
+                "Use commas to separate multiple names. Injected with the same LoRA hyperparameters "
+                "but always with requires_grad=False (e.g. DiffNFT uses 'ema_lora' as its EMA shadow adapter)."
+            )
+        },
+    )
 
 
 @dataclass
@@ -93,7 +103,12 @@ class ModelArguments(LoraArguments):
         default="bf16", metadata={"help": "Set model dtype as fp32, bf16, or fp16, otherwise use config's torch_dtype"}
     )
     model_type: Optional[
-        Literal["auto_sequence_classification", "auto_token_classification", "trl"]
+        Literal[
+            "auto_sequence_classification",
+            "auto_token_classification",
+            "trl",
+            "diffusion_model",
+        ]
     ] = field(
         default=None,
         metadata={"help": "reward model type."},
@@ -115,6 +130,13 @@ class ModelArguments(LoraArguments):
             "help": "Prefix of frozen modules for partial-parameter (freeze) fine-tuning. Use commas to separate multiple modules."
         },
     )
+    freeze_module_contains: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Substring match for freezing modules. Use commas to separate multiple patterns. "
+                    "E.g., 'self_attn' freezes all parameters whose name contains 'self_attn'."
+        },
+    )
     ulysses_size: Optional[int] = field(
         default=1,
         metadata={"help": "The group size for Ulysses attention."},
@@ -131,15 +153,10 @@ class ModelArguments(LoraArguments):
             # split when lora_target is not regex expression
             self.lora_target = split_arg(self.lora_target)
         self.freeze_module_prefix: Optional[List[str]] = split_arg(self.freeze_module_prefix)
+        self.freeze_module_contains: Optional[List[str]] = split_arg(self.freeze_module_contains)
         self.additional_target: Optional[List[str]] = split_arg(self.additional_target)
+        self.extra_frozen_lora_adapters: Optional[List[str]] = split_arg(self.extra_frozen_lora_adapters)
 
-        dtype_mapping = {
-            "fp32": torch.float32,
-            "bf16": torch.bfloat16,
-            "fp16": torch.float16,
-        }
-
-        self.compute_dtype = dtype_mapping[self.dtype]
         self.model_max_length = None
 
         if self.attn_implementation == "fa2":

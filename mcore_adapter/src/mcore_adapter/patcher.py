@@ -240,6 +240,9 @@ def patch_apply_aux_loss():
         scores_for_aux_loss: torch.Tensor,
         routing_map: torch.Tensor,
         with_padding_mask: bool = False,
+        # Compatibility with newer mcore versions, not used
+        packed_seq_params = None,
+        **kwargs,
     ):
         """Apply the auxiliary loss for the given scores and routing map."""
         aux_loss_coeff = self.get_aux_loss_coeff("aux_loss")

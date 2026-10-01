@@ -52,6 +52,7 @@ class Cluster:
         self.worker_config = worker_config
 
         self.workers: List[Any] = []
+        self.rank2placement_groups: Dict[int, List[Dict[str, Any]]] = {}
 
         self.master_addr = None
         self.master_port = None
@@ -94,6 +95,31 @@ class Cluster:
         else:
             return 1
 
+    def get_rank_placement_targets(self) -> List[Dict[str, Any]]:
+        """Return per-node placement metadata for colocating scheduler actors with this cluster."""
+        node_targets: Dict[int, Dict[str, Any]] = {}
+        for rank, pgs in self.rank2placement_groups.items():
+            for pg in pgs:
+                node_rank = pg["node_rank"]
+                target = node_targets.setdefault(
+                    node_rank,
+                    {
+                        "node_rank": node_rank,
+                        "ranks": [],
+                        "gpu_ranks": [],
+                        "placement_group": pg["placement_group"],
+                    },
+                )
+                if rank not in target["ranks"]:
+                    target["ranks"].append(rank)
+                if pg["gpu_rank"] is not None and pg["gpu_rank"] not in target["gpu_ranks"]:
+                    target["gpu_ranks"].append(pg["gpu_rank"])
+
+        for target in node_targets.values():
+            target["ranks"].sort()
+            target["gpu_ranks"].sort()
+        return list(node_targets.values())
+
     @property
     def worker_rank_info(self) -> List[RankInfo]:
         if not self._worker_rank_info or not self.initialized:
@@ -115,6 +141,7 @@ class Cluster:
         for rank, pgs in enumerate(placement_groups):
             deploy_pg = pgs[0]
             pg_zero_gpu_ranks = sorted([pg["gpu_rank"] for pg in pgs if pg["node_rank"] == deploy_pg["node_rank"]])
+            self.rank2placement_groups[rank] = pgs
 
             # Include GPU IDs in worker name for timeline visualization
             # Format: actor_train-0-G0 (single GPU) or actor_infer-0-G01 (TP=2)

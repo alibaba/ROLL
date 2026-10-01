@@ -1,7 +1,7 @@
 """
 usage:
 
-conda create -n python310_torch260_em  python=3.10
+conda create -n python310_torch280_em  python=3.10
 
 pip3 install torch torchvision torchaudio py-cpuinfo
 pip install -r requirements_em_local_debug.txt

@@ -19,6 +19,7 @@ class ActorWorker(BaseActorWorker):
         self._topr_sample_logged = False
         self._cispo_config_logged = False
         self._kimi15_config_logged = False
+        self._sao_config_logged = False
 
     def _get_or_cache_config(self, key, default_value):
         """获取或缓存配置值"""
@@ -62,7 +63,12 @@ class ActorWorker(BaseActorWorker):
         else:
             train_infer_is_weight = data.batch['train_infer_is_weight']
 
-        if self.pipeline_config.ratio_type == "segment":
+        pg_variant = self._get_or_cache_config("pg_variant", "vanilla")
+
+        if pg_variant == "sao":
+            # SAO: ratio = π_θ / π_rollout
+            ratio = (log_probs - infer_log_probs).exp()
+        elif self.pipeline_config.ratio_type == "segment":
             # 计算序列级别的 ratio：对每段连续的1分别计算 masked_mean，不连续的段不相乘
             log_ratio = log_probs - old_log_probs
             masked_log_ratio = compute_segment_masked_mean(log_ratio, response_mask)
@@ -70,7 +76,6 @@ class ActorWorker(BaseActorWorker):
         else:
             ratio = (log_probs - old_log_probs).exp()
 
-        pg_variant = self._get_or_cache_config("pg_variant", "vanilla")
         self._cached_metrics = {
             "pg_variant": pg_variant,
             "ratio": ratio,
@@ -91,6 +96,8 @@ class ActorWorker(BaseActorWorker):
             pg_loss = self._compute_cispo_loss(ratio, log_probs, advantages)
         elif pg_variant == "kimi15":  # Kimi15
             pg_loss = self._compute_kimi15_loss(ratio, log_probs, old_log_probs, advantages)
+        elif pg_variant == "sao":  # SAO DIS (Direct Double-Sided Importance Sampling)
+            pg_loss = self._compute_sao_loss(ratio, log_probs, advantages, response_mask)
         else:
             raise ValueError(f"Unsupported pg_variant: {pg_variant}")
 
@@ -108,11 +115,12 @@ class ActorWorker(BaseActorWorker):
         kl_loss = agg_loss(loss_mat=kl_loss, loss_mask=response_mask, loss_agg_mode=self.pipeline_config.loss_agg_mode,
                            batch_num_tokens=batch_num_tokens['response_mask'], global_valid_samples=global_valid_samples['response_mask'])
 
+        kl_base = infer_log_probs if pg_variant == "sao" else old_log_probs
         approxkl = compute_approx_kl(
-            log_probs=log_probs, log_probs_base=old_log_probs, action_mask=response_mask, kl_penalty="mse"
+            log_probs=log_probs, log_probs_base=kl_base, action_mask=response_mask, kl_penalty="mse"
         )
         policykl = compute_approx_kl(
-            log_probs=log_probs, log_probs_base=old_log_probs, action_mask=response_mask, kl_penalty="kl"
+            log_probs=log_probs, log_probs_base=kl_base, action_mask=response_mask, kl_penalty="kl"
         )
 
         if self.pipeline_config.use_kl_loss:
@@ -464,6 +472,32 @@ class ActorWorker(BaseActorWorker):
 
         return kimi15_loss
 
+    def _compute_sao_loss(
+        self, ratio: torch.Tensor, log_probs: torch.Tensor, advantages: torch.Tensor, response_mask: torch.Tensor
+    ):
+        """
+        SAO DIS: ratio 超出 [1-εl, 1+εh] 的 token 直接 mask（乘 0），不产生梯度。
+        PPO-style surrogate: 梯度通过 ratio 传导，等价于 ratio * ∇log_π * A。
+        """
+        epsilon_low = self._get_or_cache_config("sao_epsilon_low", 0.3)
+        epsilon_high = self._get_or_cache_config("sao_epsilon_high", 5.0)
+
+        if not self._sao_config_logged:
+            self.logger.info(f"SAO DIS配置 - epsilon_low: {epsilon_low}, epsilon_high: {epsilon_high}")
+            self.logger.info(f"SAO DIS trust region: [{1.0 - epsilon_low:.3f}, {1.0 + epsilon_high:.3f}]")
+            self._sao_config_logged = True
+
+        dis_mask = ((ratio >= 1 - epsilon_low) & (ratio <= 1 + epsilon_high)).float()
+        loss = -dis_mask.detach() * ratio * advantages
+
+        self._cached_metrics.update({
+            "sao_epsilon_low": epsilon_low,
+            "sao_epsilon_high": epsilon_high,
+            "sao_dis_mask_ratio": 1.0 - masked_mean(dis_mask, response_mask).detach().item(),
+            "sao_ratio_mean": masked_mean(ratio, response_mask).detach().item(),
+        })
+        return loss
+
     def _get_pg_metrics(self, data: DataProto, batch_num_tokens: dict, global_valid_samples: dict,):
         """
         获取Policy Gradient相关的指标，使用缓存的值避免重复计算
@@ -584,5 +618,14 @@ class ActorWorker(BaseActorWorker):
                 f"actor/kimi15_{key}": value for key, value in cached.items() if key.startswith("kimi15_")
             }
             base_metrics.update(kimi15_metrics)
+
+        elif pg_variant == "sao":
+            sao_metrics = {
+                "actor/sao_epsilon_low": cached["sao_epsilon_low"],
+                "actor/sao_epsilon_high": cached["sao_epsilon_high"],
+                "actor/sao_dis_mask_ratio@sum": cached["sao_dis_mask_ratio"],
+                "actor/sao_ratio_mean@sum": cached["sao_ratio_mean"],
+            }
+            base_metrics.update(sao_metrics)
 
         return base_metrics

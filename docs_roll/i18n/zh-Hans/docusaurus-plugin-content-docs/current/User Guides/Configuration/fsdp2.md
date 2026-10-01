@@ -34,8 +34,7 @@ actor_train:
     strategy_name: fsdp2_train
     strategy_config:
       fsdp_size: 16
-      param_dtype: bf16
-      reduce_dtype: float32
+      enable_mix_precision: true
       reshard_after_forward: true
       offload_policy: false
   device_mapping: list(range(0,16))
@@ -56,8 +55,6 @@ reference:
     strategy_name: fsdp2_infer
     strategy_config:
       fsdp_size: 4
-      param_dtype: bf16
-      reduce_dtype: float32
       reshard_after_forward: true
       offload_policy: false
   device_mapping: list(range(0,8))
@@ -86,8 +83,7 @@ actor_train:
     strategy_name: fsdp2_train
     strategy_config:
       fsdp_size: 4  # FSDP 分片大小
-      param_dtype: bf16
-      reduce_dtype: float32
+      enable_mix_precision: true
       reshard_after_forward: true
       offload_policy: false
   device_mapping: list(range(0,8))
@@ -111,8 +107,16 @@ actor_train:
    - `fsdp_size`：FSDP 分片数量
      - 如果 `fsdp_size >= world_size` 或 `fsdp_size <= 1`：纯 FSDP2 模式
      - 如果 `fsdp_size < world_size`：带有 DDP 副本的 HSDP 模式
-   - `param_dtype`：参数数据类型（例如 `bf16`、`fp16`、`float32`）
-   - `reduce_dtype`：梯度归约的数据类型（例如 `float32`）
+   - `enable_mix_precision`：`fsdp2_train` 推荐使用的精度开关
+     - `true`：训练时使用 `param_dtype=bf16`、`reduce_dtype=float32`
+     - `false`：训练时使用 `param_dtype=bf16`、`reduce_dtype=bf16`
+     - 如果显式配置了 `param_dtype` 或 `reduce_dtype`，则以显式配置为准，`enable_mix_precision` 不生效。
+   - `param_dtype`：可选的参数数据类型覆盖配置（例如 `bf16`、`fp16`、`float32`）
+     - 对于 `fsdp2_train`，仅在需要比 `enable_mix_precision` 更灵活的精度配置时设置。
+     - 对于 `fsdp2_infer`，默认值为 `bf16`；只有需要修改推理精度时才设置 `param_dtype`。
+   - `reduce_dtype`：可选的 `fsdp2_train` 梯度归约数据类型覆盖配置（例如 `bf16`、`fp16`、`float32`）
+     - 对于 `fsdp2_train`，仅在需要比 `enable_mix_precision` 更灵活的精度配置时设置。
+     - `fsdp2_infer` 不需要配置该参数，因为推理过程中不进行梯度归约。
    - `reshard_after_forward`：是否在前向传播后重新分片参数
      - `true`：前向传播后重新分片
      - `false`：保持参数gathered
@@ -196,8 +200,7 @@ strategy_config:
 ```yaml
 strategy_config:
   fsdp_size: 16
-  param_dtype: bf16
-  reduce_dtype: float32
+  enable_mix_precision: true
   wrap_policy:
     transformer_layer_cls_to_wrap: ["Qwen3DecoderLayer"]
 ```
@@ -213,8 +216,7 @@ actor_train:
     strategy_name: fsdp2_train
     strategy_config:
       fsdp_size: 4
-      param_dtype: bf16
-      reduce_dtype: float32
+      enable_mix_precision: true
       # vision encoder自动禁用 cast_forward_inputs
 ```
 
@@ -224,8 +226,7 @@ actor_train:
 ```yaml
 strategy_config:
   fsdp_size: 16
-  param_dtype: bf16
-  reduce_dtype: float32
+  enable_mix_precision: true
   apply_expert_patch: true  # 如果单独wrap每个expert
   wrap_policy:
     moe_experts: ["Qwen3MoeMLP"]

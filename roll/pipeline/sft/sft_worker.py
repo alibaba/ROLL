@@ -34,22 +34,20 @@ class SFTWorker(Worker):
                 self.strategy.load_checkpoint(load_dir=download_model(checkpoint), tag="checkpoint")
         self.logger.info(f"{self.worker_name} initialized")
 
-    @register(Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
+    @register(Dispatch.DP_MP_COMPUTE, clear_cache=False, prefetch=True)
     def train_step(self, data: DataProto):
         data = data.to(current_platform.device_type)
-        data = self.strategy.get_data_input(data)
 
         metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
 
         output = DataProto(meta_info={"metrics": metrics}).to("cpu")
         return output
 
-    @register(Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
+    @register(Dispatch.DP_MP_COMPUTE, clear_cache=False, prefetch=True)
     @torch.no_grad()
     def val_step(self, data: DataProto):
         data = data.to(current_platform.device_type)
         data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
-        data = self.strategy.get_data_input(data)
         metrics = self.strategy.forward_step(batch=data, forward_func=self.loss_func)
         if metrics is None:
             metrics = {}

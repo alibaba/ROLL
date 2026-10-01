@@ -1,0 +1,195 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: qwen3_8b_gsm8k_math_megatron
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+system_envs:
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/checkpoints/${exp_name}
+
+track_with: ml_tracker
+tracker_kwargs:
+  project: scalealigner_grpo_example_gsm8k_math
+  name: ${exp_name}
+  log_dir: ${logging_dir}
+
+num_gpus_per_node: 8
+max_steps: 210
+max_grad_norm: 1.0
+save_steps: 20
+logging_steps: 1
+eval_steps: 5
+resume_from_checkpoint: false
+
+rollout_batch_size: 1024
+max_running_requests: 256
+prompt_length: 1024
+response_length: 2048
+num_return_sequences_in_group: 5
+is_num_return_sequences_expand: true
+
+ppo_epochs: 1
+adv_estimator: grpo
+whiten_advantages: false
+
+pg_clip: 0.2
+dual_clip_loss: true
+loss_agg_mode: token-mean
+entropy_loss_coef: 0.0
+
+add_token_level_kl: false
+init_kl_coef: 0.0
+use_kl_loss: true
+kl_loss_coef: 0.001
+
+pretrain: Qwen/Qwen3-8B
+
+validation:
+  data_args:
+    template: qwen3
+    enable_thinking: true
+    file_name:
+      - path/to/gsm8k/test.parquet
+      - path/to/math/test.parquet
+    dataset_dir: ./
+    messages: prompt
+    tag: tag
+    response: ground_truth
+    preprocessing_num_workers: 8
+  generating_args:
+    do_sample: false
+    temperature: 0.0
+    top_p: 1.0
+    top_k: -1
+    num_beams: 1
+    max_new_tokens: ${response_length}
+    num_return_sequences: 1
+
+actor_train:
+  model_args:
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: null
+  training_args:
+    learning_rate: 1.0e-6
+    lr_scheduler_type: constant
+    warmup_ratio: 0.0
+    warmup_steps: 0
+    weight_decay: 0.01
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 640
+    seed: 42
+    data_seed: 42
+    dataloader_num_workers: 8
+  data_args:
+    template: qwen3
+    enable_thinking: true
+    file_name:
+      - path/to/gsm8k/train.parquet
+      - path/to/math/train.parquet
+    domain_interleave_probs:
+      math: 1.0
+    dataset_dir: ./
+    messages: prompt
+    tag: tag
+    response: ground_truth
+    preprocessing_num_workers: 8
+    rollout_dataloader_num_workers: 8
+    rollout_dataloader_batch_size: 1
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 2
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: true
+      use_distributed_optimizer: true
+  use_dynamic_batching_in_train: false
+  use_dynamic_batching_in_infer: false
+  use_sequence_packing: true
+  sequence_packing_args:
+    algorithm: load_balance
+    max_packed_sequence_length_train: 8192
+    max_packed_sequence_length_forward: 8192
+    min_num_micro_batches_train: 1
+    min_num_micro_batches_forward: 1
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    do_sample: true
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    num_beams: 1
+    max_new_tokens: ${response_length}
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: qwen3
+    enable_thinking: true
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      tensor_parallel_size: 2
+      pipeline_parallel_size: 1
+      gpu_memory_utilization: 0.7
+      block_size: 16
+      max_num_batched_tokens: 8192
+      max_num_seqs: 256
+      enable_chunked_prefill: true
+      enable_prefix_caching: true
+      load_format: dummy
+      enforce_eager: false
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: null
+  data_args:
+    template: qwen3
+    enable_thinking: true
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 2
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: true
+  use_dynamic_batching_in_infer: false
+  use_sequence_packing: true
+  sequence_packing_args:
+    algorithm: load_balance
+    max_packed_sequence_length_train: 8192
+    max_packed_sequence_length_forward: 8192
+    min_num_micro_batches_train: 1
+    min_num_micro_batches_forward: 1
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+
+rewards:
+  math:
+    worker_cls: roll.pipeline.rlvr.rewards.gsm8k_math_reward_worker.GSM8KMathRewardWorker
+    model_args:
+      model_name_or_path: ${pretrain}
+    tag_included: [openai/gsm8k, DigitalLearningGmbH/MATH-lighteval]
+    world_size: 8
+    infer_batch_size: 1

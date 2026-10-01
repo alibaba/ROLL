@@ -68,7 +68,6 @@ class WorkerBase:
         )
         self.weight_loaded: bool = True
         self.kv_cache_loaded: bool = True
-        self.buffers = None
         self.buffer_cache = None
         self._frozen_ngram_sleep_state = None
         self._native_weights_awake = True
@@ -160,6 +159,7 @@ class WorkerBase:
         clear_memory()
 
     def setup_collective_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        assert torch.distributed.is_initialized()
         group_rank = self.rank + rank_offset
         collective.init_collective_group(
             world_size,
@@ -192,7 +192,10 @@ class WorkerBase:
 
     def update_parameter_in_bucket(self, serialized_named_tensors, is_lora=False):
         monkey_patch_torch_reductions()
-        bucket_with_meta = MultiprocessingSerializer.deserialize(serialized_named_tensors[self.rank])
+        assert torch.distributed.is_initialized()
+        bucket_with_meta = MultiprocessingSerializer.deserialize(
+            serialized_named_tensors[self.rank]
+        )
         named_params = named_tensors_from_bucket(**bucket_with_meta)
         if is_lora:
             for name, weight in named_params:

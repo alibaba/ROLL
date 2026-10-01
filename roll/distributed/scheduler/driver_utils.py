@@ -123,6 +123,19 @@ class Barrier:
                 return
         await self.event.wait()
 
+@ray.remote(num_cpus=0)
+class Counter:
+    def __init__(self, total_workers=1):
+        self.total_workers = total_workers
+        self.counts = {}
+
+    def arrive(self, ckpt_id):
+        self.counts[ckpt_id] = self.counts.get(ckpt_id, 0) + 1
+        if self.counts[ckpt_id] == self.total_workers:
+            del self.counts[ckpt_id]
+            return True
+        return False
+
 
 @ray.remote
 class Locker:

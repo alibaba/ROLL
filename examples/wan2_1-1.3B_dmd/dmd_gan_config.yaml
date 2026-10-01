@@ -1,0 +1,38 @@
+defaults:
+  - dmd_config
+  - _self_
+
+exp_name: wan21_1.3b_dmd2_gan
+
+gan:
+  enabled: true
+  generator_loss_weight: 5.0e-3
+  classification_loss_weight: 1.0e-2
+  head:
+    name: residual_conv3d
+    hidden_dim: 512
+  noisy_input: true
+  max_timestep: 1000
+  real_data:
+    file_name: ${oc.env:DMD_GAN_DATA_PATH,data/openvid_real_latents}
+    dataset_type: parquet
+  real_latent_key: latent
+  real_prompt_key: text
+
+generator:
+  strategy_args:
+    strategy_config:
+      fsdp_size: 4
+      ulysses_parallel_size: 1
+
+fake_score:
+  strategy_args:
+    strategy_config:
+      fsdp_size: 4
+      ulysses_parallel_size: 1
+
+real_score:
+  strategy_args:
+    strategy_config:
+      fsdp_size: 4
+      ulysses_parallel_size: 1

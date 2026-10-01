@@ -1,9 +1,7 @@
-import os
 from typing import Optional, List
 
 import pytest
 import torch
-import torch.distributed as dist
 
 from roll.platforms import current_platform
 from megatron.core import DistributedDataParallel
@@ -24,9 +22,11 @@ from transformers import get_scheduler, PreTrainedTokenizer
 from mcore_adapter import TrainingArguments
 from mcore_adapter.initialize import initialize_megatron
 from roll.configs import ModelArguments, DataArguments
+from roll.distributed.store.local.backend import CPUOffloadBackend
 from roll.models.model_providers import default_tokenizer_provider, default_actor_model_provider
 from roll.third_party.megatron.offload_states_patch import (
     bind_megatron_offload_states_func,
+    cleanup_ddp_buffers,
     MegatronOffloadStateType,
     offload_megatron_no_grad_module,
     reload_megatron_no_grad_module,
@@ -59,6 +59,18 @@ class McaModelCreator:
                 expert_model_parallel_size=1,
             )
             self.model_args = ModelArguments(model_name_or_path=self.model_name, attn_implementation="fa2", dtype="bf16")
+            self.create_model = self.create_mca_model
+        elif optimizer_type == "dist_optimizer_fp32":
+            # LoRA-like layout: native fp32 params whose shard views alias the DDP buffers
+            self.megatron_train_args = TrainingArguments(
+                output_dir="./output",
+                use_distributed_optimizer=True,
+                bf16=False,
+                tensor_model_parallel_size=1,
+                pipeline_model_parallel_size=1,
+                expert_model_parallel_size=1,
+            )
+            self.model_args = ModelArguments(model_name_or_path=self.model_name, attn_implementation="fa2", dtype="fp32")
             self.create_model = self.create_mca_model
         elif optimizer_type == "fp16":
             self.megatron_train_args = TrainingArguments(
@@ -216,64 +228,13 @@ torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s tests/third_par
 """
 
 
-def test_megatron_init_memory():
-    MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
-    torch.cuda.memory._record_memory_history(
-        max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
-    )
-
-    mca_model = McaModelCreator(optimizer_type="dist_optimizer")
-
-    # buffer_data = []
-    # for buffer in mca_model.optimizer.buffers:
-    #     buffer_data.append(buffer.param_data.data.storage().data_ptr())
-
-    mca_model.optimizer.offload_states(include=[MegatronOffloadStateType.other_params], pin_memory=True)
-
-    t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-    del t0
-
-    mca_model.optimizer.reload_states(include=[MegatronOffloadStateType.model_params])
-    if dist.get_rank() == 0:
-        t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-        dump_file = f"./memory_dump/snapshot_megatron_init_offload_{os.environ['RANK']}.pickle"
-        os.makedirs(os.path.dirname(dump_file), exist_ok=True)
-        torch.cuda.memory._dump_snapshot(dump_file)
-        torch.cuda.memory._record_memory_history(enabled=None)
-
-    # tensors_group_by_data_ptr = defaultdict(list)
-    # tensors = objgraph.by_type('Tensor')
-    # print(f"len(tensor)={len(tensors)}")
-    # for tensor in tensors:
-    #     tensors_group_by_data_ptr[tensor.storage().data_ptr()].append(tensor)
-    #
-    # for buffer in buffer_data:
-    #     objgraph.show_backrefs(tensors_group_by_data_ptr[buffer], max_depth=10,
-    #                            extra_ignore=[id(locals())],
-    #                            filename=f'/checkpoint/binary/ScaleAligner/memory_dump/buffer_data_group_tensors.param_data_{datetime.now().strftime("%Y%m%d-%H%M%S")}.png')
+def _attach_backend(optimizer, backend, key_prefix: str = "test_offload"):
+    optimizer._offload_backend = backend
+    optimizer._offload_key_prefix = key_prefix
 
 
-def test_megatron_init_ddp_memory():
-    MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
-    torch.cuda.memory._record_memory_history(
-        max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
-    )
-
-    mca_model = McaModelCreator(optimizer_type=None)
-
-    offload_megatron_no_grad_module(model_chunks=mca_model.model.get_models())
-
-    t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-    del t0
-
-    reload_megatron_no_grad_module(model_chunks=mca_model.model.get_models())
-
-    if dist.get_rank() == 0:
-        t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-        dump_file = f"./memory_dump/snapshot_megatron_init_ddp_offload_{os.environ['RANK']}.pickle"
-        os.makedirs(os.path.dirname(dump_file), exist_ok=True)
-        torch.cuda.memory._dump_snapshot(dump_file)
-        torch.cuda.memory._record_memory_history(enabled=None)
+def _gpu_device() -> str:
+    return f"{current_platform.device_type}:{current_platform.current_device()}"
 
 
 def check_devices(tensors: List[torch.Tensor], target_device) -> None:
@@ -287,7 +248,55 @@ def check_tensors(expected_tensors: List[torch.Tensor], tensors: List[torch.Tens
         assert torch.equal(tensor_expected, tensor_restored)
 
 
-def run_model_infer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
+def check_shard_param_storage_contracts(optimizer: DistributedOptimizer) -> None:
+    """fp32 master copies (shard_fp32_from_float16_groups) must never alias the
+    DDP param buffers; native fp32 shard views (shard_fp32_groups, e.g. LoRA)
+    must alias the *reloaded* buffer — a view left on the freed old allocation
+    is the dangling-pointer crash seen in production."""
+    buffer_storage_ptrs = {buffer.param_data.untyped_storage().data_ptr() for buffer in optimizer.buffers}
+    for group in optimizer.shard_fp32_from_float16_groups:
+        for param in group:
+            assert param.untyped_storage().data_ptr() not in buffer_storage_ptrs, (
+                "fp32 master params must not alias the DDP param buffer"
+            )
+    for group in optimizer.shard_fp32_groups:
+        for param in group:
+            assert param.untyped_storage().data_ptr() in buffer_storage_ptrs, (
+                "native fp32 shard views must alias the DDP param buffer"
+            )
+
+
+def check_ddp_buffers_released(optimizer: DistributedOptimizer, models) -> None:
+    """After offload(model_params) no view may keep the flat buffer alive."""
+    for buffer in optimizer.buffers:
+        assert buffer.param_data.data.numel() == 0
+        for bucket in buffer.buckets:
+            assert bucket.param_data.data.numel() == 0
+    for model in models:
+        for param in model.parameters():
+            if param.requires_grad:
+                assert param.data.numel() == 0
+
+
+def check_grad_hook_register_cycle(optimizer: MegatronOptimizer) -> None:
+    """skip_grad_hook_register=True must leave backward hooks unregistered —
+    chained reload delegates hook registration to exactly one sub-optimizer."""
+    include = [MegatronOffloadStateType.other_params]
+    optimizer.offload_states(include=include)
+    optimizer.reload_states(include=include, skip_grad_hook_register=True)
+    assert all(not chunk.grad_accs for chunk in optimizer.model_chunks), (
+        "skip_grad_hook_register=True must not re-register backward hooks"
+    )
+    # restore hooks so a subsequent backward still accumulates main_grad
+    optimizer.offload_states(include=include)
+    optimizer.reload_states(include=include)
+    assert all(chunk.grad_accs for chunk in optimizer.model_chunks), (
+        "default reload must re-register backward hooks"
+    )
+
+
+def run_model_infer(mca_model: McaModelCreator, included_state):
+    backend = CPUOffloadBackend()
     with torch.no_grad():
         for batch in mca_model.data_loader:
             input_ids, attention_mask = batch
@@ -302,14 +311,14 @@ def run_model_infer(mca_model: McaModelCreator, included_state, pin_memory, non_
             model_params_expected = [p.clone() for model in models for p in model.parameters()]
 
             alloc_before_offload = current_platform.memory_allocated()
-            offload_megatron_no_grad_module(model_chunks=models, pin_memory=pin_memory, non_blocking=non_blocking)
+            offload_megatron_no_grad_module(model_chunks=models, backend=backend, key_prefix="test_no_grad")
             alloc_after_offload = current_platform.memory_allocated()
             assert (
                 alloc_after_offload < alloc_before_offload
             ), f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
             check_devices(tensors=[p for model in models for p in model.parameters()], target_device="cpu")
 
-            reload_megatron_no_grad_module(model_chunks=models, non_blocking=non_blocking)
+            reload_megatron_no_grad_module(model_chunks=models, backend=backend)
             alloc_after_reload = current_platform.memory_allocated()
             assert (
                 alloc_after_offload < alloc_after_reload
@@ -321,12 +330,17 @@ def run_model_infer(mca_model: McaModelCreator, included_state, pin_memory, non_
 
             check_devices(
                 tensors=[p for model in models for p in model.parameters()],
-                target_device=f"{current_platform.device_type}:{current_platform.current_device()}",
+                target_device=_gpu_device(),
             )
 
 
-def run_model_dist_optimizer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
+def run_model_dist_optimizer(mca_model: McaModelCreator, included_state):
     assert isinstance(mca_model.optimizer, DistributedOptimizer)
+    optimizer = mca_model.optimizer
+    backend = CPUOffloadBackend()
+    _attach_backend(optimizer, backend)
+
+    check_shard_param_storage_contracts(optimizer)
 
     for batch in mca_model.data_loader:
         input_ids, attention_mask = batch
@@ -339,121 +353,109 @@ def run_model_dist_optimizer(mca_model: McaModelCreator, included_state, pin_mem
             output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
             output.mean().backward()
 
-        mca_model.optimizer.step()
-        mca_model.optimizer.zero_grad()
+        optimizer.step()
+        optimizer.zero_grad()
+        # params changed: invalidate the store copy, exactly as
+        # megatron_strategy.train_step cleans up after optimizer.step()
+        cleanup_ddp_buffers(optimizer, backend)
 
         model_params_expected = [p.clone() for model in models for p in model.parameters() if p.requires_grad]
-        buffer_params_expected = [buffer.param_data.clone() for buffer in mca_model.optimizer.buffers]
+        buffer_params_expected = [buffer.param_data.clone() for buffer in optimizer.buffers]
         bucket_params_expected = [
-            bucket.param_data.clone() for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets
-        ]
-
-        shard_float16_group_params_expected = [
-            param.clone() for group in mca_model.optimizer.shard_float16_groups for param in group
-        ]
-        shard_fp32_groups_params_expected = [
-            param.clone() for group in mca_model.optimizer.shard_fp32_groups for param in group
-        ]
-
-        main_grad_params_expected = [
-            p.main_grad.clone() for model in models for p in model.parameters() if p.requires_grad
-        ]
-        buffer_grads_expected = [buffer.grad_data.clone() for buffer in mca_model.optimizer.buffers]
-        bucket_grads_expected = [
-            bucket.grad_data.clone() for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets
+            bucket.param_data.clone() for buffer in optimizer.buffers for bucket in buffer.buckets
         ]
         shard_fp32_from_float16_groups_params_expected = [
-            param.clone() for group in mca_model.optimizer.shard_fp32_from_float16_groups for param in group
+            param.clone() for group in optimizer.shard_fp32_from_float16_groups for param in group
+        ]
+        shard_fp32_groups_params_expected = [
+            param.clone() for group in optimizer.shard_fp32_groups for param in group
         ]
         adam_exp_avg_expected = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg").clone()
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg").clone()
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
         adam_exp_avg_sq_expected = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq").clone()
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg_sq").clone()
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
 
         alloc_before_offload = current_platform.memory_allocated()
-        offload_megatron_no_grad_module(model_chunks=models, pin_memory=pin_memory, non_blocking=non_blocking)
-        mca_model.optimizer.offload_states(include=included_state, pin_memory=pin_memory, non_blocking=non_blocking)
+        if included_state is None or MegatronOffloadStateType.model_params in included_state:
+            offload_megatron_no_grad_module(model_chunks=models, backend=backend, key_prefix="test_no_grad")
+        optimizer.offload_states(include=included_state)
 
         alloc_after_offload = current_platform.memory_allocated()
-        print(f"alloc_after_offload < alloc_before_offload: {alloc_after_offload}, {alloc_before_offload}")
-        # assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
+        assert (
+            alloc_after_offload < alloc_before_offload
+        ), f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
 
         if included_state is None or MegatronOffloadStateType.model_params in included_state:
+            check_ddp_buffers_released(optimizer, models)
             check_devices(tensors=[p for model in models for p in model.parameters()], target_device="cpu")
-            check_devices([buffer.param_data for buffer in mca_model.optimizer.buffers], "cpu")
+            check_devices([buffer.param_data for buffer in optimizer.buffers], "cpu")
             check_devices(
-                [bucket.param_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets], "cpu"
+                [bucket.param_data for buffer in optimizer.buffers for bucket in buffer.buckets], "cpu"
             )
-            check_devices([param for group in mca_model.optimizer.shard_float16_groups for param in group], "cpu")
-            check_devices([param for group in mca_model.optimizer.shard_fp32_groups for param in group], "cpu")
 
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
-            check_devices([p.main_grad for model in models for p in model.parameters() if p.requires_grad], "cpu")
-            check_devices([buffer.grad_data for buffer in mca_model.optimizer.buffers], "cpu")
+            check_devices([buffer.grad_data for buffer in optimizer.buffers], "cpu")
             check_devices(
-                [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets], "cpu"
+                [bucket.grad_data for buffer in optimizer.buffers for bucket in buffer.buckets], "cpu"
             )
             check_devices(
-                [param for group in mca_model.optimizer.shard_fp32_from_float16_groups for param in group], "cpu"
+                [param for group in optimizer.shard_fp32_from_float16_groups for param in group], "cpu"
             )
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
                 "cpu",
             )
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg_sq")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
                 "cpu",
             )
 
-        reload_megatron_no_grad_module(model_chunks=models, non_blocking=non_blocking)
-        mca_model.optimizer.reload_states(include=included_state, non_blocking=non_blocking)
+        if included_state is None or MegatronOffloadStateType.model_params in included_state:
+            reload_megatron_no_grad_module(model_chunks=models, backend=backend)
+        optimizer.reload_states(include=included_state)
         alloc_after_reload = current_platform.memory_allocated()
-        print(f"alloc_after_offload < alloc_after_reload: {alloc_after_offload}, {alloc_after_reload}")
+        assert (
+            alloc_after_offload < alloc_after_reload
+        ), f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
+        if included_state is None or MegatronOffloadStateType.other_params in included_state:
+            assert all(chunk.grad_accs for chunk in optimizer.model_chunks), (
+                "reload must re-register backward hooks for the next iteration"
+            )
 
-        # assert alloc_after_offload < alloc_after_reload, f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
-
-        model_params_restored = [p for model in models for p in model.parameters()]
-        main_grad_params_restored = [p.main_grad for model in models for p in model.parameters() if p.requires_grad]
-        buffer_params_restored = [buffer.param_data for buffer in mca_model.optimizer.buffers]
-        buffer_grads_restored = [buffer.grad_data for buffer in mca_model.optimizer.buffers]
+        model_params_restored = [p for model in models for p in model.parameters() if p.requires_grad]
+        buffer_params_restored = [buffer.param_data for buffer in optimizer.buffers]
         bucket_params_restored = [
-            bucket.param_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets
-        ]
-        bucket_grads_restored = [
-            bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets
-        ]
-        shard_float16_group_params_restored = [
-            param for group in mca_model.optimizer.shard_float16_groups for param in group
-        ]
-        shard_fp32_groups_params_restored = [
-            param for group in mca_model.optimizer.shard_fp32_groups for param in group
+            bucket.param_data for buffer in optimizer.buffers for bucket in buffer.buckets
         ]
         shard_fp32_from_float16_groups_params_restored = [
-            param for group in mca_model.optimizer.shard_fp32_from_float16_groups for param in group
+            param for group in optimizer.shard_fp32_from_float16_groups for param in group
+        ]
+        shard_fp32_groups_params_restored = [
+            param for group in optimizer.shard_fp32_groups for param in group
         ]
         adam_exp_avg_restored = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg")
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
         adam_exp_avg_sq_restored = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg_sq")
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
 
@@ -461,77 +463,80 @@ def run_model_dist_optimizer(mca_model: McaModelCreator, included_state, pin_mem
             check_tensors(model_params_expected, model_params_restored)
             check_tensors(buffer_params_expected, buffer_params_restored)
             check_tensors(bucket_params_expected, bucket_params_restored)
-            check_tensors(shard_float16_group_params_expected, shard_float16_group_params_restored)
             check_tensors(shard_fp32_groups_params_expected, shard_fp32_groups_params_restored)
+            check_devices([p for model in models for p in model.parameters()], _gpu_device())
+            check_devices([buffer.param_data for buffer in optimizer.buffers], _gpu_device())
+            check_devices(
+                [bucket.param_data for buffer in optimizer.buffers for bucket in buffer.buckets],
+                _gpu_device(),
+            )
+            check_devices(
+                [param for group in optimizer.shard_fp32_groups for param in group],
+                _gpu_device(),
+            )
 
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
-            # check_tensors(main_grad_params_expected, main_grad_params_restored)
-            # check_tensors(buffer_grads_expected, buffer_grads_restored)
-            # check_tensors(bucket_grads_expected, bucket_grads_restored)
             check_tensors(
                 shard_fp32_from_float16_groups_params_expected, shard_fp32_from_float16_groups_params_restored
+            )
+            check_devices([buffer.grad_data for buffer in optimizer.buffers], _gpu_device())
+            check_devices(
+                [p.main_grad for model in models for p in model.parameters() if p.requires_grad],
+                _gpu_device(),
+            )
+            check_devices([buffer.grad_data for buffer in optimizer.buffers], _gpu_device())
+            check_devices(
+                [bucket.grad_data for buffer in optimizer.buffers for bucket in buffer.buckets],
+                _gpu_device(),
+            )
+            check_devices(
+                [param for group in optimizer.shard_fp32_from_float16_groups for param in group],
+                _gpu_device(),
             )
 
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
             check_tensors(adam_exp_avg_expected, adam_exp_avg_restored)
             check_tensors(adam_exp_avg_sq_expected, adam_exp_avg_sq_restored)
+            check_devices(
+                [
+                    optimizer.optimizer.state.get(param).get("exp_avg")
+                    for group in optimizer.param_groups
+                    for param in group["params"]
+                ],
+                _gpu_device(),
+            )
+            check_devices(
+                [
+                    optimizer.optimizer.state.get(param).get("exp_avg_sq")
+                    for group in optimizer.param_groups
+                    for param in group["params"]
+                ],
+                _gpu_device(),
+            )
+
+        # shard params keep their storage contracts across every offload/reload cycle
+        check_shard_param_storage_contracts(optimizer)
 
         if included_state is None or MegatronOffloadStateType.model_params in included_state:
-            check_devices([p for model in models for p in model.parameters()], f"{current_platform.device_type}:{current_platform.current_device()}")
-            check_devices(
-                [buffer.param_data for buffer in mca_model.optimizer.buffers], f"{current_platform.device_type}:{current_platform.current_device()}"
-            )
-            check_devices(
-                [bucket.param_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [param for group in mca_model.optimizer.shard_float16_groups for param in group],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [param for group in mca_model.optimizer.shard_fp32_groups for param in group],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+            # model_update borrow pattern: offload → reload → offload → reload
+            # with no step in between must round-trip params unchanged.
+            optimizer.offload_states(include=[MegatronOffloadStateType.model_params])
+            check_ddp_buffers_released(optimizer, models)
+            optimizer.reload_states(include=[MegatronOffloadStateType.model_params])
+            check_tensors(buffer_params_expected, [buffer.param_data for buffer in optimizer.buffers])
+            check_tensors(
+                model_params_expected,
+                [p for model in models for p in model.parameters() if p.requires_grad],
             )
 
-        if included_state is None or MegatronOffloadStateType.other_params in included_state:
-            check_devices(
-                [p.main_grad for model in models for p in model.parameters() if p.requires_grad],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"{current_platform.device_type}:{current_platform.current_device()}"
-            )
-            check_devices(
-                [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [param for group in mca_model.optimizer.shard_fp32_from_float16_groups for param in group],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-
-        if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
-            check_devices(
-                [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-                    for group in mca_model.optimizer.param_groups
-                    for param in group["params"]
-                ],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-                    for group in mca_model.optimizer.param_groups
-                    for param in group["params"]
-                ],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
+    check_grad_hook_register_cycle(optimizer)
 
 
-def run_model_fp16_optimizer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
+def run_model_fp16_optimizer(mca_model: McaModelCreator, included_state):
     assert isinstance(mca_model.optimizer, Float16OptimizerWithFloat16Params)
+    optimizer = mca_model.optimizer
+    backend = CPUOffloadBackend()
+    _attach_backend(optimizer, backend)
 
     for batch in mca_model.data_loader:
         input_ids, attention_mask = batch
@@ -544,103 +549,95 @@ def run_model_fp16_optimizer(mca_model: McaModelCreator, included_state, pin_mem
             output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
             output.mean().backward()
 
-        mca_model.optimizer.step()
-        mca_model.optimizer.zero_grad()
+        optimizer.step()
+        optimizer.zero_grad()
 
         model_params_expected = [p.clone() for model in models for p in model.parameters() if p.requires_grad]
-        float16_groups_expected = [param.clone() for group in mca_model.optimizer.float16_groups for param in group]
+        float16_groups_expected = [param.clone() for group in optimizer.float16_groups for param in group]
         float32_groups_expected = [
-            param.clone() for group in mca_model.optimizer.fp32_from_fp32_groups for param in group
-        ]
-
-        main_grad_params_expected = [
-            p.main_grad.clone() for model in models for p in model.parameters() if p.requires_grad
-        ]
-        buffer_grads_expected = [buffer.grad_data.clone() for buffer in mca_model.optimizer.buffers]
-        bucket_grads_expected = [
-            bucket.grad_data.clone() for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets
+            param.clone() for group in optimizer.fp32_from_fp32_groups for param in group
         ]
         fp32_from_float16_groups_expected = [
-            param.clone() for group in mca_model.optimizer.fp32_from_float16_groups for param in group
+            param.clone() for group in optimizer.fp32_from_float16_groups for param in group
         ]
         adam_exp_avg_expected = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg").clone()
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg").clone()
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
         adam_exp_avg_sq_expected = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq").clone()
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg_sq").clone()
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
 
         alloc_before_offload = current_platform.memory_allocated()
-        offload_megatron_no_grad_module(model_chunks=models, pin_memory=pin_memory, non_blocking=non_blocking)
-        mca_model.optimizer.offload_states(include=included_state, pin_memory=pin_memory, non_blocking=non_blocking)
+        if included_state is None or MegatronOffloadStateType.model_params in included_state:
+            offload_megatron_no_grad_module(model_chunks=models, backend=backend, key_prefix="test_no_grad")
+        optimizer.offload_states(include=included_state)
 
         alloc_after_offload = current_platform.memory_allocated()
-        print(f"alloc_after_offload < alloc_before_offload: {alloc_after_offload}, {alloc_before_offload}")
-        # assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
+        assert (
+            alloc_after_offload < alloc_before_offload
+        ), f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
 
         if included_state is None or MegatronOffloadStateType.model_params in included_state:
             check_devices([p for model in models for p in model.parameters() if p.requires_grad], "cpu")
-            check_devices([param for group in mca_model.optimizer.float16_groups for param in group], "cpu")
-            check_devices([param for group in mca_model.optimizer.fp32_from_fp32_groups for param in group], "cpu")
+            check_devices([param for group in optimizer.float16_groups for param in group], "cpu")
+            check_devices([param for group in optimizer.fp32_from_fp32_groups for param in group], "cpu")
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
-            check_devices([p.main_grad for model in models for p in model.parameters() if p.requires_grad], "cpu")
-            check_devices([buffer.grad_data for buffer in mca_model.optimizer.buffers], "cpu")
+            check_devices([buffer.grad_data for buffer in optimizer.buffers], "cpu")
             check_devices(
-                [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets], "cpu"
+                [bucket.grad_data for buffer in optimizer.buffers for bucket in buffer.buckets], "cpu"
             )
             check_devices(
-                [param for group in mca_model.optimizer.fp32_from_float16_groups for param in group], "cpu"
+                [param for group in optimizer.fp32_from_float16_groups for param in group], "cpu"
             )
 
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
                 "cpu",
             )
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg_sq")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
                 "cpu",
             )
 
-        reload_megatron_no_grad_module(model_chunks=models, non_blocking=non_blocking)
-        mca_model.optimizer.reload_states(include=included_state, non_blocking=non_blocking)
+        if included_state is None or MegatronOffloadStateType.model_params in included_state:
+            reload_megatron_no_grad_module(model_chunks=models, backend=backend)
+        optimizer.reload_states(include=included_state)
         alloc_after_reload = current_platform.memory_allocated()
-        print(f"alloc_after_offload < alloc_after_reload: {alloc_after_offload}, {alloc_after_reload}")
-
-        # assert alloc_after_offload < alloc_after_reload, f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
+        assert (
+            alloc_after_offload < alloc_after_reload
+        ), f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
+        if included_state is None or MegatronOffloadStateType.other_params in included_state:
+            assert all(chunk.grad_accs for chunk in optimizer.model_chunks), (
+                "reload must re-register backward hooks for the next iteration"
+            )
 
         model_params_restored = [p for model in models for p in model.parameters() if p.requires_grad]
-        float16_groups_restored = [param for group in mca_model.optimizer.float16_groups for param in group]
-        float32_groups_restored = [param for group in mca_model.optimizer.fp32_from_fp32_groups for param in group]
-
-        main_grad_params_restored = [p.main_grad for model in models for p in model.parameters() if p.requires_grad]
-        buffer_grads_restored = [buffer.grad_data for buffer in mca_model.optimizer.buffers]
-        bucket_grads_restored = [
-            bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets
-        ]
+        float16_groups_restored = [param for group in optimizer.float16_groups for param in group]
+        float32_groups_restored = [param for group in optimizer.fp32_from_fp32_groups for param in group]
         fp32_from_float16_groups_restored = [
-            param for group in mca_model.optimizer.fp32_from_float16_groups for param in group
+            param for group in optimizer.fp32_from_float16_groups for param in group
         ]
         adam_exp_avg_restored = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg")
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
         adam_exp_avg_sq_restored = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg_sq")
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
 
@@ -648,66 +645,57 @@ def run_model_fp16_optimizer(mca_model: McaModelCreator, included_state, pin_mem
             check_tensors(model_params_expected, model_params_restored)
             check_tensors(float16_groups_expected, float16_groups_restored)
             check_tensors(float32_groups_expected, float32_groups_restored)
+            check_devices(
+                [p for model in models for p in model.parameters() if p.requires_grad],
+                _gpu_device(),
+            )
+            check_devices([param for group in optimizer.float16_groups for param in group], _gpu_device())
+            check_devices(
+                [param for group in optimizer.fp32_from_fp32_groups for param in group], _gpu_device()
+            )
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
-            # check_tensors(main_grad_params_expected, main_grad_params_restored)
-            # check_tensors(buffer_grads_expected, buffer_grads_restored)
-            # check_tensors(bucket_grads_expected, bucket_grads_restored)
             check_tensors(fp32_from_float16_groups_expected, fp32_from_float16_groups_restored)
-
+            check_devices(
+                [p.main_grad for model in models for p in model.parameters() if p.requires_grad],
+                _gpu_device(),
+            )
+            check_devices([buffer.grad_data for buffer in optimizer.buffers], _gpu_device())
+            check_devices(
+                [bucket.grad_data for buffer in optimizer.buffers for bucket in buffer.buckets],
+                _gpu_device(),
+            )
+            check_devices([buffer.grad_data for buffer in optimizer.buffers], _gpu_device())
+            check_devices(
+                [param for group in optimizer.fp32_from_float16_groups for param in group], _gpu_device()
+            )
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
             check_tensors(adam_exp_avg_expected, adam_exp_avg_restored)
             check_tensors(adam_exp_avg_sq_expected, adam_exp_avg_sq_restored)
-
-        if included_state is None or MegatronOffloadStateType.model_params in included_state:
-            check_devices(
-                [p for model in models for p in model.parameters() if p.requires_grad],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [param for group in mca_model.optimizer.float16_groups for param in group],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [param for group in mca_model.optimizer.fp32_from_fp32_groups for param in group],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-        if included_state is None or MegatronOffloadStateType.other_params in included_state:
-            check_devices(
-                [p.main_grad for model in models for p in model.parameters() if p.requires_grad],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"{current_platform.device_type}:{current_platform.current_device()}"
-            )
-            check_devices(
-                [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-            check_devices(
-                [param for group in mca_model.optimizer.fp32_from_float16_groups for param in group],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
-            )
-        if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+                _gpu_device(),
             )
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg_sq")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+                _gpu_device(),
             )
 
+    check_grad_hook_register_cycle(optimizer)
 
-def run_model_fp32_optimizer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
+
+def run_model_fp32_optimizer(mca_model: McaModelCreator, included_state):
     assert isinstance(mca_model.optimizer, FP32Optimizer)
+    optimizer = mca_model.optimizer
+    backend = CPUOffloadBackend()
+    _attach_backend(optimizer, backend)
 
     for batch in mca_model.data_loader:
         input_ids, attention_mask = batch
@@ -720,155 +708,131 @@ def run_model_fp32_optimizer(mca_model: McaModelCreator, included_state, pin_mem
             output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
             output.mean().backward()
 
-        mca_model.optimizer.step()
-        mca_model.optimizer.zero_grad()
+        optimizer.step()
+        optimizer.zero_grad()
 
         model_params_expected = [p.clone() for model in models for p in model.parameters() if p.requires_grad]
         float32_groups_expected = [
-            param.clone() for sub_group in mca_model.optimizer.param_groups for param in sub_group["params"]
-        ]
-
-        main_grad_params_expected = [
-            p.main_grad.clone() for model in models for p in model.parameters() if p.requires_grad
-        ]
-        buffer_grads_expected = [buffer.grad_data.clone() for buffer in mca_model.optimizer.buffers]
-        bucket_grads_expected = [
-            bucket.grad_data.clone() for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets
+            param.clone() for sub_group in optimizer.param_groups for param in sub_group["params"]
         ]
         adam_exp_avg_expected = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg").clone()
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg").clone()
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
         adam_exp_avg_sq_expected = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq").clone()
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg_sq").clone()
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
 
         alloc_before_offload = current_platform.memory_allocated()
-        offload_megatron_no_grad_module(model_chunks=models, pin_memory=pin_memory, non_blocking=non_blocking)
-        mca_model.optimizer.offload_states(include=included_state, pin_memory=pin_memory, non_blocking=non_blocking)
+        if included_state is None or MegatronOffloadStateType.model_params in included_state:
+            offload_megatron_no_grad_module(model_chunks=models, backend=backend, key_prefix="test_no_grad")
+        optimizer.offload_states(include=included_state)
 
         alloc_after_offload = current_platform.memory_allocated()
-        print(f"alloc_after_offload < alloc_before_offload: {alloc_after_offload}, {alloc_before_offload}")
-        # assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
+        assert (
+            alloc_after_offload < alloc_before_offload
+        ), f"Allocated memory should decrease after offload, ({alloc_before_offload}, {alloc_after_offload})"
 
         if included_state is None or MegatronOffloadStateType.model_params in included_state:
             check_devices([p for model in models for p in model.parameters() if p.requires_grad], "cpu")
-            check_devices(
-                [param.clone() for sub_group in mca_model.optimizer.param_groups for param in sub_group["params"]],
-                "cpu",
-            )
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
-            check_devices([p.main_grad for model in models for p in model.parameters() if p.requires_grad], "cpu")
-            check_devices([buffer.grad_data for buffer in mca_model.optimizer.buffers], "cpu")
+            check_devices([buffer.grad_data for buffer in optimizer.buffers], "cpu")
             check_devices(
-                [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets], "cpu"
+                [bucket.grad_data for buffer in optimizer.buffers for bucket in buffer.buckets], "cpu"
             )
 
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
                 "cpu",
             )
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg_sq")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
                 "cpu",
             )
 
-        reload_megatron_no_grad_module(model_chunks=models, non_blocking=non_blocking)
-        mca_model.optimizer.reload_states(include=included_state, non_blocking=non_blocking)
+        if included_state is None or MegatronOffloadStateType.model_params in included_state:
+            reload_megatron_no_grad_module(model_chunks=models, backend=backend)
+        optimizer.reload_states(include=included_state)
         alloc_after_reload = current_platform.memory_allocated()
-        print(f"alloc_after_offload < alloc_after_reload: {alloc_after_offload}, {alloc_after_reload}")
-
-        # assert alloc_after_offload < alloc_after_reload, f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
+        assert (
+            alloc_after_offload < alloc_after_reload
+        ), f"Allocated memory should increase after offload back, ({alloc_after_offload}, {alloc_after_reload})"
+        if included_state is None or MegatronOffloadStateType.other_params in included_state:
+            assert all(chunk.grad_accs for chunk in optimizer.model_chunks), (
+                "reload must re-register backward hooks for the next iteration"
+            )
 
         model_params_restored = [p for model in models for p in model.parameters() if p.requires_grad]
         float32_groups_restored = [
-            param for sub_group in mca_model.optimizer.param_groups for param in sub_group["params"]
-        ]
-
-        main_grad_params_restored = [p.main_grad for model in models for p in model.parameters() if p.requires_grad]
-        buffer_grads_restored = [buffer.grad_data for buffer in mca_model.optimizer.buffers]
-        bucket_grads_restored = [
-            bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets
+            param for sub_group in optimizer.param_groups for param in sub_group["params"]
         ]
         adam_exp_avg_restored = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg")
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
         adam_exp_avg_sq_restored = [
-            mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-            for group in mca_model.optimizer.param_groups
+            optimizer.optimizer.state.get(param).get("exp_avg_sq")
+            for group in optimizer.param_groups
             for param in group["params"]
         ]
 
         if included_state is None or MegatronOffloadStateType.model_params in included_state:
             check_tensors(model_params_expected, model_params_restored)
             check_tensors(float32_groups_expected, float32_groups_restored)
-        if included_state is None or MegatronOffloadStateType.other_params in included_state:
-            # check_tensors(main_grad_params_expected, main_grad_params_restored)
-            # check_tensors(buffer_grads_expected, buffer_grads_restored)
-            # check_tensors(bucket_grads_expected, bucket_grads_restored)
-            pass
-        if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
-            check_tensors(adam_exp_avg_expected, adam_exp_avg_restored)
-            check_tensors(adam_exp_avg_sq_expected, adam_exp_avg_sq_restored)
-
-        if included_state is None or MegatronOffloadStateType.model_params in included_state:
             check_devices(
                 [p for model in models for p in model.parameters() if p.requires_grad],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+                _gpu_device(),
             )
             check_devices(
-                [param for sub_group in mca_model.optimizer.param_groups for param in sub_group["params"]],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+                [param for sub_group in optimizer.param_groups for param in sub_group["params"]],
+                _gpu_device(),
             )
         if included_state is None or MegatronOffloadStateType.other_params in included_state:
             check_devices(
                 [p.main_grad for model in models for p in model.parameters() if p.requires_grad],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+                _gpu_device(),
             )
+            check_devices([buffer.grad_data for buffer in optimizer.buffers], _gpu_device())
             check_devices(
-                [buffer.grad_data for buffer in mca_model.optimizer.buffers], f"{current_platform.device_type}:{current_platform.current_device()}"
-            )
-            check_devices(
-                [bucket.grad_data for buffer in mca_model.optimizer.buffers for bucket in buffer.buckets],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+                [bucket.grad_data for buffer in optimizer.buffers for bucket in buffer.buckets],
+                _gpu_device(),
             )
         if included_state is None or MegatronOffloadStateType.optimizer_states in included_state:
+            check_tensors(adam_exp_avg_expected, adam_exp_avg_restored)
+            check_tensors(adam_exp_avg_sq_expected, adam_exp_avg_sq_restored)
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+                _gpu_device(),
             )
             check_devices(
                 [
-                    mca_model.optimizer.optimizer.state.get(param).get("exp_avg_sq")
-                    for group in mca_model.optimizer.param_groups
+                    optimizer.optimizer.state.get(param).get("exp_avg_sq")
+                    for group in optimizer.param_groups
                     for param in group["params"]
                 ],
-                f"{current_platform.device_type}:{current_platform.current_device()}",
+                _gpu_device(),
             )
 
+    check_grad_hook_register_cycle(optimizer)
 
-# @pytest.mark.parametrize("included_state", [MegatronOffloadStateType.model_params])
-# @pytest.mark.parametrize("pin_memory", [True])
-# @pytest.mark.parametrize("non_blocking", [True])
-# @pytest.mark.parametrize("optimizer_type", ['dist_optimizer'])
+
 @pytest.mark.parametrize(
     "included_state",
     [
@@ -878,39 +842,16 @@ def run_model_fp32_optimizer(mca_model: McaModelCreator, included_state, pin_mem
         None,
     ],
 )
-@pytest.mark.parametrize("pin_memory", [True, False])
-@pytest.mark.parametrize("non_blocking", [True, False])
-@pytest.mark.parametrize("optimizer_type", [None, "dist_optimizer", "fp16", "fp32"])
-def test_megatron_offload_states(included_state, pin_memory, non_blocking, optimizer_type):
-    """
-    有四块非optimizer的显存未释放:
-    /opt/conda/envs/python3.10.13/lib/python3.10/site-packages/transformer_engine/pytorch/module/base.py:58:get_workspace
-    /root/.local/lib/python3.10/site-packages/megatron/core/tensor_parallel/layers.py:413:forward
-    /root/.local/lib/python3.10/site-packages/megatron/core/models/gpt/gpt_model.py:249:forward
-    /root/.local/lib/python3.10/site-packages/megatron/core/tensor_parallel/layers.py:450:backward
-    """
-    # MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
-    # torch.cuda.memory._record_memory_history(
-    #     max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
-    #     stacks='python'
-    # )
-
+@pytest.mark.parametrize("optimizer_type", [None, "dist_optimizer", "dist_optimizer_fp32", "fp16", "fp32"])
+def test_megatron_offload_states(included_state, optimizer_type):
     mca_model = McaModelCreator(optimizer_type=optimizer_type)
 
     include = None if included_state is None else [included_state]
     if optimizer_type is None:
-        run_model_infer(mca_model, include, pin_memory, non_blocking)
-    elif optimizer_type == "dist_optimizer":
-        run_model_dist_optimizer(mca_model, include, pin_memory, non_blocking)
+        run_model_infer(mca_model, include)
+    elif optimizer_type in ("dist_optimizer", "dist_optimizer_fp32"):
+        run_model_dist_optimizer(mca_model, include)
     elif optimizer_type == "fp16":
-        run_model_fp16_optimizer(mca_model, include, pin_memory, non_blocking)
+        run_model_fp16_optimizer(mca_model, include)
     elif optimizer_type == "fp32":
-        run_model_fp32_optimizer(mca_model, include, pin_memory, non_blocking)
-
-    # print(f"dist.get_rank(): {dist.get_rank()}")
-    # if dist.get_rank() == 0:
-    #     t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-    #     dump_file = f"./memory_dump/snapshot_test_megatron_offload_states_offload_{os.environ['RANK']}.pickle"
-    #     os.makedirs(os.path.dirname(dump_file), exist_ok=True)
-    #     torch.cuda.memory._dump_snapshot(dump_file)
-    #     torch.cuda.memory._record_memory_history(enabled=None)
+        run_model_fp32_optimizer(mca_model, include)

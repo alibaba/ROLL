@@ -132,7 +132,7 @@ class AgentNativeStepEnvManager(TrajEnvManager):
         return self.rollout_cache
 
     def step(self, llm_output: DataProto):
-        if llm_output.batch is not None:
+        if "responses" in llm_output.batch:
             response = self.tokenizer.batch_decode(llm_output.batch['responses'], skip_special_tokens=False)[0]
         else:
             response = self.stop_reason

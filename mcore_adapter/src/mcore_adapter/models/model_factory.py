@@ -1,7 +1,7 @@
 import functools
 import os
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
 
 import torch
 from megatron.core import mpu, tensor_parallel
@@ -16,7 +16,12 @@ from megatron.core.transformer.module import MegatronModule
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import is_peft_available
 
-from ..checkpointing import find_dist_ckpt, generate_model_state_dict, load_state_dict_from_checkpoint, save_config_and_state_dict
+from ..checkpointing import (
+    find_dist_ckpt,
+    generate_model_state_dict,
+    load_state_dict_from_checkpoint,
+    save_config_and_state_dict,
+)
 from ..platforms import current_platform
 from ..utils import get_logger
 from .converter.convert_utils import MAX_SHARD_SIZE
@@ -31,6 +36,7 @@ from .model_utils import (
     get_thd_data_on_this_cp_rank,
     mca_lora_logits_postprocess_hook,
 )
+from .value_head import make_value_model
 
 
 if is_peft_available():
@@ -156,6 +162,79 @@ class VirtualModels:
                 all_unexpected_keys.extend(ret[1])
         return all_missing_keys, all_unexpected_keys
 
+    def load_state_dict_per_parameter(
+        self,
+        state_dict_iter: Iterable[tuple[str, Any]],
+        model_index: int = 0,
+    ) -> tuple[list[str], list[str]]:
+        """Copy converted tensors into a model immediately instead of accumulating a rank-local state dict."""
+        model = self.models[model_index]
+
+        direct_destinations = {}
+        extra_state_keys = set()
+        for module_name, module in model.named_modules():
+            prefix = f"{module_name}." if module_name else ""
+            for local_name, parameter in module._parameters.items():
+                if parameter is not None:
+                    direct_destinations[prefix + local_name] = parameter
+            for local_name, buffer in module._buffers.items():
+                if buffer is not None and local_name not in module._non_persistent_buffers_set:
+                    direct_destinations[prefix + local_name] = buffer
+            if type(module).get_extra_state is not torch.nn.Module.get_extra_state:
+                extra_state_keys.add(prefix + "_extra_state")
+
+        if any(value.is_meta for value in direct_destinations.values()):
+            return model.load_state_dict(dict(state_dict_iter), strict=False)
+
+        missing_keys = set(direct_destinations).union(extra_state_keys)
+        unexpected_keys = []
+        deferred_state_dict = {}
+        error_msgs = []
+        input_value = None
+
+        with torch.no_grad():
+            for key, input_value in state_dict_iter:
+                output_value = direct_destinations.get(key)
+                if output_value is None:
+                    deferred_state_dict[key] = input_value
+                    continue
+
+                if not isinstance(input_value, torch.Tensor):
+                    error_msgs.append(
+                        f'While copying "{key}", expected a tensor but got {type(input_value).__name__}.'
+                    )
+                    input_value = None
+                    continue
+                if output_value.shape != input_value.shape:
+                    error_msgs.append(
+                        f"size mismatch for {key}: checkpoint shape {input_value.shape}, "
+                        f"model shape {output_value.shape}."
+                    )
+                    input_value = None
+                    continue
+                try:
+                    output_value.copy_(input_value)
+                except Exception as e:
+                    error_msgs.append(f'While copying "{key}", an exception occurred: {e}.')
+                    input_value = None
+                    continue
+
+                missing_keys.discard(key)
+                input_value = None
+
+        if deferred_state_dict:
+            _, deferred_unexpected_keys = model.load_state_dict(deferred_state_dict, strict=False)
+            deferred_unexpected_keys = set(deferred_unexpected_keys)
+            unexpected_keys.extend(sorted(deferred_unexpected_keys))
+            missing_keys.difference_update(set(deferred_state_dict).difference(deferred_unexpected_keys))
+
+        input_value = None
+        del deferred_state_dict, direct_destinations
+        if error_msgs:
+            raise RuntimeError("Error(s) in per-parameter state_dict loading:\n\t" + "\n\t".join(error_msgs))
+
+        return sorted(missing_keys), unexpected_keys
+
     def state_dict(self, *args, **kwargs):
         if len(self.models) == 1:
             return self.models[0].state_dict(*args, **kwargs)
@@ -276,6 +355,9 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                 config.padded_vocab_size = resized_vocab_size
 
         models = VirtualModels(cls, config=config)
+        if config.use_value_head:
+            value_model_hook = make_value_model(config.hidden_size, config.sequence_parallel)
+            models = value_model_hook(models)
 
         logger.info(
             f"number of parameters on (tensor, pipeline, expert) model parallel rank "
@@ -300,23 +382,30 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                     "layer is not supported loading mca ckpt. Please check the tokenizer and ckpt."
                 )
             state_dict = load_state_dict_from_checkpoint(model_name_or_path, models=models)
+            missing_keys, unexpected_keys = models.load_state_dict(state_dict, strict=False)
+            del state_dict
         else:
             if not exists_hf_config(model_name_or_path):
                 raise ValueError(
                     f"{model_name_or_path} is not valid for current training, because not exists hf ckpt "
                     f"and not mca_ckpt_exist: {mca_ckpt_exist} or not dist_config_match: {dist_config_match}"
                 )
-            state_dict = {}
             converter = ModelConverter(config, resized_vocab_size=resized_vocab_size)
+            missing_keys, unexpected_keys = [], []
             for i in range(len(models)):
-                key = "model"
                 if len(models) > 1:
                     mpu.set_virtual_pipeline_model_parallel_rank(i)
-                    key = f"{key}{i}"
-                state_dict[key] = converter.load_mca_state_dict_from_hf(model_name_or_path, vp_stage=i)
-        missing_keys, unexpected_keys = models.load_state_dict(state_dict, strict=False)
+                state_dict_iter = converter.iter_mca_state_dict_from_hf(model_name_or_path, vp_stage=i)
+                model_missing_keys, model_unexpected_keys = models.load_state_dict_per_parameter(
+                    state_dict_iter,
+                    model_index=i,
+                )
+                missing_keys.extend(model_missing_keys)
+                unexpected_keys.extend(model_unexpected_keys)
         if missing_keys:
             missing_keys = [key for key in missing_keys if not key.endswith("._extra_state")]
+            if config.use_value_head:
+                missing_keys = [key for key in missing_keys if not key.endswith(("output_layer.weight", "output_layer.bias"))]
         if unexpected_keys and config.tie_embeddings_and_output_weights:
             unexpected_keys = [key for key in unexpected_keys if not key.endswith("output_layer.weight")]
         assert unexpected_keys is None or len(unexpected_keys) == 0, f"unexpected_keys: {unexpected_keys}"

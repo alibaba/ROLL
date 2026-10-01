@@ -58,7 +58,6 @@ validation:
 
 actor_train:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
@@ -99,7 +98,6 @@ actor_train:
 
 actor_infer:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
@@ -115,7 +113,6 @@ actor_infer:
     strategy_config:
       gpu_memory_utilization: 0.8
       block_size: 16
-      # mm preprocessor cache mismatch error occured in vllm084
       enable_prefix_caching: false
   num_gpus_per_worker: 1
   device_mapping: list(range(0,32))
@@ -123,7 +120,6 @@ actor_infer:
 
 reference:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16

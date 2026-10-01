@@ -18,6 +18,7 @@ from roll.models.model_providers import default_tokenizer_provider
 from roll.platforms import current_platform
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
+from roll.utils.functionals import parse_dtype
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType, load_hf_model, offload_hf_model
 from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tensors_from_bucket
@@ -50,6 +51,10 @@ class HfInferStrategy(InferenceStrategy):
         self.model = model_provider(
             tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=False
         )
+        param_dtype = self.worker_config.strategy_args.strategy_config.get("param_dtype", torch.bfloat16)
+        param_dtype = parse_dtype(param_dtype)
+        logger.info(f"[HF] Casting inference model parameters to {param_dtype}")
+        self.model = self.model.to(dtype=param_dtype)
         logger.info(f"{self.model}")
 
     def forward_step(

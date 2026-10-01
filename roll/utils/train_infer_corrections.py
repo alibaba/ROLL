@@ -3,7 +3,7 @@ from typing import Dict, Tuple, Optional
 
 import torch
 
-from roll.utils.functionals import masked_mean, masked_sum, agg_loss
+from roll.utils.functionals import masked_mean, masked_sum, agg_loss, compute_approx_kl
 from roll.pipeline.agentic.utils import compute_segment_masked_mean
 from roll.configs.base_config import TrainInferCorrectionConfig
 from roll.utils.logging import get_logger
@@ -107,6 +107,29 @@ def compute_train_infer_correction(
             loss_agg_mode="seq-mean-token-mean",
             global_valid_samples=global_valid_samples,
         ).detach().item()
+
+    # Train-infer KL (k3 method) — paper's core metric
+    train_infer_kl = compute_approx_kl(
+        log_probs=old_log_probs,
+        log_probs_base=infer_log_probs,
+        action_mask=base_mask,
+        kl_penalty="k3",
+    )
+    metrics["actor/train_infer_kl@sum"] = agg_loss(
+        loss_mat=train_infer_kl,
+        loss_mask=base_mask,
+        loss_agg_mode="seq-mean-token-mean",
+        global_valid_samples=global_valid_samples,
+    ).detach().item()
+
+    # Token-level ratio min/max — capture extreme deviations.
+    # Skip empty batches: missing keys are skipped during cross-rank merge,
+    # and a 0.0 sentinel would pollute the @min aggregation.
+    ratio_token = ratio["token"]
+    if base_mask.any():
+        valid = base_mask.bool()
+        metrics["actor/train_infer_ratio_token_max@max"] = ratio_token[valid].max().detach().item()
+        metrics["actor/train_infer_ratio_token_min@min"] = ratio_token[valid].min().detach().item()
 
     # 1) Importance Sampling (IS) Weight Handling
     if cfg.is_weight.enabled:

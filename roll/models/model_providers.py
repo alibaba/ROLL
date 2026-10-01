@@ -1,11 +1,11 @@
 import inspect
 import os
 import threading
+from types import SimpleNamespace
 from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
-from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoConfig,
@@ -25,6 +25,7 @@ from roll.platforms import current_platform
 from roll.utils.checkpoint_manager import download_model, file_lock_context
 from roll.utils.logging import get_logger
 from roll.utils.packages import is_transformers_version_greater_than
+
 
 try:
     from mcore_adapter import TrainingArguments as mca_TrainingArguments
@@ -83,18 +84,24 @@ def default_tokenizer_provider(model_args: "ModelArguments", model_name_or_path:
     if model_name_or_path is None:
         model_name_or_path = model_args.model_name_or_path
     model_name_or_path = download_model(model_name_or_path)
+    tokenizer_path = model_name_or_path
+    if model_args.model_type == "diffusion_model":
+        # diffusion model's huggingface file structure is different
+        # tokenizer locates at {model_path}/tokenizer
+        tokenizer_path = os.path.join(tokenizer_path, "tokenizer")
     prepare_automap_files(model_name_or_path)
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name_or_path,
+    tokenizer_kwargs = dict(
         use_fast=True,
         split_special_tokens=False,
         trust_remote_code=True,
         padding_side="left",
     )
-    return tokenizer
+    return AutoTokenizer.from_pretrained(tokenizer_path, **tokenizer_kwargs)
 
 
 def default_processor_provider(model_args: "ModelArguments", model_name_or_path: str = None):
+    if model_args.model_type == "diffusion_model":
+        return None
     if model_name_or_path is None:
         model_name_or_path = model_args.model_name_or_path
     model_name_or_path = download_model(model_args.model_name_or_path)
@@ -104,6 +111,13 @@ def default_processor_provider(model_args: "ModelArguments", model_name_or_path:
     except Exception as e:
         logger.info(f"processor not found: {e}")
         processor = None
+    if processor is not None:
+        has_modality = any(
+            getattr(processor, attr, None) is not None
+            for attr in ("image_processor", "audio_processor", "video_processor", "media_processor")
+        )
+        if not has_modality:
+            processor = None
     return processor
 
 
@@ -142,6 +156,42 @@ def freeze_model(model, model_args: "ModelArguments"):
     for name, param in model.named_parameters():
         if any(name.startswith(prefix) for prefix in prefixes):
             param.requires_grad_(False)
+
+
+def freeze_model_contains(model, model_args: "ModelArguments"):
+    """Freeze parameters whose name contains any of the specified substrings."""
+    if model_args.freeze_module_contains is None:
+        return
+
+    patterns = model_args.freeze_module_contains
+    frozen_count = 0
+    total_count = 0
+    for name, param in model.named_parameters():
+        total_count += 1
+        if any(pattern in name for pattern in patterns):
+            param.requires_grad_(False)
+            frozen_count += 1
+    logger.info(f"Freeze model with contains patterns: {patterns}, frozen {frozen_count}/{total_count} parameters")
+
+
+def freeze_except_mtp(model):
+    """Freeze all parameters except MTP parameters (names starting with 'mtp.').
+
+    Used by the 'mtp_only' MTP training mode: the main model stays frozen and
+    only the MTP layers receive gradients. Returns (trainable_count, frozen_count);
+    with virtual pipeline parallel, MTP params only live on the last model chunk,
+    so callers should aggregate counts across chunks before validating.
+    """
+    trainable_count = 0
+    frozen_count = 0
+    for name, param in model.named_parameters():
+        if name.startswith("mtp."):
+            param.requires_grad_(True)
+            trainable_count += 1
+        else:
+            param.requires_grad_(False)
+            frozen_count += 1
+    return trainable_count, frozen_count
 
 
 # Inspired by: https://github.com/hiyouga/LLaMA-Factory/blob/main/src/llamafactory/model/adapter.py
@@ -221,8 +271,6 @@ def load_model(
         setattr(config, "output_router_logits", is_trainable)
     init_kwargs["low_cpu_mem_usage"] = not is_fsdp2_enabled()
 
-    init_kwargs["torch_dtype"] = model_args.compute_dtype
-
     if not is_fsdp_or_fsdp2_enabled():
         if init_kwargs["low_cpu_mem_usage"]:  # device map requires low_cpu_mem_usage=True
             if "device_map" not in init_kwargs and model_args.device_map:
@@ -230,17 +278,9 @@ def load_model(
 
     init_kwargs["config"] = config
     init_kwargs["pretrained_model_name_or_path"] = model_name_or_path
-    # TODO: remove AutoModelForVision2Seq after deprecate torch260
-    import transformers
+    from transformers import AutoModelForImageTextToText
 
-    if Version("4.54.0") <= Version(transformers.__version__):
-        from transformers import AutoModelForImageTextToText
-
-        it2t_model_cls = AutoModelForImageTextToText
-    else:
-        from transformers import AutoModelForVision2Seq
-
-        it2t_model_cls = AutoModelForVision2Seq
+    it2t_model_cls = AutoModelForImageTextToText
     if type(config) in it2t_model_cls._model_mapping.keys():  # assume built-in models
         model_class = it2t_model_cls  # image and video
     else:
@@ -268,6 +308,7 @@ def load_model(
 
     if model_args.lora_target is None:
         freeze_model(model, model_args)
+        freeze_model_contains(model, model_args)
     else:
         model = setup_lora_training(config, model, model_args, is_trainable)
 
@@ -281,15 +322,8 @@ def load_model(
             model.load_state_dict(vhead_params, strict=False)
             logger.info("Loaded valuehead from checkpoint: {}".format(model_name_or_path))
 
-        # Ensure v_head dtype matches pretrained_model to avoid FSDP2 "uniform dtype" errors
-        if hasattr(model, "v_head") and model_args.compute_dtype is not None:
-            model.v_head.to(model_args.compute_dtype)
-
     if not is_trainable:
         model.requires_grad_(False)
-        for param in model.parameters():
-            if param.data.dtype == torch.float32 and model_args.compute_dtype != torch.float32:
-                param.data = param.data.to(model_args.compute_dtype)
 
         model.eval()
     else:
@@ -437,6 +471,103 @@ def patch_model(model, config, use_mcore):
             setattr(model, "_roll_forward_patched", True)
 
 
+def setup_diffusion_lora_training(model, model_args: "ModelArguments", is_trainable: bool):
+    """Inject LoRA adapters into the diffusion model (in-place, without wrapping as PeftModel).
+
+    Uses the official diffusers add_adapter → inject_adapter_in_model path;
+    task_type is not set, keeping the model's forward signature unchanged.
+
+    Adapters named in ``model_args.extra_frozen_lora_adapters`` are additionally
+    injected with the same LoRA hyperparameters but kept frozen
+    (requires_grad=False), e.g. an EMA shadow adapter.
+    """
+    if not is_trainable or model_args.lora_target is None:
+        return model
+
+    lora_config = LoraConfig(
+        r=model_args.lora_rank,
+        lora_alpha=model_args.lora_alpha,
+        lora_dropout=model_args.lora_dropout,
+        target_modules=model_args.lora_target,
+    )
+
+    model.add_adapter(lora_config, adapter_name="default")
+
+    extra_frozen_adapters = model_args.extra_frozen_lora_adapters or []
+    for adapter_name in extra_frozen_adapters:
+        model.add_adapter(lora_config, adapter_name=adapter_name)
+        for name, param in model.named_parameters():
+            if adapter_name in name:
+                param.requires_grad_(False)
+
+    logger.info(
+        "Diffusion LoRA injected: adapters=%s rank=%s alpha=%s target=%s",
+        ["default"] + list(extra_frozen_adapters),
+        model_args.lora_rank,
+        model_args.lora_alpha,
+        model_args.lora_target,
+    )
+    return model
+
+
+def default_diffusion_model_provider(
+    tokenizer: Optional["PreTrainedTokenizer"],
+    model_args: "ModelArguments",
+    training_args: Optional["TrainingArguments"] = None,
+    is_trainable: Optional[bool] = False,
+    diffusion_model_variant: str = "qwen_image",
+) -> nn.Module:
+    """Load a provider-built diffusion model for diffusion-specific strategies."""
+    model_name_or_path = download_model(model_args.model_name_or_path)
+    transformer_path = os.path.join(model_name_or_path, "transformer")
+    if not os.path.isdir(transformer_path):
+        raise FileNotFoundError(f"Diffusion model transformer directory not found: {transformer_path}")
+
+    import diffusers
+
+    from roll.pipeline.diffusion.models.registry import get_diffusion_model_adapter
+
+    adapter_cls = get_diffusion_model_adapter(diffusion_model_variant)
+    transformer_cls = getattr(diffusers, adapter_cls.transformer_cls_name)
+    fsdp2_init_context = getattr(_fsdp2_init_context, "context", None)
+    init_kwargs = dict(
+        pretrained_model_name_or_path=model_name_or_path,
+        subfolder="transformer",
+        torch_dtype=model_args.compute_dtype,
+        low_cpu_mem_usage=not is_fsdp2_enabled(),
+        local_files_only=os.path.exists(model_name_or_path),
+    )
+    if fsdp2_init_context is not None:
+        with fsdp2_init_context():
+            model = transformer_cls.from_pretrained(**init_kwargs)
+    else:
+        model = transformer_cls.from_pretrained(**init_kwargs)
+    if model_args.attn_implementation not in (None, "auto"):
+        setattr(model.config, "_attn_implementation", model_args.attn_implementation)
+    model.parallelize_weights_path = os.path.join(model_name_or_path, "transformer")
+
+    if not model_args.disable_gradient_checkpointing:
+        use_reentrant = (
+            False
+            if model_args.gradient_checkpointing_use_reentrant is None
+            else bool(model_args.gradient_checkpointing_use_reentrant)
+        )
+        gradient_checkpointing_enable = model.enable_gradient_checkpointing
+        if "gradient_checkpointing_kwargs" in inspect.signature(gradient_checkpointing_enable).parameters:
+            gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": use_reentrant})
+        else:
+            gradient_checkpointing_enable()
+
+    if is_trainable:
+        model.train()
+    else:
+        model.eval()
+        model.requires_grad_(False)
+
+    model = setup_diffusion_lora_training(model, model_args, is_trainable)
+    return model
+
+
 def default_actor_model_provider(
     tokenizer: "PreTrainedTokenizer",
     model_args: "ModelArguments",
@@ -464,6 +595,7 @@ def default_actor_model_provider(
                 param.requires_grad = False
         if model_args.lora_target is None:
             freeze_model(model, model_args)
+            freeze_model_contains(model, model_args)
         else:
             apply_megatron_lora()
             set_linear_is_expert(model[0])
@@ -471,19 +603,6 @@ def default_actor_model_provider(
         patch_model(model, config, use_mcore=True)
     else:
         # hf
-        init_kwargs = {
-            "torch_dtype": model_args.compute_dtype,
-            "trust_remote_code": True,
-        }
-        if not is_fsdp2_enabled():
-            init_kwargs["low_cpu_mem_usage"] = True
-            if is_trainable:
-                init_kwargs["device_map"] = {"": current_platform.current_device()}
-            elif model_args.device_map:
-                init_kwargs["device_map"] = model_args.device_map
-            elif model_args.export_dir is None:
-                init_kwargs["device_map"] = "balanced"
-        logger.info(f"init_kwargs: {init_kwargs}")
         model = load_model(model_args, is_trainable, False)
         # model.config may not have pad_token_id
         if getattr(model.config, "pad_token_id", None) is None:
@@ -521,7 +640,6 @@ def default_reward_model_provider(
         raise NotImplementedError("megatron reward model not implemented")
     else:
         init_kwargs = {
-            "torch_dtype": model_args.compute_dtype,
             "trust_remote_code": True,
         }
         init_kwargs["low_cpu_mem_usage"] = True
@@ -597,16 +715,37 @@ def default_value_model_provider(
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
     prepare_automap_files(model_args.model_name_or_path)
+    config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
 
     if (
         mca_TrainingArguments is not None
         and training_args is not None
         and isinstance(training_args, mca_TrainingArguments)
     ):
-        raise NotImplementedError("megatron value model not implemented")
+        # megatron
+        if model_args.moe_aux_loss_coef is not None and training_args.moe_aux_loss_coeff is None:
+            training_args.moe_aux_loss_coeff = model_args.moe_aux_loss_coef
+        if training_args.additional_configs is None:
+            training_args.additional_configs = {"use_value_head": True}
+        else:
+            training_args.additional_configs["use_value_head"] = True
+        model = AutoModel.from_pretrained(model_args.model_name_or_path, training_args)
+        if is_trainable:
+            model.train()
+        else:
+            model.eval()
+            for param in model.parameters():
+                param.requires_grad = False
+        if model_args.lora_target is None:
+            freeze_model(model, model_args)
+            freeze_model_contains(model, model_args)
+        else:
+            apply_megatron_lora()
+            set_linear_is_expert(model[0])
+            model.models[0] = setup_lora_training(model[0].config, model[0], model_args, is_trainable, is_mca=True)
+        patch_model(model, config, use_mcore=True)
     else:
         init_kwargs = {
-            "torch_dtype": model_args.compute_dtype,
             "trust_remote_code": True,
         }
         init_kwargs["low_cpu_mem_usage"] = True
@@ -628,6 +767,8 @@ def default_value_model_provider(
             model = AutoModelForTokenClassification.from_pretrained(
                 model_args.model_name_or_path, config=config, **init_kwargs
             )
+            freeze_model(model, model_args)
+            freeze_model_contains(model, model_args)
         elif model_args.model_type in ["trl"]:
             from trl import AutoModelForCausalLMWithValueHead
 
@@ -639,6 +780,8 @@ def default_value_model_provider(
 
             AutoModelForCausalLMWithValueHead.post_init = no_set_device_hook_post_init
             model = load_model(model_args, is_trainable, True)
+            freeze_model(model, model_args)
+            freeze_model_contains(model, model_args)
             setattr(model, "forward", token_classifier_forward.__get__(model))
             setattr(
                 model,

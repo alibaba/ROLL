@@ -60,7 +60,7 @@ reward_pretrain: Qwen/Qwen2.5-0.5B-Instruct
 
 actor_train:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: fp16
     model_type: ~
@@ -86,7 +86,7 @@ actor_train:
 
 actor_infer:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: fp16
   generating_args:
@@ -109,7 +109,7 @@ actor_infer:
 
 reference:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: fp16
     model_type: ~

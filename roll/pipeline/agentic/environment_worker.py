@@ -86,6 +86,7 @@ class EnvironmentWorker(Worker):
                 port=proxy_port,
             )
             self.logger.info(f'[Network Register] Auto registration result: {result}')
+
         model_name_or_path = download_model(self.worker_config.model_args.model_name_or_path)
         self.tokenizer = default_tokenizer_provider(self.worker_config.model_args, model_name_or_path)
         self.processor = default_processor_provider(self.worker_config.model_args, model_name_or_path)

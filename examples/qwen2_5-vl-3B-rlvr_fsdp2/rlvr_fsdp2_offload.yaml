@@ -65,7 +65,6 @@ validation:
 
 actor_train:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     model_name_or_path: ${pretrain}
     disable_gradient_checkpointing: false
@@ -94,9 +93,8 @@ actor_train:
   strategy_args:
     strategy_name: fsdp2_train
     strategy_config:
+      enable_mix_precision: true
       fsdp_size: 8
-      param_dtype: bf16
-      reduce_dtype: float32
       reshard_after_forward: true
       offload_policy: false # offload model param
       use_batched_model_update: false # disable batched gather during model update (not bring any benefit in test)
@@ -105,7 +103,6 @@ actor_train:
 
 actor_infer:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     model_name_or_path: ${pretrain}
     disable_gradient_checkpointing: true
@@ -128,7 +125,6 @@ actor_infer:
 
 reference:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     model_name_or_path: ${pretrain}
     disable_gradient_checkpointing: true

@@ -126,9 +126,8 @@ actor_train:
   strategy_args:
     strategy_name: fsdp2_train
     strategy_config:
+      enable_mix_precision: true
       fsdp_size: 16
-      param_dtype: bf16
-      reduce_dtype: float32
       reshard_after_forward: true
       offload_policy: false # offload model param
       use_batched_model_update: false # disable batched gather during model update (not bring any benefit in test)

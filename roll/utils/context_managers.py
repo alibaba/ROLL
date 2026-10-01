@@ -2,7 +2,7 @@ import copy
 import os
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Dict, Literal, List
+from typing import Dict, Literal, List, Optional, Tuple
 
 import psutil
 import torch
@@ -13,8 +13,8 @@ from codetiming import Timer
 from ray._private import profiling
 
 from roll.platforms import current_platform
+from roll.utils.nccl_suspend import resume_nccl_communicators, suspend_nccl_communicators
 from roll.utils.offload_states import OffloadStateType
-from roll.utils.offload_nccl import reload_process_groups, destroy_process_groups
 from roll.utils.logging import get_logger, is_roll_debug_mode
 
 
@@ -107,6 +107,30 @@ def cpu_memory_info():
     return memory_info
 
 
+_offload_debug_logged: set = set()
+
+
+def log_offload_debug(head: str, store_stats: Optional[dict] = None, once_id: Optional[str] = None) -> None:
+    """Log process RSS (and offload-store stats) for offload debugging.
+
+    Only logs in roll debug mode. once_id logs at most once per process.
+    """
+    if not is_roll_debug_mode():
+        return
+    if once_id is not None:
+        if once_id in _offload_debug_logged:
+            return
+        _offload_debug_logged.add(once_id)
+    try:
+        rss_gb = cpu_memory_info().rss / 1024**3
+    except Exception:
+        return
+    msg = f"[OffloadDebug] {head}: rss={rss_gb:.2f}GB"
+    if store_stats:
+        msg += f", store={store_stats}"
+    get_logger().info(msg)
+
+
 def _get_gpu_memory_metrics(metric_infix: str, stage: str, with_max_frac: bool = False) -> Dict:
     if not is_roll_debug_mode():
         return {}
@@ -141,10 +165,72 @@ def _get_cpu_memory_metrics(metric_infix: str, stage: str) -> Dict:
     if not is_roll_debug_mode():
         return {}
     memory_info = cpu_memory_info()
-    return {
+    metrics = {
         f"memory/cpu/{metric_infix}/{stage}/rss": memory_info.rss / 1024**3,
         f"memory/cpu/{metric_infix}/{stage}/vms": memory_info.vms / 1024**3,
     }
+    container_usage_gb, container_limit_gb = get_container_memory_gb()
+    if container_usage_gb is not None:
+        metrics[f"memory/container/{metric_infix}/{stage}/usage"] = container_usage_gb
+        metrics[f"memory/container/{metric_infix}/{stage}/limit"] = container_limit_gb
+        metrics[f"memory/container/{metric_infix}/{stage}/util_frac"] = (
+            container_usage_gb / container_limit_gb if container_limit_gb > 0 else 0.0
+        )
+    return metrics
+
+
+def get_container_memory_gb() -> Tuple[Optional[float], Optional[float]]:
+    """Read container cgroup memory usage and limit in GB.
+
+    Supports both cgroup v2 (memory.current / memory.max) and cgroup v1
+    (memory.usage_in_bytes / memory.limit_in_bytes). Returns (None, None) if
+    cgroup files are not available.
+    """
+    usage_bytes: Optional[int] = None
+    limit_bytes: Optional[int] = None
+
+    # cgroup v2
+    try:
+        with open("/sys/fs/cgroup/memory.current", "r") as f:
+            usage_bytes = int(f.read().strip())
+        with open("/sys/fs/cgroup/memory.max", "r") as f:
+            content = f.read().strip()
+            limit_bytes = None if content == "max" else int(content)
+    except FileNotFoundError:
+        pass
+
+    # cgroup v1 fallback
+    if usage_bytes is None or limit_bytes is None:
+        try:
+            if usage_bytes is None:
+                with open("/sys/fs/cgroup/memory/memory.usage_in_bytes", "r") as f:
+                    usage_bytes = int(f.read().strip())
+            if limit_bytes is None:
+                with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r") as f:
+                    limit_bytes = int(f.read().strip())
+        except FileNotFoundError:
+            pass
+
+    if usage_bytes is None:
+        return None, None
+    usage_gb = usage_bytes / 1024**3
+    limit_gb = limit_bytes / 1024**3 if limit_bytes is not None else None
+    return usage_gb, limit_gb
+
+
+def log_container_memory_usage(head: str, logger: logging.Logger = None, rank: int = 0):
+    """Log container cgroup memory usage if available."""
+    _logger = logger or get_logger()
+    if (not dist.is_initialized()) or (rank is None) or (dist.get_rank() == rank):
+        usage_gb, limit_gb = get_container_memory_gb()
+        if usage_gb is not None:
+            if limit_gb is not None:
+                _logger.info(
+                    f"{head}, container memory usage: {usage_gb:.2f} GB / {limit_gb:.2f} GB "
+                    f"({usage_gb / limit_gb:.2%})"
+                )
+            else:
+                _logger.info(f"{head}, container memory usage: {usage_gb:.2f} GB")
 
 
 @contextmanager
@@ -167,14 +253,18 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
                 metrics.update(_get_gpu_memory_metrics(metric_infix, "start/offload"))
 
                 log_gpu_memory_usage(head=f"{metric_infix}_start_offload", logger=logger, rank=None)
+                log_container_memory_usage(head=f"{metric_infix}_start_offload", logger=logger, rank=None)
                 strategy.load_states(**load_kwargs)
                 if load_kwargs.get("include", None) is not None:
                     strategy.offload_states(**get_load_exclude_kwargs(load_kwargs))
                 if strategy.offload_nccl:
-                    with Timer(f"{metric_infix}_reload") as reload_pg_timer, gpu_memory_offload_profiler(metrics, metric_infix, "reload_nccl"):
-                        reload_process_groups()
-                    metrics[f"time/{metric_infix}/reload_nccl"] = reload_pg_timer.last
+                    with Timer(f"{metric_infix}_resume_nccl") as resume_nccl_timer, gpu_memory_offload_profiler(
+                        metrics, metric_infix, "resume_nccl"
+                    ):
+                        resume_nccl_communicators()
+                    metrics[f"time/{metric_infix}/resume_nccl"] = resume_nccl_timer.last
                 log_gpu_memory_usage(head=f"{metric_infix}_start_onload", logger=logger, rank=None)
+                log_container_memory_usage(head=f"{metric_infix}_start_onload", logger=logger, rank=None)
 
                 metrics.update(_get_gpu_memory_metrics(metric_infix, "start/onload"))
                 metrics.update(_get_cpu_memory_metrics(metric_infix, "start"))
@@ -188,14 +278,18 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
                     metrics.update(_get_gpu_memory_metrics(metric_infix, "end/onload", with_max_frac=True))
 
                     log_gpu_memory_usage(head=f"{metric_infix}_end_onload", logger=logger, rank=None)
+                    log_container_memory_usage(head=f"{metric_infix}_end_onload", logger=logger, rank=None)
                     if is_offload_states:
                         current_platform.clear_cublas_workspaces()
                         strategy.offload_states()
                         if strategy.offload_nccl:
-                            with Timer(f"{metric_infix}_destroy") as destroy_pg_timer, gpu_memory_offload_profiler(metrics, metric_infix, "offload_nccl"):
-                                destroy_process_groups()
-                            metrics[f"time/{metric_infix}/offload_nccl"] = destroy_pg_timer.last
+                            with Timer(f"{metric_infix}_suspend_nccl") as suspend_nccl_timer, gpu_memory_offload_profiler(
+                                metrics, metric_infix, "suspend_nccl"
+                            ):
+                                suspend_nccl_communicators()
+                            metrics[f"time/{metric_infix}/suspend_nccl"] = suspend_nccl_timer.last
                     log_gpu_memory_usage(head=f"{metric_infix}_end_offload", logger=logger, rank=None)
+                    log_container_memory_usage(head=f"{metric_infix}_end_offload", logger=logger, rank=None)
 
                     metrics.update(_get_gpu_memory_metrics(metric_infix, "end/offload"))
                     metrics.update(_get_cpu_memory_metrics(metric_infix, "end"))

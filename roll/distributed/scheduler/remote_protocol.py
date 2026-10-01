@@ -14,6 +14,30 @@ from roll.utils.logging import get_logger
 logger = get_logger()
 
 
+def _densify_uniform_nested_fields(td: TensorDict) -> TensorDict:
+    """Convert nested (jagged) fields whose rows all share the same shape back to dense.
+
+    TransferQueue reconstructs batched rows as jagged nested tensors even when every
+    sample is padded to the same length. The rest of the pipeline assumes dense tensors
+    (e.g. `.view` in batch_balance), so restore dense layout here, losslessly, at the
+    materialization boundary. Fields with genuinely variable row lengths are left nested.
+
+    Covers both jagged representations tensordict uses: NestedTensor (is_nested tensors)
+    and LinkedList (a list container, not a tensor, so is_nested misses it).
+    """
+    for key in list(td.keys()):
+        val = td[key]
+        if isinstance(val, torch.Tensor) and val.is_nested:
+            rows = val.unbind()
+            if rows and all(row.shape == rows[0].shape for row in rows):
+                td[key] = torch.stack(rows)
+        elif isinstance(val, LinkedList):
+            rows = list(val)
+            if rows and all(isinstance(row, torch.Tensor) and row.shape == rows[0].shape for row in rows):
+                td[key] = torch.stack(rows)
+    return td
+
+
 class RemoteBatch:
     def __init__(self, key_type: str, partition: str, device):
         self.key_type = key_type
@@ -218,9 +242,9 @@ class BatchProxy:
         # Yield from _remote_batch for keys not in _batch
         if self._remote_batch is not None:
             logger.warning("RemoteBatch materializing remote batch for items()")
-            self._remote_batch.materialize()
-            for key in self._remote_batch.keys():
-                yield (key, self._remote_batch[key])
+            td = self._remote_batch.materialize()
+            for key, val in td.items():
+                yield (key, val)
 
     _POP_SENTINEL = object()
 
@@ -352,12 +376,16 @@ class RowRemoteBatch(RemoteBatch):
             fields = self.fields
         else:
             assert set(fields) <= self.fields, f"Fields {set(fields)} is not subset of {self.fields}"
+        if len(fields) == 0:
+            # Empty remote-batch shell: nothing to fetch, cache may be None.
+            return TensorDict({}, batch_size=[len(self._row_ids)], device=self.device)
         existing_fields = set(self.cache.keys()) if self.cache is not None else set()
         fetch_fields = [field for field in fields if field not in existing_fields]
         if len(fetch_fields) > 0:
             with Timer(name="remote_batch_materialize", logger=None) as timer:
                 data: TensorDict = transfer_backend.get(partition=self.partition, keys=self._row_ids, fields=fetch_fields)
                 assert set(data.keys()) == set(fetch_fields)
+                data = _densify_uniform_nested_fields(data)
 
                 if self.cache is None:
                     self.cache = data
@@ -366,7 +394,7 @@ class RowRemoteBatch(RemoteBatch):
 
                     self.cache = union_tensor_dict(self.cache, data)
                 if self.device is not None:
-                    self.cache.to(self.device)
+                    self.cache = self.cache.to(self.device)
             logger.info(f"RemoteBatch materialize cost {timer.last}s, partition={self.partition}, new materialized {sorted(fetch_fields)}, cached fields {sorted(list(existing_fields))}")
 
         return self.cache.select(*fields)
@@ -708,6 +736,9 @@ class ColumnRemoteBatch(RemoteBatch):
             fields = self.fields.keys()
         else:
             assert set(fields) <= set(self.fields.keys())
+        if len(fields) == 0:
+            # Empty remote-batch shell: nothing to fetch, cache may be None.
+            return TensorDict({}, batch_size=[self.batch_size], device=self.device)
         existing_fields = set(self.cache.keys()) if self.cache is not None else set()
 
         data = None
@@ -724,6 +755,7 @@ class ColumnRemoteBatch(RemoteBatch):
                 data: TensorDict = transfer_backend.get(
                     partition=self.partition, keys=list(fetch_fields.keys()), fields=list(fetch_fields.values())
                 )
+                data = _densify_uniform_nested_fields(data)
 
         if data is not None:
             for operator in self.pipeline:
@@ -731,7 +763,7 @@ class ColumnRemoteBatch(RemoteBatch):
             assert len(data) == self.batch_size
 
             if self.device is not None:
-                data.to(self.device)
+                data = data.to(self.device)
 
             if self.cache is None:
                 self.cache = data

@@ -17,6 +17,8 @@ RNG_STATE_DIR = "rng_state"
 
 CACHE_PATH = os.path.join(os.path.expanduser("~"), ".cache", "roll")
 
+DIFFUSION_LORA_ADAPTER_STAGING_DIR = "/dev/shm/lora_adapter"
+
 IGNORE_INDEX = -100
 
 

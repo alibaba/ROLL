@@ -9,7 +9,7 @@ curl -fsSL https://github.com/alibaba/ROLL/blob/main/scripts/install_docker_nvid
 ```
 
 ## Environment Configuration
-Choose your desired Docker image from the [image addresses](https://alibaba.github.io/ROLL/docs/QuickStart/image_address). The following example uses *torch2.6.0 + vLLM0.8.4*
+Choose your desired Docker image from the [image addresses](https://alibaba.github.io/ROLL/docs/QuickStart/image_address). The following example uses *torch2.8.0 + vLLM0.11.0*
 ```shell
 # 1. Start a Docker container with GPU support, expose container ports, and keep the container running
 sudo docker run -dit \
@@ -17,7 +17,7 @@ sudo docker run -dit \
   -p 9001:22 \
   --ipc=host \
   --shm-size=10gb \
-  roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-vllm084 \
+  roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-25.06-py3-torch280-vllm0110 \
   /bin/bash
 
 # 2. Enter the Docker container
@@ -32,7 +32,7 @@ git clone https://github.com/alibaba/ROLL.git
 
 # 5. Install project dependencies (choose the requirements file corresponding to your image)
 cd ROLL
-pip install -r requirements_torch260_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/
+pip install -r requirements_torch280_vllm.txt -i https://mirrors.aliyun.com/pypi/simple/
 ```
 
 ## Pipeline Execution

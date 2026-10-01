@@ -113,7 +113,9 @@ class Platform:
     @classmethod
     def get_common_envs(cls) -> dict:
         return {
-            "TORCH_EXTENSIONS_DIR": ""
+            "TORCH_EXTENSIONS_DIR": "",
+            "DATAPROTO_SERIALIZATION_METHOD": os.getenv("DATAPROTO_SERIALIZATION_METHOD", ""),
+            "OMP_NUM_THREADS": "4",
         }
 
     @classmethod

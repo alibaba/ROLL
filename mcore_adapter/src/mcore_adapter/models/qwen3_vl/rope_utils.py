@@ -81,6 +81,10 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
         position_ids: torch.Tensor,
         mrope_section: list[int],
         cp_group: Optional[torch.distributed.ProcessGroup] = None,
+        # Compatibility with newer mcore versions, not used
+        return_raw_freqs: bool = False,
+        packed_seq: bool = False,
+        **kwargs,
     ) -> torch.Tensor:
         """Forward pass of multimodal RoPE embedding.
 

@@ -8,6 +8,8 @@ MTP training mode is read from `self.config.mtp_training_mode`:
 - 'disabled': MTP is loaded but not trained (default)
 - 'standalone': MTP is trained independently with truncated gradients
 - 'joint': MTP participates in main model updates with full gradient flow
+- 'mtp_only': the main model is frozen and only MTP parameters are trained;
+  gradient truncation behaves the same as 'standalone'
 """
 
 from typing import TYPE_CHECKING, Callable, Optional
@@ -81,6 +83,8 @@ def patch_mtp_functions():
             else:
                 extra_block_kwargs = {"padding_mask": kwargs["padding_mask"]}
         mtp_training_mode = getattr(self.config, "mtp_training_mode", "disabled")
+        # modes that truncate MTP-loss gradients from flowing into the main model
+        truncate_mtp_grad = mtp_training_mode in ("standalone", "mtp_only")
 
         in_inference_mode = inference_context is not None and not self.training
         if in_inference_mode:
@@ -128,7 +132,7 @@ def patch_mtp_functions():
                 # output
                 mtp_logits, _ = self.output_layer(
                     hidden_states_list[mtp_layer_number + 1],
-                    weight=output_weight.detach() if mtp_training_mode == "standalone" and output_weight is not None else output_weight,
+                    weight=output_weight.detach() if truncate_mtp_grad and output_weight is not None else output_weight,
                     runtime_gather_output=runtime_gather_output,
                 )
                 # Calc loss for the current Multi-Token Prediction (MTP) layers.
@@ -242,6 +246,8 @@ def patch_mtp_functions():
         # and use kwargs to be compatible
         padding_mask = kwargs.get("padding_mask", None)
         mtp_training_mode = getattr(self.config, "mtp_training_mode", "disabled")
+        # modes that truncate MTP-loss gradients from flowing into the main model
+        truncate_mtp_grad = mtp_training_mode in ("standalone", "mtp_only")
 
         # Calc logits for the current Multi-Token Prediction (MTP) layers.
         input_ids, _ = roll_tensor(
@@ -270,7 +276,7 @@ def patch_mtp_functions():
         decoder_input = embedding(input_ids=input_ids, position_ids=position_ids)
 
         #
-        if mtp_training_mode == "standalone":
+        if truncate_mtp_grad:
             decoder_input = decoder_input.detach()
             hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=False)
         else:

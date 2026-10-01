@@ -187,14 +187,32 @@ def make_micro_batch_iter_for_dynamic_batching(mini_batch: DataProto):
         micro_batch = mini_batch.slice(start_idx, end_idx)
         input_ids_shape = micro_batch.batch["input_ids"].shape
         for k in mini_batch.batch.keys():
-            if (len(micro_batch.batch[k].shape) == len(input_ids_shape) or k == "position_ids") and micro_batch.batch[k].shape[-1] in (
-                input_ids_shape[-1],
-                input_ids_shape[-1] - 1,
+            value = micro_batch.batch[k]
+            # TQ materialization can yield non-dense values (tensordict LinkedList
+            # for jagged/object rows, NestedTensor); only dense tensors carry a
+            # sequence dim that can be narrowed.
+            if not isinstance(value, torch.Tensor) or value.is_nested:
+                continue
+            if (len(value.shape) == len(input_ids_shape) or k == "position_ids") and \
+                    value.shape[-1] in (
+                    input_ids_shape[-1],
+                    input_ids_shape[-1] - 1,
             ):
                 micro_batch.batch[k] = torch.narrow(
-                    micro_batch.batch[k],
+                    value,
                     dim=-1,
                     start=0,
-                    length=seqlen if micro_batch.batch[k].shape[-1] == input_ids_shape[-1] else seqlen - 1,
+                    length=seqlen if value.shape[-1] == input_ids_shape[-1] else seqlen - 1,
                 )
+        # routed_experts [B, S, L, topk] has its sequence dim at dim=1 and is padded
+        # to the full width; narrow it with input_ids so router replay matches the
+        # actual micro-batch token count.
+        routed_experts = micro_batch.batch.get("routed_experts", None)
+        if (
+                isinstance(routed_experts, torch.Tensor)
+                and not routed_experts.is_nested
+                and routed_experts.dim() >= 3
+                and routed_experts.shape[1] == input_ids_shape[-1]
+        ):
+            micro_batch.batch["routed_experts"] = torch.narrow(routed_experts, dim=1, start=0, length=seqlen)
         yield micro_batch

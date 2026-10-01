@@ -82,7 +82,7 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         assert len(placement_group) == self.parallel_config.world_size
-    
+
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
         self.driver_dummy_worker: Optional[RayWorkerWrapper] = None

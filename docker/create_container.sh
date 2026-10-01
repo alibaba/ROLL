@@ -22,7 +22,7 @@ sudo docker run -dit \
      -v /home/$CURRENT_USER/:/home/$CURRENT_USER/ \
      -v /var/run/docker.sock:/var/run/docker.sock \
      -v /mnt/ram:/mnt/ram \
-     roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-vllm084 \
+     roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-25.06-py3-torch280-vllm0110 \
      /bin/bash
 
 sudo docker exec -i $CONTAINER_NAME groupadd sdev

@@ -35,7 +35,6 @@ class Dispatch(Enum):
     ALL_TO_ALL = auto()
     DP_MP_COMPUTE = auto()
     DP_MP_DISPATCH_FIRST = auto()
-    DP_MP_DISPATCH_FIRST_COLLECT_ALL = auto()
 
 
 class Execute(Enum):
@@ -204,10 +203,6 @@ predefined_dispatch_mode_fn = {
         "dispatch_fn": dispatch_dp_mp_dispatch_first,
         "collect_fn": collect_dp_mp_compute,
     },
-    Dispatch.DP_MP_DISPATCH_FIRST_COLLECT_ALL: {
-        "dispatch_fn": dispatch_dp_mp_dispatch_first,
-        "collect_fn": collect_all_to_all,
-    }
 }
 
 

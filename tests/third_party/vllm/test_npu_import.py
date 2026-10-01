@@ -50,16 +50,13 @@ def test_vllm_npu_worker_class_resolves():
     assert worker_cls.__name__.endswith("Worker")
 
 
-def test_roll_vllm_ray_executor_resolves():
+def test_vllm_multiproc_executor_resolves():
     if not current_platform.is_npu():
-        pytest.skip("ROLL vLLM Ray executor resolution only applies on Ascend NPU.")
+        pytest.skip("vLLM multiprocess executor resolution only applies on Ascend NPU.")
 
-    import roll.third_party.vllm as roll_vllm
-    import vllm
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
-    assert roll_vllm.ray_executor_class_v1 is not None, (
-        f"ROLL must resolve a vLLM V1 Ray executor for NPU CI; vllm={vllm.__version__}"
-    )
+    assert MultiprocExecutor is not None
 
 
 async def _shutdown_async_llm(model):
@@ -99,7 +96,6 @@ async def _run_with_npu_vllm_smoke_model(callback, **model_kwargs):
             max_num_batched_tokens=512,
             max_num_seqs=1,
             tensor_parallel_size=1,
-            distributed_executor_backend="ray",
             disable_custom_all_reduce=True,
             enforce_eager=True,
             trust_remote_code=True,

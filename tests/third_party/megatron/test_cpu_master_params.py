@@ -127,7 +127,7 @@ def test_chain_rejects_invalid_later_collective_before_any_model_mutation(fault,
         leaf.offload_states = offload
         leaves.append(leaf)
         parameters.append(parameter)
-    chain = SimpleNamespace(chained_optimizers=leaves)
+    chain = SimpleNamespace(chained_optimizers=leaves, _offload_backend=None, _offload_key_prefix="chain")
     if include is None or "model_params" in include:
         with pytest.raises(ValueError, match="CPU master"):
             namespace["chained_optimizers_offload_states"](chain, include=include)

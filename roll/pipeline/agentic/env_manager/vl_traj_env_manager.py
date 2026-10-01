@@ -212,7 +212,7 @@ class VLTrajEnvManager(TrajEnvManager):
     def step(self, llm_output: DataProto):
         # Similar to agent_native_env_manager.py:133-157
         # If stop_reason is MAX_LENGTH, pass it to env; otherwise decode response
-        if llm_output.batch is not None:
+        if "responses" in llm_output.batch:
             response = self.tokenizer.batch_decode(llm_output.batch['responses'], skip_special_tokens=False)[0]
         else:
             # When MAX_LENGTH, batch may be None, pass stop_reason as action
@@ -356,7 +356,7 @@ class VLTrajEnvManager(TrajEnvManager):
                 for k, v in mm_dict.items():
                     mm_data[k].extend([v] if not isinstance(v, (list, tuple)) else v)
 
-            if "llm_response" in content:
+            if isinstance(content.get("llm_response"), str):
                 # eos token is included in response, only need to process once actually
                 llm_response = (
                     content["llm_response"][: -len(self.tokenizer.eos_token)]
@@ -382,7 +382,8 @@ class VLTrajEnvManager(TrajEnvManager):
                 feature[self.collator.video_key] = mm_data["video"]
 
         self.logger.debug(
-            f"env_id={self.env_config['env_id']}, global_step={self.current_step}, episode_id={self.episode_id}, turn_idx={idx + 1}, {feature=}"
+            f"env_id={self.env_config['env_id']}, global_step={self.current_step}, "
+            f"episode_id={self.episode_id}, turn_idx={idx + 1}, {feature=}"
         )
         if not add_generation_prompt:  # the final multi-turn feature, no need for infer
             self.collator.return_infer_inputs = False

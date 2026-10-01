@@ -85,7 +85,7 @@ actor_train:
   worker_cls: roll.pipeline.rlvr.actor_pg_worker.ActorPGWorker
   pg_variant: ppo # topr, vanilla, tis, cispo, kimi15, ppo
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
@@ -109,9 +109,8 @@ actor_train:
   strategy_args:
     strategy_name: fsdp2_train
     strategy_config:
+      enable_mix_precision: true
       fsdp_size: 8
-      param_dtype: bf16
-      reduce_dtype: float32
       reshard_after_forward: true
       offload_policy: false # offload model param
       use_batched_model_update: false # disable batched gather during model update (not bring any benefit in test)
@@ -120,7 +119,7 @@ actor_train:
 
 actor_infer:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
   generating_args:
@@ -143,7 +142,7 @@ actor_infer:
 
 reference:
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~

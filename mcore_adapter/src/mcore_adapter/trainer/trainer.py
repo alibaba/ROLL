@@ -17,6 +17,7 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
+from megatron.core.dist_checkpointing.strategies.torch import TorchDistSaveShardedStrategy
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig, finalize_model_grads
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from megatron.core.packed_seq_params import PackedSeqParams

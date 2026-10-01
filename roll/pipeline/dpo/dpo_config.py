@@ -67,8 +67,8 @@ class DPOConfig(BaseConfig):
         self.actor_train.name = "actor_train"
         self.reference.name = "reference"
 
-        assert self.actor_train.use_sequence_packing == False and self.reference.use_sequence_packing == False,\
-        "dpo pipeline doesn't support use sequence packing now"
+        self.actor_train.use_sequence_packing = False
+        self.reference.use_sequence_packing = False
 
         self.actor_train.apply_loss_scale = False
         self.reference.apply_loss_scale = False

@@ -1,0 +1,444 @@
+"""vllm_omni pipeline shell for Qwen-Image diffusion with log-prob support.
+
+This module provides the vllm_omni-compatible pipeline class that inherits
+from QwenImagePipeline (vllm_omni contract) but delegates all core model
+operations to QwenImageAdapter via composition.
+
+Architecture:
+    QwenImagePipelineWithLogProb (vllm_omni shell)
+        ├── inherits QwenImagePipeline (vllm_omni contract: weights_sources, forward(req))
+        └── holds QwenImageAdapter (shared model ops: diffuse, replay, encode_prompt)
+
+The pipeline handles:
+    - vllm_omni lifecycle (weights_sources, prepare_latents, prepare_timesteps)
+    - OmniDiffusionRequest parsing and DiffusionOutput construction
+    - VAE decoding of final latents to pixel images
+
+The adapter handles:
+    - Transformer forward with CFG (shared with trainer side)
+    - Diffusion sampling loop with SDE/ODE (shared with trainer side)
+    - Text encoder prompt encoding
+    - Frozen weight reload and RoPE reinitialization
+"""
+from __future__ import annotations
+
+import os
+from typing import Any, Literal
+
+import torch
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
+from transformers import Qwen2_5_VLForConditionalGeneration
+from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
+from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
+from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
+from vllm_omni.diffusion.request import OmniDiffusionRequest
+
+from roll.pipeline.diffusion.models.qwen_image.qwen_image_adapter import QwenImageAdapter, QwenImageDiffuseInput
+from roll.pipeline.diffusion.models.qwen_image.qwen_image_transformer import QwenImageTransformer2DModelFixed
+from roll.pipeline.diffusion.models.scheduling_flow_match_sde_discrete import FlowMatchSDEDiscreteScheduler
+from roll.utils.logging import get_logger
+
+
+_logger = get_logger()
+
+
+def _maybe_to_cpu(v):
+    if isinstance(v, torch.Tensor):
+        return v.detach().cpu()
+    return v
+
+
+def _summarize_ipc_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return {
+            "type": "tensor",
+            "shape": tuple(value.shape),
+            "dtype": str(value.dtype),
+            "device": str(value.device),
+        }
+    if isinstance(value, dict):
+        return {k: _summarize_ipc_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return {
+            "type": type(value).__name__,
+            "len": len(value),
+            "first": _summarize_ipc_value(value[0]) if value else None,
+        }
+    return {"type": type(value).__name__, "value": repr(value)}
+
+
+class QwenImagePipelineWithLogProb(QwenImagePipeline):
+    """vllm_omni-compatible diffusion pipeline with log-probability support.
+
+    This class satisfies the vllm_omni pipeline contract (inherits QwenImagePipeline,
+    provides weights_sources, forward(req) -> DiffusionOutput) while delegating all
+    core model operations to QwenImageAdapter.
+    """
+
+    def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
+        # Skip QwenImagePipeline.__init__ to avoid its model loading;
+        # we construct components ourselves.
+        super(QwenImagePipeline, self).__init__()
+        self.od_config = od_config
+        self.parallel_config = od_config.parallel_config
+        self.weights_sources = [
+            DiffusersPipelineLoader.ComponentSource(
+                model_or_path=od_config.model,
+                subfolder="transformer",
+                revision=None,
+                prefix="transformer.",
+                fall_back_to_pt=True,
+            )
+        ]
+
+        self.device = get_local_device()
+        model = od_config.model
+        local_files_only = os.path.exists(model)
+
+        # Construct model components
+        self.scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
+            model, subfolder="scheduler", local_files_only=local_files_only
+        )
+        self.text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model, subfolder="text_encoder", local_files_only=local_files_only
+        )
+        self.vae = AutoencoderKLQwenImage.from_pretrained(
+            model, subfolder="vae", local_files_only=local_files_only
+        ).to(self.device)
+        self.transformer = QwenImageTransformer2DModelFixed(od_config=od_config)
+
+        self.stage = None
+        self.vae_scale_factor = (
+            2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
+        )
+        self.default_sample_size = 128
+
+        # Create adapter — single source of truth for model operations
+        self.adapter = QwenImageAdapter(
+            transformer=self.transformer,
+            scheduler=self.scheduler,
+            text_encoder=self.text_encoder,
+            vae=self.vae,
+            device=self.device,
+            model_path=model,
+        )
+
+    # =========================================================================
+    # Delegated lifecycle methods
+    # =========================================================================
+
+    def compute_weights_hash(self) -> dict[str, str]:
+        """Delegate to adapter."""
+        return self.adapter.compute_weights_hash()
+
+    def reinit_pos_embed(self) -> None:
+        """Delegate to adapter for RoPE reinitialization after sleep_level=2."""
+        self.adapter.reinit_non_persistent_states()
+
+    def load_non_dit_weights_from_disk(self) -> None:
+        """Delegate to adapter for frozen weight reload after sleep_level=2.
+        """
+        self.adapter.load_frozen_weights()
+
+    def load_transformer_base_weights(self, base_sd: dict) -> set[str]:
+        """Delegate to adapter: load base weights into the LoRA-wrapped transformer."""
+        return self.adapter.load_transformer_base_weights(base_sd)
+
+    # =========================================================================
+    # Delegated encode_prompt
+    # =========================================================================
+
+    def encode_prompt(
+        self,
+        prompt_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        num_images_per_prompt: int = 1,
+        prompt_embeds: torch.Tensor | None = None,
+        prompt_embeds_mask: torch.Tensor | None = None,
+        max_sequence_length: int = 1024,
+    ):
+        """Encode prompts via adapter, with pre-computed embedding passthrough."""
+        if prompt_embeds is not None:
+            # Pre-computed embeddings provided — just truncate and repeat
+            prompt_ids_2d = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
+            batch_size = prompt_embeds.shape[0]
+            prompt_embeds = prompt_embeds[:, :max_sequence_length]
+            prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
+            _, seq_len, _ = prompt_embeds.shape
+            prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+            prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            prompt_embeds_mask = prompt_embeds_mask.repeat(1, num_images_per_prompt, 1)
+            prompt_embeds_mask = prompt_embeds_mask.view(batch_size * num_images_per_prompt, seq_len)
+            return prompt_embeds, prompt_embeds_mask
+
+        # Delegate to adapter for text encoder forward
+        prompt = self.adapter.encode_prompt(
+            prompt_encoder=self.text_encoder,
+            prompt_inputs={
+                "prompt_ids": prompt_ids,
+                "attention_mask": attention_mask,
+                "num_images_per_prompt": num_images_per_prompt,
+                "max_sequence_length": max_sequence_length,
+            },
+        )
+        return prompt["prompt_embeds"], prompt["prompt_embeds_mask"]
+
+    # =========================================================================
+    # Delegated diffuse
+    # =========================================================================
+
+    def diffuse(
+        self,
+        prompt_embeds,
+        prompt_embeds_mask,
+        negative_prompt_embeds,
+        negative_prompt_embeds_mask,
+        latents,
+        img_shapes,
+        txt_seq_lens,
+        negative_txt_seq_lens,
+        timesteps,
+        do_true_cfg,
+        guidance,
+        guidance_scale,
+        noise_level,
+        sde_window,
+        sde_type,
+        generator,
+        logprobs,
+    ):
+        """Delegate to adapter.diffuse(), converting return format for pipeline contract."""
+        diffuse_input = QwenImageDiffuseInput(
+            latents=latents,
+            timesteps=timesteps,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            img_shapes=img_shapes,
+            txt_seq_lens=txt_seq_lens,
+            guidance_scale=guidance_scale,
+            negative_prompt_embeds=negative_prompt_embeds if do_true_cfg else None,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask if do_true_cfg else None,
+            negative_txt_seq_lens=negative_txt_seq_lens if do_true_cfg else None,
+            sde_type=sde_type,
+            noise_level=noise_level,
+            sde_window=sde_window,
+            generator=generator,
+            logprobs=logprobs,
+        )
+        output = self.adapter.diffuse(diffuse_input)
+        # Pipeline contract: return (final_latent, all_latents, all_log_probs, all_timesteps)
+        return output.final_latents, output.latents, output.log_probs, output.timesteps
+
+    # =========================================================================
+    # forward: vllm_omni entry point (stays here — request parsing + VAE decode)
+    # =========================================================================
+
+    def forward(
+        self,
+        req: OmniDiffusionRequest,
+        prompt_ids: torch.Tensor | list[int] | None = None,
+        prompt_mask: torch.Tensor | None = None,
+        negative_prompt_ids: torch.Tensor | list[int] | None = None,
+        negative_prompt_mask: torch.Tensor | None = None,
+        height: int | None = None,
+        width: int | None = None,
+        num_inference_steps: int = 50,
+        sigmas: list[float] | None = None,
+        guidance_scale: float = 1.0,
+        num_images_per_prompt: int = 1,
+        generator: torch.Generator | list[torch.Generator] | None = None,
+        latents: torch.Tensor | None = None,
+        prompt_embeds: torch.Tensor | None = None,
+        prompt_embeds_mask: torch.Tensor | None = None,
+        negative_prompt_embeds: torch.Tensor | None = None,
+        negative_prompt_embeds_mask: torch.Tensor | None = None,
+        output_type: str | None = "pil",
+        attention_kwargs: dict[str, Any] | None = None,
+        callback_on_step_end_tensor_inputs: tuple[str, ...] = ("latents",),
+        max_sequence_length: int = 512,
+        noise_level: float = 0.7,
+        sde_window_size: int | None = None,
+        sde_window_range: tuple[int, int] = (0, 5),
+        sde_type: Literal["sde", "cps", "ode"] = "sde",
+        logprobs: bool = True,
+    ) -> DiffusionOutput:
+        # Extract prompt data from OmniCustomPrompt in req.prompts[0]
+        custom_prompt = req.prompts[0] if req.prompts else {}
+        if isinstance(custom_prompt, dict):
+            prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
+            prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
+            negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
+            negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
+            # Set encode_start_idx on adapter so encode_prompt drops the correct prefix
+            encode_start_idx = custom_prompt.get("encode_start_idx", 0)
+            self.adapter.prompt_template_encode_start_idx = encode_start_idx
+
+        # Read sampling params from req.sampling_params
+        sp = req.sampling_params
+        height = sp.height or self.default_sample_size * self.vae_scale_factor
+        width = sp.width or self.default_sample_size * self.vae_scale_factor
+        num_inference_steps = sp.num_inference_steps or num_inference_steps
+        max_sequence_length = sp.max_sequence_length or max_sequence_length
+
+        noise_level = sp.extra_args.get("noise_level", None) or noise_level
+        sde_window_size = sp.extra_args.get("sde_window_size", None) or sde_window_size
+        sde_window_range = sp.extra_args.get("sde_window_range", None) or sde_window_range
+        sde_type = sp.extra_args.get("sde_type", None) or sde_type
+        logprobs = sp.extra_args.get("logprobs", logprobs)
+
+        generator = sp.generator or generator
+        if generator is None and sp.seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(sp.seed)
+        req_num_outputs = getattr(sp, "num_outputs_per_prompt", None)
+        if req_num_outputs and req_num_outputs > 0:
+            num_images_per_prompt = req_num_outputs
+
+        self._guidance_scale = guidance_scale
+        self._attention_kwargs = attention_kwargs
+        self._current_timestep = None
+        self._interrupt = False
+
+        if prompt_ids is not None:
+            if isinstance(prompt_ids, list):
+                prompt_ids = torch.tensor(prompt_ids, device=self.device)
+            batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+        elif prompt_embeds is not None:
+            batch_size = prompt_embeds.shape[0]
+        else:
+            # Both prompt_ids and prompt_embeds are None (e.g. during warmup).
+            return DiffusionOutput(output=None, custom_output={})
+
+        if isinstance(negative_prompt_ids, list):
+            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
+
+        has_neg_prompt = negative_prompt_ids is not None or (
+            negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
+        )
+
+        do_true_cfg = guidance_scale > 1 and has_neg_prompt
+        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
+            prompt_ids=prompt_ids,
+            attention_mask=prompt_mask,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_sequence_length,
+        )
+        if do_true_cfg:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
+                prompt_ids=negative_prompt_ids,
+                attention_mask=negative_prompt_mask,
+                prompt_embeds=negative_prompt_embeds,
+                prompt_embeds_mask=negative_prompt_embeds_mask,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+            )
+
+        num_channels_latents = self.transformer.in_channels // 4
+        latents = self.prepare_latents(
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds.dtype,
+            self.device,
+            generator,
+            latents,
+        )
+        img_shapes = [[(1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)]] * batch_size
+
+        timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
+        self._num_timesteps = len(timesteps)
+
+        # Handle guidance embedding
+        if self.transformer.guidance_embeds:
+            guidance = torch.full([1], guidance_scale, dtype=torch.float32)
+            guidance = guidance.expand(latents.shape[0])
+        else:
+            guidance = None
+
+        if self.attention_kwargs is None:
+            self._attention_kwargs = {}
+
+        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
+        negative_txt_seq_lens = (
+            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
+        )
+
+        if sde_window_size is not None:
+            start = torch.randint(
+                sde_window_range[0],
+                sde_window_range[1] - sde_window_size + 1,
+                (1,),
+                generator=generator,
+                device=self.device,
+            ).item()
+            end = start + sde_window_size
+            sde_window = (start, end)
+        else:
+            sde_window = (0, len(timesteps) - 1)
+
+        latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
+            prompt_embeds,
+            prompt_embeds_mask,
+            negative_prompt_embeds,
+            negative_prompt_embeds_mask,
+            latents,
+            img_shapes,
+            txt_seq_lens,
+            negative_txt_seq_lens,
+            timesteps,
+            do_true_cfg,
+            guidance,
+            guidance_scale,
+            noise_level,
+            sde_window,
+            sde_type,
+            generator,
+            logprobs,
+        )
+
+        self._current_timestep = None
+        if output_type == "latent":
+            image = latents
+        else:
+            latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+            latents = latents.to(self.vae.dtype)
+            latents_mean = (
+                torch.tensor(self.vae.config.latents_mean)
+                .view(1, self.vae.config.z_dim, 1, 1, 1)
+                .to(latents.device, latents.dtype)
+            )
+            latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, self.vae.config.z_dim, 1, 1, 1).to(
+                latents.device, latents.dtype
+            )
+            latents = latents / latents_std + latents_mean
+            image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
+
+        output_cpu = _maybe_to_cpu(image)
+        custom_output = {
+            "responses": _maybe_to_cpu(image),
+            "all_latents": _maybe_to_cpu(all_latents),
+            "rollout_log_probs": _maybe_to_cpu(all_log_probs),
+            "all_timesteps": _maybe_to_cpu(all_timesteps),
+            "prompt_embeds": _maybe_to_cpu(prompt_embeds),
+            "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
+        }
+        if (negative_prompt_embeds is None) != (negative_prompt_embeds_mask is None):
+            raise ValueError(
+                "negative_prompt_embeds and negative_prompt_embeds_mask must either both be present or both be absent"
+            )
+        if negative_prompt_embeds is not None:
+            custom_output.update(
+                {
+                    "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
+                    "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+                }
+            )
+        _logger.info(
+            "vllm_omni IPC pre-send summary: output=%s custom_output=%s",
+            _summarize_ipc_value(output_cpu),
+            _summarize_ipc_value(custom_output),
+        )
+        return DiffusionOutput(output=output_cpu, custom_output=custom_output)

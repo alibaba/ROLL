@@ -64,7 +64,7 @@ num_return_sequences_in_group: 8
 ### 调度与请求管理
 - `generate_opt_level`: 控制 LLM 生成（推理）的优化级别。设置为 0 时，使用基础批次生成接口；设置为 1 时，使用调度器处理请求。
 - `is_num_return_sequences_expand`: 是否在提示（prompts）中复制 num_return_sequences 次。如果为 True，LLM 会为每个输入提示生成多个独立的响应，而不是只生成一个。
-- `max_running_requests`: 在 LLM 推理服务器上可以同时处理的最大请求数量。这限制了并行推理的并发度。
+- `max_running_requests`: 在 LLM 推理服务器上可以同时处理的最大请求数量。这限制了并行推理的并发度。当 actor_infer 的 strategy_config 配置了 `max_num_seqs`（vllm）或 `max_running_requests`（sglang）时，该值会被自动对齐为 `max(128, 该值)`。
 - `is_use_additional_prompts`: 是否使用除常规批次大小之外的额外提示进行处理。
 - `max_additional_running_prompts`: 在 batch_size 之外，可以额外运行的提示数量。这可能用于处理一些特殊或低优先级的请求，而不会阻塞主批次。
 
@@ -256,11 +256,13 @@ reference:
 - `gpu_memory_utilization`: 用于模型执行器的 GPU 内存占比。 例如 0.6 表示使用 60% 的 GPU 内存。
 - `block_size`: token 块大小，用于连续的 token 块。影响 VLLM 内部的内存管理效率。
 - `max_model_len`: 模型上下文长度。如果未指定，将从模型配置中自动推导。
+- `max_num_seqs`: vLLM 引擎每次迭代可处理的最大序列数。配置该项后，router 的 `max_running_requests` 会被自动对齐为 `max(128, max_num_seqs)`，避免路由层限制低于引擎并发能力。
 - `load_format`: 加载模型权重的格式。由于模型会在开始时进行"更新"，此值可以设置为 dummy。
 
 #### SGLang 策略配置
 
 - `mem_fraction_static`: 用于模型权重和 KV 缓存等静态内存的 GPU 内存占比。 如果 KV 缓存构建失败，请增加此值；如果 CUDA 内存不足，请减小此值。
+- `max_running_requests`: 引擎可同时处理的最大请求数。配置该项后，router 的 `max_running_requests` 会被自动对齐为 `max(128, 该值)`，避免路由层限制低于引擎并发能力。
 - `load_format`: 加载模型权重的格式。（同 VLLM，可设为 dummy）
 
 #### FSDP2 策略配置
@@ -268,8 +270,16 @@ reference:
 - `fsdp_size`：FSDP 分片数量
   - 如果 `fsdp_size >= world_size` 或 `fsdp_size <= 1`：纯 FSDP2 模式
   - 如果 `fsdp_size < world_size`：带有 DDP 副本的 HSDP 模式
-- `param_dtype`：参数数据类型（例如 `bf16`、`fp16`、`float32`）
-- `reduce_dtype`：梯度归约的数据类型（例如 `float32`）
+- `enable_mix_precision`：`fsdp2_train` 推荐使用的混合精度设置
+  - `true`：训练时使用 `param_dtype=bf16`、`reduce_dtype=float32`
+  - `false`：训练时使用 `param_dtype=bf16`、`reduce_dtype=bf16`
+  - 如果显式配置了 `param_dtype` 或 `reduce_dtype`，则以显式配置为准，`enable_mix_precision` 不生效。
+- `param_dtype`：可选的参数数据类型（例如 `bf16`、`fp16`、`float32`）
+  - 对于 `fsdp2_train`，仅在需要使用不同于 `enable_mix_precision` 的自定义精度配置时设置。
+  - 对于 `fsdp2_infer`，默认值为 `bf16`；只有需要修改推理精度时才设置。
+- `reduce_dtype`：可选的 `fsdp2_train` 梯度归约数据类型覆盖配置（例如 `bf16`、`fp16`、`float32`）
+  - 对于 `fsdp2_train`，仅在需要使用不同于 `enable_mix_precision` 的自定义精度配置时设置。
+  - `fsdp2_infer` 不需要配置该参数，因为推理过程中不进行梯度归约。
 - `reshard_after_forward`：是否在前向传播后重新分片参数
   - `true`：前向传播后重新分片
   - `false`：保持参数gathered

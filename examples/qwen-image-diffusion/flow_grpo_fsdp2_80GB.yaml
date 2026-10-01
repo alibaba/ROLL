@@ -1,0 +1,170 @@
+# Requires at least 80GB GPU VARM
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+lr: 4e-5
+ga_steps: 1
+
+exp_name: "qwen_image_flow_grpo_fsdp2_lr_${lr}_ga_steps_${ga_steps}"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+transfer_backend:
+  backend_name: TransferQueue
+  backend_config:
+    backend:
+      SimpleStorage:
+        num_data_storage_units: 16
+
+checkpoint_config:
+  type: mos
+
+track_with: ml_tracker
+tracker_kwargs:
+ project: roll_qwenimage_diffusion # ml_tracker的实验名，
+ notes: "scale aligner qwenimage diffusion rl"
+ tags: # mltracker job tags，后续方便管理实验
+   - pipeline
+   - roll
+   - diffusion
+   - diffusion_qwen_image
+
+# track_with: tensorboard
+# tracker_kwargs:
+#   log_dir: ./output/logs
+
+max_steps: 100
+eval_steps: 5
+save_steps: 5
+rollout_batch_size: 32
+prompt_length: 1058
+sequence_length: 1059
+ppo_epochs: 1
+pg_clip: 0.0001
+advantage_clip: 5.0
+
+adv_estimator: flowgrpo
+enable_reference: false
+use_kl_loss: false
+kl_loss_coef: 0.0
+is_offload_optimizer_states_in_train_step: true
+pretrain: Qwen/Qwen-Image
+num_return_sequences_in_group: 16
+is_num_return_sequences_expand: true
+diffusion_model_variant: qwen_image
+val_before_train: true
+
+dump_step_output_type: []
+dump_step_output_idx: "list(range(0,100))"
+dump_step_output_path: ./output/dump/
+
+actor_train:
+  infer_batch_size: 32
+  model_args:
+    model_name_or_path: Qwen/Qwen-Image
+    model_type: diffusion_model
+    dtype: bf16
+  training_args:
+    learning_rate: ${lr}
+    weight_decay: 1e-4
+    per_device_train_batch_size: 32
+    gradient_accumulation_steps: ${ga_steps}
+    num_train_epochs: 1
+  data_args:
+    template: native
+    file_name:
+      - data/ocr/train.json
+    messages: prompt
+    preprocessing_num_workers: 1
+  strategy_args:
+    strategy_name: fsdp2_diffusion_train
+    strategy_config:
+      fsdp_size: 8
+      reshard_after_forward: true
+      offload_policy: false
+      forward_prefetch: true
+      fused_optimizer: true
+  device_mapping: list(range(0,8))
+
+actor_infer:
+  worker_cls: roll.pipeline.base_worker.InferWorker
+  infer_batch_size: 32
+  model_args:
+    model_name_or_path: Qwen/Qwen-Image
+    model_type: diffusion_model
+    dtype: bf16
+  generating_args:
+    num_return_sequences: ${num_return_sequences_in_group}
+    temperature: 0
+    top_p: 1.0
+    top_k: 50
+    max_length: 1058
+    max_sequence_length: 1058
+    max_new_tokens: 1
+    height: 512
+    width: 512
+    num_inference_steps: 10
+    guidance_scale: 1.0
+    extra_args:
+      logprobs: true
+      noise_level: 1.0
+      sde_type: sde
+      sde_window_size: 2
+      sde_window_range: [0, 5]
+  data_args:
+    template: native
+  strategy_args:
+    strategy_name: vllm_omni
+    strategy_config:
+      enforce_eager: true
+      load_format: safetensors
+      sleep_level: 2
+      vllm_omni:
+        custom_pipeline: roll.pipeline.diffusion.models.qwen_image.vllm_omni_qwen_image_adapter.QwenImagePipelineWithLogProb
+  device_mapping: "list(range(0,8))"
+
+validation:
+  data_args:
+    template: native
+    file_name:
+      - data/ocr/test.json
+    messages: prompt
+    preprocessing_num_workers: 1
+  generating_args:
+    num_return_sequences: 1
+    num_inference_steps: 50
+    height: 512
+    width: 512
+    max_sequence_length: 1058
+    guidance_scale: 1.0
+
+rewards:
+  ocr_reward:
+    name: ocr_reward
+    worker_cls: roll.pipeline.diffusion.rewards.qwen_vl_judge_reward_worker.QwenVLJudgeRewardWorker
+    judge_model_type: inference
+    tag_included: [ocr]
+    model_args:
+      model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
+      dtype: bf16
+    generating_args:
+      max_new_tokens: 32
+      temperature: 0
+      top_p: 0.8
+      num_return_sequences: 1
+    data_args:
+      template: native
+    strategy_args:
+      strategy_name: vllm
+      strategy_config:
+        gpu_memory_utilization: 0.1
+        enforce_eager: false
+        max_model_len: 8192
+        tensor_parallel_size: 4
+        load_format: auto
+        max_num_seqs: 1
+    device_mapping: "list(range(0,8))"
+    infer_batch_size: 128

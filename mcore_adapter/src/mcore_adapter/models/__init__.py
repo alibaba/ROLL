@@ -1,6 +1,7 @@
 from . import (
     deepseek_v3,
     glm4_moe,
+    kimi_k25,
     llama,
     mistral,
     mixtral,

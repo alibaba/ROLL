@@ -8,15 +8,16 @@ if TYPE_CHECKING:
 import torch
 import math
 import copy
+import numpy as np
 from dataclasses import field, dataclass, asdict
 from typing import Iterator, Tuple, Dict, List
 import torch.distributed as dist
 from roll.configs.worker_config import SequencePackingConfig
 
 def make_micro_batch_iter_for_sequence_packing(mini_batch, tp_size, cp_size, vp_size, is_train=False, dp_group=None,
-                                               micro_batch_size=None, config: SequencePackingConfig = None):
+                                               micro_batch_size=None, config: SequencePackingConfig = None, pp_size: int = 1):
     packer = get_sequence_packing_packer(config)
-    return packer.make_micro_batch_iter_for_sequence_packing(mini_batch, tp_size, cp_size, vp_size, is_train, dp_group, micro_batch_size)
+    return packer.make_micro_batch_iter_for_sequence_packing(mini_batch, tp_size, cp_size, vp_size, is_train, dp_group, micro_batch_size, pp_size)
 
 def restore_results_order(
             results: Dict[str, torch.Tensor],
@@ -68,17 +69,38 @@ class SequencePackingPacker:
         """Ceiling division."""
         return -(a // -b)
 
+    @staticmethod
+    def _compute_packing_metrics(attention_mask, partition_indices_list, num_micro_batches, is_train):
+        phase = "train" if is_train else "forward"
+        batch_size = attention_mask.shape[0]
+        max_seq_len = attention_mask.shape[-1]
+        raw_seqlens = attention_mask.sum(dim=1).tolist()
+        total_seqlen = sum(raw_seqlens)
+        seqlen_per_mb = [sum(raw_seqlens[i] for i in p) for p in partition_indices_list]
+        max_seqlen_mb = max(seqlen_per_mb) if seqlen_per_mb else 1
+        min_seqlen_mb = min(seqlen_per_mb) if seqlen_per_mb else 0
+        return {
+            f"{phase}/num_micro_batches": float(num_micro_batches),
+            f"{phase}/effective_ratio": total_seqlen / (batch_size * max_seq_len) if batch_size * max_seq_len > 0 else 0.0,
+            f"{phase}/seq_len_balance_ratio": min_seqlen_mb / max_seqlen_mb if max_seqlen_mb > 0 else 0.0,
+            f"{phase}/avg_samples_per_pack": batch_size / num_micro_batches if num_micro_batches > 0 else 0.0,
+        }
+
     def make_micro_batch_iter_for_sequence_packing(
             self,
             mini_batch: DataProto,
             tp_size, cp_size, vp_size, is_train=False,
-            dp_group=None, micro_batch_size=None
+            dp_group=None, micro_batch_size=None, pp_size: int = 1
     ) -> Iterator[DataProto]:
         assert micro_batch_size is not None, "SequencePackingPacker: micro_batch_size is None"
         mini_batch_size = len(mini_batch)
         mini_batch.meta_info['partition_indices_list'] = []
         num_microbatches = mini_batch_size // micro_batch_size
         mini_batch.meta_info['num_micro_batchs'] = num_microbatches
+        attention_mask = mini_batch.batch["attention_mask"]
+        partition_indices = [list(arr) for arr in np.array_split(np.arange(mini_batch_size), num_microbatches)]
+        mini_batch.meta_info['sequence_packing_metrics'] = self._compute_packing_metrics(
+            attention_mask, partition_indices, num_microbatches, is_train)
         return iter(mini_batch.chunk(chunks=num_microbatches))
 
     @staticmethod
@@ -124,7 +146,8 @@ class LoadBalancePacker(SequencePackingPacker):
             vp_size: int,
             is_train=False,
             dp_group=None,
-            micro_batch_size=None
+            micro_batch_size=None,
+            pp_size: int = 1
     ) -> Iterator[DataProto]:
         """
         Split mini_batch into micro batches with sequence packing strategy.
@@ -203,18 +226,20 @@ class LoadBalancePacker(SequencePackingPacker):
             )
             num_micro_batches = num_micro_batches_tensor.cpu().item()
 
-        # Step 4: Round up to be divisible by vp_size
-        if vp_size > 1:
-            num_micro_batches = self.roundup_divisible(num_micro_batches, vp_size)
+        # Step 4: VP interleaved schedule requires num_microbatches % microbatch_group_size_per_vp_stage == 0.
+        # microbatch_group_size_per_vp_stage defaults to pp_size in Megatron. Non-VP PP has no such constraint.
+        if vp_size is not None and vp_size > 1:
+            num_micro_batches = self.roundup_divisible(num_micro_batches, pp_size)
 
         # Step 5: Calculate workload for load balancing
         # Use squared sequence length as proxy for attention computation cost
         workloads = self.calculate_workload_batch(seq_len_effective)
+        workloads_list = workloads.tolist()
 
         from roll.utils.functionals import get_seqlen_balanced_partitions
         # Step 6: Partition samples into micro batches with balanced workload
         micro_batch_indices = get_seqlen_balanced_partitions(
-            seqlen_list=workloads.tolist(),
+            seqlen_list=workloads_list,
             k_partitions=num_micro_batches,
             equal_size=False  # Allow variable sizes for better balance
         )
@@ -224,7 +249,7 @@ class LoadBalancePacker(SequencePackingPacker):
         micro_batch_indices_with_workload = [
             (
                 partition,
-                sum(workloads[idx].item() for idx in partition),
+                sum(workloads_list[idx] for idx in partition),
                 partition[0] if partition else 0  # tie-breaker
             )
             for partition in micro_batch_indices
@@ -241,6 +266,8 @@ class LoadBalancePacker(SequencePackingPacker):
         reordered_indices = sorted_indices[::2][::-1] + sorted_indices[1::2]
 
         mini_batch.meta_info['partition_indices_list'] = reordered_indices.copy()
+        mini_batch.meta_info['sequence_packing_metrics'] = self._compute_packing_metrics(
+            attention_mask, reordered_indices, num_micro_batches, is_train)
 
         # Step 8: Generate micro batches
         generated_count = 0

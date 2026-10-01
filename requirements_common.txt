@@ -33,6 +33,7 @@ opentelemetry-exporter-otlp
 opentelemetry-proto
 
 math-verify
+mathruler
 openai
 langdetect
 nltk>=3.8
@@ -49,6 +50,7 @@ hydra-core
 omegaconf
 latex2sympy2==1.5.4
 latex2sympy2_extended==1.10.1
+pylatexenc==2.10.0
 antlr4-python3-runtime==4.9.3
 
 ./mcore_adapter

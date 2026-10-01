@@ -3,7 +3,8 @@ import json
 import os
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from functools import partial
 from typing import Any, Dict, List, Optional
@@ -19,7 +20,7 @@ from ray.util.timer import _Timer
 from roll.configs import GeneratingArguments
 from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
-from roll.datasets.dataset import get_dataset
+from roll.datasets.dataset import get_dataset, update_dataset_domain
 from roll.distributed.executor.cluster import Cluster
 from roll.configs.base_config import RouterArguments
 from roll.distributed.scheduler.generate_scheduler import DynamicSamplingScheduler
@@ -30,17 +31,20 @@ from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.worker_state import WorkerState
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
-from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
+from roll.pipeline.rlvr.utils import dump_batch_to_reward_system, dump_rollout_to_specific_path
 from roll.utils.dynamic_batching import dynamic_batching_shard
 from roll.utils.functionals import (
     RunningMoments,
     clusters_have_disjoint_devices,
     agg_loss,
+    attach_routed_experts,
     build_domain_routing_context,
     compute_advantage,
     compute_ref_log_probs_with_routing,
     compute_token_reward,
     get_sample_level_mask,
+    hold_aside_routed_experts,
+    opsd_teacher_context,
     reduce_metrics,
     reward_postprocess,
     batch_balance,
@@ -91,6 +95,8 @@ def get_encode_function(template_name, tokenizer, data_args, tag_to_template=Non
                 template_funcs[tmpl_name] = get_chat_template(tmpl_name, tokenizer)
 
     tag_key = getattr(data_args, "tag", "tag")
+    enable_thinking = getattr(data_args, "enable_thinking", None)
+    extra_kwargs = {"enable_thinking": enable_thinking} if enable_thinking is not None else {}
 
     def encode_function(data_i):
         text_list = []
@@ -101,7 +107,7 @@ def get_encode_function(template_name, tokenizer, data_args, tag_to_template=Non
                 if isinstance(messages, str):
                     messages = json.loads(messages)
                 tmpl_name = tag_to_template.get(tag, template_name) if tag_to_template else template_name
-                text_list.append(template_funcs[tmpl_name](messages))
+                text_list.append(template_funcs[tmpl_name](messages, **extra_kwargs))
         elif (prompt_key := getattr(data_args, "prompt", "prompt")) in data_i:
             for prompt in data_i[prompt_key]:
                 text_list.append(prompt)
@@ -109,13 +115,6 @@ def get_encode_function(template_name, tokenizer, data_args, tag_to_template=Non
         return encodings
 
     return encode_function
-
-
-def update_dataset_domain(tag_2_domain: Dict[str, set[str]], row):
-    if "domain" in row and row["domain"] is not None:
-        return row
-    row["domain"] = tag_2_domain.get(row["tag"], "math_rule")
-    return row
 
 
 
@@ -174,10 +173,28 @@ class RLVRPipeline(BasePipeline):
             assert len(self.domain_datasets[domain]) > 0, f"domain dataset {domain} has no data"
 
         if self.val_dataset:
+            # Validation supports configuring a thinking mode different from training.
+            # Only override enable_thinking and keep the actor's field mappings
+            # (messages/prompt/tag) since validation.data_args leaves them unset.
+            val_enable_thinking = self.pipeline_config.validation.data_args.enable_thinking
+            val_encode_function = encode_function
+            if (
+                val_enable_thinking is not None
+                and val_enable_thinking != self.pipeline_config.actor_train.data_args.enable_thinking
+            ):
+                val_data_args = dataclass_replace(
+                    self.pipeline_config.actor_train.data_args, enable_thinking=val_enable_thinking
+                )
+                val_encode_function = get_encode_function(
+                    template_name,
+                    self.tokenizer,
+                    val_data_args,
+                    tag_to_template=self.pipeline_config.tag_to_template,
+                )
             self.val_dataset = preprocess_dataset(
                 self.val_dataset,
                 self.pipeline_config.prompt_length,
-                encode_function,
+                val_encode_function,
                 data_args=self.pipeline_config.actor_train.data_args,
             )
             self.val_dataset = self.val_dataset.map(
@@ -196,69 +213,96 @@ class RLVRPipeline(BasePipeline):
             target_kl=self.pipeline_config.target_kl,
             kl_horizon=self.pipeline_config.kl_horizon,
         )
-
         assert self.pipeline_config.max_steps > 0, "max_steps must be greater than 0"
         self.pipeline_config.set_max_steps(max_steps=self.pipeline_config.max_steps)
 
-        self.actor_train: Any = Cluster(
-            name=self.pipeline_config.actor_train.name,
-            worker_cls=self.pipeline_config.actor_train.worker_cls,
-            resource_manager=self.resource_manager,
-            worker_config=self.pipeline_config.actor_train,
-        )
-        self.actor_infer: Any = Cluster(
-            name=self.pipeline_config.actor_infer.name,
-            worker_cls=self.pipeline_config.actor_infer.worker_cls,
-            resource_manager=self.resource_manager,
-            worker_config=self.pipeline_config.actor_infer,
-        )
-        download_clusters = [self.actor_train, self.actor_infer]
+        # Build cluster creation specs (label, name, worker_cls, worker_config)
+        # All clusters are created in parallel since Cluster.__init__ only allocates
+        # placement groups and creates Ray actors (no GPU work), which is thread-safe.
+        cluster_specs: List[tuple] = []
+
+        cluster_specs.append((
+            "actor_train",
+            self.pipeline_config.actor_train.name,
+            self.pipeline_config.actor_train.worker_cls,
+            self.pipeline_config.actor_train,
+        ))
+        cluster_specs.append((
+            "actor_infer",
+            self.pipeline_config.actor_infer.name,
+            self.pipeline_config.actor_infer.worker_cls,
+            self.pipeline_config.actor_infer,
+        ))
+
         # use unwrapped model as reference for lora training
         if self.use_ref_model:
-            self.references: Dict[str, Any] = {}
             for name, ref_cfg in self.pipeline_config.reference_configs.items():
-                self.references[name] = Cluster(
-                    name=ref_cfg.name,
-                    worker_cls=ref_cfg.worker_cls,
-                    resource_manager=self.resource_manager,
-                    worker_config=ref_cfg,
-                )
-            download_clusters.extend(self.references.values())
-            # Backward compat: self.reference points to the first teacher
-            self.reference = self.references[list(self.references.keys())[0]]
+                cluster_specs.append((
+                    f"reference_{name}",
+                    ref_cfg.name,
+                    ref_cfg.worker_cls,
+                    ref_cfg,
+                ))
+
         if self.pipeline_config.adv_estimator == "gae":
-            self.critic: Any = Cluster(
-                name=self.pipeline_config.critic.name,
-                worker_cls=self.pipeline_config.critic.worker_cls,
-                resource_manager=self.resource_manager,
-                worker_config=self.pipeline_config.critic,
-            )
-            download_clusters.append(self.critic)
-        self.rewards: Dict[str, Any] = {
-            key: Cluster(
-                name=f"reward-{key}",
-                worker_cls=worker_config.worker_cls,
-                resource_manager=self.resource_manager,
-                worker_config=worker_config,
-            )
-            for key, worker_config in self.pipeline_config.rewards.items()
-        }
-        download_clusters.extend(self.rewards.values())
+            cluster_specs.append((
+                "critic",
+                self.pipeline_config.critic.name,
+                self.pipeline_config.critic.worker_cls,
+                self.pipeline_config.critic,
+            ))
+
+        for key, worker_config in self.pipeline_config.rewards.items():
+            cluster_specs.append((
+                f"reward_{key}",
+                f"reward-{key}",
+                worker_config.worker_cls,
+                worker_config,
+            ))
 
         # Create reward model cluster (shared InferWorker + vLLM for LLM-as-judge)
         self.reward_model_cluster = None
         self.reward_model_scheduler = None
-        if (
+        has_reward_model = (
             self.pipeline_config.reward_model is not None
             and self.pipeline_config.reward_model.device_mapping
             and len(self.pipeline_config.reward_model.device_mapping) > 0
-        ):
-            self.reward_model_cluster = Cluster(
-                name=self.pipeline_config.reward_model.name,
-                worker_cls=self.pipeline_config.reward_model.worker_cls,
-                resource_manager=self.resource_manager,
-                worker_config=self.pipeline_config.reward_model,
-            )
+        )
+        if has_reward_model:
+            cluster_specs.append((
+                "reward_model",
+                self.pipeline_config.reward_model.name,
+                self.pipeline_config.reward_model.worker_cls,
+                self.pipeline_config.reward_model,
+            ))
+
+        # Create all clusters in parallel
+        clusters = self.create_clusters_parallel(cluster_specs)
+
+        # Assign clusters to attributes (preserving original order semantics)
+        self.actor_train = clusters["actor_train"]
+        self.actor_infer = clusters["actor_infer"]
+        download_clusters = [self.actor_train, self.actor_infer]
+
+        if self.use_ref_model:
+            self.references: Dict[str, Any] = {}
+            for name in self.pipeline_config.reference_configs.keys():
+                self.references[name] = clusters[f"reference_{name}"]
+            download_clusters.extend(self.references.values())
+            # Backward compat: self.reference points to the first teacher
+            self.reference = self.references[list(self.references.keys())[0]]
+
+        if self.pipeline_config.adv_estimator == "gae":
+            self.critic = clusters["critic"]
+            download_clusters.append(self.critic)
+
+        self.rewards: Dict[str, Any] = {
+            key: clusters[f"reward_{key}"] for key in self.pipeline_config.rewards.keys()
+        }
+        download_clusters.extend(self.rewards.values())
+
+        if has_reward_model:
+            self.reward_model_cluster = clusters["reward_model"]
             download_clusters.append(self.reward_model_cluster)
 
         self.download_models(*download_clusters)
@@ -511,6 +555,7 @@ class RLVRPipeline(BasePipeline):
                     meta_info={
                         "global_step": global_step,
                         "collect_unfinished": self.pipeline_config.async_pipeline,
+                        "reward_system_config": self.pipeline_config.reward_system_config
                         }
                 )
 
@@ -581,7 +626,6 @@ class RLVRPipeline(BasePipeline):
                 batch = generate_output
                 defer.callback(lambda b=batch: DataProto.drop(b))
                 batch.meta_info["global_step"] = global_step
-                batch.meta_info["_broadcast_non_tensor_batch"] = True
                 batch.meta_info["loss_mask_keys"] = ['response_mask', 'final_response_mask']
                 batch.non_tensor_batch['sample_uuid'] = np.array([str(uuid.uuid4()) for _ in range(batch.batch.shape[0])], dtype=object)
                 batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
@@ -589,42 +633,56 @@ class RLVRPipeline(BasePipeline):
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer, \
                         tracer.start_as_current_span("ref_log_probs"):
                     if self.pipeline_config.enable_reference:
+                        opsd_active = getattr(self.pipeline_config, "opsd_mode", False)
+                        # OPSD assumes a single teacher: thinking mode comes from the first
+                        # (and normally only) reference config. In LoRA mode that entry is the
+                        # auto-aliased student_train, so the teacher inherits the student's
+                        # enable_thinking unless an explicit teacher section sets data_args.
+                        ref_cfg = next(iter(self.pipeline_config.reference_configs.values()))
+                        teacher_enable_thinking = getattr(getattr(ref_cfg, "data_args", None), "enable_thinking", None)
                         if not self.use_ref_model:
-                            # LoRA branch: use actor_train with disabled adapter
-                            worker_config = self.pipeline_config.actor_train
-                            batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
-                            batch.meta_info["disable_adapter"] = True
-                            batch.meta_info["is_offload_states"] = False
-                            if worker_config.use_dynamic_batching_in_infer:
-                                batch, dynamic_batching_metrics = dynamic_batching_shard(
-                                    batch,
-                                    self.actor_train.dp_size,
-                                    worker_config.max_tokens_per_microbatch_in_infer,
-                                    worker_config.sequence_length_round_in_infer,
-                                    worker_config.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
-                                    worker_config.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
-                                    "reference/compute_log_probs",
-                                )
-                                metrics_mgr.add_metrics(dynamic_batching_metrics)
-                            ref_log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
-                            ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
-                            batch = batch.union(ref_log_probs)
-                            metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
+                            # LoRA branch: use actor_train with disabled adapter.
+                            # Ref log-prob pass doesn't need routed_experts; hold it aside
+                            # and re-align it with prompt_id after the in-place reordering.
+                            with hold_aside_routed_experts(batch, realign_key="prompt_id"):
+                                worker_config = self.pipeline_config.actor_train
+                                batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
+                                batch.meta_info["disable_adapter"] = True
+                                batch.meta_info["is_offload_states"] = False
+                                if worker_config.use_dynamic_batching_in_infer:
+                                    batch, dynamic_batching_metrics = dynamic_batching_shard(
+                                        batch,
+                                        self.actor_train.dp_size,
+                                        worker_config.max_tokens_per_microbatch_in_infer,
+                                        worker_config.sequence_length_round_in_infer,
+                                        worker_config.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
+                                        worker_config.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
+                                        "reference/compute_log_probs",
+                                    )
+                                    metrics_mgr.add_metrics(dynamic_batching_metrics)
+                                with opsd_teacher_context(batch, self.tokenizer, self.pipeline_config, teacher_enable_thinking) if opsd_active else nullcontext():
+                                    ref_log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
+                                    ref_name = list(self.pipeline_config.reference_configs.keys())[0]
+                                    ref_log_probs.rename(old_keys="log_probs", new_keys=f"ref_log_probs_{ref_name}")
+                                    for key in ref_log_probs.batch.keys():
+                                        if key not in batch.batch:
+                                            batch.batch[key] = ref_log_probs.batch[key]
+                                    batch.batch["ref_log_probs"] = batch.batch[f"ref_log_probs_{ref_name}"]
+                                    metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
                         else:
-                            saved_routed_experts = batch.batch.pop("routed_experts", None)
-                            domain_to_teacher_names, domain_values = build_domain_routing_context(
-                                batch, self.pipeline_config, domain_key="domain"
-                            )
-                            batch = compute_ref_log_probs_with_routing(
-                                batch=batch,
-                                references=self.references,
-                                pipeline_config=self.pipeline_config,
-                                domain_to_teacher_names=domain_to_teacher_names,
-                                domain_values=domain_values,
-                                metrics_fn=metrics_mgr.add_metrics,
-                            )
-                            if saved_routed_experts is not None:
-                                batch.batch["routed_experts"] = saved_routed_experts
+                            with hold_aside_routed_experts(batch):
+                                domain_to_teacher_names, domain_values = build_domain_routing_context(
+                                    batch, self.pipeline_config, domain_key="domain"
+                                )
+                                with opsd_teacher_context(batch, self.tokenizer, self.pipeline_config, teacher_enable_thinking) if opsd_active else nullcontext():
+                                    batch = compute_ref_log_probs_with_routing(
+                                        batch=batch,
+                                        references=self.references,
+                                        pipeline_config=self.pipeline_config,
+                                        domain_to_teacher_names=domain_to_teacher_names,
+                                        domain_values=domain_values,
+                                        metrics_fn=metrics_mgr.add_metrics,
+                                    )
                 metrics_mgr.add_metric("time/ref_log_probs_values", cal_ref_log_probs_timer.last)
 
                 with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer, \
@@ -633,7 +691,9 @@ class RLVRPipeline(BasePipeline):
                         batch.meta_info["disable_adapter"] = False
                     batch.meta_info["is_offload_states"] = False
                     if self.pipeline_config.adv_estimator == "gae":
-                        values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
+                        # Critic doesn't need routed_experts; hold it aside during dispatch.
+                        with hold_aside_routed_experts(batch):
+                            values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
 
                     if self.pipeline_config.enable_old_logprobs_recompute:
                         batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
@@ -669,6 +729,9 @@ class RLVRPipeline(BasePipeline):
 
                         batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
                         metrics_mgr.add_reduced_metrics(old_log_probs.meta_info.pop("metrics", {}))
+                        # R2 mode: extract routed_experts from compute_log_probs output,
+                        # keeping it in the TQ remote view when possible.
+                        attach_routed_experts(batch, old_log_probs)
                     else:
                         # Use zeros when optimization is enabled
                         batch.batch["old_log_probs"] = torch.zeros_like(batch.batch["attention_mask"][:, 1:])
@@ -690,128 +753,136 @@ class RLVRPipeline(BasePipeline):
                 metrics_mgr.add_metric("time/old_log_probs", cal_old_logpb_timer.last)
 
                 # 要按domain group by处理reward
-                batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
-                batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
-                batch_list = []
-                for domain, domain_batch in batch_grouped.items():
-                    # 1. 处理mask相关策略， 获取sample level mask
-                    with Timer(name="get_sample_level_mask", logger=None) as get_sample_level_mask_timer, \
-                            tracer.start_as_current_span("get_sample_level_mask"):
-                        domain_batch, mask_metrics = get_sample_level_mask(domain_batch, self.pipeline_config)
-                        metrics_mgr.add_domain_metrics(domain, mask_metrics)
-                    metrics_mgr.add_domain_metrics(domain, {"time/get_sample_level_mask": get_sample_level_mask_timer.last})
+                # routed_experts is only needed by actor old_log_probs / train_step; hold it aside so
+                # reorder/group_by/advantage CPU ops don't drag the large tensor around.
+                _reorder_idx = torch.argsort(batch.batch["prompt_id"])
+                with hold_aside_routed_experts(batch, realign_indices=_reorder_idx) as restore:
+                    batch.reorder(indices=_reorder_idx)
+                    batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
+                    batch_list = []
+                    for domain, domain_batch in batch_grouped.items():
+                        # 1. 处理mask相关策略， 获取sample level mask
+                        with Timer(name="get_sample_level_mask", logger=None) as get_sample_level_mask_timer, \
+                                tracer.start_as_current_span("get_sample_level_mask"):
+                            domain_batch, mask_metrics = get_sample_level_mask(domain_batch, self.pipeline_config)
+                            metrics_mgr.add_domain_metrics(domain, mask_metrics)
+                        metrics_mgr.add_domain_metrics(domain, {"time/get_sample_level_mask": get_sample_level_mask_timer.last})
 
-                    # 2. 处理reward相关策略
-                    with Timer(name="reward_postprocess", logger=None) as reward_postprocess_timer, \
-                            tracer.start_as_current_span("reward_postprocess"):
-                        domain_batch, response_level_metrics = reward_postprocess(
-                            domain_batch, self.pipeline_config, self.running
-                        )
-                        metrics_mgr.add_domain_metrics(domain, response_level_metrics)
-                    metrics_mgr.add_domain_metrics(domain, {"time/reward_postprocess": reward_postprocess_timer.last})
-
-                    # 3. 计算token level rewards
-                    with Timer(name="get_token_reward", logger=None) as get_token_reward_timer, \
-                            tracer.start_as_current_span("compute_token_reward"):
-                        domain_batch, token_level_metrics = compute_token_reward(
-                            domain_batch, self.pipeline_config, self.kl_ctrl
-                        )
-                        metrics_mgr.add_domain_metrics(domain, token_level_metrics)
-                    metrics_mgr.add_domain_metrics(domain, {"time/get_token_reward": get_token_reward_timer.last})
-
-                    # 4. 计算advantage
-                    final_response_mask = domain_batch.batch["final_response_mask"].clone()
-                    with Timer(name="compute_advantage", logger=None) as compute_advantage_timer, \
-                            tracer.start_as_current_span("compute_advantage"):
-                        domain_batch = compute_advantage(
-                            data=domain_batch,
-                            gamma=self.pipeline_config.gamma,
-                            lambd=self.pipeline_config.lambd,
-                            adv_estimator=self.pipeline_config.adv_estimator,
-                            advantage_clip=self.pipeline_config.advantage_clip,
-                            whiten_advantages=self.pipeline_config.whiten_advantages,
-                            whiten_rewards=self.pipeline_config.whiten_rewards,
-                            response_mask=final_response_mask,
-                            pipeline_config=self.pipeline_config,
-                        )
-                        domain_metrics = reduce_metrics(domain_batch.meta_info.pop("metrics", {}))
-                        metrics_mgr.add_domain_metrics(domain, domain_metrics)
-                        batch_list.append(domain_batch)
-                    metrics_mgr.add_domain_metrics(domain, {"time/compute_advantage": compute_advantage_timer.last})
-                    if self.pipeline_config.save_logging_board_dir:
-                        self.save_metrics(domain_batch)
-
-                batch = DataProto.concat(batch_list)
-
-                if batch.batch["final_response_mask"].sum() == 0:
-                    logger.info("Warning: final_response_mask.sum() == 0! Current step will be skipped.")
-                    metrics_mgr.add_metric("mask/final_mask_sum_eq_0", 1)
-                    metrics = metrics_mgr.get_metrics()
-                    # do ckpt
-                    self.state.step = global_step
-                    self.state.log_history.append(metrics)
-                    for domain, scheduler in self.generate_schedulers.items():
-                        self.state.kv[f"scheduler_state_{domain}"] = ray.get(scheduler.get_scheduler_state.remote())
-                    self.do_checkpoint(global_step=global_step)
-                    self.tracker.log(values=metrics, step=global_step)
-                    continue
-                else:
-                    metrics_mgr.add_metric("mask/final_mask_sum_eq_0", 0)
-
-                batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
-                batch.pop("prompt_id")
-
-                metrics_mgr.add_all_metrics(
-                    global_step,
-                    batch,
-                    resource_manager=self.resource_manager,
-                    actor_infer=self.actor_infer,
-                    actor_train=self.actor_train,
-                )
-                batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
-                metrics_mgr.add_domain_all_metrics(global_step, batch_grouped)
-
-                if self.pipeline_config.enable_old_logprobs_recompute:
-                    batch, corr_metrics = apply_train_infer_correction_to_batch(self.pipeline_config, batch,
-                                                                                update_mask_keys=batch.meta_info[
-                                                                                    'loss_mask_keys'])
-                    metrics_mgr.add_metrics(corr_metrics)
-
-                with Timer(name="step_train", logger=None) as step_train_timer, \
-                        tracer.start_as_current_span("train"):
-                    if self.pipeline_config.adv_estimator == "gae":
-                        critic_train_metrics_refs: List[ray.ObjectRef] = self.critic.train_step(batch, blocking=False)
-
-                    with actor_train_timer:
-                        # implement critic warmup
-                        if self.pipeline_config.critic_warmup <= global_step:
-                            # Reorder data for DP rank load balancing
-                            batch_balance_metrics = batch_balance(batch, dp_size=self.actor_train.dp_size,
-                                minibatch_size=self.pipeline_config.actor_train.training_args.per_device_train_batch_size
-                                * self.pipeline_config.actor_train.training_args.gradient_accumulation_steps
-                                * self.actor_train.dp_size, logging_prefix="global_seqlen/actor_train")
-                            metrics_mgr.add_metrics(batch_balance_metrics)
-                            # update actor
-                            if self.pipeline_config.actor_train.use_dynamic_batching_in_train:
-                                batch, dynamic_batching_metrics = dynamic_batching_shard(
-                                    batch,
-                                    self.actor_train.dp_size,
-                                    self.pipeline_config.actor_train.max_tokens_per_microbatch_in_train,
-                                    self.pipeline_config.actor_train.sequence_length_round_in_train,
-                                    self.pipeline_config.actor_train.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
-                                    self.pipeline_config.actor_train.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
-                                    "actor_train/train_step",
-                                )
-                                metrics_mgr.add_metrics(dynamic_batching_metrics)
-                            actor_train_metrics_refs = self.actor_train.train_step(batch, blocking=False)
-                            actor_train_metrics: DataProto = DataProto.materialize_concat(
-                                data_refs=actor_train_metrics_refs
+                        # 2. 处理reward相关策略
+                        with Timer(name="reward_postprocess", logger=None) as reward_postprocess_timer, \
+                                tracer.start_as_current_span("reward_postprocess"):
+                            domain_batch, response_level_metrics = reward_postprocess(
+                                domain_batch, self.pipeline_config, self.running
                             )
-                            metrics_mgr.add_reduced_metrics(actor_train_metrics.meta_info.pop("metrics", {}))
+                            metrics_mgr.add_domain_metrics(domain, response_level_metrics)
+                        metrics_mgr.add_domain_metrics(domain, {"time/reward_postprocess": reward_postprocess_timer.last})
 
-                    if self.pipeline_config.adv_estimator == "gae":
-                        critic_train_metrics = DataProto.materialize_concat(data_refs=critic_train_metrics_refs)
-                        metrics_mgr.add_reduced_metrics(critic_train_metrics.meta_info.pop("metrics", {}))
+                        # 3. 计算token level rewards
+                        with Timer(name="get_token_reward", logger=None) as get_token_reward_timer, \
+                                tracer.start_as_current_span("compute_token_reward"):
+                            domain_batch, token_level_metrics = compute_token_reward(
+                                domain_batch, self.pipeline_config, self.kl_ctrl
+                            )
+                            metrics_mgr.add_domain_metrics(domain, token_level_metrics)
+                        metrics_mgr.add_domain_metrics(domain, {"time/get_token_reward": get_token_reward_timer.last})
+
+                        # 4. 计算advantage
+                        final_response_mask = domain_batch.batch["final_response_mask"].clone()
+                        with Timer(name="compute_advantage", logger=None) as compute_advantage_timer, \
+                                tracer.start_as_current_span("compute_advantage"):
+                            domain_batch = compute_advantage(
+                                data=domain_batch,
+                                gamma=self.pipeline_config.gamma,
+                                lambd=self.pipeline_config.lambd,
+                                adv_estimator=self.pipeline_config.adv_estimator,
+                                advantage_clip=self.pipeline_config.advantage_clip,
+                                whiten_advantages=self.pipeline_config.whiten_advantages,
+                                whiten_rewards=self.pipeline_config.whiten_rewards,
+                                response_mask=final_response_mask,
+                                pipeline_config=self.pipeline_config,
+                            )
+                            domain_metrics = reduce_metrics(domain_batch.meta_info.pop("metrics", {}))
+                            metrics_mgr.add_domain_metrics(domain, domain_metrics)
+                            batch_list.append(domain_batch)
+                        metrics_mgr.add_domain_metrics(domain, {"time/compute_advantage": compute_advantage_timer.last})
+                        if self.pipeline_config.save_logging_board_dir:
+                            self.save_metrics(domain_batch)
+
+                    batch = DataProto.concat(batch_list)
+                    dump_batch_to_reward_system(batch, self.tokenizer)
+
+                    if batch.batch["final_response_mask"].sum() == 0:
+                        logger.info("Warning: final_response_mask.sum() == 0! Current step will be skipped.")
+                        metrics_mgr.add_metric("mask/final_mask_sum_eq_0", 1)
+                        metrics = metrics_mgr.get_metrics()
+                        # do ckpt
+                        self.state.step = global_step
+                        self.state.log_history.append(metrics)
+                        for domain, scheduler in self.generate_schedulers.items():
+                            self.state.kv[f"scheduler_state_{domain}"] = ray.get(scheduler.get_scheduler_state.remote())
+                        self.do_checkpoint(global_step=global_step)
+                        self.tracker.log(values=metrics, step=global_step)
+                        continue
+                    else:
+                        metrics_mgr.add_metric("mask/final_mask_sum_eq_0", 0)
+
+                    batch.reorder(indices=torch.argsort(batch.batch["prompt_id"]))
+                    batch.pop("prompt_id")
+
+                    metrics_mgr.add_all_metrics(
+                        global_step,
+                        batch,
+                        resource_manager=self.resource_manager,
+                        actor_infer=self.actor_infer,
+                        actor_train=self.actor_train,
+                    )
+                    batch_grouped: Dict[str, DataProto] = batch.group_by("domain")
+                    metrics_mgr.add_domain_all_metrics(global_step, batch_grouped)
+
+                    if self.pipeline_config.enable_old_logprobs_recompute:
+                        batch, corr_metrics = apply_train_infer_correction_to_batch(self.pipeline_config, batch,
+                                                                                    update_mask_keys=batch.meta_info[
+                                                                                        'loss_mask_keys'])
+                        metrics_mgr.add_metrics(corr_metrics)
+
+                    with Timer(name="step_train", logger=None) as step_train_timer, \
+                            tracer.start_as_current_span("train"):
+                        if self.pipeline_config.adv_estimator == "gae":
+                            critic_train_metrics_refs: List[ray.ObjectRef] = self.critic.train_step(batch, blocking=False)
+
+                        # Restore routed_experts only for actor training; critic doesn't need it.
+                        restore(batch)
+
+                        with actor_train_timer:
+                            # implement critic warmup
+                            if self.pipeline_config.critic_warmup <= global_step:
+                                # Reorder data for DP rank load balancing
+                                batch_balance_metrics = batch_balance(batch, dp_size=self.actor_train.dp_size,
+                                    minibatch_size=self.pipeline_config.actor_train.training_args.per_device_train_batch_size
+                                    * self.pipeline_config.actor_train.training_args.gradient_accumulation_steps
+                                    * self.actor_train.dp_size, logging_prefix="global_seqlen/actor_train")
+                                metrics_mgr.add_metrics(batch_balance_metrics)
+                                # update actor
+                                if self.pipeline_config.actor_train.use_dynamic_batching_in_train:
+                                    batch, dynamic_batching_metrics = dynamic_batching_shard(
+                                        batch,
+                                        self.actor_train.dp_size,
+                                        self.pipeline_config.actor_train.max_tokens_per_microbatch_in_train,
+                                        self.pipeline_config.actor_train.sequence_length_round_in_train,
+                                        self.pipeline_config.actor_train.strategy_args.strategy_config.get("pipeline_model_parallel_size", 1),
+                                        self.pipeline_config.actor_train.strategy_args.strategy_config.get("virtual_pipeline_model_parallel_size", None),
+                                        "actor_train/train_step",
+                                    )
+                                    metrics_mgr.add_metrics(dynamic_batching_metrics)
+                                actor_train_metrics_refs = self.actor_train.train_step(batch, blocking=False)
+                                actor_train_metrics: DataProto = DataProto.materialize_concat(
+                                    data_refs=actor_train_metrics_refs
+                                )
+                                metrics_mgr.add_reduced_metrics(actor_train_metrics.meta_info.pop("metrics", {}))
+
+                        if self.pipeline_config.adv_estimator == "gae":
+                            critic_train_metrics = DataProto.materialize_concat(data_refs=critic_train_metrics_refs)
+                            metrics_mgr.add_reduced_metrics(critic_train_metrics.meta_info.pop("metrics", {}))
 
                 metrics_mgr.add_metric("time/step_train", step_train_timer.last)
 
@@ -870,11 +941,16 @@ class RLVRPipeline(BasePipeline):
         with Timer(name="step_generate", logger=None) as step_generate_timer, \
                 tracer.start_as_current_span("val_generate"):
             inject_trace_context(batch.meta_info)
-            batch.meta_info = {
+            reward_system_config = copy.deepcopy(self.pipeline_config.reward_system_config)
+            experiment_id = reward_system_config.get("experiment_id", 'roll_default_task_id')
+            # TODO: 当前通过在 experiment_id 后加上_val 的方式来区分 reward system train 和 val 的日志记录, 后续考虑更优雅的 train 和 val 区分方式。
+            reward_system_config["experiment_id"] = experiment_id + '_val'
+            batch.meta_info.update({
                 "is_offload_states": False,
                 "generation_config": self.pipeline_config.validation.generating_args.to_dict(),
                 "global_step": global_step,
-            }
+                "reward_system_config": reward_system_config,
+            })
 
             generate_output: DataProto = ray.get(
                 self.val_generate_scheduler.get_batch.remote(data=batch, global_step=global_step, batch_size=len(self.val_dataset)),

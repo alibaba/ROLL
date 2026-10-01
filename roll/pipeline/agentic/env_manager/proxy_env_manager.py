@@ -125,9 +125,12 @@ class ProxyEnvManager(BaseEnvManager):
 
             seed = self.group_seed + self.episode_id
 
+            self.agent_runner.set_episode_context(self.output_queue, self.env_config['group_id'], self.episode_id)
             episode_result = self.agent_runner.run_job(seed)
             if episode_result.status == "NoData":
                 break
+            if episode_result.status == "Cancelled":
+                continue
             result = episode_result.to_dict()
 
             self.running = False 
@@ -255,7 +258,7 @@ class ProxyEnvManager(BaseEnvManager):
         pure_infer_duration = infer_end - infer_start
 
         if lm_output is None:
-            self.logger.error("LLM Proxy returned None (Inference Aborted), retrying...")
+            self.logger.warning("LLM Proxy returned None (Inference Aborted, likely step transition), retrying...")
             lm_input.meta_info["src_rank"] = self.env_config["env_id"]
             lm_output = await asyncio.to_thread(
                 self.llm_proxy.generate,

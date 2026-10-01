@@ -92,7 +92,7 @@ Using MTP speculative decoding can significantly accelerate the rollout process 
 
 ## Training Modes
 
-ROLL supports three MTP training modes, configured via the `mtp_training_mode` parameter:
+ROLL supports four MTP training modes, configured via the `mtp_training_mode` parameter:
 
 ### 1. disabled (Default)
 
@@ -150,14 +150,34 @@ actor_train:
 - **SFT Training**: Want both main model and MTP to learn the target task simultaneously
 - MTP serves as an auxiliary training objective
 
+### 4. mtp_only
+
+The main model is frozen and only MTP parameters are trained.
+
+```yaml
+actor_train:
+  mtp_training_mode: mtp_only
+```
+
+**Characteristics**:
+- All non-MTP parameters (`embedding`, `decoder`, `output_layer`, ...) are frozen; only `mtp.*` parameters are trainable
+- Gradient truncation behaves the same as `standalone` mode (MTP loss never flows into the main model)
+- The main loss is still computed and reported for monitoring, but produces no parameter gradients
+- Requires `mtp_num_layers > 0` in `strategy_config` and `pipeline_model_parallel_size: 1`
+
+**Use Cases**:
+- Train the MTP head on top of a fixed main model (e.g. to build a speculative-decoding drafter
+  for a trained/frozen policy) without changing the main model's distribution
+
 ## Configuration Parameters
 
 ### Training Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `mtp_training_mode` | `str` | `disabled` | MTP training mode: `disabled`, `standalone`, `joint` |
+| `mtp_training_mode` | `str` | `disabled` | MTP training mode: `disabled`, `standalone`, `joint`, `mtp_only` |
 | `mtp_loss_scaling_factor` | `float` | See below | MTP loss scaling factor |
+| `mtp_num_layers` | `int` | `0` (disabled) | Number of MTP layers. Must match the model's `config.json` (`mtp_num_hidden_layers`). Set in `actor_train`'s `strategy_config`. |
 
 **mtp_loss_scaling_factor**:
 - Default value is typically `0.3` (referencing DeepSeek-V3)
@@ -180,13 +200,13 @@ actor_infer:
         num_speculative_tokens: 4
 ```
 
-Note: Regardless of the training mode, when using MTP, you must configure `mtp_num_layers` (the corresponding value from the model's `config.json`) in `actor_train`'s `strategy_config`.
+Note: `mtp_num_layers` defaults to `0`, which overrides the value from the model's `config.json` and disables MTP. To use MTP, you must explicitly set `mtp_num_layers` in `actor_train`'s `strategy_config` to match the model's `config.json` (`mtp_num_hidden_layers`). `mtp_training_mode` is set at the `actor_train` top level (not inside `strategy_config`).
 
 ## Training Examples
 
 ### RLVR Pipeline with MTP
 
-To enable MTP in RLVR training, configure `mtp_training_mode: standalone` in `actor_train` and `speculative_config` in `actor_infer`:
+To enable MTP in RLVR training, configure `mtp_training_mode: standalone` at the `actor_train` top level, `mtp_num_layers` in `actor_train`'s `strategy_config`, and `speculative_config` in `actor_infer`:
 
 ```yaml
 actor_train:
@@ -195,6 +215,7 @@ actor_train:
     strategy_config:
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 2
+      mtp_num_layers: 1  # must match model's config.json (mtp_num_hidden_layers)
       # ... other configs
   # MTP training config (uncomment to enable)
   #mtp_training_mode: standalone
@@ -223,7 +244,7 @@ SFT training uses `joint` mode for collaborative learning between main model and
 actor_train:
   model_args:
     model_name_or_path: Qwen/Qwen3.5-7B
-    flash_attn: sdpa
+    attn_implementation: sdpa
     dtype: bf16
   training_args:
     learning_rate: 2.0e-5
@@ -237,6 +258,7 @@ actor_train:
     strategy_config:
       tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 1
+      mtp_num_layers: 1  # must match model's config.json (mtp_num_hidden_layers)
   # MTP joint training
   mtp_training_mode: joint
   mtp_loss_scaling_factor: 0.3
@@ -270,6 +292,7 @@ MTP-related configuration is in the model checkpoint:
 |----------|------------------|--------|
 | RL Training | `standalone` | Isolate RL gradients, MTP learns main model distribution |
 | SFT Training | `joint` | Joint optimization, MTP as auxiliary objective |
+| Train MTP on a frozen main model | `mtp_only` | Main model distribution stays unchanged, only MTP params are updated |
 | Inference-only acceleration | `disabled` | Use pre-trained MTP, no training needed |
 
 ### 2. Performance Monitoring

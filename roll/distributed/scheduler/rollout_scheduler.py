@@ -323,6 +323,10 @@ class GroupQueue:
                 await self.progress.wait()
         return None
 
+    def is_episode_done(self, episode_id: int) -> bool:
+        """Return True if episode is no longer in groups (completed or expired)."""
+        return episode_id not in self.groups
+
     def put(self, episode_id, start_step, rollout):
         if episode_id not in self.groups: # ignore rollouts from outdated episode
             return
@@ -453,6 +457,12 @@ class GroupQueueManager:
         self.pending_gets = set()
         for group_queue in self.group_queue.values():
             group_queue.shutdown()
+
+    def is_episode_done(self, group_id: int, episode_id: int) -> bool:
+        """Check if an episode is no longer active (completed or expired)."""
+        if group_id not in self.group_queue:
+            return True
+        return self.group_queue[group_id].is_episode_done(episode_id)
 
     def put(self, group_id, episode_id, start_step, rollout: DataProto, env_id=None):
         """

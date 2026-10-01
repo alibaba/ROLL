@@ -19,6 +19,10 @@ class SharedStorage:
             return None
         return ray.get(ref)
 
+    def get_if_exists(self, key):
+        ref = self._storage.get(key)
+        return None if ref is None else ray.get(ref)
+
     def put_if_absent(self, key: str, data: any) -> bool:
         if key in self._storage:
             return False

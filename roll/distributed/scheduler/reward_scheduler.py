@@ -30,6 +30,19 @@ class RewardScheduler:
         self.pipeline_config = None
         self.progress_bar: Optional[tqdm] = None
 
+    async def _toggle_states(self, reward_clusters: Dict[str, Any], method_name: str) -> None:
+        refs: List[ray.ObjectRef] = []
+        for reward_cluster in reward_clusters.values():
+            refs.extend(getattr(reward_cluster, method_name)(blocking=False))
+        if refs:
+            await asyncio.gather(*refs)
+
+    async def load_states(self, reward_clusters: Dict[str, Any]) -> None:
+        await self._toggle_states(reward_clusters=reward_clusters, method_name="load_states")
+
+    async def offload_states(self, reward_clusters: Dict[str, Any]) -> None:
+        await self._toggle_states(reward_clusters=reward_clusters, method_name="offload_states")
+
     async def compute_rewards(self, data: DataProto, reward_clusters: Dict[str, Any], pipeline_config) -> DataProto:
         """
         保序返回rewards

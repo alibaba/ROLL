@@ -10,7 +10,9 @@ from collections import defaultdict
 from typing import Any, Dict, List, Set
 from urllib.parse import quote
 
+import numpy as np
 import ray
+import torch
 
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.executor.worker import Worker
@@ -551,6 +553,18 @@ class RouterClient:
         self.eos_token_id = meta["eos_token_id"]
         self.pad_token_id = meta["pad_token_id"]
 
+    def _normalize_vllm_omni_multi_modal_data(self, multi_modal_data):
+        normalized = dict(multi_modal_data)
+        for key in ["prompt_ids", "prompt_mask", "negative_prompt_ids", "negative_prompt_mask"]:
+            value = normalized.get(key)
+            if value is None or isinstance(value, torch.Tensor):
+                continue
+            if isinstance(value, np.ndarray):
+                value = value.tolist()
+            if isinstance(value, (list, tuple)):
+                normalized[key] = torch.tensor(value, dtype=torch.long)
+        return normalized
+
     def _preprocess_generate(self, req: DataProto, request_id):
         if request_id is None:
             request_id = str(uuid.uuid4())
@@ -571,17 +585,31 @@ class RouterClient:
         if "multi_modal_data" in req.non_tensor_batch:
             multi_modal_data = req.non_tensor_batch["multi_modal_data"]
             assert len(multi_modal_data) == 1
-            if 'multi_modal_data' in multi_modal_data[0] and 'video' in multi_modal_data[0]['multi_modal_data'] and self.strategy_name == 'sglang':
+            if (
+                "multi_modal_data" in multi_modal_data[0]
+                and "video" in multi_modal_data[0]["multi_modal_data"]
+                and self.strategy_name == "sglang"
+            ):
                 multi_modal_data = req.non_tensor_batch["multi_modal_inputs"]
                 assert len(multi_modal_data) == 1
-                payload["multi_modal_data"] = {'multi_modal_data': {'video': multi_modal_data[0]}}
+                payload["multi_modal_data"] = {"multi_modal_data": {"video": multi_modal_data[0]}}
                 input_ids = req.batch["input_ids"]
                 attention_mask = req.batch["attention_mask"]
                 input_ids = gather_unpadded_input_ids(input_ids=input_ids, attention_mask=attention_mask)
                 payload["multi_modal_data"]["prompt_token_ids"] = input_ids[0]
+            elif self.strategy_name == "vllm_omni":
+                payload["multi_modal_data"] = self._normalize_vllm_omni_multi_modal_data(multi_modal_data[0])
+            elif self.strategy_name == "vllm":
+                payload["multi_modal_data"] = multi_modal_data[0]
+                # vLLM records routing on the vision-expanded sequence, so R3 needs the expanded
+                # prompt length (not the text-only prompt_token_ids) to slice routed_experts.
+                payload["expanded_prompt_len"] = len(
+                    gather_unpadded_input_ids(
+                        input_ids=req.batch["input_ids"], attention_mask=req.batch["attention_mask"]
+                    )[0]
+                )
             else:
                 payload["multi_modal_data"] = multi_modal_data[0]
-
         else:
             input_ids = req.batch["input_ids"]
             assert not collect_unfinished or input_ids.size(0) == 1
@@ -600,21 +628,43 @@ class RouterClient:
                 # vllm is hard coded to return logprob
                 sampling_params = create_sampling_params_for_vllm(generation_config, collect_unfinished)
                 payload["sampling_params"] = sampling_params
+            case "vllm_omni":
+                from roll.distributed.strategy.vllm_omni_strategy import create_sampling_params_for_vllm_omni
+                payload["sampling_params"] = create_sampling_params_for_vllm_omni(generation_config)
             case _:
                 raise NotImplementedError(f"strategy {self.strategy_name} is not supported")
         return payload, request_id
 
     def _postprocess_generate(self, req, response):
         output_data = DataProto(meta_info=req.meta_info)
-        output_data.meta_info["finish_reasons"] = response["finish_reasons"]
-        output_data.meta_info["output_token_ids"] = response.get("output_token_ids", None)
-        output_data.meta_info["output_logprobs"] = response.get("output_logprobs", None)
-        # TODO: The size of routed_experts is [b * s * layer * topk].
-        # For the 30A3 model, this data block is tens of MB in size.
-        # The serialization overhead of Ray transmission needs to be profiled again.
-        output_data.meta_info["routed_experts"] = response.get("routed_experts", None)
-        output_data.meta_info["eos_token_id"] = [self.eos_token_id, self.pad_token_id]
-        output_data.meta_info["pad_token_id"] = self.pad_token_id
+        if self.strategy_name == "vllm_omni":
+            required_output_keys = [
+                "responses",
+                "rollout_log_probs",
+                "all_timesteps",
+                "all_latents",
+                "prompt_embeds",
+                "prompt_embeds_mask",
+            ]
+            optional_output_keys = [
+                "negative_prompt_embeds",
+                "negative_prompt_embeds_mask",
+            ]
+            for key in required_output_keys:
+                output_data.meta_info[key] = response[key]
+            for key in optional_output_keys:
+                if key in response:
+                    output_data.meta_info[key] = response[key]
+        else:
+            output_data.meta_info["finish_reasons"] = response["finish_reasons"]
+            output_data.meta_info["output_token_ids"] = response.get("output_token_ids", None)
+            output_data.meta_info["output_logprobs"] = response.get("output_logprobs", None)
+            # TODO: The size of routed_experts is [b * s * layer * topk].
+            # For the 30A3 model, this data block is tens of MB in size.
+            # The serialization overhead of Ray transmission needs to be profiled again.
+            output_data.meta_info["routed_experts"] = response.get("routed_experts", None)
+            output_data.meta_info["eos_token_id"] = [self.eos_token_id, self.pad_token_id]
+            output_data.meta_info["pad_token_id"] = self.pad_token_id
 
         # Merge metrics from response (e.g., speculative decoding metrics)
         if "metrics" in response:
@@ -834,7 +884,7 @@ class SglangRouter(Router):
 
 class PromptAffinityRouter(Router):
     """
-    Schedule requests of the same prompt to the same worker. Choose worker using best fit
+    Schedule requests with the same affinity uid to the same worker. Choose worker using best fit
     strategy (using linear search for simplicity), blocking generate request if no worker available.
 
     Limit the number of running requests of each dp rank below max_running_requests.
@@ -845,7 +895,7 @@ class PromptAffinityRouter(Router):
         # key: dp_rank, value: num_inflight_requests
         self.worker_loads = {dp_rank: 0 for dp_rank in range(len(self.workers))}
         # cache-aware scheduling by uid
-        self.id_to_dp_rank: Dict[int, int] = {}
+        self.id_to_dp_rank: Dict[Any, int] = {}
         # dp_rank -> request_ids, used by abort_all
         self.dp_inflight_requests: List[int, Set[str]] = [set() for _ in self.workers]
 

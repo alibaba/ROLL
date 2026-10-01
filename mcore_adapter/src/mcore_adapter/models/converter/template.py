@@ -2,6 +2,7 @@ import json
 import os
 import re
 from abc import ABC
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -650,4 +651,4 @@ def register_template(
 
 
 def get_template(name) -> Template:
-    return templates[name]
+    return deepcopy(templates[name])

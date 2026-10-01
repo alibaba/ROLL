@@ -44,13 +44,6 @@ actor_train:
       context_parallel_size: 1
       overlap_grad_reduce: false
       use_distributed_optimizer: true
-#    strategy_name: deepspeed_train
-#    strategy_config:
-#      train_micro_batch_size_per_gpu: auto
-#      bf16:
-#        enabled: true
-#      zero_optimization:
-#        stage: 3
   device_mapping: list(range(0,4))
 
 

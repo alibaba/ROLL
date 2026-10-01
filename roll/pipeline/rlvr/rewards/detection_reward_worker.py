@@ -1630,7 +1630,10 @@ class DetectionRewardWorker(Worker):
         self.strategy: Optional[Union[InferenceStrategy, TrainStrategy]] = None
 
         # qwen2.5-vl use 14, while qwen2-vl/qwen3-vl/qwen3-omni use 16
-        self.patch_size = self.processor.image_processor.patch_size
+        if hasattr(self.processor, "media_processor"):  # Kimi
+            self.patch_size = self.processor.media_processor.media_proc_cfg["patch_size"]
+        else:
+            self.patch_size = self.processor.image_processor.patch_size
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):

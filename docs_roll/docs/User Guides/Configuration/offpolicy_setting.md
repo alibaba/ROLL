@@ -50,7 +50,7 @@ actor_train:
   worker_cls: roll.pipeline.rlvr.actor_pg_worker.ActorPGWorker
   pg_variant: topr  # Keep consistent with global configuration
   model_args:
-    flash_attn: fa2
+    attn_implementation: fa2
     disable_gradient_checkpointing: false
     dtype: bf16
   training_args:

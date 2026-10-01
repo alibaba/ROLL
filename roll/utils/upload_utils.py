@@ -61,6 +61,9 @@ class FileSystemUploader:
             os.replace(staged, destination)
         return destination
 
+    def register(self, ckpt_info):
+        pass
+
     def get_latest_ckpt(self):
         content = os.listdir(self.output_dir)
         checkpoints = [

@@ -180,9 +180,8 @@ critic:
   strategy_args:
     strategy_name: fsdp2_train
     strategy_config:
+      enable_mix_precision: true
       fsdp_size: 8
-      param_dtype: bf16
-      reduce_dtype: float32
       reshard_after_forward: true
       offload_policy: false
       wrap_policy:  # trl wrapped model should specify this

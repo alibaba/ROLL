@@ -58,7 +58,6 @@ validation:
 
 actor_train:
   model_args:
-    flash_attn: sdpa
     attn_implementation: sdpa
     disable_gradient_checkpointing: false
     dtype: bf16
@@ -93,13 +92,13 @@ actor_train:
       overlap_grad_reduce: true
       use_distributed_optimizer: true
       bf16: true
-      #mtp_training_mode: standalone
+      #mtp_num_layers: 1  # must match model config.json (mtp_num_hidden_layers)
+  #mtp_training_mode: standalone
   device_mapping: list(range(0,32))
   infer_batch_size: 1
 
 actor_infer:
   model_args:
-    flash_attn: fa2
     attn_implementation: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
@@ -118,7 +117,6 @@ actor_infer:
       max_model_len: 8192
       load_format: dummy
       tensor_parallel_size: 4
-      optimization_level: 1
       sleep_level: 2
       #speculative_config:
         # method: mtp
@@ -129,7 +127,6 @@ actor_infer:
 
 reference:
   model_args:
-    flash_attn: sdpa
     attn_implementation: sdpa
     disable_gradient_checkpointing: true
     dtype: bf16

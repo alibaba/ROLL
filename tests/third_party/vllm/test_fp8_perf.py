@@ -33,8 +33,6 @@ async def generate(model, prompts, sampling_params):
     print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
     print_speed_metrics(outputs, start_time)
     print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-    # need patch vllm084 StatLogger
-    # model.llm_engine.do_log_stats()
 
 def get_sampling_param_uniform(limit, num):
     num_tokens = []

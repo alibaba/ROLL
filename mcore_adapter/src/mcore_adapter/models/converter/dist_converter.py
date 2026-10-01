@@ -1,6 +1,7 @@
 import fnmatch
 import os
 import warnings
+from copy import deepcopy
 from dataclasses import dataclass, field
 from itertools import product
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -188,14 +189,14 @@ mla_dist_config = DistParallelConfig(
         ".mlp.linear_fc1.layer_norm_weight",
         ".self_attention.linear_q_up_proj.layer_norm_weight",
         ".self_attention.linear_kv_up_proj.layer_norm_weight",
+        ".self_attention.linear_q_down_proj.weight",
+        ".self_attention.linear_kv_down_proj.weight",
     ],
     column_parallel_weights=[
         MCORE_WORD_EMBEDDING,
         MCORE_LM_HEAD,
-        ".self_attention.linear_q_down_proj.weight",
         ".self_attention.linear_q_up_proj.weight",
         ".self_attention.linear_q_proj.weight",
-        ".self_attention.linear_kv_down_proj.weight",
         ".self_attention.linear_kv_up_proj.weight",
     ],
     grouped_column_map={".linear_fc1.weight": ".mlp.experts.weight1"},
@@ -249,7 +250,7 @@ def register_dist_config(names: Union[str, list[str]], config: DistParallelConfi
 
 def get_dist_config(name) -> DistParallelConfig:
     dist_config = dist_configs.get(name, [default_dist_config])
-    return dist_config
+    return deepcopy(dist_config)
 
 
 lora_shared_moe_dist_config = DistParallelConfig(
@@ -323,6 +324,10 @@ class DistConverter:
             self.num_layers_for_expert = self.num_experts // self.mca_config.expert_model_parallel_size
 
         self.weights_waiting_for_convert: dict[str, dict[Union[int, str], "Tensor"]] = {}
+
+    def release(self) -> None:
+        """Release grouped tensors retained while waiting for all conversion inputs."""
+        self.weights_waiting_for_convert.clear()
 
     def _get_num_layers_per_virtual_rank(self):
         num_layers = self.mca_config.num_layers
@@ -649,7 +654,8 @@ class DistConverter:
         self.weights_waiting_for_convert[relocated_name][moe_index] = weights
         if len(self.weights_waiting_for_convert[relocated_name]) < self.num_layers_for_expert:
             return None  # not ready to convert
-        weights = sorted(self.weights_waiting_for_convert[relocated_name].items(), key=lambda x: x[0])
+        grouped_weights = self.weights_waiting_for_convert.pop(relocated_name)
+        weights = sorted(grouped_weights.items(), key=lambda x: x[0])
         weights = [weight[1] for weight in weights]
         return {relocated_name: torch.stack(weights, dim=0).view(self.mca_config.hidden_size, -1)}
 
@@ -709,7 +715,8 @@ class DistConverter:
         self.weights_waiting_for_convert[relocated_name][moe_index] = weights
         if len(self.weights_waiting_for_convert[relocated_name]) < self.num_layers_for_expert:
             return None  # not ready to convert
-        weights = sorted(self.weights_waiting_for_convert[relocated_name].items(), key=lambda x: x[0])
+        grouped_weights = self.weights_waiting_for_convert.pop(relocated_name)
+        weights = sorted(grouped_weights.items(), key=lambda x: x[0])
         weights = [weight[1] for weight in weights]
         return {relocated_name: torch.stack(weights, dim=0).view(-1, self.mca_config.hidden_size)}
 

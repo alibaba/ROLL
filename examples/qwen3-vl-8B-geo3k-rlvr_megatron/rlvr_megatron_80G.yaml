@@ -1,0 +1,203 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen3_vl_8B_geo3k_megatron_actor_train_tp2_pp2_cp2_dp1_k3_kl_clamp20"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+
+system_envs:
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/checkpoints/${exp_name}
+
+track_with: ml_tracker
+tracker_kwargs:
+  project: verl_grpo_example_geo3k
+  name: ${exp_name}
+  log_dir: ${logging_dir}
+
+num_gpus_per_node: 8
+
+max_steps: 60
+save_steps: 60
+logging_steps: 1
+eval_steps: 5
+resume_from_checkpoint: false
+
+rollout_batch_size: 512
+num_return_sequences_in_group: 5
+is_num_return_sequences_expand: true
+max_running_requests: 512
+prompt_length: 1024
+response_length: 2048
+
+adv_estimator: grpo
+ppo_epochs: 1
+pg_clip: 0.2
+loss_agg_mode: token-mean
+reward_clip: 10.0
+whiten_advantages: false
+add_token_level_kl: false
+init_kl_coef: 0.0
+use_kl_loss: true
+kl_loss_coef: 1.0e-2
+entropy_loss_coef: 0.0
+max_grad_norm: 1.0
+
+# ROLL offloads role states between rollout/reference/train phases. Megatron's
+# optimizer_cpu_offload below keeps optimizer states and computation on CPU.
+is_offload_states: true
+offload_backend: local
+
+pretrain: Qwen/Qwen3-VL-8B-Instruct
+
+validation:
+  data_args:
+    file_name:
+      - data/geo3k/test.parquet
+    dataset_dir: ./
+    messages: prompt
+    preprocessing_num_workers: 32
+    image_max_pixels: 1048576
+  generating_args:
+    max_new_tokens: ${response_length}
+    do_sample: false
+    top_p: 1.0
+    top_k: -1
+    num_beams: 1
+    temperature: 0.0
+    num_return_sequences: 1
+
+actor_train:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    lr_scheduler_type: constant
+    weight_decay: 1.0e-2
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 640
+    warmup_steps: 0
+    num_train_epochs: 15
+  data_args:
+    file_name:
+      - data/geo3k/train.parquet
+    domain_interleave_probs:
+      geo3k: 1.0
+    dataset_dir: ./
+    messages: prompt
+    preprocessing_num_workers: 32
+    image_max_pixels: 1048576
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      sequence_parallel: true
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 2
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+      additional_configs:
+        gradient_accumulation_fusion: true
+      bf16: true
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+  use_dynamic_batching_in_train: false
+  max_tokens_per_microbatch_in_train: 4096
+  sequence_length_round_in_train: 4
+  use_dynamic_batching_in_infer: false
+  max_tokens_per_microbatch_in_infer: 4096
+  sequence_length_round_in_infer: 4
+  use_sequence_packing: true
+  sequence_packing_args:
+    algorithm: load_balance
+    max_packed_sequence_length_train: 16384
+    max_packed_sequence_length_forward: 32768
+    min_num_micro_batches_train: 1
+    min_num_micro_batches_forward: 1
+  use_logits_chunking: true
+  logits_chunk_size: 2048
+
+actor_infer:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 1.0
+    top_k: -1
+    num_beams: 1
+    temperature: 1.0
+    num_return_sequences: ${num_return_sequences_in_group}
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      tensor_parallel_size: 4
+      gpu_memory_utilization: 0.7
+      max_model_len: 4096
+      max_num_batched_tokens: 8192
+      block_size: 16
+      load_format: dummy
+      mm_processor_cache_gb: 0
+      sleep_level: 2
+      max_num_seqs: 1024
+      enable_chunked_prefill: true
+  num_gpus_per_worker: 4
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      sequence_parallel: true
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 2
+      expert_model_parallel_size: 1
+      bf16: true
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+  use_dynamic_batching_in_infer: false
+  max_tokens_per_microbatch_in_infer: 4096
+  sequence_length_round_in_infer: 4
+  use_sequence_packing: true
+  sequence_packing_args:
+    algorithm: load_balance
+    max_packed_sequence_length_train: 16384
+    max_packed_sequence_length_forward: 32768
+    min_num_micro_batches_train: 1
+    min_num_micro_batches_forward: 1
+  use_logits_chunking: true
+  logits_chunk_size: 2048
+
+rewards:
+  geo3k:
+    worker_cls: roll.pipeline.rlvr.rewards.geo3k_reward_worker.Geo3kRewardWorker
+    model_args:
+      model_name_or_path: ${pretrain}
+    tag_included: [hiyouga/geometry3k]
+    world_size: 8
+    infer_batch_size: 1

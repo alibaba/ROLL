@@ -71,7 +71,7 @@ custom_env:
       max_steps: ${max_actions_per_traj}
       workspace_dir: /tmp/cli_workspace
       sandbox_image: hub.docker.alibaba-inc.com/chatos/iflow-cli:3.0
-      sandbox_base_url: https://xrl-sandbox.alibaba-inc.com
+      sandbox_base_url: http://localhost:8080
       auto_clear_seconds: 1200
       format_penalty: -0.1
   SimpleSokoban:
@@ -170,7 +170,7 @@ custom_env:
       max_steps: 5
       mode: "train"
       xrl_authorization: t-r8c4rjh0por8gwc5
-      sandbox_base_url: https://xrl-sandbox.alibaba-inc.com
+      sandbox_base_url: http://localhost:8080
       user_id: '410435'
       experiment_id: "test"
 
@@ -198,7 +198,7 @@ custom_env:
       max_steps: 10
       mode: "train"
       xrl_authorization: t-j99eljub5bst4q9p
-      sandbox_base_url: https://xrl-sandbox.alibaba-inc.com
+      sandbox_base_url: http://localhost:8080
       user_id: '481404'
       experiment_id: "test"
       test_files: ["output/terminal-bench/terminal-bench"]

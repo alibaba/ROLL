@@ -48,6 +48,8 @@ class Qwen3VLGPTModel(McaGPTModel):
         )
 
         # rebuild the transformer block
+        # TODO: rebuilding self.decoder double-registers MoE routers in RouterReplay.global_router_replay_instances;
+        # patch TransformerBlock.forward for deepstack directly so the decoder is built only once.
         self.decoder = Qwen3VLTransformerBlock(
             config=self.config,
             spec=self.transformer_layer_spec,

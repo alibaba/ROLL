@@ -45,14 +45,14 @@ Before you begin, ensure you have the following:
    * CUDA Version >= 12.4  
    * cuDNN Version >= 9.1.0  
    * PyTorch >= 2.5.1  
-   * vLLM >= 0.7.3  
-   * SGlang >= 0.4.3  
+   * vLLM >= 0.11.0
+   * SGlang >= 0.4.10.post2
    ROLL also provides Docker images for a quick start.
 
 2. **Python Dependencies** – Install all necessary Python dependencies, typically via the requirements file:
 
    ```bash
-   pip install -r requirements.txt   # Or a specific file like requirements_torch260.txt
+   pip install -r requirements.txt   # Or a specific file like requirements_torch280_vllm.txt
    ```
 
    Ensure any specific dependencies for your chosen agentic environments or models are also met.

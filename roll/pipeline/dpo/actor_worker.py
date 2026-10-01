@@ -57,7 +57,7 @@ def loss_fn(
 
 
 class ActorWorker(BaseActorWorker):
-    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
+    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, clear_cache=False, prefetch=True)
     def train_step(self, data: DataProto):
         """
         return DataProto(meta_info={'metrics': metrics})
@@ -74,7 +74,6 @@ class ActorWorker(BaseActorWorker):
             is_offload_states=is_offload_states,
         ):
             data = data.to(current_platform.device_type)
-            data = self.strategy.get_data_input(data)
 
             pg_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
             append_to_dict(metrics, pg_metrics)
@@ -85,13 +84,12 @@ class ActorWorker(BaseActorWorker):
         output = DataProto(meta_info={"metrics": metrics})
         return output
 
-    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
+    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, clear_cache=False, prefetch=True)
     def compute_log_probs(self, data: DataProto):
         """
         return DataProto.from_dict(tensors={'log_probs': output})
         """
 
-        data = self.strategy.get_data_input(data)
         data.meta_info.get("global_step", 0)
         is_offload_states = data.meta_info.get("is_offload_states", False)
         metrics = {}

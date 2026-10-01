@@ -48,6 +48,7 @@ class RocmPlatform(Platform):
             # "NCCL_DEBUG_SUBSYS":"INIT,COLL",
             # "NCCL_DEBUG":"INFO",
             # "NCCL_DEBUG_FILE":"rccl.%h.%p.log",
+            "NCCL_NET_GDR_LEVEL": "1",
         }
         return env_vars
 
@@ -66,6 +67,7 @@ class RocmPlatform(Platform):
         """
         visible_devices_env_vars = {
             "HIP_VISIBLE_DEVICES": ",".join(map(str, gpu_ranks)),
+            "CUDA_VISIBLE_DEVICES": ",".join(map(str, gpu_ranks)),
             "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
             "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",
         }
@@ -96,6 +98,7 @@ class RocmPlatform(Platform):
         env_vars = {
             "PYTORCH_CUDA_ALLOC_CONF": "",
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+            "CUDA_VISIBLE_DEVICES": f"{gpu_rank}",
             "HIP_VISIBLE_DEVICES": f"{gpu_rank}",
             "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
             "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",

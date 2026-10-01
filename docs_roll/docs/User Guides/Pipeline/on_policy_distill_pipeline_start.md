@@ -30,6 +30,7 @@
   - [Multi-Teacher OPD](#multi-teacher-opd)
     - [Configuration Examples](#configuration-examples)
     - [Core Mechanisms](#core-mechanisms)
+  - [OPSD (On-Policy Self-Distillation)](#opsd-on-policy-self-distillation)
   - [FAQ](#faq)
   - [References](#references)
 
@@ -133,18 +134,19 @@ advantages = -reverse_kl  # Negative sign: minimize KL = maximize advantage
 
 Pure OPD mode reuses existing Pipelines, selected by `pure_opd_pipeline_type` config:
 
-- **RLVR Mode** (default): Uses `RLVRConfig` + `RLVRPipeline`
+- **RLVR Mode** (default): Uses `RLVRConfig` + `RLVRPipeline` (LLM)
+- **RLVR VLM Mode**: Uses `RLVRConfig` + `RLVRVLMPipeline` (vision-language model)
 - **Agentic Mode**: Uses `AgenticConfig` + `AgenticPipeline`
 
 The main differences from standard RLVR/Agentic training are:
 
 * **Reward Computation**: Uses Teacher Model's log probabilities instead of external reward models
 * **Advantage Computation**: `advantage = teacher_log_prob - student_log_prob`
-* **Worker Mapping**: `student_train` → `actor_train`, `student_infer` → `actor_infer`, `teacher` → `reference`
+* **Worker Mapping**: `student_train` → `actor_train`, `student_infer` → `actor_infer`, `teacher` and/or `reference` → `reference` (merged into unified `_reference_configs`)
 
 **Source Code**:
 - Launcher script: `examples/start_onpolicy_distill_pipeline.py`
-- Pipeline: `roll/pipeline/rlvr/rlvr_pipeline.py` or `roll/pipeline/agentic/agentic_pipeline.py`
+- Pipeline: `roll/pipeline/rlvr/rlvr_pipeline.py` (LLM), `roll/pipeline/rlvr/rlvr_vlm_pipeline.py` (VLM), or `roll/pipeline/agentic/agentic_pipeline.py`
 - Config handling: `roll/configs/base_config.py` (`_handle_opd_mapping()` method)
 
 ---
@@ -188,7 +190,8 @@ token_level_rewards = -reverse_kl  # Pure KL signal, no external rewards
 ```
 
 **Supported Pipeline Types**: Configured via `pure_opd_pipeline_type`:
-- `"rlvr"` (default): Uses RLVRConfig + RLVRPipeline
+- `"rlvr"` (default): Uses RLVRConfig + RLVRPipeline (LLM)
+- `"rlvr_vlm"`: Uses RLVRConfig + RLVRVLMPipeline (vision-language model)
 - `"agentic"`: Uses AgenticConfig + AgenticPipeline
 
 
@@ -249,9 +252,9 @@ Configure three roles, automatically mapped to internal Workers:
 |----------|----------|------|
 | `student_train` | `actor_train` | Train student model, compute loss using Teacher KL |
 | `student_infer` | `actor_infer` | Generate trajectories, compute student log_probs |
-| `teacher` | `reference` / `references` | Compute teacher log_probs (supports single WorkerConfig or multi-teacher Dict) |
+| `teacher` and/or `reference` | `reference` / `references` | Compute teacher log_probs (supports single WorkerConfig or multi-teacher Dict) |
 
-**Note**: Config file uses `student_train`, `student_infer`, `teacher` names, system will automatically map them. For multi-teacher, `teacher` is `Dict[str, WorkerConfig]`, internally normalized to `self.references: Dict[str, Cluster]`.
+**Note**: Config file uses `student_train`, `student_infer`, `teacher` names, system will automatically map them. `reference` can be used alongside or instead of `teacher` — both are merged into a unified `_reference_configs` dict (`reference` → `"reference"`, single `teacher` → `"default"`, dict `teacher` → by keys). For multi-teacher, `teacher` is `Dict[str, WorkerConfig]`, internally normalized to `self.references: Dict[str, Cluster]`.
 
 #### Mixed Mode
 
@@ -304,14 +307,14 @@ On-Policy Distillation's data format is identical to RLVR, **does not include re
 ```bash
 # Make sure you're in the project root directory
 python examples/start_onpolicy_distill_pipeline.py \
-    --config_path examples/qwen3-8B-onpolicy-distill-megatron \
+    --config_path distill/on_policy/llm \
     --config_name onpolicy_distill_config
 ```
 
 ### Method 2: Using Helper Shell Script
 
 ```bash
-bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.sh
+bash examples/distill/on_policy/llm/run_onpolicy_distill_pipeline.sh
 ```
 
 ---
@@ -322,14 +325,21 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 
 #### Pure OPD Mode
 
-**No additional OPD-related parameters need to be configured**. Users only need to configure the `teacher` model path, student model path, data, and Reward Workers.
+Launched via `start_onpolicy_distill_pipeline.py`, which automatically sets `is_pure_opd=True`.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `pure_opd_pipeline_type` | Pipeline type, one of `"rlvr"`, `"rlvr_vlm"`, or `"agentic"`. Only configurable in pure OPD mode; config validation rejects it in other modes | `"rlvr"` (auto-set when unset) |
+| `student_train` | Student model training config (mapped to actor_train) | Required |
+| `student_infer` | Student model inference config (mapped to actor_infer) | Required |
+| `teacher` or `reference` | Teacher/reference model config (merged into _reference_configs) | Required |
 
 #### Mixed Mode (`PPOConfig` / `RLVRConfig`)
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `use_opd` | Enable mixed mode OPD (add Teacher KL to rewards) | `false` |
-| `teacher` | Teacher model config (auto-mapped to reference) | Required |
+| `teacher` or `reference` | Teacher/reference model config (merged into _reference_configs) | Required |
 
 #### Multi-Teacher Mode Parameters
 
@@ -340,6 +350,23 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 | `teacher.{name}.tag_included` | Tags this teacher handles; empty means all | `[]` |
 | `tag_to_template` | Select different chat templates by tag | `{}` |
 
+#### Common OPD Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `opd_token_kld_clip` | Optional clamp on the per-token teacher KL divergence to ±clip before advantage computation, bounding heavy-tailed divergence. Applies to pure OPD, mixed OPD, and OPSD modes | `None` |
+
+#### OPSD Mode Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `opsd_mode` | Enable OPSD (inject reference solution y\* into teacher prompt). Auto-enables `is_pure_opd=True`; set `use_opd=True` explicitly for mixed mode (external rewards + KL) | `false` |
+| `opsd_solution_key` | Dataset column name for the reference solution | `"reference_solution"` |
+| `opsd_teacher_template` | Format string for teacher prompt, placeholders `{problem}` and `{solution}` | Built-in default template |
+| `global_template` | Chat template name for teacher prompt formatting; falls back to the actor's `data_args.template` if unset | — |
+| `sequence_length` | Total batch tensor length. OPSD teacher prompt (problem + y\*) is longer than student prompt — set larger than `prompt_length + response_length` to give buffer | `prompt_length + response_length` |
+| `opsd_max_solution_length` | Optional hard cap on reference solution (y\*) token length. If set, solutions exceeding this are truncated before building teacher prompt. If not set, solutions are auto-truncated to fit `sequence_length` (template overhead measured dynamically) | `None` |
+
 
 ---
 
@@ -347,7 +374,7 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 
 ### Step 1: Configuration Setup
 
-* File: `examples/qwen3-8B-onpolicy-distill-megatron/onpolicy_distill_config.yaml`
+* File: `examples/distill/on_policy/llm/onpolicy_distill_config.yaml`
 * Key sections include `exp_name`, `seed`, `output_dir`, model paths, `student_train`, `student_infer`, `teacher`, and reward configuration.
 
 * Pay special attention to these configuration sections:
@@ -372,7 +399,7 @@ bash examples/qwen3-8B-onpolicy-distill-megatron/run_onpolicy_distill_pipeline.s
 
 ```bash
 python examples/start_onpolicy_distill_pipeline.py \
-       --config_path examples/qwen3-8B-onpolicy-distill-megatron \
+       --config_path distill/on_policy/llm \
        --config_name onpolicy_distill_config
 ```
 
@@ -560,6 +587,138 @@ Internally normalized to `{"default": WorkerConfig}`, the loop executes only onc
 
 ---
 
+## OPSD (On-Policy Self-Distillation)
+
+### Overview
+
+OPSD extends OPD: when the teacher evaluates the student's response, its prompt includes the **reference solution y\*** (privileged information) in addition to the original problem. This makes the teacher "know the answer," assigning higher probability to reasoning paths that lead to the correct answer, providing a more precise distillation signal.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    OPSD Data Flow                                 │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│   Student Infer:                                                  │
+│     prompt = original problem (no y*)                             │
+│     → generate response                                           │
+│                                                                   │
+│   Teacher Forward:                                               │
+│     prompt = original problem + y* + instruction (privileged)     │
+│     + same response tokens                                        │
+│     → compute ref_log_probs                                       │
+│     → align back to student layout                                │
+│                                                                   │
+│   Advantage = -KL(student || teacher)                            │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Difference from standard OPD**:
+
+| Feature | Standard OPD | OPSD |
+|---------|-------------|------|
+| Teacher prompt | Original problem only | Original problem + reference solution y\* |
+| Privileged info | None | y\* injected into teacher prompt |
+| Distillation signal | General behavior alignment | Guides reasoning toward correct answer |
+| Config | `is_pure_opd=True` or `use_opd=True` | `opsd_mode=True` (auto-enables `is_pure_opd=True`) |
+
+### Configuration Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `opsd_mode` | Enable OPSD mode (inject y\* into teacher prompt). Auto-enables `is_pure_opd=True`; set `use_opd=True` explicitly for mixed mode (external rewards + KL) | `false` |
+| `opsd_solution_key` | Dataset column name for the reference solution | `"reference_solution"` |
+| `opsd_teacher_template` | Format string for teacher prompt, supports `{problem}` and `{solution}` placeholders | Built-in default template |
+| `global_template` | Chat template name (e.g., `qwen3`) for teacher prompt formatting; falls back to the actor's `data_args.template` if unset | — |
+| `opsd_max_solution_length` | Optional hard cap on y\* token length; if unset, solutions are auto-truncated to fit `sequence_length` | `None` |
+| `teacher.data_args.enable_thinking` | Thinking mode used to render the OPSD teacher prompt. In LoRA mode the teacher is aliased to `student_train` and inherits the student's setting | — |
+
+### Data Requirements
+
+The dataset JSONL must contain a `reference_solution` field (or the field specified by `opsd_solution_key`). Its content is injected into the teacher prompt as privileged information with no format requirement (a full reasoning process, a final answer, or a brief hint all work):
+
+```json
+{
+    "id": "0",
+    "prompt": "Prove that for all positive integers n, n^3 - n is divisible by 6",
+    "messages": "[{\"role\": \"user\", \"content\": \"Prove that for all positive integers n, n^3 - n is divisible by 6\"}]",
+    "ground_truth": "Proof complete",
+    "reference_solution": "n^3 - n = n(n-1)(n+1) = (n-1)n(n+1)...\nThus n^3 - n is a product of three consecutive integers, divisible by 6.",
+    "tag": "math_opsd"
+}
+```
+
+### Teacher Prompt Construction
+
+The teacher prompt is built by formatting `opsd_teacher_template`, then wrapping with the chat template specified by `global_template`:
+
+```
+opsd_teacher_template.format(problem=..., solution=...)
+  → user_content (problem + y* + instruction)
+  → [{"role": "user", "content": user_content}]
+  → get_chat_template(global_template, tokenizer)(..., add_generation_prompt=True)
+  → teacher_prompt_text (with chat format tokens)
+```
+
+The default template instructs the student to reason independently rather than copy the reference solution. When customizing, use `{problem}` and `{solution}` as placeholders.
+
+### Configuration Example
+
+```yaml
+# OPSD configuration
+opsd_mode: true  # auto-enables is_pure_opd (pure self-distillation)
+opsd_solution_key: "reference_solution"
+global_template: qwen3  # teacher prompt uses qwen3 chat template (with thinking)
+# Optional: hard cap on solution length. If not set, auto-truncates to fit sequence_length.
+opsd_max_solution_length: 2048
+
+# OPSD teacher prompt (problem + y*) is longer than student prompt.
+# Set sequence_length > prompt_length + response_length to give buffer.
+prompt_length: 2048
+response_length: 4096
+sequence_length: 6656  # 2048 + 4096 + 512 buffer for teacher prompt
+
+student_train:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  data_args:
+    file_name:
+      - data/openthoughts_math_opsd.jsonl  # Must contain reference_solution field
+    domain_interleave_probs:
+      math_rule: 1.0
+  # ...
+
+student_infer:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B
+  # ...
+
+teacher:
+  model_args:
+    model_name_or_path: Qwen/Qwen3-8B  # Self-distillation: teacher = student initial weights
+  data_args:
+    enable_thinking: true  # teacher prompt rendered with an open think block
+  # ...
+```
+
+### Compatibility
+
+- **Pipelines**: OPSD is currently implemented in the RLVR pipeline only (`roll/pipeline/rlvr/rlvr_pipeline.py`). On `rlvr_vlm` / `agentic` pipelines, `opsd_mode=True` passes config validation but the y\* transform is not applied — teacher log probs are computed on the student prompt, i.e. plain pure OPD behavior
+- **Multi-Teacher**: Not supported. OPSD currently supports a single teacher only (the y\* transform and teacher thinking mode are applied once for the whole batch). Multi-teacher routing is available in standard OPD (`opsd_mode=False`)
+- **Reference + Teacher**: Not supported in OPSD mode (config validation rejects it). Configuring both is available in standard OPD (`opsd_mode=False`), where they are merged into a unified `_reference_configs` dict weighted by `opd_kl_coef`
+- **Mixed Mode**: OPSD can be combined with `use_opd=True`, advantage = `rl_advantages - total_weighted_kld`
+
+### Caveats
+
+- OPSD teacher prompt (problem + y\*) is longer than student prompt. Set `sequence_length` larger than `prompt_length + response_length` to give buffer. Solutions are auto-truncated to fit: the system measures template overhead dynamically (by building an empty-solution prompt), calculates available space for the solution, and truncates the solution text — preserving the OPSD template structure. Optionally set `opsd_max_solution_length` for a hard cap on solution length. If even the empty-solution prompt exceeds the available space, the tokenized prompt itself is truncated as a last resort.
+- Literal curly braces in `opsd_teacher_template` must be escaped as `{{` and `}}` (standard Python `.format()`)
+- OPSD mode does not support configuring both `reference` and `teacher` simultaneously
+- OPSD supports both LoRA and non-LoRA branches:
+  - **Non-LoRA branch**: teacher is a separate cluster
+  - **LoRA branch**: teacher is the actor model itself (adapter disabled), no `teacher` config needed
+
+---
+
 ## FAQ
 
 ### Q1: How to configure mixed mode?
@@ -577,7 +736,8 @@ rewards:
     worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
     tag_included: [math]
 
-# Teacher configuration (automatically mapped to reference)
+# Teacher or reference configuration (automatically mapped to reference)
+# Both can be configured simultaneously — they are merged into _reference_configs
 teacher:
   model_args:
     model_name_or_path: Qwen/Qwen3-32B
@@ -619,7 +779,7 @@ teacher:
 Launch command:
 ```bash
 python examples/start_onpolicy_distill_pipeline.py \
-    --config_path examples/qwen3-8B-onpolicy-distill-megatron \
+    --config_path distill/on_policy/llm \
     --config_name onpolicy_distill_config
 ```
 

@@ -18,8 +18,8 @@ In RL training pipelines (especially VLM and Agentic scenarios), `DataProto` bat
 - **ColumnRemoteBatch**: A concrete `RemoteBatch` where data is stored with **column IDs** as keys (one key per field/column). This is used by the **RayMemoryStore** backend.
 - **BatchProxy**: A proxy object that wraps both a local `TensorDict` (or `dict`) and a `RemoteBatch`, supporting transparent fallback lookup. When a key is accessed, it first checks the local batch and then falls back to the remote batch.
 - **Transfer Backend**: A pluggable storage backend responsible for `put`, `get`, and `delete` operations. Currently supported backends:
-  - `None` (Dummy): No remote storage; data stays local (default).
-  - `TransferQueue`: Uses the [TransferQueue](https://github.com/kvcache-ai/TransferQueue) library for high-performance distributed key-value transfer.
+  - `None` (Dummy): No remote storage; data stays local. Set `backend_name: null` to opt in.
+  - `TransferQueue` (default): Uses the [TransferQueue](https://github.com/kvcache-ai/TransferQueue) library for high-performance distributed key-value transfer.
 
 ### How It Works
 
@@ -30,7 +30,7 @@ In RL training pipelines (especially VLM and Agentic scenarios), `DataProto` bat
 
 ## Configuration
 
-The transfer backend is configured under the `transfer_backend` field in the top-level ROLL configuration:
+The transfer backend is configured under the `transfer_backend` field in the top-level ROLL configuration. The block below is the default, so it can be omitted:
 
 ```yaml
 transfer_backend:
@@ -42,10 +42,14 @@ transfer_backend:
 ```
 
 - `backend_name`: The name of the transfer backend to use.
-  - `null` (default): Disables remote transfer; all data stays local. This is the default behavior when `transfer_backend` is not configured.
-  - `TransferQueue`: Uses the TransferQueue library for high-performance data transfer.
+  - `TransferQueue` (default): Uses the TransferQueue library for high-performance data transfer. This is the default behavior when `transfer_backend` is not configured.
+  - `null`: Disables remote transfer; all data stays local. Only `rlvr`, `rlvr_vlm`, `agentic`, and `diffusion` call `to_remote`; other pipelines stay local regardless.
 - `backend_config`: Backend-specific configuration dictionary. For TransferQueue, this corresponds to the TransferQueue initialization config.
-  - `backend.SimpleStorage.num_data_storage_units`: The number of storage units to shard data across. Can be configured based on the number of CPU cores and cluster nodes. `msgpack` serialization has a maximum 4 GB limit per object, so larger data transfers require more storage units to shard `non_tensor_batch` into smaller pieces.
+  - `backend.SimpleStorage.num_data_storage_units`: The number of storage units to shard data across (default 16). Each unit is a Ray actor pinned to one CPU, and put/get is scattered across units in parallel. `msgpack` serialization has a maximum 4 GB limit per object, so larger data transfers require more storage units to shard `non_tensor_batch` into smaller pieces.
+
+:::caution CPU requirements
+Each unit reserves one CPU, plus one for the controller. Since `ResourceManager` already reserves half of every node's CPUs, 16 units needs roughly 34+ CPUs per node. When there are not enough CPUs, ROLL raises a `RuntimeError` at startup and **does not degrade automatically** (TransferQueue's `ray.get(pg.ready())` has no timeout, so otherwise it would just hang silently). The message names the largest workable value, so lower `num_data_storage_units` and restart.
+:::
 
 ### Agentic Pipeline Optimization
 

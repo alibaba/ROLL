@@ -44,8 +44,11 @@ def format_prompt(prompt, processor, use_image=True, prompt_image_token=None):
             }
         ]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    real_image_token = "<|vision_start|><|image_pad|><|vision_end|>"
+    if hasattr(processor, "media_processor"):
+        real_image_token = "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
     if prompt_image_token:
-        text = text.replace(prompt_image_token, "<|vision_start|><|image_pad|><|vision_end|>")
+        text = text.replace(prompt_image_token, real_image_token)
     return text
 
 
@@ -201,6 +204,16 @@ def get_vlm_data_kwargs(data_args, tokenizer, processor, is_val=False):
     return dict(dataset=dataset, collect_fn_kwargs=collect_fn_kwargs)
 
 
+def _get_rollout_dataloader_kwargs(data_args) -> dict[str, int | bool]:
+    """Build rollout scheduler DataLoader options from data args."""
+    return dict(
+        use_dataloader=True,
+        use_collect_fn=True,
+        batch_size=data_args.rollout_dataloader_batch_size,
+        num_workers=data_args.rollout_dataloader_num_workers,
+    )
+
+
 ### for video rlvr demo
 # we use video-r1 116k video data with adjusted format, case for training data:
 #   {
@@ -304,8 +317,9 @@ def video_r1_get_data_kwargs(data_args, tokenizer, processor, is_val=False):
         },
         video_meta_keys=[],
         is_template_applied=True,
+        generate_mm_uuids=True,
     )
-    get_data_item_kwargs = dict(use_dataloader=True, use_collect_fn=True, num_workers=4)
+    get_data_item_kwargs = _get_rollout_dataloader_kwargs(data_args)
     return dict(dataset=dataset, collect_fn_kwargs=collect_fn_kwargs, get_data_item_kwargs=get_data_item_kwargs)
 
 

@@ -162,7 +162,6 @@ actor_infer:
       load_format: dummy
       tensor_parallel_size: 8
       cudagraph_capture_sizes: [1,2,4,8,16,24,32,40,48]
-      optimization_level: 1
       sleep_level: 2  # 2 will destroy model parameter and kv_cache after generate to save cpu memory, 1 will destroy kv_cache only.
   num_gpus_per_worker: 8
   device_mapping: list(range(0,128))

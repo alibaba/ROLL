@@ -171,7 +171,11 @@ class Qwen3_5Template(VisionTemplate):
         weight_prefix = "mtp.layers.0" if hf_name.startswith("mtp.layers.0") else "mtp"
         original_name = hf_name.removeprefix(weight_prefix)
         if self.hf_moe_prefix is not None:
-            original_name = remove_weight_prefix(original_name, self.hf_moe_prefix)
+            if original_name.endswith(("gate_up_proj", "down_proj")):
+                # qwen3.6 mtp moe weights is stacked 
+                original_name = hf_name.removeprefix(weight_prefix).removeprefix(self.hf_moe_prefix)
+            else:
+                original_name = remove_weight_prefix(original_name, self.hf_moe_prefix)
         if original_name in self.hf_invalid_keys:
             return None
         op = self.get_conver_op(original_name, self.hf_name_to_converter)

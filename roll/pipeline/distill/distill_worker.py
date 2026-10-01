@@ -9,11 +9,12 @@ from codetiming import Timer
 
 from roll.configs.worker_config import WorkerConfig
 from roll.distributed.executor.worker import Worker
-from roll.distributed.scheduler.decorator import register, Dispatch
+from roll.distributed.scheduler.decorator import register, Dispatch, collect_all_to_all, dispatch_dp_mp_compute
 from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_actor_model_provider
+from roll.utils.checkpoint_manager import download_model, get_latest_ckpt
 from roll.utils.context_managers import state_offload_manger
 from roll.utils.functionals import (
     append_to_dict,
@@ -53,9 +54,15 @@ class StudentWorker(Worker):
         self.strategy.initialize(model_provider=default_actor_model_provider)
         self.tokenizer = self.strategy.tokenizer
 
-        if self.pipeline_config.resume_from_checkpoint:
-            load_dir = os.path.join(self.pipeline_config.resume_from_checkpoint, self.cluster_name)
-            self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
+        if self.pipeline_config.resume_from_checkpoint or self.pipeline_config.auto_resume:
+            ckpt_uri = None
+            if self.pipeline_config.auto_resume or self.pipeline_config.resume_from_checkpoint is True:
+                ckpt_uri = get_latest_ckpt(self.pipeline_config.checkpoint_config)
+            if ckpt_uri is None and isinstance(self.pipeline_config.resume_from_checkpoint, str):
+                ckpt_uri = self.pipeline_config.resume_from_checkpoint
+            if ckpt_uri:
+                load_dir = os.path.join(download_model(ckpt_uri), self.cluster_name)
+                self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
 
         self.logger.info(f"{self.worker_name} initialized")
 
@@ -63,7 +70,7 @@ class StudentWorker(Worker):
 
         self.kl_loss_func = VariousDivergence(self.pipeline_config)
 
-    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
+    @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, clear_cache=False, prefetch=True)
     def train_step(self, data: DataProto):
         """
         return DataProto(meta_info={'metrics': metrics})
@@ -81,7 +88,6 @@ class StudentWorker(Worker):
                 load_kwargs={"include": None},
         ):
             data = data.to(current_platform.device_type)
-            data = self.strategy.get_data_input(data)
             if self.rank_info.is_pipeline_last_stage:
                 # Retrieve the teacher logits
                 data.batch['teacher_probs'] = self.probs_cache.pop_full_logits()
@@ -143,11 +149,10 @@ class StudentWorker(Worker):
         }
         return loss, student_metrics
 
-    @register(Dispatch.DP_MP_DISPATCH_FIRST, clear_cache=False)
+    @register(Dispatch.DP_MP_COMPUTE, clear_cache=False, prefetch=True)
     def val_step(self, data: DataProto):
         data = data.to(current_platform.device_type)
         data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
-        data = self.strategy.get_data_input(data)
         if "labels" in data.batch.keys():
             # rename key: labels -> labels_for_loss
             data.rename("labels", "labels_for_loss")
@@ -448,10 +453,6 @@ class TeacherWorker(Worker):
         self.strategy.initialize(model_provider=default_actor_model_provider)
         self.tokenizer = self.strategy.tokenizer
 
-        if self.pipeline_config.resume_from_checkpoint:
-            load_dir = os.path.join(self.pipeline_config.resume_from_checkpoint, self.cluster_name)
-            self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
-
         self.logger.info(f"{self.worker_name} initialized")
 
         self.strategy.offload_states()
@@ -474,9 +475,12 @@ class TeacherWorker(Worker):
             'topk_inf_mask': topk_inf_mask.detach()
         }
 
-    @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST_COLLECT_ALL, clear_cache=False)
+    @register(
+        dispatch_mode={"dispatch_fn": dispatch_dp_mp_compute, "collect_fn": collect_all_to_all},
+        clear_cache=False,
+        prefetch=True,
+    )
     def forward(self, data: DataProto):
-        data = self.strategy.get_data_input(data)
         if "labels" in data.batch.keys():
             # rename key: labels -> labels_for_loss
             data.rename("labels", "labels_for_loss")
