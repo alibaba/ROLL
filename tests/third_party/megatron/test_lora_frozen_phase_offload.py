@@ -91,5 +91,7 @@ def test_lora_phase_restores_frozen_weights_and_next_adam_update(tmp_path, monke
         return original_save(strategy, *args, **kwargs)
 
     monkeypatch.setattr(MegatronTrainStrategy, "save_checkpoint", save_after_phase)
-    test_strategy_checkpoint_resumes_model_optimizer_scheduler_and_rng(tmp_path, monkeypatch, lora=True)
+    test_strategy_checkpoint_resumes_model_optimizer_scheduler_and_rng(
+        tmp_path, monkeypatch, lora=True, initial_update=True, from_master=False
+    )
     assert checked == [True]

@@ -125,6 +125,14 @@ def checkpoint_grad_buffer_offload(optimizer):
     it does not park a full gradient image in host memory.
     """
     leaves = getattr(optimizer, "chained_optimizers", [optimizer])
+    backend = getattr(optimizer, "_offload_backend", None)
+    if backend is not None:
+        # Leaves are offloaded directly, so give each the store and key prefix the chain would assign.
+        chained = hasattr(optimizer, "chained_optimizers")
+        key_prefix = getattr(optimizer, "_offload_key_prefix", "")
+        for idx, leaf in enumerate(leaves):
+            leaf._offload_backend = backend
+            leaf._offload_key_prefix = f"{key_prefix}_chain{idx}" if chained else key_prefix
     suspended = []
     try:
         for leaf in leaves:
@@ -782,7 +790,22 @@ def _offload_ddp_buffers(optimizer: DistributedOptimizer) -> None:
             if ddp_buffer.param_data is None:
                 continue
             ddp_buffer.param_data.data = empty_cpu_parameter_buffer(ddp_buffer.numel, ddp_buffer.param_data.dtype)
-        _release_ddp_param_views(optimizer)
+            # Full-shaped zero-storage views: Hybrid validates masters against shard shapes while parked.
+            for param in ddp_buffer.params[::-1]:
+                start_index, _, _ = ddp_buffer.param_index_map[param]
+                view = ddp_buffer._get(
+                    _param_view_shape(ddp_buffer, param), start_index, buffer_type=BufferType.PARAM
+                )
+                if is_float8tensor(param):
+                    param._data = view
+                else:
+                    param.data = view
+            for bucket in ddp_buffer.buckets:
+                start_index, end_index = ddp_buffer.bucket_indices[bucket.bucket_id]
+                bucket.param_data.data = ddp_buffer._get(
+                    torch.Size([end_index - start_index]), start_index, buffer_type=BufferType.PARAM
+                )
+        _rebind_hybrid_float16_shards(optimizer)
         optimizer._offload_ddp_keys = []
         optimizer._offload_ddp_from_master = True
         log_offload_debug(
@@ -814,6 +837,9 @@ def _offload_ddp_buffers(optimizer: DistributedOptimizer) -> None:
     # put_tensors rebinds param_data and shrinks its storage; still break the
     # param/bucket views so nothing reads the emptied buffer before reload.
     _release_ddp_param_views(optimizer)
+    # Hybrid owners key their CPU masters by the shard views; leaving them on the
+    # old CUDA allocation would pin it while the model is parked.
+    _rebind_hybrid_float16_shards(optimizer)
 
     # put_tensors(replicated_over=group) already barriers internally — no extra barrier here.
     optimizer._offload_ddp_keys = keys

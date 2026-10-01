@@ -2069,6 +2069,9 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             and self.megatron_train_args.bounded_cpu_grad_staging
             and adapter_state_dict is None
         )
+        if release_gradients:
+            self.optimizer._offload_backend = self._get_offload_backend()
+            self.optimizer._offload_key_prefix = self._get_offload_key_prefix()
         gradient_context = checkpoint_grad_buffer_offload(self.optimizer) if release_gradients else nullcontext()
         with gradient_context:
             self.model.models = self.models_unwrapped

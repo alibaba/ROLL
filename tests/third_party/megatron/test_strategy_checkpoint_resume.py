@@ -112,13 +112,19 @@ def test_strategy_checkpoint_resumes_model_optimizer_scheduler_and_rng(tmp_path,
             strategy.megatron_train_args = args
             strategy.scheduler = get_megatron_lr_scheduler(args, 4, optimizer)
             strategy.tokenizer = strategy.processor = None
-            strategy.worker_config = SimpleNamespace(checkpoint_config={"async_upload": False})
+            strategy.worker_config = SimpleNamespace(
+                checkpoint_config={"async_upload": False},
+                strategy_args=SimpleNamespace(strategy_config={}),
+            )
             strategy.checkpoint_manager = CheckpointManager({})
             strategy.ckpt_sharding_metadata = build_sharded_state_dict_metadata(args)
             strategy.save_strategy = FullyParallelSaveStrategyWrapper(
                 streaming_save_strategy(),
                 parallel_state.get_data_parallel_group(), do_cache_distribution=True)
             strategy._validate_access_integrity = True
+            from roll.distributed.store.local.backend import CPUOffloadBackend
+            strategy._offload_backend = CPUOffloadBackend()
+            strategy.worker = SimpleNamespace(cluster_name="resume_probe")
             return strategy
 
         def update(strategy, offset, capture_grads=None, expected_grads=None):
@@ -359,7 +365,7 @@ def test_strategy_checkpoint_resumes_model_optimizer_scheduler_and_rng(tmp_path,
             # The temporary context must preserve gradients already parked by
             # its caller. Full optimizer checkpoint templating itself requires
             # materialized bucket geometry and runs before this context.
-            resumed.optimizer.offload_states(include=[MegatronOffloadStateType.other_params], pin_memory=False)
+            resumed.optimizer.offload_states(include=[MegatronOffloadStateType.other_params])
             with checkpoint_grad_buffer_offload(resumed.optimizer):
                 assert all(buffer.grad_data.device.type == "cpu" and buffer.grad_data.numel() == 1
                            for leaf in resumed.optimizer.chained_optimizers for buffer in leaf.buffers)
