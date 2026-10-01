@@ -103,6 +103,7 @@ def _install_mock_vllm_modules(monkeypatch):
         return await result if inspect.isawaitable(result) else result
 
     compat.call_maybe_await = call_maybe_await
+    compat.module_has_attributes = lambda module_name, attributes: False
     monkeypatch.setitem(sys.modules, "roll.third_party.vllm.compat", compat)
     monkeypatch.setitem(sys.modules, "roll.third_party.vllm.gdn_patcher", gdn_patcher)
 
@@ -360,6 +361,25 @@ class TestVllmStrategyBeamSearch:
 
         with pytest.raises(RuntimeError, match="Upgrade vLLM"):
             asyncio.run(vllm_strategy_module.VllmStrategy(mock_worker).initialize(None))
+
+    def test_ep_allowed_on_modern_dev_build(self, monkeypatch, vllm_strategy_module, mock_worker):
+        mock_worker.cluster_name = "actor-infer"
+        mock_worker.master_port = 29500
+        mock_worker.get_node_ip = Mock(return_value="127.0.0.1")
+        mock_worker.worker_config.strategy_args.strategy_config = {"enable_expert_parallel": True}
+        mock_worker.worker_config.resource_placement_groups = [
+            {"node_rank": 0, "gpu_rank": 0, "placement_group": "pg-0"}
+        ]
+        model = Mock()
+        model.get_tokenizer = AsyncMock(return_value=Mock())
+        create_async_llm = AsyncMock(return_value=model)
+        monkeypatch.setattr(vllm_strategy_module, "create_async_llm", create_async_llm)
+        monkeypatch.setattr(vllm_strategy_module, "module_has_attributes", lambda *_args, **_kwargs: True)
+        vllm_strategy_module.vllm.__version__ = "0.1.dev20073+g8e685d198"
+
+        asyncio.run(vllm_strategy_module.VllmStrategy(mock_worker).initialize(None))
+
+        assert create_async_llm.await_args.kwargs["enable_expert_parallel"] is True
 
     @pytest.mark.parametrize("version", ["0.11.0"])
     def test_legacy_vllm_cross_node_tp_uses_ray(

@@ -27,7 +27,7 @@ from roll.distributed.scheduler.protocol import DataProto, list_of_dict_to_dict_
 from roll.distributed.strategy.strategy import InferenceStrategy
 from roll.distributed.strategy.vllm_topology import resolve_vllm_mp_topology
 from roll.third_party.vllm import create_async_llm
-from roll.third_party.vllm.compat import call_maybe_await
+from roll.third_party.vllm.compat import call_maybe_await, module_has_attributes
 from roll.utils.functionals import (
     concatenate_input_and_output,
     reduce_metrics,
@@ -196,7 +196,15 @@ class VllmStrategy(InferenceStrategy):
         self.sleep_level = vllm_config.pop("sleep_level", 1)
 
         vllm_version = Version(vllm.__version__)
-        if vllm_config.get("enable_expert_parallel", False) and vllm_version.release[:2] < (0, 16):
+        # Development builds report 0.1.devN but track current vLLM; judge them by capability.
+        modern_dev_build = vllm_version.is_devrelease and module_has_attributes(
+            "vllm.v1.executor.ray_executor", ("RayDistributedExecutor", "RayWorkerMetaData")
+        )
+        if (
+            vllm_config.get("enable_expert_parallel", False)
+            and vllm_version.release[:2] < (0, 16)
+            and not modern_dev_build
+        ):
             raise RuntimeError(
                 "vLLM expert parallelism with the mp backend requires vLLM 0.16.x or later, "
                 f"but found {vllm.__version__}. Upgrade vLLM or disable enable_expert_parallel."
