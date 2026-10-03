@@ -896,8 +896,14 @@ class DataCollatorForSFT(DataCollatorWithPaddingForPaddedKeys):
     shift_feature: bool = True
 
     def __call__(self, features):
+        labels = [feature["labels"] for feature in features]
+        # tokenizer.pad does not truncate overlong sequences. Clip all token
+        # fields to the same window before padding, without changing dataset
+        # records in place. Labels use their own ignore-index padding below.
+        features = [{key: value[:self.max_length] if key in self.padded_keys else value
+                     for key, value in feature.items() if key != "labels"}
+                    for feature in features]
         padded_batch = super().__call__(features)
-        labels = padded_batch.pop("labels")
         padded_labels = []
         for label in labels:
             seq_len = len(label)

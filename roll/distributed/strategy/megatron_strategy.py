@@ -43,6 +43,9 @@ from transformers.utils import is_peft_available
 
 from mcore_adapter import TrainingArguments
 from mcore_adapter.checkpointing import generate_model_state_dict, get_checkpoint_dir, load_state_dict_from_checkpoint
+from mcore_adapter.checkpoint_read_order import patch_mcore_checkpoint_read_order
+from mcore_adapter.checkpoint_write import streaming_save_strategy
+from mcore_adapter.models.qwen4_exp.capabilities import validate_bounded_rl_token_statistics
 from mcore_adapter.parallel_functions import context_parallel_gather, vocab_parallel_logprobs
 from mcore_adapter.patcher import (
     patch_apply_aux_loss,
@@ -64,12 +67,14 @@ from roll.third_party.megatron.mtp_patcher import patch_mtp_functions
 from roll.third_party.megatron.offload_states_patch import (
     MegatronOffloadStateType,
     bind_megatron_offload_states_func,
+    checkpoint_grad_buffer_offload,
     cleanup_ddp_buffers,
     is_model_params_offloaded,
     offload_megatron_no_grad_module,
     reload_megatron_no_grad_module,
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
+from roll.third_party.megatron.optimizer_config import build_optimizer_config
 from roll.third_party.megatron.router_replay_utils import (
     collect_r2_router_indices,
     finalize_r2_routed_experts,
@@ -131,6 +136,7 @@ class MegatronInferStrategy(InferenceStrategy):
         #TODO remove the patches when the latest pytorch version > v2.9.1
         patch_torch_find_nd_overlapping_shards()
         patch_torch_validate_global_plan()
+        patch_mcore_checkpoint_read_order()
         super().__init__(worker)
         config_dict = self.worker_config.training_args.to_dict()
         config_dict.update(self.worker_config.strategy_args.strategy_config)
@@ -147,6 +153,8 @@ class MegatronInferStrategy(InferenceStrategy):
         self.forward_backward_func = None
         self.seq_length = None
         self.use_sequence_packing = self.worker_config.use_sequence_packing
+        self._bounded_rl_token_statistics_request = self._validate_bounded_rl_token_statistics_request()
+        self._bounded_rl_token_statistics_enabled = False
         # hard to impl with offload states
         assert not self.megatron_train_args.overlap_param_gather, "overlap_param_gather is not supported"
 
@@ -194,6 +202,7 @@ class MegatronInferStrategy(InferenceStrategy):
             self.model.config.mtp_training_mode = self.worker_config.mtp_training_mode
 
         self.models_unwrapped = self.model.get_models()
+        self._configure_bounded_rl_token_statistics()
         self.forward_backward_func = get_forward_backward_func()
         self.is_multimodal = self.processor is not None
         self._validate_vlm_packing_support()
@@ -220,6 +229,7 @@ class MegatronInferStrategy(InferenceStrategy):
         logger.info(f"{self.model.get_models()}")
         self._warmup_p2p_comms()
         dist.barrier()
+        clear_memory(clear_host_memory=True)
 
     def _warmup_p2p_comms(self):
         # Pre-create lazy 2-rank p2p communicators at init to avoid deadlock
@@ -708,7 +718,7 @@ class MegatronInferStrategy(InferenceStrategy):
                 labels = self._get_feature_on_this_cp_rank(labels, "labels")
             loss_mask = self._get_feature_on_this_cp_rank(loss_mask, "loss_mask")
         position_ids = None
-        forward_args = data.meta_info.get("forward_args", {})
+        forward_args = dict(data.meta_info.get("forward_args") or {})
         if "position_ids" in data.batch and data.batch["position_ids"].dim() == 3:  # qwen-vl/omni mrope
             position_ids = data.batch["position_ids"]
             if position_ids.size(1) == 4:
@@ -789,6 +799,16 @@ class MegatronInferStrategy(InferenceStrategy):
 
         # megatron_llama_core need loss_mask to compute aux loss
         forward_args["loss_mask"] = loss_mask
+        if self._bounded_rl_token_statistics_enabled:
+            if "response_mask" not in data.batch:
+                raise ValueError("bounded RL token statistics require response_mask")
+            block_kwargs = dict(forward_args.get("extra_block_kwargs") or {})
+            if "rl_token_labels" in block_kwargs:
+                raise ValueError("rl_token_labels is owned by MegatronStrategy")
+            block_kwargs["rl_token_labels"] = self._build_next_token_labels(
+                input_ids, data.batch["response_mask"]
+            )
+            forward_args["extra_block_kwargs"] = block_kwargs
 
         output_tensor = model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, labels=labels,
@@ -893,14 +913,12 @@ class MegatronInferStrategy(InferenceStrategy):
         input_ids [[p, p, r, r, r, 0, 0]] p: prompt, r: response, 0: pad
         response_mask [[0, 0, 1, 1, 1, 0, 0]]
         """
-        ori_seq_length = attention_mask.size(1)
-        cp_size = mpu.get_context_parallel_world_size()
-        seq_len = ori_seq_length
+        if self._bounded_rl_token_statistics_enabled:
+            if logits.ndim != 3 or logits.shape[-1] != 2:
+                raise ValueError("bounded RL token statistics require a [batch, sequence, 2] tensor")
+            return logits[..., 0][:, :-1] * attention_mask[:, 1:]
 
-        labels: torch.Tensor = input_ids[:, 1:].clone()
-        labels[attention_mask[:, 1:seq_len] == 0] = 0  # avoid invalid token id
-        # TODO: don't pad here but process this shift after generation
-        labels = torch.cat([labels, torch.zeros_like(labels[:, :1])], dim=1)
+        labels = self._build_next_token_labels(input_ids, attention_mask)
         labels = self._get_feature_on_this_cp_rank(labels, "labels")
         # compute logprobs in remove padding token
         log_probs = vocab_parallel_logprobs(
@@ -913,6 +931,10 @@ class MegatronInferStrategy(InferenceStrategy):
         return log_probs
 
     def op_compute_entropy(self, logits: torch.Tensor, attention_mask: torch.Tensor):
+        if self._bounded_rl_token_statistics_enabled:
+            if logits.ndim != 3 or logits.shape[-1] != 2:
+                raise ValueError("bounded RL token statistics require a [batch, sequence, 2] tensor")
+            return logits[..., 1][:, :-1] * attention_mask[:, 1:]
         entropy = vocab_parallel_entropy(
             logits,
             used_fp32=self.worker_config.logits_in_fp32,
@@ -922,6 +944,64 @@ class MegatronInferStrategy(InferenceStrategy):
             entropy = context_parallel_gather(entropy, parallel_dim=1)
         entropy = entropy[:, :-1] * attention_mask[:, 1:]
         return entropy
+
+    @staticmethod
+    def _build_next_token_labels(input_ids: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+        labels = input_ids[:, 1:].clone()
+        labels[response_mask[:, 1:] == 0] = 0
+        return torch.cat((labels, torch.zeros_like(labels[:, :1])), dim=1)
+
+    def _validate_bounded_rl_token_statistics_request(self):
+        options = self.worker_config.model_args.model_config_kwargs
+        enabled = options.get("bounded_rl_token_statistics", False)
+        configured_temperature = options.get("rl_token_statistics_temperature", 1.0)
+        if (
+            isinstance(configured_temperature, bool)
+            or not isinstance(configured_temperature, (int, float))
+            or float(configured_temperature) != 1.0
+        ):
+            raise ValueError("bounded RL token statistics use raw logits and require temperature=1")
+        targets = self.worker_config.model_args.lora_target or []
+        if isinstance(targets, str):
+            targets = [targets]
+        output_head_adapter = any(
+            target in {"all", "all-linear", "output_layer", "lm_head"}
+            or "output_layer" in target
+            or "lm_head" in target
+            for target in targets
+        )
+        return validate_bounded_rl_token_statistics(
+            enabled=enabled,
+            chunk_size=options.get("vocab_loss_chunk_size", 256),
+            context_parallel_size=self.megatron_train_args.context_parallel_size or 1,
+            sequence_packing=self.use_sequence_packing,
+            mtp_num_layers=self.megatron_train_args.mtp_num_layers,
+            output_head_adapter=output_head_adapter,
+        )
+
+    def _configure_bounded_rl_token_statistics(self):
+        request = self._bounded_rl_token_statistics_request
+        self._bounded_rl_token_statistics_enabled = bool(request["enabled"])
+        if not self._bounded_rl_token_statistics_enabled:
+            return
+        for model in self.model.get_models():
+            candidate = unwrap_model(model)
+            if getattr(candidate, "bounded_rl_token_statistics_capability", None) != "qwen4_exp_v1":
+                raise NotImplementedError(
+                    "bounded_rl_token_statistics requires the Qwen4Exp bounded-statistics capability"
+                )
+            validate_bounded_rl_token_statistics(
+                enabled=True,
+                chunk_size=request["chunk_size"],
+                context_parallel_size=candidate.config.context_parallel_size,
+                sequence_packing=self.use_sequence_packing,
+                mtp_num_layers=candidate.config.mtp_num_layers,
+                output_head_adapter=not candidate._is_plain_output_head(),
+            )
+            candidate.config.bounded_rl_token_statistics = True
+            candidate.config.vocab_loss_chunk_size = request["chunk_size"]
+        self.model.config.bounded_rl_token_statistics = True
+        self.model.config.vocab_loss_chunk_size = request["chunk_size"]
 
     def op_compute_language_loss_from_logits(
             self,
@@ -1364,6 +1444,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         )
         self.forward_backward_func = get_forward_backward_func()
         self.model.config.finalize_model_grads_func = finalize_model_grads
+        if self.megatron_train_args.optimizer_cpu_offload and not self.megatron_train_args.overlap_grad_reduce:
+            from roll.third_party.megatron.grad_sync_memory import FirstGradSyncCacheRelease
+
+            self.model.config.finalize_model_grads_func = FirstGradSyncCacheRelease(finalize_model_grads)
 
         # Inject mtp_training_mode from WorkerConfig to model config
         if hasattr(self.worker_config, "mtp_training_mode"):
@@ -1412,6 +1496,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             for model_index, m in enumerate(self.model.get_models())
         ]
         self.models_unwrapped = self.model.get_models()
+        self._configure_bounded_rl_token_statistics()
         self.model.models = self.models_wrapped
         self.is_multimodal = self.processor is not None
         self._validate_vlm_packing_support()
@@ -1422,19 +1507,23 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             if self.megatron_train_args.fp16
             else torch.bfloat16 if self.megatron_train_args.bf16 else torch.float32
         )
-        optimizer_config = OptimizerConfig(
-            optimizer=self.megatron_train_args.optimizer,
-            lr=self.megatron_train_args.learning_rate,
-            min_lr=self.megatron_train_args.lr_scheduler_kwargs.get("min_lr", 0.0),
-            weight_decay=self.megatron_train_args.weight_decay,
-            adam_beta1=self.megatron_train_args.adam_beta1,
-            adam_beta2=self.megatron_train_args.adam_beta2,
-            adam_eps=self.megatron_train_args.adam_epsilon,
-            fp16=self.megatron_train_args.fp16,
-            bf16=self.megatron_train_args.bf16,
-            params_dtype=params_dtype,
-            use_distributed_optimizer=self.megatron_train_args.use_distributed_optimizer,
-            clip_grad=self.megatron_train_args.max_grad_norm,
+        optimizer_config = build_optimizer_config(
+            OptimizerConfig,
+            {
+                "optimizer": self.megatron_train_args.optimizer,
+                "lr": self.megatron_train_args.learning_rate,
+                "min_lr": self.megatron_train_args.lr_scheduler_kwargs.get("min_lr", 0.0),
+                "weight_decay": self.megatron_train_args.weight_decay,
+                "adam_beta1": self.megatron_train_args.adam_beta1,
+                "adam_beta2": self.megatron_train_args.adam_beta2,
+                "adam_eps": self.megatron_train_args.adam_epsilon,
+                "fp16": self.megatron_train_args.fp16,
+                "bf16": self.megatron_train_args.bf16,
+                "params_dtype": params_dtype,
+                "use_distributed_optimizer": self.megatron_train_args.use_distributed_optimizer,
+                "clip_grad": self.megatron_train_args.max_grad_norm,
+            },
+            self.megatron_train_args,
         )
         self.optimizer: MegatronOptimizer = get_megatron_optimizer(optimizer_config, self.models_wrapped)
 
@@ -1465,7 +1554,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         if self.megatron_train_args.use_distributed_optimizer:
             self.save_strategy = FullyParallelSaveStrategyWrapper(
-                TorchDistSaveShardedStrategy(backend="torch_dist", version=1),
+                streaming_save_strategy(),
                 mpu.get_data_parallel_group(with_context_parallel=True),
                 do_cache_distribution=True,
             )
@@ -1495,6 +1584,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         self._warmup_p2p_comms()
         dist.barrier()
+        clear_memory(clear_host_memory=True)
 
     def train_step(self, batch: DataProto, loss_func: Callable):
         self.model.train()
@@ -1672,12 +1762,37 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 self.offload_states(include=[OffloadStateType.model_params])
 
     def model_update(self, model_update_name: str):
+        if self.worker_config.strategy_args.strategy_config.get("offload_model_from_cpu_master", False):
+            from roll.third_party.megatron.cpu_master_params import CpuMasterWeightProvider
+
+            # Weights are streamed from the Hybrid optimizer's CPU FP32 masters;
+            # the bf16 DDP image stays a placeholder and is never materialized.
+            provider = CpuMasterWeightProvider(self.models_unwrapped, self.optimizer,
+                                               device=current_platform.device_type)
+            return self.weight_updaters[model_update_name].model_update(weight_provider=provider)
         with self._materialized_model_params():
             return self.weight_updaters[model_update_name].model_update()
 
-    def load_states(self, include=None):
+    def get_model_update_load_kwargs(self):
+        kwargs = super().get_model_update_load_kwargs()
+        if self.worker_config.strategy_args.strategy_config.get("offload_model_from_cpu_master", False):
+            # Export each weight from CPU optimizer masters as its bucket is
+            # converted; keep the complete actor off GPU while vLLM wakes.
+            kwargs["include"] = []
+            return kwargs
+        if is_peft_available() and isinstance(self.models_unwrapped[0], PeftModel):
+            # Adapter export does not read the frozen backbone. Keep it on CPU
+            # while the colocated inference engine wakes to admit the adapter.
+            kwargs["include_frozen_parameters"] = False
+        return kwargs
+
+    def load_states(self, include=None, include_frozen_parameters=True):
         """Load states from offload backend. Already-resident sections no-op via
-        the optimizer's and the model chunks' offloaded_states sets."""
+        the optimizer's and the model chunks' offloaded_states sets.
+
+        ``include_frozen_parameters=False`` leaves the frozen (no-grad) backbone
+        parked so a LoRA adapter export never wakes it alongside the inference engine.
+        """
         backend = self._get_offload_backend()
         self.optimizer._offload_backend = backend
 
@@ -1685,10 +1800,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         if megatron_include:
             self.optimizer.reload_states(include=megatron_include)
 
-        if include is None or OffloadStateType.model_params in include:
+        if include_frozen_parameters and (include is None or OffloadStateType.model_params in include):
             reload_megatron_no_grad_module(model_chunks=self.model.get_models(), backend=backend)
 
-    def offload_states(self, include=None):
+    def offload_states(self, include=None, include_frozen_parameters=True):
         """Offload states to backend."""
         backend = self._get_offload_backend()
         key_prefix = self._get_offload_key_prefix()
@@ -1700,7 +1815,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         if megatron_include:
             self.optimizer.offload_states(include=megatron_include)
 
-        if include is None or OffloadStateType.model_params in include:
+        if include_frozen_parameters and (include is None or OffloadStateType.model_params in include):
             offload_megatron_no_grad_module(
                 model_chunks=self.model.get_models(),
                 backend=backend,
@@ -1762,11 +1877,19 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                         adapter_save_directory, state_dict={"model": peft_state_dict}
                     )
                 self.models_unwrapped[0].config.save_pretrained(save_dir)
+                # Training state lives at the checkpoint root, including the
+                # frozen asset identity validated before restoring any adapter.
+                asset_hook = getattr(self.models_unwrapped[0], "save_external_assets", None)
+                if asset_hook is not None:
+                    asset_hook(save_dir)
             else:
                 self.models_unwrapped[0].save_pretrained(save_dir, ckpt_format=ckpt_format)
         else:
             state_dict = {f"model{i}": generate_model_state_dict(model, ckpt_format=ckpt_format) for i, model in enumerate(self.models_unwrapped)}
-            self.models_unwrapped[0].save_pretrained(save_dir, state_dict=state_dict, ckpt_format=ckpt_format)
+            self.models_unwrapped[0].save_pretrained(
+                save_dir, state_dict=state_dict, ckpt_format=ckpt_format,
+                external_asset_models=self.models_unwrapped,
+            )
             del state_dict
         if dist.get_rank() == 0:
             if self.tokenizer is not None:
@@ -1777,6 +1900,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         # save optimizer
         if not self.megatron_train_args.save_only_model:
+            if self.megatron_train_args.optimizer_cpu_offload:
+                from roll.third_party.megatron.checkpoint_optimizer_state import prepare_cpu_adam_for_checkpoint
+
+                prepare_cpu_adam_for_checkpoint(self.optimizer)
             checkpoint_dir = get_checkpoint_dir(save_dir,
                                                 return_base_dir=self.megatron_train_args.use_distributed_optimizer)
             if self.megatron_train_args.use_distributed_optimizer:
@@ -1838,6 +1965,70 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
     def load_checkpoint(self, load_dir, tag="checkpoint", **kwargs):
         logger.info(f"load checkpoint from {load_dir}")
 
+        # Every rank must restore its saved RNG before exact training can
+        # continue. Agree on missing files before entering state-load collectives.
+        rng_file = os.path.join(load_dir, RNG_STATE_DIR, f"rng_state_{dist.get_rank()}.pth")
+        missing_rng = None if os.path.isfile(rng_file) else rng_file
+        missing_rng_files = [None] * dist.get_world_size()
+        dist.all_gather_object(missing_rng_files, missing_rng)
+        missing_rng_files = [path for path in missing_rng_files if path is not None]
+        if missing_rng_files:
+            raise FileNotFoundError(f"Incomplete training checkpoint: missing RNG state {missing_rng_files}")
+
+        # Frozen external assets are part of checkpoint identity. Validate them
+        # before loading mutable training state, using the unwrapped model hooks.
+        adapter_state_dict = None
+        self.model.models = self.models_unwrapped
+        try:
+            self.model.load_external_assets(load_dir, external_asset_path=kwargs.get("external_asset_path"))
+            adapter_error = None
+            try:
+                if len(self.models_unwrapped) == 1 and is_peft_available() and isinstance(
+                    self.models_unwrapped[0], PeftModel
+                ):
+                    # Match save_checkpoint's per-adapter legacy checkpoint layout
+                    # and VirtualModels.load_state_dict's adapter-name mapping.
+                    adapter_state_dict = {}
+                    for adapter_name in self.models_unwrapped[0].peft_config:
+                        adapter_dir = os.path.join(load_dir, adapter_name)
+                        adapter_state = load_state_dict_from_checkpoint(adapter_dir)
+                        if adapter_state is None:
+                            raise FileNotFoundError(f"Missing adapter checkpoint: {adapter_dir}")
+                        expected = get_peft_model_state_dict(
+                            self.models_unwrapped[0], self.models_unwrapped[0].state_dict_for_save_checkpoint(),
+                            adapter_name,
+                        )
+                        actual = adapter_state.get("model", adapter_state)
+                        missing = sorted(expected.keys() - actual.keys())
+                        unexpected = sorted(actual.keys() - expected.keys())
+                        mismatched = [key for key in expected.keys() & actual.keys()
+                                      if isinstance(expected[key], torch.Tensor) and
+                                      (not isinstance(actual[key], torch.Tensor) or
+                                       expected[key].shape != actual[key].shape)]
+                        if missing or unexpected or mismatched:
+                            raise ValueError(
+                                f"Invalid adapter checkpoint {adapter_name}: missing={missing}, "
+                                f"unexpected={unexpected}, shape_mismatch={sorted(mismatched)}"
+                            )
+                        adapter_state_dict[adapter_name] = adapter_state
+            except Exception as exc:
+                adapter_error = exc
+
+            # Adapter files are read locally. Agree on every rank's validation
+            # result before any rank loads optimizer, scheduler, or model state.
+            adapter_errors = [None] * dist.get_world_size()
+            dist.all_gather_object(
+                adapter_errors,
+                None if adapter_error is None else f"{type(adapter_error).__name__}: {adapter_error}",
+            )
+            adapter_errors = [f"rank {rank}: {error}" for rank, error in enumerate(adapter_errors) if error]
+            if adapter_errors:
+                if adapter_error is not None:
+                    raise adapter_error
+                raise ValueError("Invalid adapter checkpoint across ranks: " + "; ".join(adapter_errors))
+        finally:
+            self.model.models = self.models_wrapped
+
         # load optimizer
         optimizer_checkpoint = get_checkpoint_dir(
             load_dir, iteration=1, return_base_dir=self.megatron_train_args.use_distributed_optimizer
@@ -1866,17 +2057,38 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.optimizer.load_state_dict(state_dict)
 
         # load lr_scheduler
-        self.scheduler.load_state_dict(torch.load(os.path.join(load_dir, SCHEDULER_NAME)))
+        scheduler_state = torch.load(os.path.join(load_dir, SCHEDULER_NAME))
+        # Megatron's loader calls step(increment=saved_num_steps). Restoring
+        # into an existing strategy must use the saved absolute position.
+        self.scheduler.num_steps = 0
+        self.scheduler.load_state_dict(scheduler_state)
 
         # load model state dict
-        state_dict = load_state_dict_from_checkpoint(load_dir)
-        assert state_dict is not None, "No model state_dict found in checkpoint."
-        self.model.models = self.models_unwrapped
-        self.model.load_state_dict(state_dict)
-        self.model.models = self.models_wrapped
+        release_gradients = (
+            self.megatron_train_args.use_distributed_optimizer
+            and self.megatron_train_args.bounded_cpu_grad_staging
+            and adapter_state_dict is None
+        )
+        if release_gradients:
+            self.optimizer._offload_backend = self._get_offload_backend()
+            self.optimizer._offload_key_prefix = self._get_offload_key_prefix()
+        gradient_context = checkpoint_grad_buffer_offload(self.optimizer) if release_gradients else nullcontext()
+        with gradient_context:
+            self.model.models = self.models_unwrapped
+            model_state = None
+            try:
+                # Distributed model checkpoints use the unwrapped model's
+                # shard keys. Factories may allocate merged GDN/MLP tensors.
+                model_state = (adapter_state_dict if adapter_state_dict is not None
+                               else load_state_dict_from_checkpoint(load_dir, models=self.model))
+                assert model_state is not None, "No model state_dict found in checkpoint."
+                self.model.load_state_dict(model_state)
+            finally:
+                self.model.models = self.models_wrapped
+                # Drop merge results before the context recreates gradients.
+                del model_state
 
         # load rng state
-        rng_file = os.path.join(load_dir, RNG_STATE_DIR, f"rng_state_{dist.get_rank()}.pth")
         if os.path.exists(rng_file):
             logger.info(f"Loading rng states from {rng_file}")
             checkpoint_rng_state = torch.load(rng_file, weights_only=False)
@@ -1889,4 +2101,4 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 raise KeyError
             tensor_parallel.get_cuda_rng_tracker().set_states(checkpoint_rng_state["rng_tracker_states"])
         else:
-            logger.info(f"not load rng state, not found file: {rng_file}")
+            raise FileNotFoundError(f"Checkpoint RNG state disappeared during restoration: {rng_file}")

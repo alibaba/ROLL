@@ -14,6 +14,7 @@ from roll.utils.constants import IGNORE_INDEX
 from roll.utils.collective import collective
 from roll.utils.functionals import log_probs_from_logits, get_dist_info_from_comm_plan, entropy_from_logits
 from roll.utils.logging import get_logger
+from roll.utils.offload_states import OffloadStateType
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
 
 
@@ -144,6 +145,10 @@ class InferenceStrategy(ABC):
         self._setup_collective_group_impl(model_update_name, comm_plan, backend, mode=mode)
 
     # offload/load 相关接口
+    def get_model_update_load_kwargs(self):
+        """States required to export this strategy's updated weights."""
+        return {"include": [OffloadStateType.model_params]}
+
     def load_states(self, *args, **kwargs):
         raise NotImplementedError
 

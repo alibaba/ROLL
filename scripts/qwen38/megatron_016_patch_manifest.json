@@ -1,0 +1,48 @@
+{
+  "upstream_repository": "https://github.com/NVIDIA/Megatron-LM.git",
+  "upstream_commit": "bfa1d3163804eb8ea65b77d1c0e807a3fcb959e9",
+  "patch_order": [
+    "scripts/qwen38/patch_megatron_block_factory.py",
+    "scripts/qwen38/patch_megatron_gdn_decay.py",
+    "scripts/qwen38/patch_megatron_gdn_lora_checkpoint.py",
+    "scripts/qwen38/patch_megatron_gdn_gate_precision.py",
+    "scripts/qwen38/patch_megatron_gdn_convolution.py",
+    "scripts/qwen38/patch_megatron_gradient_clipping.py",
+    "scripts/qwen38/patch_megatron_moe_cache.py",
+    "scripts/qwen38/patch_megatron_ddp_memory.py",
+    "scripts/qwen38/patch_megatron_cpu_grad_staging.py",
+    "scripts/qwen38/patch_megatron_hybrid_checkpoint.py",
+    "scripts/qwen38/patch_megatron_checkpoint_padding.py",
+    "scripts/qwen38/patch_megatron_checkpoint_initialization.py"
+  ],
+  "files": {
+    "megatron/core/distributed/param_and_grad_buffer.py": {
+      "before_sha256": "a778caf0cf94b97f39e3c9e2696957dbb9dca65c56019496bb3ed6136f3ea57a",
+      "after_sha256": "21cea2d261515800af05cdf72423a8cac58434de0dda6fca3955732231f1bd92"
+    },
+    "megatron/core/models/gpt/gpt_model.py": {
+      "before_sha256": "ef12b3db9e43687b4b1f04757ff61b636295405c14ee42c7c078cafd0640bf69",
+      "after_sha256": "1717f5dc27868a5fb65ba4a17a1fafecf2cfcda45925b82cefff46fd8fbfbc7a"
+    },
+    "megatron/core/optimizer/clip_grads.py": {
+      "before_sha256": "4a68e9aae8cb1188f30766af93fabba00a43a8512f8fe3e9e4154d80de4c84ee",
+      "after_sha256": "a7a40ac42a1658fad4f589b0da5d2963cadcb5a3c01dfffc7c4b6d8174cf4556"
+    },
+    "megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py": {
+      "before_sha256": "28053c32a2468645215b19f246bd8e86e250ffab49a036e49b3f6940b8996dcb",
+      "after_sha256": "a4734d1250d210f640e0b6b55ddaa31a01ffbc583280784684c7d70de984223b"
+    },
+    "megatron/core/optimizer/distrib_optimizer.py": {
+      "before_sha256": "7382c3de15e7b487aeb3c00c3ba5a460735f0d7f50c1d905d52b5695d1a1e7d3",
+      "after_sha256": "376a00f749be1caaa5875e5e46a35ccc7bae95915fbbe34e37b686a11f8533fc"
+    },
+    "megatron/core/ssm/gated_delta_net.py": {
+      "before_sha256": "2d573edc20bde3c83abfbcc6dacf4e813038594c90a0151a6c0bd2b4dc5e0b3a",
+      "after_sha256": "e24e34abe335df8bcc30f81829438dd71ff8f7b4bf36c16c542f6acd46bbdc42"
+    },
+    "megatron/core/transformer/moe/token_dispatcher.py": {
+      "before_sha256": "b99bf2950e7ec774a228d96fe3123e81c6dc26e2379e803d6f5e9039492ece27",
+      "after_sha256": "cc42e000f913c87c616a056fc7ecc6eec5d61da347f0f1f8a283526ce614846f"
+    }
+  }
+}

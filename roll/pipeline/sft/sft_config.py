@@ -7,6 +7,13 @@ from roll.configs.worker_config import WorkerConfig
 
 @dataclass
 class SFTConfig(BaseConfig):
+    # SFT historically derives its duration from num_train_epochs. The base
+    # pipeline default (500) must not become an implicit SFT step override.
+    max_steps: int = field(
+        default=-1,
+        metadata={"help": "If > 0, override Megatron SFT epochs with this many pipeline steps."},
+    )
+
     global_template: str = field(
         default=None,
         metadata={"help": "The template of the global."}
