@@ -7,7 +7,6 @@ import glob
 import inspect
 import logging
 import os
-import subprocess
 import threading
 import time
 from collections import defaultdict
@@ -231,8 +230,6 @@ class LogMonitorListener:
             self.wait_for_grace_stop()
         ray.shutdown()
         logger.info("Execute ray.shutdown before the program exits...")
-        cmd = f"ray stop --force"
-        subprocess.run(cmd, shell=True, capture_output=True)
 
     def start(self):
         if self.rank == 0:

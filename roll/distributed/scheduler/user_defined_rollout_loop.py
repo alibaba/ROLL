@@ -1,9 +1,11 @@
 import asyncio
 import copy
+import json
 import math
 from contextlib import nullcontext
 from typing import ContextManager, List, Optional
 
+import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -215,6 +217,31 @@ class UserDefinedRolloutLoop:
         )
         request_repeat = request.repeat(repeat_times=len(output_tokens))
         output.non_tensor_batch = request_repeat.non_tensor_batch
+        # Batch-level meta_info retains only one request after concatenation. Keep
+        # generation provenance with the samples so it also survives reordering.
+        # output_token_ids and finish_reasons are already indexed by returned
+        # sequence; serializing the whole list into every row makes a dumped row
+        # claim another sample's tokens/reason.
+        per_sample_metadata = []
+        per_sample_keys = {"finish_reasons", "output_token_ids"}
+        for sample_idx in range(len(output_tokens)):
+            sample_metadata = {}
+            for key in (
+                "request_id", "generation_config", "finish_reasons", "output_token_ids",
+                "eos_token_id", "pad_token_id", "global_step",
+            ):
+                value = data.meta_info.get(key, request.meta_info.get(key))
+                if value is None:
+                    continue
+                if key in per_sample_keys and isinstance(value, (list, tuple, np.ndarray)):
+                    if len(value) != len(output_tokens):
+                        raise ValueError(
+                            f"{key} has {len(value)} entries for {len(output_tokens)} outputs"
+                        )
+                    value = value[sample_idx]
+                sample_metadata[key] = value
+            per_sample_metadata.append(json.dumps(sample_metadata))
+        output.non_tensor_batch["sampling_params"] = np.asarray(per_sample_metadata, dtype=object)
         output.meta_info = request_repeat.meta_info
         # Preserve metrics from data (e.g., speculative decoding metrics)
         if "metrics" in data.meta_info:
@@ -343,3 +370,7 @@ class UserDefinedRolloutLoop:
                 req = original_req
 
         return responses
+
+def postprocess_output_data(request: DataProto, data: DataProto, sequence_length: int) -> DataProto:
+    """Backward-compatible module-level entry to the default token postprocess."""
+    return UserDefinedRolloutLoop().postprocess_output_data(request, data, sequence_length)

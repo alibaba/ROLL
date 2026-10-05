@@ -6,6 +6,7 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import FullyPara
 from megatron.core.dist_checkpointing.strategies.torch import TorchDistSaveShardedStrategy
 
 from .constants import DIST_MODEL_DIR, DIST_OPTIMIZER_DIR, TRACKER_FILENAME
+from .checkpoint_write import streaming_save_strategy
 from .utils import get_logger
 
 
@@ -303,7 +304,7 @@ def save_config_and_state_dict(save_directory, config, state_dict, ckpt_format: 
         os.makedirs(dist_model_dir, exist_ok=True)
         logger.info(f"Saving distributed model checkpoint to {dist_model_dir}")
         save_strategy = FullyParallelSaveStrategyWrapper(
-            TorchDistSaveShardedStrategy(backend="torch_dist", version=1),
+            streaming_save_strategy(),
             mpu.get_data_parallel_group(with_context_parallel=True),
             do_cache_distribution=True,
         )

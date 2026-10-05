@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+from threading import RLock
 from typing import Dict
 
 import torch
@@ -210,6 +212,34 @@ def _modify_tuple(t, index: int, modifier):
 
 _BUCKET_CACHE = {}
 _BUFFER_INDEX = 0
+_IPC_ALLOCATION_LOCK = RLock()
+
+
+@contextmanager
+def _cuda_ipc_allocation():
+    """Pack IPC buffers with cudaMalloc while retaining the training policy.
+
+    Importing expandable-segment handles needs pidfd_getfd permissions that
+    ordinary CUDA IPC does not require (notably in default Docker containers).
+    Only new transfer allocations use this policy; source tensors stay intact.
+    """
+    if not current_platform.is_cuda():
+        yield
+        return
+    with _IPC_ALLOCATION_LOCK:
+        get_settings = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+        if get_settings is not None:
+            previous = get_settings()
+        else:
+            previous = torch.cuda.memory._snapshot()["allocator_settings"]["PYTORCH_CUDA_ALLOC_CONF"]
+        set_settings = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
+        if set_settings is None:
+            set_settings = current_platform.set_allocator_settings
+        try:
+            set_settings(",".join(filter(None, [previous, "expandable_segments:False"])))
+            yield
+        finally:
+            set_settings(previous)
 
 
 def _bucket_named_tensors(named_tensors: list[tuple[str, torch.Tensor]]) -> tuple[torch.Tensor, list[dict]]:
@@ -309,12 +339,12 @@ def serialize_named_weights(named_weights: list[tuple[str, torch.Tensor]], infer
         serialized_tensors = MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True)
         return serialized_tensors
 
-    bucket, tensors_meta = _bucket_named_tensors(named_weights)
+    with _cuda_ipc_allocation():
+        bucket, tensors_meta = _bucket_named_tensors(named_weights)
 
-    # PumpkinComment:
-    # FSDP2 will fail if using CPUOffload Policy without this check
-    if not getattr(bucket, "is_cuda", False):
-        bucket = bucket.to(current_platform.device_type).contiguous()
+        # FSDP2 CPU offload also needs the final device allocation to be IPC-safe.
+        if not getattr(bucket, "is_cuda", False):
+            bucket = bucket.to(current_platform.device_type).contiguous()
 
     monkey_patch_torch_reductions()
 

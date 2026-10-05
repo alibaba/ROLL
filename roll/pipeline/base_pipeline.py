@@ -167,7 +167,14 @@ class BasePipeline:
                 )
 
             for ckpt_metrics_refs in ckpt_metrics_refss:
-                ckpt_metrics = DataProto.materialize_concat(data_refs=ckpt_metrics_refs)
+                # A full distributed optimizer save can take longer than the
+                # ordinary rollout/RPC deadline.  Checkpoint completion has
+                # its own optional deadline and defaults to waiting for the
+                # workers instead of killing a valid, still-writing save.
+                ckpt_metrics = DataProto.materialize_concat(
+                    data_refs=ckpt_metrics_refs,
+                    timeout=getattr(self.pipeline_config, "checkpoint_rpc_timeout", None),
+                )
                 metrics.update(reduce_metrics(ckpt_metrics.meta_info.pop("metrics", {})))
 
             ckpt_id = f"checkpoint-{global_step}"
