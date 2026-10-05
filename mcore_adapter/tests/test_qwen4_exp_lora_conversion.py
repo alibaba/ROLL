@@ -25,6 +25,7 @@ def _converter(tp_size=1, ep_rank=0):
 
     config = SimpleNamespace(
         hf_model_type="qwen4_exp",
+        use_value_head=False,
         num_moe_experts=512,
         expert_model_parallel_size=8,
         expert_tensor_parallel_size=1,

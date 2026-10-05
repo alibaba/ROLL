@@ -22,7 +22,7 @@ def converter(ep_rank=0, num_experts=512, ep_size=8):
     from mcore_adapter.models.converter.model_converter import ModelConverter
 
     config = SimpleNamespace(
-        hf_model_type="qwen4_exp", num_moe_experts=num_experts, expert_model_parallel_size=ep_size,
+        hf_model_type="qwen4_exp", use_value_head=False, num_moe_experts=num_experts, expert_model_parallel_size=ep_size,
         expert_tensor_parallel_size=1, tensor_model_parallel_size=1, pipeline_model_parallel_size=1,
         virtual_pipeline_model_parallel_size=None, pipeline_model_parallel_layout=None,
         num_layers=1, hidden_size=8, moe_ffn_hidden_size=16, swiglu=True,
