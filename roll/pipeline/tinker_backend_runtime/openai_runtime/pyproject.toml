@@ -1,0 +1,13 @@
+[project]
+name = "roll-tinker-openai-runtime"
+version = "0.1.0"
+description = "Minimal runtime environment for ROLL Tinker OpenAI rollout poller."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "openai==2.42.0",
+    "PyYAML==6.0.3",
+    "sglang==0.5.2",
+]
+
+[tool.uv]
+package = false

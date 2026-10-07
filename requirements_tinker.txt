@@ -1,0 +1,42 @@
+# Incremental native Tinker runtime dependencies for the ROLL torch2.11/vLLM0.23 image.
+# Compare requirements_common.txt and requirements_torch2100_vllm.txt; this does not
+# install the full ROLL common/vision/evaluation stack or any GPU distribution.
+# The image already supplies torch/vLLM/TE/Megatron/FlashAttention, datasets,
+# openai. Use setup_public_runtime.sh to inherit those packages.
+
+# Original common requires numpy<2; this exact version passed the Qwen3 runtime checks.
+numpy==1.26.4
+# Verified Transformers/PEFT pair for the Qwen3 runtime on this base image.
+transformers==4.57.6
+# Compatibility override of common's peft0.12 for the verified Transformers4.57 runtime.
+peft==0.17.1
+# Reuse the accelerator version from requirements_torch2100_vllm.txt.
+accelerate==1.7.0
+# Reuse common's Ray version, without optional CUDA graph dependencies for this runtime.
+ray[default]==2.48.0
+# Satisfies common's >=0.10.0; verified native DataProto/TensorDict contracts.
+tensordict==0.10.0
+
+# Missing runtime helpers: names and explicit pins follow requirements_common.txt.
+modelscope
+jsonlines
+deprecated
+dacite
+codetiming
+more_itertools
+sglang-router
+TransferQueue==0.1.6
+gem-llm==0.0.4
+hydra-core
+omegaconf
+
+# Reuse common's complete OpenTelemetry group at one version: system OTLP1.42.1
+# exporters cannot run with the newer API/SDK selected by runtime helpers.
+# The exporter metapackage pins its grpc/http/common implementations to this version.
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp==1.45.1
+opentelemetry-proto==1.45.1
+
+# SGlang0.5.2 is needed only for its tool parser. setup_public_runtime.sh installs
+# it separately with --no-deps; resolving the full SGlang server would replace CUDA packages.

@@ -1,0 +1,3 @@
+# Compatibility entry point; native runtime increments are maintained at the ROLL root.
+# Run setup_public_runtime.sh to inherit the GPU image and install SGlang's parser --no-deps.
+-r ../../requirements_tinker.txt

@@ -1,0 +1,145 @@
+# Template: generate real local paths with ROCK/examples/tinker_original_local/configure.py.
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+exp_name: tinker_swe_verified
+num_gpus_per_node: 8
+num_nodes: 1
+enable_reference: true
+seed: 0
+logging_dir: /path/to/tinker-local/logs
+output_dir: /path/to/tinker-local/engine
+track_with: stdout
+system_envs:
+  TINKER_PARAMETER_PROBE: '1'
+  PYTHONPATH: /path/to/ROLL/mcore_adapter/src:/path/to/ROLL
+  LD_LIBRARY_PATH: /usr/local/cuda/compat/lib.real:/usr/local/cuda/lib64:/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib
+  LD_PRELOAD: /usr/local/cuda/lib64/libcublasLt.so.13:/usr/local/cuda/lib64/libcublas.so.13
+transfer_backend:
+  backend_name: null
+pretrain: /path/to/tinker-local/assets/model-download/model
+reward_pretrain: ${pretrain}
+rpc_timeout: 1800
+max_steps: 32
+logging_steps: 1
+rollout_batch_size: 4
+val_batch_size: 1
+sequence_length: 8192
+max_tokens_per_step: 512
+max_running_requests: 4
+init_kl_coef: 0.0
+use_kl_loss: false
+actor_train:
+  worker_cls: roll.pipeline.tinker_backend_runtime.workers.TinkerActorWorker
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    lora_rank: 0
+    lora_dropout: 0.0
+  training_args:
+    max_steps: 32
+    learning_rate: 1.0e-06
+    weight_decay: 0.0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 1
+    warmup_steps: 0
+    lr_scheduler_type: constant
+    bf16: true
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      overlap_param_gather: false
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+      additional_configs:
+        hidden_dropout: 0.0
+        attention_dropout: 0.0
+  use_sequence_packing: false
+  use_dynamic_batching_in_train: false
+  infer_batch_size: 1
+  model_update_frequency: 1
+  device_mapping: list(range(0,4))
+actor_infer:
+  worker_cls: roll.pipeline.tinker_backend_runtime.workers.TinkerInferWorker
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    lora_rank: 0
+  generating_args:
+    max_new_tokens: 512
+    top_p: 1.0
+    top_k: 50
+    temperature: 0.7
+    num_return_sequences: 1
+    repetition_penalty: 1.0
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.2
+      tensor_parallel_size: 4
+      load_format: auto
+      max_model_len: 8192
+      max_num_seqs: 4
+      enforce_eager: true
+      enable_sleep_mode: true
+  use_sequence_packing: false
+  device_mapping: list(range(4,8))
+reference:
+  worker_cls: roll.pipeline.base_worker.ActorWorker
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    lora_rank: 0
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      additional_configs:
+        hidden_dropout: 0.0
+        attention_dropout: 0.0
+  use_sequence_packing: false
+  infer_batch_size: 1
+  device_mapping: list(range(0,4))
+train_env_manager:
+  num_env_groups: 1
+  max_env_num_per_worker: 1
+  group_size: 1
+  tags:
+  - PublicTraining
+  num_groups_partition:
+  - 1
+  llm_proxy:
+    proxy_type: policy
+val_env_manager:
+  num_env_groups: 1
+  max_env_num_per_worker: 1
+  group_size: 1
+  tags:
+  - PublicTraining
+  num_groups_partition:
+  - 1
+  llm_proxy:
+    proxy_type: policy
+max_actions_per_traj: 1
+custom_envs:
+  PublicTraining:
+    env_type: public_training
+    max_steps: 1
+    env_config: {}
