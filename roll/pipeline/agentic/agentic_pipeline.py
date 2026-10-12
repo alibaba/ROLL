@@ -61,7 +61,12 @@ class AgenticPipeline(BasePipeline):
         self.pipeline_config: AgenticConfig
 
         self.pipeline_config.set_max_steps(max_steps=self.pipeline_config.max_steps)
-        self.use_ref_model = self.pipeline_config.enable_reference and (not is_lora_training(self.pipeline_config))
+        # OPD must use the configured teacher, including when the student uses LoRA.
+        self.use_ref_model = self.pipeline_config.enable_reference and (
+            not is_lora_training(self.pipeline_config)
+            or self.pipeline_config.is_pure_opd
+            or self.pipeline_config.use_opd
+        )
 
         # Derived configuration for partial GPU mode (auto-detected from device_mapping)
         self.partial_gpu_mode: bool = False

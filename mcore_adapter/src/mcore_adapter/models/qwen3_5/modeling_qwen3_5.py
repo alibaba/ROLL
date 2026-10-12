@@ -70,6 +70,10 @@ class Qwen3_5Model(Qwen3_5McaGPTModel, MultimodalEmbeddingMixin):
         from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
             get_transformer_block_with_experimental_attention_variant_spec,
         )
+        from megatron.core.ssm.gated_delta_net import GatedDeltaNet
+        from megatron.core.transformer.attention import SelfAttention
+
+        from .layers import Qwen3_5SelfAttention, Qwen3_5TorchGatedDeltaNet
 
         config = config or self.config
         assert config.transformer_impl == "transformer_engine", (
@@ -79,6 +83,12 @@ class Qwen3_5Model(Qwen3_5McaGPTModel, MultimodalEmbeddingMixin):
             transformer_block_spec = get_transformer_block_with_experimental_attention_variant_spec(
                 config=config, vp_stage=self.vp_stage
             )
+            for layer_spec in transformer_block_spec.layer_specs:
+                attention_spec = layer_spec.submodules.self_attention
+                if attention_spec.module is SelfAttention:
+                    attention_spec.module = Qwen3_5SelfAttention
+                elif attention_spec.module is GatedDeltaNet and config.gdn_backend == "torch":
+                    attention_spec.module = Qwen3_5TorchGatedDeltaNet
         else:
             transformer_block_spec = super()._get_transformer_layer_spec(config)
         return transformer_block_spec

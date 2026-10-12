@@ -29,6 +29,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.constants import RAY_NAMESPACE
+from roll.utils.worker_state import WorkerState
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.utils import dump_batch_to_reward_system, dump_rollout_to_specific_path
 from roll.utils.dynamic_batching import dynamic_batching_shard
@@ -122,7 +123,12 @@ class RLVRPipeline(BasePipeline):
     def __init__(self, pipeline_config: RLVRConfig):
         super().__init__(pipeline_config)
         self.pipeline_config = pipeline_config
-        self.use_ref_model = self.pipeline_config.enable_reference and (not is_lora_training(self.pipeline_config))
+        # OPD must use the configured teacher, including when the student uses LoRA.
+        self.use_ref_model = self.pipeline_config.enable_reference and (
+            not is_lora_training(self.pipeline_config)
+            or self.pipeline_config.is_pure_opd
+            or self.pipeline_config.use_opd
+        )
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
 
         dataset_paths = []
@@ -501,6 +507,13 @@ class RLVRPipeline(BasePipeline):
 
     @torch.no_grad()
     def run(self):
+        if self.resume_from_checkpoint:
+            rng_directory = os.path.join(self.resume_from_checkpoint, "pipeline")
+            rng_file = os.path.join(rng_directory, "rng_state_pipeline.pth")
+            if not os.path.isfile(rng_file):
+                raise FileNotFoundError(f"RL resume requires pipeline RNG state: {rng_file}")
+            WorkerState.load_rng_state(rng_directory, "pipeline")
+
         # 计算tokens per second 系统吞吐
 
         # 创建一个专门管理监控指标的类

@@ -198,7 +198,7 @@ class Worker:
                 strategy=self.strategy,
                 metrics=metrics,
                 metric_infix=f"{self.cluster_name}/model_update",
-                load_kwargs={"include": [OffloadStateType.model_params]},
+                load_kwargs=self.strategy.get_model_update_load_kwargs(),
             ):
                 exec_metrics: Dict = self.strategy.model_update(*args, **kwargs)
             metric_prefix = f"time/{self.cluster_name}/model_update"

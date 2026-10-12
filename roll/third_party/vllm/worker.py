@@ -6,10 +6,10 @@ from collections import OrderedDict
 from typing import Iterable, Tuple
 
 import torch
-import vllm
-from packaging.version import Version
-
 from roll.platforms import current_platform
+from roll.third_party.vllm.compat import native_sleep, native_sleep_owns_buffers, native_wake_up
+from roll.third_party.vllm.compat import process_weights_after_loading as process_vllm_weights_after_loading
+from roll.third_party.vllm.frozen_ngram_sleep import FrozenNGramSleepState, restore_ngram_context_offsets
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
@@ -60,20 +60,46 @@ class TensorLoraManager:
 
 class WorkerBase:
     def custom_init_worker(self, *args, **kwargs):
+        from roll.third_party.vllm.lora_shrink import patch_qwen38_lora_shrink
+
+        patch_qwen38_lora_shrink(
+            getattr(getattr(self, "model_config", None), "hf_config", None),
+            getattr(getattr(self, "vllm_config", None), "lora_config", None),
+        )
         self.weight_loaded: bool = True
         self.kv_cache_loaded: bool = True
         self.buffer_cache = None
+        self._frozen_ngram_sleep_state = None
+        self._native_weights_awake = True
+        self._sleep_wake_failed = False
         self.tensor_lora_manager = TensorLoraManager()
 
     def reload_model(self):
+        if getattr(self, "_sleep_wake_failed", False):
+            raise RuntimeError("Native sleep/wake failed; reconstruct the worker before reuse")
         if not self.weight_loaded:
-            self.wake_up(["weights"])
+            if not getattr(self, "_native_weights_awake", False):
+                try:
+                    native_wake_up(self, ["weights"])
+                except BaseException:
+                    self._sleep_wake_failed = True
+                    raise
+                self._native_weights_awake = True
+            restore_ngram_context_offsets(
+                self.model_runner, getattr(self.model_config, "hf_config", None)
+            )
+            frozen_tables = getattr(self, "_frozen_ngram_sleep_state", None)
+            if frozen_tables is not None:
+                frozen_tables.restore(self.model_runner.model)
+                self._frozen_ngram_sleep_state = None
             self.weight_loaded = True
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # before updating the parameters, we need to reinitialize the previously released model
         self.reload_model()
+        from roll.third_party.vllm.vllm_utils import patch_vllm_moe_model_weight_loader
 
+        patch_vllm_moe_model_weight_loader(self.model_runner.model)
         # Convert to list for multiple iterations (draft model also needs the same weights)
         weights_list = list(weights)
 
@@ -90,16 +116,44 @@ class WorkerBase:
     def load_states(self):
         self.reload_model()
         if not self.kv_cache_loaded:
-            self.wake_up(["kv_cache"])
+            try:
+                native_wake_up(self, ["kv_cache"])
+            except BaseException:
+                self._sleep_wake_failed = True
+                raise
             self.kv_cache_loaded = True
+        if not native_sleep_owns_buffers(self) and self.buffers is not None:
+            model = self.model_runner.model
+            for name, buffer in model.named_buffers():
+                if name in self.buffers:
+                    buffer.data.copy_(self.buffers[name].data)
+            self.buffers = None
 
     def offload_states(self, level):
+        if getattr(self, "_sleep_wake_failed", False):
+            raise RuntimeError("Native sleep/wake failed; reconstruct the worker before reuse")
         assert (self.weight_loaded and self.kv_cache_loaded) or (not self.weight_loaded and not self.kv_cache_loaded)
         if not self.weight_loaded:
             return
-        self.sleep(level)
+        if level == 2:
+            self._frozen_ngram_sleep_state = FrozenNGramSleepState.capture(
+                self.model_runner.model, getattr(self.model_config, "hf_config", None),
+                lora_enabled=getattr(getattr(self, "vllm_config", None), "lora_config", None) is not None,
+            )
+        if not native_sleep_owns_buffers(self) and level == 2:
+            model = self.model_runner.model
+            self.buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        # Native sleep can raise after discarding only part of its allocations.
+        # Preserve the first valid table snapshot and forbid recapture/reuse if
+        # that boundary fails; its completion cannot safely be inferred.
         self.weight_loaded = False
         self.kv_cache_loaded = False
+        self._native_weights_awake = False
+        try:
+            native_sleep(self, level)
+        except BaseException:
+            self._sleep_wake_failed = True
+            raise
         if hasattr(self, "recv_manager"):
             self.recv_manager.clear()
         clear_memory()
@@ -150,25 +204,14 @@ class WorkerBase:
         self.load_weights([(name, weight) for name, weight in named_params])
 
     def process_weights_after_loading(self):
-        if Version(vllm.__version__) >= Version("0.11.1"):
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading
-            from vllm.utils.torch_utils import set_default_torch_dtype
-            device_config = self.device_config
-            load_config = self.vllm_config.load_config
-            load_device = (device_config.device if load_config.device is None else load_config.device)
-            target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype):
-                process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
-        if (Version("0.11.0") == Version(vllm.__version__) or
-                Version("0.11.1rc1") == Version(vllm.__version__) or
-                Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__)):
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading,set_default_torch_dtype
-            device_config = self.device_config
-            load_config = self.vllm_config.load_config
-            load_device = (device_config.device if load_config.device is None else load_config.device)
-            target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype):
-                process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
+        device_config = self.device_config
+        load_config = self.vllm_config.load_config
+        load_device = device_config.device if load_config.device is None else load_config.device
+        process_vllm_weights_after_loading(
+            self.model_runner.model,
+            self.model_config,
+            torch.device(load_device),
+        )
 
 
 class WorkerV1(WorkerBase):

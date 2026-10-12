@@ -27,6 +27,7 @@ from roll.distributed.scheduler.protocol import DataProto, list_of_dict_to_dict_
 from roll.distributed.strategy.strategy import InferenceStrategy
 from roll.distributed.strategy.vllm_topology import resolve_vllm_mp_topology
 from roll.third_party.vllm import create_async_llm
+from roll.third_party.vllm.compat import call_maybe_await, module_has_attributes
 from roll.utils.functionals import (
     concatenate_input_and_output,
     reduce_metrics,
@@ -195,7 +196,15 @@ class VllmStrategy(InferenceStrategy):
         self.sleep_level = vllm_config.pop("sleep_level", 1)
 
         vllm_version = Version(vllm.__version__)
-        if vllm_config.get("enable_expert_parallel", False) and vllm_version.release[:2] < (0, 16):
+        # Development builds report 0.1.devN but track current vLLM; judge them by capability.
+        modern_dev_build = vllm_version.is_devrelease and module_has_attributes(
+            "vllm.v1.executor.ray_executor", ("RayDistributedExecutor", "RayWorkerMetaData")
+        )
+        if (
+            vllm_config.get("enable_expert_parallel", False)
+            and vllm_version.release[:2] < (0, 16)
+            and not modern_dev_build
+        ):
             raise RuntimeError(
                 "vLLM expert parallelism with the mp backend requires vLLM 0.16.x or later, "
                 f"but found {vllm.__version__}. Upgrade vLLM or disable enable_expert_parallel."
@@ -376,10 +385,7 @@ class VllmStrategy(InferenceStrategy):
             raise
 
 
-        if Version("0.15.0") <= vllm_version:
-            self.tokenizer = self.model.get_tokenizer()
-        else:
-            self.tokenizer = await self.model.get_tokenizer()
+        self.tokenizer = await call_maybe_await(self.model.get_tokenizer)
 
         assert self.worker.rank_info.dp_rank == self.worker.rank
         assert self.worker.rank_info.dp_size == self.worker.world_size
@@ -637,8 +643,19 @@ class VllmStrategy(InferenceStrategy):
         await self.model.update_parameter_in_bucket(serialized_named_tensors, is_lora)
 
     async def add_lora(self, peft_config):
-        peft_config["target_modules"] = set(self.worker_config.model_args.lora_target)
-        await self.model.add_lora(peft_config)
+        target = self.worker_config.model_args.lora_target
+        config = dict(peft_config)
+        config["target_modules"] = target if isinstance(target, str) else list(target)
+        acknowledgements = await self.model.add_lora(config)
+        expected = self.worker_config.num_gpus_per_worker
+        if (not isinstance(acknowledgements, (list, tuple))
+                or len(acknowledgements) != expected
+                or any(added is not True for added in acknowledgements)):
+            raise RuntimeError(
+                f"LoRA admission requires {expected} successful rank acknowledgements; "
+                f"received {acknowledgements!r}"
+            )
+        return acknowledgements
 
     # Mapping from raw vLLM metric names to internal keys
     _VLLM_METRIC_MAP = {

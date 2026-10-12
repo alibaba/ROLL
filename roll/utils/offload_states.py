@@ -1,4 +1,6 @@
+import ctypes
 import gc
+import sys
 from enum import Enum
 from typing import List, Tuple, Union
 
@@ -12,14 +14,30 @@ def clear_memory(clear_host_memory: bool = False):
     """Clear GPU and CPU memory caches.
 
     Synchronizes CUDA, runs Python GC, and clears the GPU memory cache.
-    Optionally releases pinned host memory cached by PyTorch's CachingHostAllocator
-    back to the OS.
+    Optionally releases idle pinned host allocations and unused glibc heap
+    pages. The latter can retain large HF conversion and optimizer setup
+    temporaries even after their tensors have been freed.
     """
     current_platform.synchronize()
     gc.collect()
     current_platform.empty_cache()
     if clear_host_memory:
-        torch._C._host_emptyCache()
+        memory = getattr(getattr(torch, "accelerator", None), "memory", None)
+        empty_host_cache = getattr(memory, "empty_host_cache", None)
+        if empty_host_cache is None:
+            empty_host_cache = getattr(torch._C, "_host_emptyCache", None)
+        if empty_host_cache is not None:
+            empty_host_cache()
+        if sys.platform == "linux":
+            # malloc_trim only releases free pages; live tensors and pinned
+            # allocations retain their storage. Other allocators may omit it.
+            try:
+                trim = ctypes.CDLL(None).malloc_trim
+            except (AttributeError, OSError):
+                return
+            trim.argtypes = [ctypes.c_size_t]
+            trim.restype = ctypes.c_int
+            trim(0)
 
 
 class OffloadStateType(str, Enum):
@@ -69,11 +87,17 @@ def load_hf_model(model: PreTrainedModel):
         ]
 
 
-def get_mapping_to_flat_buffer(tensors: List[torch.Tensor]) -> List[Tuple[torch.Tensor, int, int]]:
+def get_mapping_to_flat_buffer(
+    tensors: List[torch.Tensor], alignment_bytes: int = 1
+) -> List[Tuple[torch.Tensor, int, int]]:
+    if not isinstance(alignment_bytes, int) or alignment_bytes < 1 or alignment_bytes & (alignment_bytes - 1):
+        raise ValueError("buffer alignment must be a positive power of two")
     tensor_infos: List[Tuple[torch.Tensor, int, int]] = []
 
     offset = 0
     for tensor in tensors:
+        alignment = max(1, alignment_bytes // tensor.element_size())
+        offset = ((offset + alignment - 1) // alignment) * alignment
         tensor_numel = tensor.numel()
         # record some data so we can restore the device tensor later
         tensor_infos.append((tensor, offset, tensor_numel))
@@ -88,24 +112,26 @@ def move_tensors_to_device_buffer(
     pin_memory: bool = True,
     non_blocking: bool = False,
     device_buffer: torch.Tensor = None,
+    alignment_bytes: int = 1,
 ):
     if len(tensors) == 0:
         return None
     tensor_metas = [torch.zeros_like(tensor, device="meta") for tensor in tensors]
+    mapping = get_mapping_to_flat_buffer(tensors, alignment_bytes=alignment_bytes)
     if device_buffer is None:
         device_buffer = torch.empty(
-            sum(p.numel() for p in tensors), dtype=tensors[0].dtype, device=device, pin_memory=pin_memory
+            mapping[-1][1] + mapping[-1][2], dtype=tensors[0].dtype, device=device, pin_memory=pin_memory
         )
-    for (tensor, offset, tensor_numel), tensor_meta in zip(get_mapping_to_flat_buffer(tensors), tensor_metas):
+    for (tensor, offset, tensor_numel), tensor_meta in zip(mapping, tensor_metas):
         device_buffer.narrow(0, offset, tensor_numel).copy_(tensor.view(-1), non_blocking=non_blocking)
         tensor.data = device_buffer.narrow(0, offset, tensor_numel).view(tensor_meta.shape)
     return device_buffer
 
 
-def move_device_buffer_to_tensors(tensors: List[Tensor], device_buffer: torch.Tensor):
+def move_device_buffer_to_tensors(tensors: List[Tensor], device_buffer: torch.Tensor, alignment_bytes: int = 1):
     if len(tensors) == 0:
         return None
-    for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(tensors):
+    for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(tensors, alignment_bytes=alignment_bytes):
         tensor.data = device_buffer.narrow(0, offset, tensor_numel).view(tensor.shape)
 
 

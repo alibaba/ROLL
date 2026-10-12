@@ -37,7 +37,7 @@ COLUMMNS_CONFIG = [
 def write_to_json_process(path, data, columns_configs):
     os.makedirs(path, exist_ok=True)
     column_names = {item[0] for item in columns_configs}
-    data = {k: v.tolist() if isinstance(v, numpy.ndarray) else v for k,v in data.items() if k in column_names}
+    data = {k: v.tolist() if hasattr(v, "tolist") else v for k,v in data.items() if k in column_names}
     with Timer(name="dump", logger=None) as timer:
         global_step = data.get('global_step', [0])[0]
         with open(os.path.join(path, f"rollout_dump_data.step_{global_step}.jsonl"), "w", encoding="utf-8") as f:
@@ -61,8 +61,8 @@ def dump_rollout_to_specific_path(path: str, global_step: int, data: DataProto, 
     write_data['responses'] = responses
     scores = data.batch['scores'].tolist()
     write_data['scores'] = scores
-    meta_info = [json.dumps(data.meta_info)] * data_cnt
-    write_data['sampling_params'] = meta_info
+    if 'sampling_params' not in write_data:
+        write_data['sampling_params'] = [json.dumps(data.meta_info)] * data_cnt
     write_data['global_step'] = [global_step] * data_cnt
 
     # TODO:If IO becomes the bottleneck, need use queue and only one write process to dump data

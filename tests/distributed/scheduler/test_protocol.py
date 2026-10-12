@@ -167,6 +167,25 @@ def test_concat_non_global_remain_rank0():
     assert merged.meta_info["seed"] == 42
 
 
+def test_materialize_concat_checkpoint_timeout_can_override_rpc_timeout(monkeypatch):
+    """Large checkpoint waits must be able to opt out of the normal RPC deadline."""
+    proto = DataProto.from_single_dict({"dummy": torch.tensor([1])})
+    calls = []
+
+    def fake_get(refs, timeout=None):
+        calls.append(timeout)
+        return [proto]
+
+    monkeypatch.setenv("roll_RPC_TIMEOUT", "17")
+    monkeypatch.setattr("roll.distributed.scheduler.protocol.ray.get", fake_get)
+
+    DataProto.materialize_concat(data_refs=[object()])
+    DataProto.materialize_concat(data_refs=[object()], timeout=None)
+    DataProto.materialize_concat(data_refs=[object()], timeout=23)
+
+    assert calls == [17, None, 23]
+
+
 def test_concat_empty_global_keys():
     """Test no aggregation when global_keys is empty/default."""
     dp0 = DataProto.from_single_dict(

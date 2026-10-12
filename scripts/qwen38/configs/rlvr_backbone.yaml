@@ -1,0 +1,181 @@
+# Validation candidate: frozen N-gram tables; full-model acceptance is pending.
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+seed: 42
+logging_dir: ${output_dir}/logs
+system_envs:
+  TORCH_COMPILE_DISABLE: '0'
+  NVTE_TORCH_COMPILE: '0'
+  TOKENIZERS_PARALLELISM: 'false'
+  CUDA_DEVICE_MAX_CONNECTIONS: '1'
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  OMP_NUM_THREADS: '2'
+  NCCL_BUFFSIZE: '1048576'
+  NCCL_MAX_CTAS: '8'
+  NVIDIA_TF32_OVERRIDE: '0'
+num_gpus_per_node: 8
+rpc_timeout: 14400
+pretrain: ${oc.env:MODEL_PATH}
+exp_name: qwen38-rlvr-backbone
+output_dir: ${oc.env:ROLL_RL_OUTPUT_DIR,output/qwen38-rlvr-backbone}
+checkpoint_config:
+  type: file_system
+  output_dir: ${output_dir}/checkpoints
+  async_upload: false
+  use_hard_links: true
+track_with: stdout
+max_steps: 20
+save_steps: 20
+eval_steps: 20
+logging_steps: 1
+resume_from_checkpoint: false
+rollout_batch_size: 8
+prompt_length: 256
+response_length: 128
+num_return_sequences_in_group: 4
+ppo_epochs: 1
+adv_estimator: grpo
+global_template: native_nonthinking
+enable_reference: true
+enable_old_logprobs_recompute: true
+whiten_advantages: true
+max_len_mask: true
+difficulty_mask: false
+add_token_level_kl: false
+rollout_dump_dir: ${output_dir}/rollouts
+actor_train:
+  model_args:
+    model_config_kwargs:
+      bounded_rl_token_statistics: true
+      rl_token_statistics_temperature: 1.0
+      vocab_loss_chunk_size: 256
+    dtype: bf16
+    attn_implementation: sdpa
+  training_args:
+    num_train_epochs: 1
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
+    learning_rate: 1.0e-06
+    lr_scheduler_type: constant
+    warmup_steps: 0
+    weight_decay: 0.0
+  data_args:
+    file_name:
+    - ${oc.env:ROLL_RL_DATA}
+    template: native_nonthinking
+    messages: messages
+    preprocessing_num_workers: 1
+    domain_interleave_probs:
+      boxed_choice: 1.0
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      sequence_parallel: true
+      moe_grouped_gemm: true
+      moe_token_dispatcher_type: alltoall
+      use_distributed_optimizer: true
+      accumulate_allreduce_grads_in_fp32: false
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
+      use_precision_aware_optimizer: true
+      overlap_cpu_optimizer_d2h_h2d: true
+      bounded_cpu_grad_staging: true
+      bf16: true
+      save_only_model: false
+      ckpt_format: torch_dist
+      additional_configs:
+        perform_initialization: false
+        gradient_accumulation_fusion: false
+        recompute_granularity: full
+        recompute_method: uniform
+        recompute_num_layers: 1
+        checkpoint_cpu_offload: true
+        vocab_loss_chunk_size: 256
+        qsa_indexer_kl_coef: 0.01
+      offload_model_from_cpu_master: true
+      overlap_param_gather: false
+      overlap_grad_reduce: false
+  use_sequence_packing: false
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+actor_infer:
+  model_args:
+    dtype: bf16
+    attn_implementation: sdpa
+  data_args:
+    template: native_nonthinking
+  generating_args:
+    max_new_tokens: ${response_length}
+    temperature: 1.0
+    top_p: 0.95
+    top_k: -1
+    num_return_sequences: ${num_return_sequences_in_group}
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      tensor_parallel_size: 8
+      enable_expert_parallel: true
+      gpu_memory_utilization: 0.75
+      max_model_len: 512
+      max_num_batched_tokens: 512
+      max_num_seqs: 8
+      enforce_eager: true
+      enable_prefix_caching: false
+      attention_config: null
+      sleep_level: 2
+      additional_config:
+        gdn_prefill_backend: triton
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+rewards:
+  boxed_choice:
+    worker_cls: roll.pipeline.rlvr.rewards.crossthinkqa_rule_reward_worker.CrossThinkQARuleRewardWorker
+    model_args:
+      model_name_or_path: ${pretrain}
+    data_args:
+      template: native_nonthinking
+    tag_included:
+    - gpqa_diamond_boxed
+    world_size: 1
+    infer_batch_size: 1
+    reward_type: strict
+    response_length_penalty_coef: 0.0
+async_generation_ratio: 0
+model_update_buffer_size_mb: 64
+reference:
+  model_args:
+    model_config_kwargs:
+      bounded_rl_token_statistics: true
+      rl_token_statistics_temperature: 1.0
+      vocab_loss_chunk_size: 256
+    dtype: bf16
+    attn_implementation: sdpa
+  strategy_args:
+    strategy_name: megatron_infer
+    strategy_config:
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      sequence_parallel: true
+      moe_grouped_gemm: true
+      moe_token_dispatcher_type: alltoall
+      bf16: true
+      additional_configs:
+        perform_initialization: false
+        gradient_accumulation_fusion: false
+        vocab_loss_chunk_size: 256
+        qsa_indexer_kl_coef: 0.01
+  data_args:
+    template: native_nonthinking
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1
+  use_sequence_packing: false

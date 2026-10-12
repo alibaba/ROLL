@@ -110,9 +110,10 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
             "is_expert": self.is_expert,
             "skip_bias_add": False,
         }
-        if not self.is_grouped:
+        if self.is_grouped:
+            lora_layer_kwargs["pg_collection"] = self.base_layer._pg_collection
+        else:
             lora_layer_kwargs["tp_group"] = self.base_layer.tp_group
-
         lora_a, lora_b = self._create_lora_layers(r, lora_bias, **lora_layer_kwargs)
 
         # Disable ub_overlap for parallel layers
@@ -228,7 +229,12 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
 
         if not isinstance(self.base_layer, TopKRouter) and not self.disable_adapters and not self.merged:
             if self.sequence_parallel and self.base_layer.parallel_mode == "column":
-                x = gather_from_sequence_parallel_region(x)
+                # Column-parallel LoRA-B already all-reduces its input gradient.
+                # Return that replicated gradient to the local sequence shard
+                # without summing it over the tensor-parallel ranks again.
+                x = gather_from_sequence_parallel_region(
+                    x, tensor_parallel_output_grad=False, group=self.base_layer.tp_group
+                )
             for active_adapter in self.active_adapters:
                 if active_adapter not in self.lora_A.keys():
                     continue
@@ -449,6 +455,7 @@ class LoraRowParallelLinear(LoraParallelLinear):
         in_features = self.in_features * self.tp_size
 
         if self.is_grouped:
+            r = r // self.config.moe_router_topk
             lora_a = TERowParallelGroupedLinear(
                 num_gemms=self.base_layer.num_gemms,
                 input_size=in_features,
@@ -492,6 +499,7 @@ class LoraColumnParallelLinear(LoraParallelLinear):
         out_features = self.out_features * self.tp_size
 
         if self.is_grouped:
+            r = r // self.config.moe_router_topk
             lora_a = TEGroupedLinear(
                 num_gemms=self.base_layer.num_gemms,
                 input_size=self.in_features,

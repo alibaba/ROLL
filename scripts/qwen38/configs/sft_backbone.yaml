@@ -1,0 +1,93 @@
+# Engineering validation candidate; full-model acceptance is still pending.
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: ${oc.env:ROLL_EXPERIMENT_NAME,qwen38-backbone-sft-8k}
+seed: 42
+logging_dir: ./output/logs
+output_dir: ${oc.env:ROLL_OUTPUT_DIR,./output/qwen38-backbone-sft-8k}
+pretrain: ${oc.env:MODEL_PATH}
+track_with: stdout
+num_gpus_per_node: 8
+# Full model and CPU Adam checkpoints exceed 1.7 TB on slow storage.
+rpc_timeout: 14400
+max_steps: 100
+save_steps: 50
+eval_steps: 50
+logging_steps: 1
+resume_from_checkpoint: false
+sequence_length: ${oc.decode:${oc.env:ROLL_SEQUENCE_LENGTH,8192}}
+prompt_key: instruction
+response_key: output
+global_template: native_nonthinking
+
+system_envs:
+  # QSA FlexAttention requires its compiled forward/backward kernel.
+  TORCH_COMPILE_DISABLE: '0'
+  NVTE_TORCH_COMPILE: '0'
+  TOKENIZERS_PARALLELISM: 'false'
+  CUDA_DEVICE_MAX_CONNECTIONS: '1'
+  PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True'
+  OMP_NUM_THREADS: '2'
+  # Validated collective configuration for the eight-H800 acceptance host.
+  NCCL_BUFFSIZE: '1048576'
+  NCCL_MAX_CTAS: '8'
+
+validation:
+  data_args:
+    file_name: ${oc.env:ROLL_SFT_HELDOUT,output/sft-validation-data-v2/heldout.jsonl}
+    template: native_nonthinking
+
+sft_train:
+  model_args:
+    dtype: bf16
+    attn_implementation: sdpa
+    flash_attn: sdpa
+  training_args:
+    num_train_epochs: 1
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 2
+    learning_rate: 1.0e-6
+    lr_scheduler_type: constant
+    warmup_steps: 0
+    weight_decay: 0.0
+  data_args:
+    file_name: ${oc.env:ROLL_SFT_TRAIN_DATA,output/sft-validation-data-v2/train-8k.jsonl}
+    template: native_nonthinking
+    preprocessing_num_workers: 1
+  strategy_args:
+    strategy_name: megatron_train
+    strategy_config:
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      sequence_parallel: true
+      moe_grouped_gemm: true
+      moe_token_dispatcher_type: alltoall
+      use_distributed_optimizer: true
+      accumulate_allreduce_grads_in_fp32: false
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
+      use_precision_aware_optimizer: true
+      overlap_cpu_optimizer_d2h_h2d: true
+      bounded_cpu_grad_staging: true
+      bf16: true
+      save_only_model: false
+      ckpt_format: torch_dist
+      additional_configs:
+        perform_initialization: false
+        gradient_accumulation_fusion: false
+        recompute_granularity: full
+        recompute_method: uniform
+        recompute_num_layers: 1
+        checkpoint_cpu_offload: true
+        vocab_loss_chunk_size: 256
+        qsa_indexer_kl_coef: 0.01
+  use_sequence_packing: false
+  use_remove_padding: false
+  device_mapping: list(range(0,8))
+  infer_batch_size: 1

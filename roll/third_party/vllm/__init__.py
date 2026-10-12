@@ -12,14 +12,18 @@ from vllm.envs import get_default_cache_root
 from vllm.usage.usage_lib import UsageContext
 
 from roll.platforms import current_platform
+from roll.third_party.vllm.compat import apply_default_attention_config, module_has_attributes
+from roll.third_party.vllm.frozen_ngram_sleep import configure_frozen_ngram_loading
 import roll.third_party.vllm.fp8 as fp8
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
+from roll.utils.qwen38_gdn import configure_qwen38_gdn_backend
 
 
 logger = get_logger()
 vllm_version = Version(vllm.__version__)
 legacy_ray_executor_package = None
+dev_build_ray_executor = False
 
 if vllm_version.release[:2] == (0, 17):
     # vLLM 0.17.x initializes multi-node queues before distributed groups.
@@ -34,6 +38,13 @@ if Version("0.11.0") <= vllm_version < Version("0.11.1"):
 elif Version("0.15") <= vllm_version:
     if Version("0.16").release <= vllm_version.release:
         import roll.third_party.vllm.patch_transformers # apply patch
+elif module_has_attributes(
+    "vllm.v1.executor.ray_executor",
+    ("RayDistributedExecutor", "RayWorkerMetaData"),
+):
+    # Development builds report a pre-release version but expose the modern
+    # ray executor API; detect the capability rather than the version string.
+    dev_build_ray_executor = True
 elif vllm_version < Version("0.11.0"):
     logger.warning(f"ROLL does not support vLLM version {vllm.__version__}.")
 else:
@@ -47,6 +58,11 @@ if legacy_ray_executor_package is not None:
     )
     ray_executor_class_v1 = safe_import_class(
         f"{legacy_ray_executor_package}.v1.ray_distributed_executor.CustomRayDistributedExecutor"
+    )
+
+if dev_build_ray_executor:
+    ray_executor_class_v1 = safe_import_class(
+        "roll.third_party.vllm.ray_distributed_executor.CustomRayDistributedExecutor"
     )
 
 logger.info(f"Using vllm version {vllm.__version__}")
@@ -63,6 +79,7 @@ except Exception:
 
 async def create_async_llm(resource_placement_groups: List[Dict], headless: bool = False, **kwargs):
     engine_arg_names = {field.name for field in dataclasses.fields(AsyncEngineArgs)}
+    configure_qwen38_gdn_backend(kwargs, kwargs.get("model"))
     executor_backend = kwargs.get("distributed_executor_backend")
     if executor_backend == "ray" and vllm_version >= Version("0.11.1"):
         raise ValueError(
@@ -82,9 +99,9 @@ async def create_async_llm(resource_placement_groups: List[Dict], headless: bool
     else:
         kwargs.pop("data_parallel_backend", None)
     kwargs["enable_sleep_mode"] = True
-    if "attention_config" not in kwargs and "attention_config" in engine_arg_names:
-        # vllm<=0.12.0 does not have attention_config in AsyncEngineArgs.
-        kwargs["attention_config"] = {"backend": "FLASH_ATTN"}
+    apply_default_attention_config(
+        kwargs, supports_attention_config="attention_config" in engine_arg_names
+    )  # vllm<=0.12.0 does not have attention_config; explicit None opts out
     
     if "moe_backend" not in kwargs and "moe_backend" in engine_arg_names:
         # vLLM0.20.0, remove this while >= 0.29: https://github.com/vllm-project/vllm/issues/45447
@@ -136,6 +153,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], headless: bool
         )
     else:
         vllm_config = engine_args.create_engine_config(UsageContext.ENGINE_CONTEXT)
+    configure_frozen_ngram_loading(vllm_config.model_config.hf_config, vllm_config.load_config)
 
     fp8.update_quant_config(config=kwargs, vllm_config=vllm_config)
 

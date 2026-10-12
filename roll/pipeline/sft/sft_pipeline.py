@@ -1,4 +1,5 @@
 from typing import Any
+import os
 
 import datasets
 import numpy as np
@@ -15,10 +16,12 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.sft.sft_config import SFTConfig
+from roll.pipeline.sft.step_planning import resolve_sft_step_plan
 from roll.utils.constants import IGNORE_INDEX
 from roll.utils.logging import get_logger
 from roll.utils.metrics.metrics_manager import MetricsManager
 from roll.utils.functionals import batch_balance, reduce_metrics
+from roll.utils.worker_state import WorkerState
 
 logger = get_logger()
 
@@ -128,10 +131,41 @@ class SFTPipeline(BasePipeline):
             label_pad_token_id=IGNORE_INDEX,
         )
 
-        self.pipeline_config.set_max_steps(
-            (self.pipeline_config.sft_train.training_args.num_train_epochs * len(self.dataset)) // \
-            (self.pipeline_config.sft_train.training_args.per_device_train_batch_size * \
-             self.pipeline_config.sft_train.training_args.gradient_accumulation_steps))
+        training_args = self.pipeline_config.sft_train.training_args
+        configured_max_steps = self.pipeline_config.max_steps
+        original_num_train_epochs = training_args.num_train_epochs
+        strategy_args = self.pipeline_config.sft_train.strategy_args
+        strategy_config = getattr(strategy_args, "strategy_config", {}) or {}
+        world_size = self.pipeline_config.sft_train.world_size
+        if (configured_max_steps > 0 and world_size and
+                getattr(strategy_args, "strategy_name", None) == "megatron_train"):
+            model_parallel_size = (
+                strategy_config.get("tensor_model_parallel_size", 1)
+                * strategy_config.get("pipeline_model_parallel_size", 1)
+                * strategy_config.get("context_parallel_size", 1)
+            )
+            if world_size % model_parallel_size:
+                raise ValueError(
+                    f"SFT world size {world_size} is not divisible by TP*PP*CP={model_parallel_size}"
+                )
+            planned_dp_size = world_size // model_parallel_size
+            plan = resolve_sft_step_plan(
+                configured_max_steps=configured_max_steps,
+                dataset_size=len(self.dataset),
+                data_parallel_size=planned_dp_size,
+                per_device_train_batch_size=training_args.per_device_train_batch_size,
+                gradient_accumulation_steps=training_args.gradient_accumulation_steps,
+                num_train_epochs=original_num_train_epochs,
+            )
+            training_args.num_train_epochs = plan.epochs
+            self.pipeline_config.set_max_steps(plan.worker_max_steps)
+            self._pipeline_max_steps = plan.pipeline_steps
+        else:
+            self.pipeline_config.set_max_steps(
+                (original_num_train_epochs * len(self.dataset)) // \
+                (training_args.per_device_train_batch_size * \
+                 training_args.gradient_accumulation_steps))
+            self._pipeline_max_steps = None
 
         self.sft_train: Any = Cluster(
             name=self.pipeline_config.sft_train.name,
@@ -159,6 +193,22 @@ class SFTPipeline(BasePipeline):
             collate_fn=data_collator,
         )
 
+        if self._pipeline_max_steps is not None:
+            actual_plan = resolve_sft_step_plan(
+                configured_max_steps=self._pipeline_max_steps,
+                dataset_size=len(self.dataset),
+                data_parallel_size=dp_size,
+                per_device_train_batch_size=per_device_bs,
+                gradient_accumulation_steps=ga_steps,
+                num_train_epochs=training_args.num_train_epochs,
+            )
+            if actual_plan.worker_max_steps != training_args.max_steps:
+                raise RuntimeError(
+                    "SFT worker data-parallel size changed during initialization: "
+                    f"planned max_steps={training_args.max_steps}, "
+                    f"actual={actual_plan.worker_max_steps}"
+                )
+
         if self.val_dataset:
             self.val_dataset = preprocess_dataset(
                 self.val_dataset,
@@ -180,21 +230,45 @@ class SFTPipeline(BasePipeline):
 
     @torch.no_grad()
     def run(self):
-        global_step = 0
         metrics_mgr = MetricsManager()
         num_epochs = self.pipeline_config.sft_train.training_args.num_train_epochs
-        total_steps = num_epochs * len(self.dataloader)
+        steps_per_epoch = len(self.dataloader)
+        if steps_per_epoch == 0:
+            logger.info("pipeline complete: no full training batches")
+            return
+        pipeline_max_steps = getattr(self, "_pipeline_max_steps", None)
+        total_steps = num_epochs * steps_per_epoch
+        if pipeline_max_steps is not None:
+            total_steps = min(total_steps, pipeline_max_steps)
+        global_step = self.state.step + 1
+        first_epoch, consumed_batches = divmod(global_step, steps_per_epoch)
+        rng_directory = None
+        if self.resume_from_checkpoint:
+            rng_directory = os.path.join(self.resume_from_checkpoint, "pipeline")
+            rng_file = os.path.join(rng_directory, "rng_state_pipeline.pth")
+            if not os.path.isfile(rng_file):
+                raise FileNotFoundError(f"SFT resume requires pipeline RNG state: {rng_file}")
+            WorkerState.load_rng_state(rng_directory, "pipeline")
 
-        for epoch in range(num_epochs):
+        for epoch in range(first_epoch, num_epochs):
             logger.info(f"epoch {epoch} start...")
 
-            pbar = tqdm(self.dataloader, desc=f"Epoch {epoch}/{num_epochs}")
+            iterator = iter(self.dataloader)
+            skipped = consumed_batches if epoch == first_epoch else 0
+            for _ in range(skipped):
+                next(iterator)
+            if skipped and rng_directory is not None:
+                # Rebuilding an interrupted iterator consumes a base seed and
+                # may run random transforms for already-consumed batches. The
+                # next unseen batch must start from the saved driver RNG.
+                WorkerState.load_rng_state(rng_directory, "pipeline")
+            pbar = tqdm(iterator, desc=f"Epoch {epoch}/{num_epochs}",
+                        initial=skipped, total=steps_per_epoch)
             for batch_dict in pbar:
-                # for continual training
-                if global_step <= self.state.step:
-                    global_step += 1
-                    continue
-
+                # ``state.step`` and ``global_step`` are zero based.  A cap of
+                # N therefore permits indices [0, N), exactly N updates.
+                if pipeline_max_steps is not None and global_step >= pipeline_max_steps:
+                    break
                 logger.info(f"pipeline step {global_step} start...")
 
                 metrics_mgr.clear_metrics()
@@ -240,6 +314,9 @@ class SFTPipeline(BasePipeline):
                 logger.info(f"pipeline step {global_step} finished...")
 
                 global_step += 1
+
+            if pipeline_max_steps is not None and global_step >= pipeline_max_steps:
+                break
 
         logger.info("pipeline complete!")
 

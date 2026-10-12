@@ -88,8 +88,17 @@ def patch_torch_validate_global_plan():
              https://github.com/pytorch/pytorch/pull/166820
     """
 
-    def _validate_global_plan(global_plan: list[SavePlan], metadata: Metadata) -> bool:
-        all_good = True
+    # Older planners expect True for a valid plan; newer planners expect an
+    # empty error list. Probe the installed validator with a valid empty plan
+    # so repeated patching preserves the caller's contract without a version
+    # assumption or reliance on private return annotations.
+    probe = torch.distributed.checkpoint.default_planner._validate_global_plan([], Metadata({}))
+    if type(probe) not in (bool, list):
+        raise RuntimeError("Unsupported PyTorch global-plan validation result type")
+    returns_errors = isinstance(probe, list)
+
+    def _validate_global_plan(global_plan: list[SavePlan], metadata: Metadata) -> bool | list[str]:
+        errors = []
         for key, value in metadata.state_dict_metadata.items():
             if isinstance(value, BytesStorageMetadata):
                 continue
@@ -100,16 +109,9 @@ def patch_torch_validate_global_plan():
             for chunk in chunks:
                 # Compute the volume
                 if not _check_box_bounds(value.size, chunk):
-                    logger.warning(
-                        """
-                            key:%s has out of bounds chunk:
-                            tensor-size:%s chunk: %s
-                        """,
-                        key,
-                        value.size,
-                        chunk,
-                    )
-                    all_good = False
+                    message = f"key:{key} has out of bounds chunk: tensor-size:{value.size} chunk: {chunk}"
+                    logger.warning(message)
+                    errors.append(message)
                 chunks_volume += math.prod(chunk.sizes)
 
             if len(chunks) > 1:
@@ -136,31 +138,20 @@ def patch_torch_validate_global_plan():
                     for _, other_idx in active:
                         other = chunks[other_idx]
                         if _check_box_overlap(current, other):
-                            logger.warning(
-                                "key:%s has overlapping chunks: %s %s",
-                                key,
-                                current,
-                                other,
-                            )
-                            all_good = False
+                            message = f"key:{key} has overlapping chunks: {current} {other}"
+                            logger.warning(message)
+                            errors.append(message)
 
                     insort(active, (end, idx))
 
             # Check whether combined chunk cover the whole tensor
             tensor_volume = math.prod(value.size)
             if len(global_plan) > 1 and chunks_volume != tensor_volume:
-                logger.warning(
-                    """
-                        key:%s invalid fill tensor-volume:
-                        %s chunks-volume: %s
-                    """,
-                    key,
-                    tensor_volume,
-                    chunks_volume,
-                )
-                all_good = False
+                message = f"key:{key} invalid fill tensor-volume: {tensor_volume} chunks-volume: {chunks_volume}"
+                logger.warning(message)
+                errors.append(message)
 
-        return all_good
+        return errors if returns_errors else not errors
 
     torch.distributed.checkpoint.default_planner._validate_global_plan = _validate_global_plan
 

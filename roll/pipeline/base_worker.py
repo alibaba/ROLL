@@ -497,7 +497,7 @@ class InferWorker(Worker):
         await self.strategy.update_parameter_in_bucket(*args, **kwargs)
 
     async def add_lora(self, *args, **kwargs):
-        await self.strategy.add_lora(*args, **kwargs)
+        return await self.strategy.add_lora(*args, **kwargs)
 
     async def set_ema_decay(self, ema_decay: float):
         if hasattr(self.strategy, "set_ema_decay"):

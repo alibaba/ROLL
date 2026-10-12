@@ -317,12 +317,74 @@ class StreamingHFConverter(BaseHFConverter):
 
 
 class LoRAHFConverter(HFConverter):
-    """Converts Mca LoRA adapters to Hugging Face PEFT format."""
+    """Export MCA adapters, using native vLLM 2D expert layout for Qwen4.
+
+    Qwen4's per-expert adapters do not correspond to the stacked parameters in
+    its HF base model. Its export is for vLLM, not generic HF PEFT reloading.
+    """
 
     def __init__(self, hf_base_model_path: str, adapter_name_or_path: str, *args, **kwargs):
         self.hf_base_model_path = hf_base_model_path
         self.adapter_name_or_path = adapter_name_or_path
         super().__init__(adapter_name_or_path, *args, **kwargs)
+
+    def _convert_qwen4_adapters(self, peft_configs):
+        artifacts = {}
+        for adapter_name, peft_config in peft_configs.items():
+            if (
+                peft_config.modules_to_save or peft_config.use_dora or peft_config.use_rslora
+                or peft_config.bias != "none" or peft_config.rank_pattern or peft_config.alpha_pattern
+            ):
+                raise ValueError(
+                    "Qwen4 vLLM LoRA export requires uniform scaling, no bias, DoRA, rsLoRA, or modules_to_save"
+                )
+            tensors = {}
+            for name, weight in self._stream_hf_weights(
+                os.path.join(self.adapter_name_or_path, adapter_name),
+                use_mmap=True, lora_rank=peft_config.r, expert_format="per_expert",
+            ):
+                if name in tensors and not torch.equal(tensors[name], weight):
+                    raise ValueError(f"Conflicting replicated LoRA tensor: {name}")
+                tensors[name] = weight
+            pairs = defaultdict(dict)
+            for name, tensor in tensors.items():
+                match = re.fullmatch(r"(.+)\.lora_([AB])\.weight", name)
+                if match is None or tensor.ndim != 2:
+                    raise ValueError(f"Invalid Qwen4 LoRA tensor: {name}")
+                pairs[match[1]][match[2]] = tensor
+            if not pairs:
+                raise ValueError(f"Empty LoRA adapter: {adapter_name}")
+            for name, pair in pairs.items():
+                if set(pair) != {"A", "B"}:
+                    raise ValueError(f"Missing LoRA A/B pair: {name}")
+                rank = pair["A"].shape[0]
+                if rank < 1 or rank > peft_config.r or pair["B"].shape[1] != rank:
+                    raise ValueError(
+                        f"Incompatible LoRA rank in {name}: A{tuple(pair['A'].shape)}, B{tuple(pair['B'].shape)}"
+                    )
+            config = peft_config.to_dict()
+            config.update(
+                base_model_name_or_path=self.hf_base_model_path,
+                inference_mode=True,
+                target_modules=sorted({name.rsplit(".", 1)[-1] for name in pairs}),
+                roll_lora_layout="qwen4_exp_vllm_2d",
+            )
+            # Keep global r/alpha and raw factors: grouped MCA experts have a
+            # smaller matrix rank but use the same global scale as dense layers.
+            artifacts[adapter_name] = (config, tensors)
+
+        for adapter_name, (config, tensors) in artifacts.items():
+            directory = (
+                self.save_directory if adapter_name == "default" else os.path.join(self.save_directory, adapter_name)
+            )
+            os.makedirs(directory, exist_ok=True)
+            save_file(
+                {name: value.to(dtype=self.torch_dtype).contiguous() for name, value in tensors.items()},
+                os.path.join(directory, "adapter_model.safetensors"), metadata={"format": "pt"},
+            )
+            with open(os.path.join(directory, ADAPTER_CONFIG_NAME), "w") as stream:
+                json.dump(config, stream, indent=2)
+        self._finalize()
 
     def convert(self):
         if not is_peft_available():
@@ -346,6 +408,10 @@ class LoRAHFConverter(HFConverter):
             adapter_name: PeftConfig.from_pretrained(os.path.join(self.adapter_name_or_path, adapter_name))
             for adapter_name in adapter_names
         }
+
+        if self.mca_config.hf_model_type == "qwen4_exp":
+            self._convert_qwen4_adapters(peft_configs)
+            return
 
         hf_state_dicts = defaultdict(dict)
         for adapter_name, peft_config in peft_configs.items():
