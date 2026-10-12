@@ -1,3 +1,4 @@
+import os
 from typing import Dict
 
 import torch
@@ -280,6 +281,8 @@ def _bucket_named_tensors(named_tensors: list[tuple[str, torch.Tensor]]) -> tupl
 
 
 def named_tensors_from_bucket(bucket: "torch.Tensor", tensors_meta: list[dict]) -> list[tuple[str, torch.Tensor]]:
+    if not isinstance(bucket, torch.Tensor):
+        bucket = torch.from_numpy(bucket)
     reconstructed = []
     for i, meta in enumerate(tensors_meta):
         tensor = bucket[meta["start_idx"] : meta["end_idx"]].view(meta["dtype"]).reshape(torch.Size(meta["shape"]))
@@ -311,12 +314,18 @@ def serialize_named_weights(named_weights: list[tuple[str, torch.Tensor]], infer
 
     bucket, tensors_meta = _bucket_named_tensors(named_weights)
 
+    # Managed AutoDL containers block pidfd_getfd, which makes CUDA IPC
+    # deserialization fail even for colocated workers. Preserve the default
+    # zero-copy path unless this explicit portable transport is requested.
+    if os.getenv("ROLL_WEIGHT_SYNC_USE_CPU", "0") == "1":
+        bucket = bucket.detach().to("cpu").contiguous().numpy()
     # PumpkinComment:
     # FSDP2 will fail if using CPUOffload Policy without this check
-    if not getattr(bucket, "is_cuda", False):
+    elif not getattr(bucket, "is_cuda", False):
         bucket = bucket.to(current_platform.device_type).contiguous()
 
-    monkey_patch_torch_reductions()
+    if getattr(bucket, "is_cuda", False):
+        monkey_patch_torch_reductions()
 
     serialized_tensors = MultiprocessingSerializer.serialize({"bucket": bucket, "tensors_meta": tensors_meta})
     return serialized_tensors
