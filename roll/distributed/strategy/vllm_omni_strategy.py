@@ -320,9 +320,16 @@ class VllmOmniStrategy(InferenceStrategy):
             # going through strategy.load_states(); keep strategy state in sync.
             self.is_model_in_gpu = True
 
-    async def setup_collective_group(self, *args, **kwargs):
+    async def setup_collective_group(self, master_address, master_port, rank_offset, world_size, group_name, backend=None):
         if hasattr(self.model, "setup_collective_group"):
-            await self.model.setup_collective_group(*args, **kwargs)
+            await self.model.setup_collective_group(
+                master_address=master_address,
+                master_port=master_port,
+                rank_offset=rank_offset,
+                world_size=world_size,
+                group_name=group_name,
+                backend=backend if backend is not None else current_platform.communication_backend,
+            )
 
     async def broadcast_parameter(self, *args, **kwargs):
         if hasattr(self.model, "broadcast_parameter"):
