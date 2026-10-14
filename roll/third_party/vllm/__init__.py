@@ -84,7 +84,12 @@ async def create_async_llm(resource_placement_groups: List[Dict], headless: bool
     kwargs["enable_sleep_mode"] = True
     if "attention_config" not in kwargs and "attention_config" in engine_arg_names:
         # vllm<=0.12.0 does not have attention_config in AsyncEngineArgs.
-        kwargs["attention_config"] = {"backend": "FLASH_ATTN"}
+        # FLASH_ATTN needs the CUDA-only vllm_flash_attn package, so on ROCm it fails every engine
+        # at init with "AssertionError: FlashAttention version not detected." vLLM's own gfx942
+        # priority list does not contain FLASH_ATTN at all; TRITON_ATTN is the Triton
+        # FlashAttention implementation it ships for ROCm.
+        default_backend = "TRITON_ATTN" if current_platform.is_rocm() else "FLASH_ATTN"
+        kwargs["attention_config"] = {"backend": default_backend}
     
     if "moe_backend" not in kwargs and "moe_backend" in engine_arg_names:
         # vLLM0.20.0, remove this while >= 0.29: https://github.com/vllm-project/vllm/issues/45447
