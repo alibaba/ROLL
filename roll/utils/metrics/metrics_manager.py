@@ -15,6 +15,7 @@ class MetricsManager:
     def __init__(self):
         self.metrics = {}
         self.domain_metrics = {}
+        self.domain_entropies = {}
         self.timers = {}
 
     def add_metric(self, name: str, value: Any) -> None:
@@ -50,6 +51,17 @@ class MetricsManager:
     def clear_metrics(self) -> None:
         self.metrics = {}
         self.domain_metrics = {}
+        self.domain_entropies = {}
+
+    def record_domain_entropy(self, batch: Any, entropy: torch.Tensor) -> None:
+        """Record response-token mean entropy for each domain before batch reordering."""
+        response_mask = batch.batch["response_mask"][:, 1:]
+        entropy_sums = (entropy * response_mask.float()).sum(dim=-1)
+        token_counts = response_mask.sum(dim=-1)
+        domains = batch.non_tensor_batch["domain"]
+        for domain in np.unique(domains):
+            indices = torch.as_tensor(domains == domain, device=entropy.device)
+            self.domain_entropies[str(domain)] = (entropy_sums[indices].sum() / token_counts[indices].sum()).item()
 
     def add_system_metrics(
         self, global_step: int, batch_size: int, resource_manager=None, actor_infer=None, actor_train=None
@@ -409,6 +421,8 @@ class MetricsManager:
         for domain, domain_batch in batch_grouped.items():
             original_metrics = self.metrics.copy()
             domain_metrics = self.add_values_metrics(batch=domain_batch)
+            if domain in self.domain_entropies:
+                domain_metrics["critic/entropy/mean"] = self.domain_entropies[domain]
             self.add_domain_metrics(domain, domain_metrics)
 
             token_metrics = self.add_token_metrics(batch=domain_batch)
