@@ -19,6 +19,7 @@ import torch
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 from codetiming import Timer
+from packaging.version import Version
 
 from roll.distributed.scheduler.remote_protocol import RemoteBatch, BatchProxy
 from roll.distributed.scheduler import transfer_backend
@@ -419,7 +420,7 @@ class DataProto:
         import io
 
         buffer = io.BytesIO()
-        if tensordict.__version__ >= "0.5.0" and self._batch is not None:
+        if Version(tensordict.__version__) >= Version("0.5.0") and self._batch is not None:
             self._batch = self._batch.contiguous()
             self._batch = self._batch.consolidate()
 
