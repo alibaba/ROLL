@@ -698,7 +698,8 @@ class CriticWorker(Worker):
             loss = torch.max(surr1, surr2)
         else:
             loss = (values - returns) ** 2
-            vf_clipfrac = masked_mean(loss, response_mask, dim=-1).mean()
+            # nothing is clipped without value_clip
+            vf_clipfrac = torch.zeros((), device=loss.device)
 
         vf_loss = 0.5 * masked_mean(loss, response_mask, dim=-1).mean()
 
