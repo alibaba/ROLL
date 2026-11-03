@@ -251,5 +251,20 @@ def test_clone_independence(create_data_proto):
 
 
 
+def test_data_proto_getstate_consolidates_batch(create_data_proto):
+    # tensordict>=0.10 reports e.g. "0.10.0", which is smaller than "0.5.0" as a plain string.
+    import pickle
+
+    dp = create_data_proto
+    assert not dp._batch.is_consolidated()
+
+    restored = pickle.loads(pickle.dumps(dp))
+
+    assert dp._batch.is_consolidated()
+    torch.testing.assert_close(restored.batch["a"], dp.batch["a"])
+    torch.testing.assert_close(restored.batch["b"], dp.batch["b"])
+    assert restored.non_tensor_batch["c"].tolist() == dp.non_tensor_batch["c"].tolist()
+
+
 if __name__ == "__main__":
     pytest.main()
