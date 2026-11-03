@@ -816,16 +816,17 @@ def reward_norm(
         reward_std = torch.std(reshape_reward, dim=-1, keepdim=True)
     elif norm_std_type == "running":
         reward_std = running.std
-    # 选择基础奖励值
-    rewards = reshape_reward if norm_mean_type == "group" else response_level_rewards
+    # 选择基础奖励值: 只要用到 group 统计量 (mean 或 std)，就在分组形状上计算，保证 [*, n_groups, 1] 的统计量正确广播
+    grouped = group_mode and n_sample > 0
+    rewards = reshape_reward if grouped else response_level_rewards
     # 标准化奖励
     if norm_std_type is not None:
         normalized_rewards = (rewards - reward_mean) / (reward_std + 1e-6)
     else:
         normalized_rewards = (rewards - reward_mean)
 
-    # 如果是对 group mean 归一化，需要恢复原始形状
-    if norm_mean_type == "group":
+    # 在分组形状上计算时，需要恢复原始形状
+    if grouped:
         normalized_rewards = normalized_rewards.reshape(*response_level_rewards.size())
     return normalized_rewards
 
