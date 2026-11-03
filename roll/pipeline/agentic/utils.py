@@ -533,8 +533,10 @@ def agentic_compute_advantage(
         token_level_rewards = token_level_rewards * response_mask
         data.batch["token_level_rewards"] = token_level_rewards
         if adv_estimator == "gae":
-            values = data.batch["values"].float()
-            data.batch["values"] = values * response_mask
+            # Mask the critic values before GAE: the value at the first padding position is the bootstrap
+            # value of the last response token, so it must be 0 (terminal).
+            values = data.batch["values"].float() * response_mask
+            data.batch["values"] = values
             advantages, returns = compute_gae_advantage_return(
                 token_level_rewards=token_level_rewards, values=values, gamma=gamma, lambd=lambd
             )
