@@ -1,14 +1,12 @@
 import copy
 import json
 import os
-import time
 from typing import Any, Dict, List
 
 import datasets
 import ray
 import torch
 from codetiming import Timer
-from ray.util.timer import _Timer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -107,7 +105,9 @@ class DPOPipeline(BasePipeline):
             if self.pipeline_config.global_template
             else self.pipeline_config.actor_train.data_args.template
         )
-        encode_function = get_encode_function(template_name, self.tokenizer, self.pipeline_config.chosen_key, self.pipeline_config.rejected_key)
+        encode_function = get_encode_function(
+            template_name, self.tokenizer, self.pipeline_config.chosen_key, self.pipeline_config.rejected_key
+        )
         self.dataset = preprocess_dataset(
             self.dataset,
             self.pipeline_config.sequence_length,
@@ -168,10 +168,12 @@ class DPOPipeline(BasePipeline):
         )
 
         # Assert reference inference capacity is sufficient
-        reference_infer_global_batch_size = (self.pipeline_config.reference.infer_batch_size//2) * self.reference.dp_size
-        assert reference_infer_global_batch_size <= self.global_train_batch_size, (
-            f"reference_infer_global_batch_size ({reference_infer_global_batch_size}) must be <= global train batch size ({self.global_train_batch_size})"
-        )
+        reference_infer_global_batch_size = (
+            self.pipeline_config.reference.infer_batch_size // 2
+        ) * self.reference.dp_size
+        assert (
+            reference_infer_global_batch_size <= self.global_train_batch_size
+        ), f"reference_infer_global_batch_size ({reference_infer_global_batch_size}) must be <= global train batch size ({self.global_train_batch_size})"
 
         if self.val_dataset:
             val_pipeline_config = copy.deepcopy(self.pipeline_config)
@@ -189,9 +191,9 @@ class DPOPipeline(BasePipeline):
                 collate_fn=data_collator,
             )
 
-            assert reference_infer_global_batch_size <= self.global_val_batch_size, (
-                f"reference_infer_global_batch_size ({reference_infer_global_batch_size}) must be <= global val batch size ({self.global_val_batch_size})"
-            )
+            assert (
+                reference_infer_global_batch_size <= self.global_val_batch_size
+            ), f"reference_infer_global_batch_size ({reference_infer_global_batch_size}) must be <= global val batch size ({self.global_val_batch_size})"
 
         self.set_checkpoint_clusters(self.actor_train)
 
@@ -219,8 +221,15 @@ class DPOPipeline(BasePipeline):
                 with Timer(name="step_total", logger=None) as step_total_timer:
                     batch_dict: Dict
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
-                    batch.meta_info = {"global_step": global_step, "is_offload_states": self.pipeline_config.is_offload_states,
-                                       "is_offload_optimizer_states_in_train_step": self.pipeline_config.is_offload_optimizer_states_in_train_step, 'loss_mask_keys': []}
+                    batch.meta_info = {
+                        "global_step": global_step,
+                        "is_offload_states": self.pipeline_config.is_offload_states,
+                        "is_offload_optimizer_states_in_train_step": self.pipeline_config.is_offload_optimizer_states_in_train_step,
+                        "loss_mask_keys": [],
+                        "ipo": self.pipeline_config.ipo,
+                        "beta": self.pipeline_config.beta,
+                        "label_smoothing": self.pipeline_config.label_smoothing,
+                    }
 
                     with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                         ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
@@ -257,7 +266,7 @@ class DPOPipeline(BasePipeline):
                 global_step += 1
                 if global_step >= self.pipeline_config.max_steps:
                     break
-            
+
             if global_step >= self.pipeline_config.max_steps:
                 break
 
@@ -269,8 +278,13 @@ class DPOPipeline(BasePipeline):
         for batch_dict in tqdm(self.val_dataloader):
             batch_dict: Dict
             batch: DataProto = DataProto.from_single_dict(batch_dict)
-            batch.meta_info = {"is_offload_states": self.pipeline_config.is_offload_states,
-                               'loss_mask_keys': []}
+            batch.meta_info = {
+                "is_offload_states": self.pipeline_config.is_offload_states,
+                "loss_mask_keys": [],
+                "ipo": self.pipeline_config.ipo,
+                "beta": self.pipeline_config.beta,
+                "label_smoothing": self.pipeline_config.label_smoothing,
+            }
 
             with Timer(name="cal_ref_log_probs", logger=None) as cal_ref_log_probs_timer:
                 ref_log_probs = self.reference.compute_log_probs(batch, blocking=True)
