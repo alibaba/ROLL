@@ -2192,12 +2192,10 @@ def batch_balance(batch: DataProto, dp_size, minibatch_size, logging_prefix="glo
     Reorder the data on single controller such that each dp rank gets similar total tokens"""
     attention_mask = batch.batch["attention_mask"]
     batch_size = attention_mask.shape[0]
-    global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1)  # (train_batch_size,)
+    # Move lengths once to avoid scalar device synchronizations during Python sorting.
+    global_seqlen_lst = attention_mask.view(batch_size, -1).sum(-1).detach().cpu().tolist()
 
-    def calculate_workload(seq_len_list):
-        return 24576 * seq_len_list + seq_len_list * seq_len_list
-
-    workload_lst = calculate_workload(global_seqlen_lst)
+    workload_lst = [24576 * seq_len + seq_len * seq_len for seq_len in global_seqlen_lst]
     world_size = dp_size
     if keep_minibatch:
         # Decouple the DP balancing and mini-batching.
@@ -2224,7 +2222,7 @@ def batch_balance(batch: DataProto, dp_size, minibatch_size, logging_prefix="glo
     global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
     batch.reorder(global_idx)
     global_balance_stats = log_seqlen_unbalance(
-        seqlen_list=global_seqlen_lst.detach().cpu().tolist(), partitions=global_partition_lst, prefix=logging_prefix
+        seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix
     )
     metrics = {}
     metrics.update(global_balance_stats)
