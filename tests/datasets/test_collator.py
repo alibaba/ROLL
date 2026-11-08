@@ -1,6 +1,9 @@
 import torch
 
-from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
+from roll.datasets.collator import (
+    DataCollatorForSFT,
+    DataCollatorWithPaddingForPaddedKeys,
+)
 
 
 class DummyTokenizer:
@@ -51,6 +54,14 @@ class DummyTokenizer:
         }
 
 
+class SFTDummyTokenizer(DummyTokenizer):
+    def pad(self, encoded_inputs, **kwargs):
+        encoded_inputs = [{**feature, "labels": torch.tensor(0)} for feature in encoded_inputs]
+        batch = super().pad(encoded_inputs, **kwargs)
+        batch.pop("labels")
+        return batch
+
+
 def test_data_collator_with_padding_for_padded_keys():
     tokenizer = DummyTokenizer(padding_side="left")
 
@@ -92,3 +103,30 @@ def test_data_collator_with_padding_for_padded_keys():
         batch["input_ids"].shape[1] == max_length
     ), f"Expected max_length {max_length}, got {batch['input_ids'].shape[1]}"
     print(f"All inputs padded to length {max_length} correctly.")
+
+
+def test_sft_collator_truncates_to_max_length():
+    data_collator = DataCollatorForSFT(
+        tokenizer=SFTDummyTokenizer(padding_side="right"),
+        padding="max_length",
+        max_length=4,
+        padded_keys=["input_ids", "attention_mask"],
+    )
+    features = [
+        {
+            "input_ids": torch.tensor([1, 2, 3, 4, 5, 6]),
+            "attention_mask": [1] * 6,
+            "labels": [-100, -100, 3, 4, 5, 6],
+        },
+        {
+            "input_ids": torch.tensor([5, 6, 7]),
+            "attention_mask": [1] * 3,
+            "labels": [-100, 6, 7],
+        },
+    ]
+
+    batch = data_collator(features)
+
+    assert batch["input_ids"].shape == batch["labels"].shape == (2, 4)
+    assert batch["input_ids"].tolist() == [[1, 2, 3, 4], [5, 6, 7, 0]]
+    assert batch["labels"].tolist() == [[-100, 3, 4, -100], [6, 7, -100, -100]]
