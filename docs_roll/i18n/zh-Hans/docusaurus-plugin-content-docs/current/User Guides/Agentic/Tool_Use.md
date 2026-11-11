@@ -32,6 +32,27 @@ class PythonCodeTool(GEMPythonCodeTool):
         pass
 ```
 
+#### RuntaPythonCodeTool
+
+`runta_python_code` 可直接替换 `python_code`：模型生成的代码在 [Runta](https://runta.com/docs/) 云端 runtime 中执行，而不是在 rollout worker 进程内执行，因此不可信代码不会运行在训练机器上。它的 action 解析和 observation 格式与 `PythonCodeTool` 完全一致。
+
+通过 `pip install runta-sdk` 安装 SDK，并通过 `RUNTA_TOKEN`（或 `runta login`）提供凭证，然后在 `tool_configs` 中替换 tool：
+
+```yaml
+tool_configs:
+  - tool_id: runta_python_code
+    tool_args:
+      timeout: 5
+      keep_error_last_line: false
+      # image: python:3.12-slim   # 可选：在该 Docker 镜像中执行代码
+      # memory_mib: 1024
+      # max_lifetime_seconds: 7200
+```
+
+每个 tool 实例（每个环境一个）拥有一个 runtime，在第一次执行时创建并在之后复用。每次执行都会启动新的解释器：变量不会保留，文件会保留。runtime 存活超过 `max_lifetime_seconds` 后会被 Runta 自动关闭，tool 会在下一次执行时新建 runtime，因此被强制终止的 worker 遗留的 runtime 会被自动回收。
+
+同一后端也可以承载完整的环境：`sokoban_runta_sandbox`（`roll/pipeline/agentic/env/sandbox/runta_sandbox_env.py`）在 Runta runtime 上运行沙箱版 Sokoban，示例见 `examples/agentic_demo/agent_val_sokoban_runta_sandbox.yaml`。
+
 #### SearchTool
 - 功能：搜索外部信息
 - 用途：问答系统、知识检索、事实验证等

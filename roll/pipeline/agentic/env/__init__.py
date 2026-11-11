@@ -4,6 +4,7 @@ base agentic codes reference: https://github.com/RAGEN-AI/RAGEN
 import gem
 
 from roll.utils.logging import get_logger
+
 logger = get_logger()
 
 gem.register("sokoban", entry_point="roll.pipeline.agentic.env.sokoban:SokobanEnv")
@@ -18,6 +19,14 @@ gem.register("sokoban_tool_call", entry_point="roll.pipeline.agentic.env.sokoban
 gem.register("deepeyes", entry_point="roll.pipeline.agentic.env.deepeyes:DeepEyesEnv")
 gem.register("rock_tb_native_env", entry_point="roll.pipeline.agentic.env.sandbox.rock_tb_native_env:RockTBNativeEnv")
 gem.register("geo3k", entry_point="roll.pipeline.agentic.env.geo3k:Geo3kEnv")
+try:
+    gem.register(
+        "sokoban_runta_sandbox",
+        entry_point="roll.pipeline.agentic.env.sandbox.runta_sandbox_env:SokobanRuntaSandboxEnv",
+    )
+except Exception as e:
+    logger.info(f"Failed to register sokoban_runta_sandbox: {e}")
+
 try:
     gem.register("openreward_env", entry_point="roll.pipeline.agentic.env.openreward:OpenRewardEnv")
 except Exception as e:

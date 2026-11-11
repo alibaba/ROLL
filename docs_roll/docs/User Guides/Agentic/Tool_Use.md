@@ -32,6 +32,27 @@ class PythonCodeTool(GEMPythonCodeTool):
         pass
 ```
 
+#### RuntaPythonCodeTool
+
+`runta_python_code` is a drop-in replacement for `python_code` that runs the model's code on a [Runta](https://runta.com/docs/) cloud runtime instead of in the rollout worker, so untrusted code never executes on the training machines. It parses actions and formats observations exactly like `PythonCodeTool`.
+
+Install the SDK with `pip install runta-sdk` and provide credentials through `RUNTA_TOKEN` (or `runta login`). Then swap the tool in `tool_configs`:
+
+```yaml
+tool_configs:
+  - tool_id: runta_python_code
+    tool_args:
+      timeout: 5
+      keep_error_last_line: false
+      # image: python:3.12-slim   # optional: run the code in this Docker image
+      # memory_mib: 1024
+      # max_lifetime_seconds: 7200
+```
+
+Each tool instance (one per environment) owns one runtime, created on the first execution and reused afterwards. Every execution starts a fresh interpreter: variables do not carry over, files do. Runta shuts a runtime down after `max_lifetime_seconds`, and the tool then starts a new one on the next execution, so runtimes left behind by a killed worker are reclaimed automatically.
+
+The same backend can host whole environments: `sokoban_runta_sandbox` (`roll/pipeline/agentic/env/sandbox/runta_sandbox_env.py`) runs the sandboxed Sokoban game on a Runta runtime; see `examples/agentic_demo/agent_val_sokoban_runta_sandbox.yaml`.
+
 #### SearchTool
 - **Function**: Search for external information
 - **Purpose**: Q&A systems, knowledge retrieval, fact verification, etc.
