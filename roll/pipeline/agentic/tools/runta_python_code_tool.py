@@ -4,6 +4,9 @@ import uuid
 import weakref
 from typing import List, Optional, Tuple
 
+from gem.utils.constants import BASE_IMPORTS
+from gem.utils.sandbox import check_forbidden_imports
+
 from roll.pipeline.agentic.tools.python_code_tool import PythonCodeTool
 from roll.utils.logging import get_logger
 
@@ -21,6 +24,10 @@ def _close_live_tools() -> None:
 
 atexit.register(_close_live_tools)
 
+# What gem's run_python answers for code rejected by check_forbidden_imports; gem has no
+# constant for it.
+FORBIDDEN_CODE_MESSAGE = "Execution blocked: Code contains potentially dangerous operations or imports."
+
 
 class RuntaPythonCodeTool(PythonCodeTool):
     """
@@ -30,6 +37,15 @@ class RuntaPythonCodeTool(PythonCodeTool):
     Each tool instance owns one runtime, created on the first execution and reused
     afterwards. Every execution starts a fresh ``python3`` interpreter, so variables do
     not carry over between calls while files written by earlier code do.
+
+    Code is screened and retried like the local tool (gem's ``run_python`` with
+    ``sandbox_type="none"``), using gem's own helpers: code that
+    ``check_forbidden_imports`` rejects is not executed, and code failing with
+    "is not defined" runs once more with gem's ``BASE_IMPORTS`` prepended. The modules
+    ``BASE_IMPORTS`` imports (``numpy`` and ``pandas`` among them) must therefore exist on
+    the runtime or in ``image``. Two details of gem's local runner are not reproduced: a
+    program that is exactly ``...`` runs (and prints nothing) instead of being reported
+    as a syntax error, and a timeout is reported in Runta's wording, not gem's.
 
     Requires the ``runta-sdk`` package (``pip install runta-sdk``) and credentials in
     ``RUNTA_TOKEN`` (or the config file written by ``runta login``).
@@ -93,14 +109,17 @@ class RuntaPythonCodeTool(PythonCodeTool):
         client = Runta(endpoint=self.endpoint) if self.endpoint else Runta()
         runtime = None
         try:
+            # wait=False hands back the runtime as soon as it exists server-side, so it
+            # is deleted below even when it never becomes ready.
             runtime = client.runtimes.create(
                 f"roll-python-{uuid.uuid4().hex[:8]}",
                 vcpus=self.vcpus,
                 memory_mib=self.memory_mib,
                 auto_shutdown_after_secs=self.max_lifetime_seconds,
                 auto_delete_after_secs=600,
-                timeout=self.startup_timeout,
+                wait=False,
             )
+            runtime.wait_until_ready(timeout=self.startup_timeout)
             if self.image is not None:
                 started = runtime.exec(
                     [
@@ -138,6 +157,20 @@ class RuntaPythonCodeTool(PythonCodeTool):
         return ["docker", "exec", "-i", self.CONTAINER_NAME, "python3", "-"]
 
     def _run_python(self, code: str) -> Tuple[bool, str, str]:
+        """Runs ``code`` like gem's ``run_python`` does, but on the runtime."""
+        if check_forbidden_imports(code):
+            return False, "", FORBIDDEN_CODE_MESSAGE
+
+        success, stdout, stderr = self._exec_python(code)
+        if not success and "is not defined" in stderr:
+            retry = self._exec_python(BASE_IMPORTS + "\n" + code)
+            # A runtime without the BASE_IMPORTS modules fails on the prepended imports;
+            # the model should then see its own error, not a missing-module one.
+            if retry[0] or "No module named" not in retry[2]:
+                success, stdout, stderr = retry
+        return success, stdout, stderr
+
+    def _exec_python(self, code: str) -> Tuple[bool, str, str]:
         """Runs ``code`` on the runtime and returns ``(success, stdout, stderr)``."""
         from runta import ApiError
 
@@ -148,7 +181,8 @@ class RuntaPythonCodeTool(PythonCodeTool):
                 try:
                     # The program is sent on stdin, so it is never interpolated into a shell.
                     result = self._ensure_runtime().exec(self._python_command(), timeout=self.timeout, stdin=code)
-                    return result.exit_code == 0, result.stdout_text, result.stderr_text
+                    # stderr is stripped as gem does, so keep_error_last_line finds the error.
+                    return result.exit_code == 0, result.stdout_text, result.stderr_text.strip()
                 except (ApiError, TimeoutError) as e:
                     logger.warning(f"Runta execution failed (attempt {attempt + 1}/2): {e}")
                     self._release()

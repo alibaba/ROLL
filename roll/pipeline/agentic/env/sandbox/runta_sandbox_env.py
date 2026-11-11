@@ -1,8 +1,10 @@
+import atexit
 import datetime
 import json
 import time
 import uuid
-from typing import Optional, Union
+import weakref
+from typing import List, Optional, Union
 
 from roll.pipeline.agentic.env.sandbox.sokoban_sandbox_env import SokobanSandboxEnv
 from roll.utils.logging import get_logger
@@ -10,6 +12,18 @@ from roll.utils.logging import get_logger
 logger = get_logger()
 
 SOKOBAN_SANDBOX_IMAGE = "rock-n-roll-registry.cn-hangzhou.cr.aliyuncs.com/rock/sokoban-sandbox:latest"
+
+# The env managers never call close(), so runtimes still alive at interpreter exit are
+# deleted here; the server-side lifetime covers workers killed without exit hooks.
+_LIVE_ENVS: "weakref.WeakSet[SokobanRuntaSandboxEnv]" = weakref.WeakSet()
+
+
+def _close_live_envs() -> None:
+    for env in list(_LIVE_ENVS):
+        env.close()
+
+
+atexit.register(_close_live_envs)
 
 
 class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
@@ -20,6 +34,12 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
     container, so the game image runs as one container inside the runtime and every
     client command goes through ``docker exec``. The game protocol (``reset``, ``step``,
     ``render``) is inherited unchanged from :class:`SokobanSandboxEnv`.
+
+    A runtime that was shut down (it reached ``max_lifetime_seconds``), crashed or was
+    deleted is replaced on the next command, and the episode in progress is replayed on
+    the new runtime from its reset. Only an episode that was reset with a seed can be
+    replayed; one reset without a seed raises, because its random map cannot be restored.
+    Any other Runta failure is raised instead of being turned into an observation.
 
     Requires the ``runta-sdk`` package (``pip install runta-sdk``) and credentials in
     ``RUNTA_TOKEN`` (or the config file written by ``runta login``).
@@ -45,7 +65,8 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
             server_start_timeout: Seconds to wait for the game server to become healthy.
             startup_timeout: Seconds to wait for the runtime to boot and pull the image.
             max_lifetime_seconds: Server-side lifetime of the runtime. Runta shuts it down
-                after this long even if the worker died without calling ``close()``.
+                after this long even if the worker died without calling ``close()``; the
+                next command then starts a new one.
             endpoint: Runta API endpoint; defaults to ``RUNTA_ENDPOINT`` or the SDK default.
         """
         # The parent constructor only builds ROCK's sandbox config, so it is not called.
@@ -63,6 +84,13 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
         self.last_known_map_str: str = "Game has not been reset yet."
 
         self._initialized: bool = False
+        # Client commands of the episode in progress, replayed if the runtime is replaced.
+        self._episode_commands: List[str] = []
+
+    def reset(self, seed=None, **kwargs):
+        """Resets the environment to a new game."""
+        self._episode_commands = []
+        return super().reset(seed=seed, **kwargs)
 
     def close(self):
         """Deletes the runtime and releases all cloud resources."""
@@ -70,6 +98,7 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
         self.runtime = None
         self.client = None
         self._initialized = False
+        _LIVE_ENVS.discard(self)
         try:
             if runtime is not None:
                 runtime.delete()
@@ -101,14 +130,18 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
         from runta import Runta
 
         self.client = Runta(endpoint=self.endpoint) if self.endpoint else Runta()
+        _LIVE_ENVS.add(self)
+        # wait=False hands back the runtime as soon as it exists server-side, so close()
+        # can delete it even when it never becomes ready.
         self.runtime = self.client.runtimes.create(
             f"roll-sokoban-{uuid.uuid4().hex[:8]}",
             vcpus=self.vcpus,
             memory_mib=self.memory_mib,
             auto_shutdown_after_secs=self.max_lifetime_seconds,
             auto_delete_after_secs=600,
-            timeout=self.startup_timeout,
+            wait=False,
         )
+        self.runtime.wait_until_ready(timeout=self.startup_timeout)
         logger.info("Runta runtime %s created", self.runtime.id)
 
         # --network host keeps the game server reachable on the runtime's localhost.
@@ -191,11 +224,59 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
                 self.close()
                 raise RuntimeError("Failed to initialize sandbox environment due to a critical error.") from e
 
+    def _runtime_stopped(self) -> bool:
+        """Tells whether the runtime was deleted or is no longer running."""
+        from runta import ApiError, RuntimeStatus
+
+        try:
+            return self.runtime.status() != RuntimeStatus.RUNNING
+        except ApiError as e:
+            if e.status_code == 404:
+                return True
+            raise
+
+    def _run_client_command(self, command: str) -> str:
+        """Runs a client command and returns its output, replacing a runtime that stopped."""
+        from runta import ApiError
+
+        try:
+            output = self._container_exec(f"cd /app && {command}").stdout_text.strip()
+        except (ApiError, TimeoutError) as e:
+            if not self._runtime_stopped():
+                raise
+            logger.warning(
+                "%s Runtime is gone or no longer running (%s); starting a new one and replaying %d command(s).",
+                self._get_sandbox_info_str(),
+                e,
+                len(self._episode_commands),
+            )
+            self.close()
+            if self._episode_commands and "--seed" not in self._episode_commands[0]:
+                # An unseeded reset drew a random map, so replaying the actions on a new
+                # runtime would continue the episode on a different game.
+                raise RuntimeError(
+                    "The Runta runtime stopped in the middle of an episode that was reset without a seed, "
+                    "so the episode cannot be restored on a new runtime."
+                ) from e
+            self._lazy_init()
+            # The new game server is empty: bring it back to the state this command expects.
+            for earlier_command in self._episode_commands:
+                self._container_exec(f"cd /app && {earlier_command}")
+            output = self._container_exec(f"cd /app && {command}").stdout_text.strip()
+        self._episode_commands.append(command)
+        return output
+
     def _execute_command(self, command: str) -> Union[dict, str]:
-        """Executes a client command in the game container and parses its JSON output."""
+        """
+        Executes a client command in the game container and parses its JSON output.
+
+        Output that is not JSON is returned as a string, like the parent class does. A
+        Runta failure that replacing the runtime does not cure is raised: turning it into
+        an observation would feed broken episodes to the trainer as normal trajectories.
+        """
         raw_output = ""
         try:
-            raw_output = self._container_exec(f"cd /app && {command}").stdout_text.strip()
+            raw_output = self._run_client_command(command)
             return json.loads(raw_output)
         except json.JSONDecodeError:
             sandbox_info = self._get_sandbox_info_str()
@@ -206,7 +287,7 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
             logger.exception(
                 "%s An unexpected error occurred executing command: %s. Error: %s. ", sandbox_info, command, e
             )
-            return f"{sandbox_info} Unexpected sandbox execution error: {e}"
+            raise
 
     def _get_sandbox_info_str(self) -> str:
         """Generates a standardized string with sandbox context for logging."""
