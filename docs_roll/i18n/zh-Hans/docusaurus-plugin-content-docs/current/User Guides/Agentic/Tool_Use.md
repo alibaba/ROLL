@@ -47,11 +47,16 @@ tool_configs:
       # image: python:3.12-slim   # 可选：在该 Docker 镜像中执行代码
       # memory_mib: 1024
       # max_lifetime_seconds: 7200
+      # lease_seconds: 600
 ```
 
-每个 tool 实例（每个环境一个）拥有一个 runtime，在第一次执行时创建并在之后复用。每次执行都会启动新的解释器：变量不会保留，文件会保留。runtime 存活超过 `max_lifetime_seconds` 后会被 Runta 自动关闭，tool 会在下一次执行时新建 runtime，因此被强制终止的 worker 遗留的 runtime 会被自动回收。
+每个 tool 实例（每个环境一个）拥有一个 runtime，在第一次执行时创建并在之后复用。每次执行都会启动新的解释器：变量不会保留，文件会保留。
 
-同一后端也可以承载完整的环境：`sokoban_runta_sandbox`（`roll/pipeline/agentic/env/sandbox/runta_sandbox_env.py`）在 Runta runtime 上运行沙箱版 Sokoban，示例见 `examples/agentic_demo/agent_val_sokoban_runta_sandbox.yaml`。
+runtime 依靠可续期的租约存活。距离上一次续期超过 `lease_seconds`（默认 600 秒）后，Runta 会自动关闭 runtime；tool 内的后台心跳线程每隔 `lease_seconds / 3` 续期一次。ROLL 通过 `ray stop --force` 停止 worker，worker 在执行任何清理代码之前就被杀死；被杀死的 worker 不再续期，因此它的 runtime 会在一个租约周期内被关闭，并在十分钟后被删除，而不会继续运行。`max_lifetime_seconds` 是单个 runtime 的寿命上限：续期不会超过这个上限。无论因为哪种原因被关闭，tool 都会在下一次执行时新建 runtime。续期失败只会记录一条 warning 日志，并在下一次心跳时重试。
+
+执行时间超过 `timeout` 的程序会被终止。设置了 `image` 时，tool 会自行杀死容器内该程序所在的进程组，这要求镜像中包含 `sh`。
+
+同一后端也可以承载完整的环境：`sokoban_runta_sandbox`（`roll/pipeline/agentic/env/sandbox/runta_sandbox_env.py`）在 Runta runtime 上运行沙箱版 Sokoban，其 `env_config` 支持同样的 `lease_seconds` / `max_lifetime_seconds` 租约配置，示例见 `examples/agentic_demo/agent_val_sokoban_runta_sandbox.yaml`。
 
 #### SearchTool
 - 功能：搜索外部信息

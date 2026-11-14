@@ -8,13 +8,14 @@ from typing import List, Optional, Union
 
 from roll.pipeline.agentic.env.sandbox.sokoban_sandbox_env import SokobanSandboxEnv
 from roll.utils.logging import get_logger
+from roll.utils.runta_lease import RuntaLease
 
 logger = get_logger()
 
 SOKOBAN_SANDBOX_IMAGE = "rock-n-roll-registry.cn-hangzhou.cr.aliyuncs.com/rock/sokoban-sandbox:latest"
 
 # The env managers never call close(), so runtimes still alive at interpreter exit are
-# deleted here; the server-side lifetime covers workers killed without exit hooks.
+# deleted here; the renewable lease (RuntaLease) covers workers killed without exit hooks.
 _LIVE_ENVS: "weakref.WeakSet[SokobanRuntaSandboxEnv]" = weakref.WeakSet()
 
 
@@ -35,11 +36,19 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
     client command goes through ``docker exec``. The game protocol (``reset``, ``step``,
     ``render``) is inherited unchanged from :class:`SokobanSandboxEnv`.
 
-    A runtime that was shut down (it reached ``max_lifetime_seconds``), crashed or was
-    deleted is replaced on the next command, and the episode in progress is replayed on
-    the new runtime from its reset. Only an episode that was reset with a seed can be
-    replayed; one reset without a seed raises, because its random map cannot be restored.
-    Any other Runta failure is raised instead of being turned into an observation.
+    The runtime lives on a renewable lease: Runta shuts it down ``lease_seconds`` after
+    the last renewal, and a daemon heartbeat thread renews the lease every
+    ``lease_seconds / 3`` for as long as this env exists, up to ``max_lifetime_seconds``
+    in total. A worker that is killed without running ``close()`` or its exit hooks
+    (``ray stop --force``) stops renewing, so its runtime is shut down within one lease
+    and deleted ten minutes later.
+
+    A runtime that was shut down (its lease lapsed or it reached
+    ``max_lifetime_seconds``), crashed or was deleted is replaced on the next command,
+    and the episode in progress is replayed on the new runtime from its reset. Only an
+    episode that was reset with a seed can be replayed; one reset without a seed raises,
+    because its random map cannot be restored. Any other Runta failure is raised instead
+    of being turned into an observation.
 
     Requires the ``runta-sdk`` package (``pip install runta-sdk``) and credentials in
     ``RUNTA_TOKEN`` (or the config file written by ``runta login``).
@@ -56,6 +65,7 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
         startup_timeout: int = 600,
         max_lifetime_seconds: int = 60 * 120,
         endpoint: Optional[str] = None,
+        lease_seconds: int = 600,
     ):
         """
         Args:
@@ -64,11 +74,17 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
             memory_mib: Memory of the runtime in MiB.
             server_start_timeout: Seconds to wait for the game server to become healthy.
             startup_timeout: Seconds to wait for the runtime to boot and pull the image.
-            max_lifetime_seconds: Server-side lifetime of the runtime. Runta shuts it down
-                after this long even if the worker died without calling ``close()``; the
-                next command then starts a new one.
+            max_lifetime_seconds: Hard cap on the lifetime of one runtime. The lease is
+                never renewed beyond it, so Runta shuts the runtime down after this long
+                even while the env is in use; the next command then starts a new one.
             endpoint: Runta API endpoint; defaults to ``RUNTA_ENDPOINT`` or the SDK default.
+            lease_seconds: Seconds the runtime survives without a renewal, i.e. how long
+                a runtime outlives a worker that was killed. The heartbeat renews it
+                every ``lease_seconds / 3``; keep it well above the time one Runta API
+                request may take.
         """
+        if lease_seconds < 1:
+            raise ValueError(f"lease_seconds must be at least 1, got {lease_seconds}")
         # The parent constructor only builds ROCK's sandbox config, so it is not called.
         self.image = image
         self.vcpus = vcpus
@@ -77,10 +93,12 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
         self.startup_timeout = startup_timeout
         self.max_lifetime_seconds = max_lifetime_seconds
         self.endpoint = endpoint
+        self.lease_seconds = lease_seconds
         self.server_port = 8001
 
         self.client = None
         self.runtime = None
+        self._lease: Optional[RuntaLease] = None
         self.last_known_map_str: str = "Game has not been reset yet."
 
         self._initialized: bool = False
@@ -94,11 +112,15 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
 
     def close(self):
         """Deletes the runtime and releases all cloud resources."""
-        runtime, client = self.runtime, self.client
+        runtime, client, lease = self.runtime, self.client, self._lease
         self.runtime = None
         self.client = None
+        self._lease = None
         self._initialized = False
         _LIVE_ENVS.discard(self)
+        # The heartbeat is stopped first, so it does not renew a runtime being deleted.
+        if lease is not None:
+            lease.stop()
         try:
             if runtime is not None:
                 runtime.delete()
@@ -131,16 +153,25 @@ class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
 
         self.client = Runta(endpoint=self.endpoint) if self.endpoint else Runta()
         _LIVE_ENVS.add(self)
+        # The lifetime cap is counted from here, before the runtime exists.
+        self._lease = RuntaLease(
+            lease_seconds=self.lease_seconds,
+            max_lifetime_seconds=self.max_lifetime_seconds,
+            endpoint=self.endpoint,
+            owner=self,
+        )
         # wait=False hands back the runtime as soon as it exists server-side, so close()
         # can delete it even when it never becomes ready.
         self.runtime = self.client.runtimes.create(
             f"roll-sokoban-{uuid.uuid4().hex[:8]}",
             vcpus=self.vcpus,
             memory_mib=self.memory_mib,
-            auto_shutdown_after_secs=self.max_lifetime_seconds,
+            auto_shutdown_after_secs=self._lease.initial_seconds,
             auto_delete_after_secs=600,
             wait=False,
         )
+        # Renewed from now on: booting and pulling the image may take longer than a lease.
+        self._lease.start(self.runtime.id)
         self.runtime.wait_until_ready(timeout=self.startup_timeout)
         logger.info("Runta runtime %s created", self.runtime.id)
 

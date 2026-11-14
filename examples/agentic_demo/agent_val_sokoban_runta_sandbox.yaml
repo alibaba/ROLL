@@ -158,7 +158,8 @@ custom_envs:
     env_config:
       vcpus: 1
       memory_mib: 2048
-      max_lifetime_seconds: 7200 # Runta shuts the runtime down after this long
+      max_lifetime_seconds: 7200 # hard cap: Runta shuts the runtime down after this long, the next command starts a new one
+      lease_seconds: 600 # renewed by the env every lease_seconds / 3; a runtime whose worker was killed (ray stop --force) is shut down within one lease
     max_steps: ${max_actions_per_traj}
     max_tokens_per_step: ${max_tokens_per_step}
     env_manager_cls: ${env_manager_cls}
