@@ -32,6 +32,32 @@ class PythonCodeTool(GEMPythonCodeTool):
         pass
 ```
 
+#### RuntaPythonCodeTool
+
+`runta_python_code` is a drop-in replacement for `python_code` that runs the model's code on a [Runta](https://runta.com/docs/) cloud runtime instead of in the rollout worker, so untrusted code never executes on the training machines. It parses actions and formats observations exactly like `PythonCodeTool`.
+
+Install the SDK with `pip install runta-sdk` and provide credentials through `RUNTA_TOKEN` (or `runta login`). Then swap the tool in `tool_configs`:
+
+```yaml
+tool_configs:
+  - tool_id: runta_python_code
+    tool_args:
+      timeout: 5
+      keep_error_last_line: false
+      # image: python:3.12-slim   # optional: run the code in this Docker image
+      # memory_mib: 1024
+      # max_lifetime_seconds: 7200
+      # lease_seconds: 600
+```
+
+Each tool instance (one per environment) owns one runtime, created on the first execution and reused afterwards. Every execution starts a fresh interpreter: variables do not carry over, files do.
+
+The runtime lives on a renewable lease. Runta shuts it down `lease_seconds` (default 600) after the last renewal, and a background heartbeat thread in the tool renews the lease every `lease_seconds / 3`. ROLL stops its workers with `ray stop --force`, which kills them before any cleanup code can run; a killed worker stops renewing, so its runtime is shut down within one lease and deleted ten minutes later instead of running on. `max_lifetime_seconds` is the hard cap on one runtime: the lease is never renewed beyond it. A runtime that was shut down, for either reason, is replaced on the next execution. A renewal that fails is logged as a warning and retried on the next heartbeat.
+
+A program that exceeds `timeout` is killed. With `image` set, the tool does this itself by killing the program's process group inside the container, which requires `sh` in the image.
+
+The same backend can host whole environments: `sokoban_runta_sandbox` (`roll/pipeline/agentic/env/sandbox/runta_sandbox_env.py`) runs the sandboxed Sokoban game on a Runta runtime, with the same `lease_seconds` / `max_lifetime_seconds` lease in its `env_config`; see `examples/agentic_demo/agent_val_sokoban_runta_sandbox.yaml`.
+
 #### SearchTool
 - **Function**: Search for external information
 - **Purpose**: Q&A systems, knowledge retrieval, fact verification, etc.

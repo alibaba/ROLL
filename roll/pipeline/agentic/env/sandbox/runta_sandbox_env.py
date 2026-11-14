@@ -1,0 +1,327 @@
+import atexit
+import datetime
+import json
+import time
+import uuid
+import weakref
+from typing import List, Optional, Union
+
+from roll.pipeline.agentic.env.sandbox.sokoban_sandbox_env import SokobanSandboxEnv
+from roll.utils.logging import get_logger
+from roll.utils.runta_lease import RuntaLease
+
+logger = get_logger()
+
+SOKOBAN_SANDBOX_IMAGE = "rock-n-roll-registry.cn-hangzhou.cr.aliyuncs.com/rock/sokoban-sandbox:latest"
+
+# The env managers never call close(), so runtimes still alive at interpreter exit are
+# deleted here; the renewable lease (RuntaLease) covers workers killed without exit hooks.
+_LIVE_ENVS: "weakref.WeakSet[SokobanRuntaSandboxEnv]" = weakref.WeakSet()
+
+
+def _close_live_envs() -> None:
+    for env in list(_LIVE_ENVS):
+        env.close()
+
+
+atexit.register(_close_live_envs)
+
+
+class SokobanRuntaSandboxEnv(SokobanSandboxEnv):
+    """
+    The sandboxed Sokoban environment, hosted on a Runta runtime (https://runta.com/docs/).
+
+    A Runta runtime is a full cloud machine with Docker preinstalled rather than a
+    container, so the game image runs as one container inside the runtime and every
+    client command goes through ``docker exec``. The game protocol (``reset``, ``step``,
+    ``render``) is inherited unchanged from :class:`SokobanSandboxEnv`.
+
+    The runtime lives on a renewable lease: Runta shuts it down ``lease_seconds`` after
+    the last renewal, and a daemon heartbeat thread renews the lease every
+    ``lease_seconds / 3`` for as long as this env exists, up to ``max_lifetime_seconds``
+    in total. A worker that is killed without running ``close()`` or its exit hooks
+    (``ray stop --force``) stops renewing, so its runtime is shut down within one lease
+    and deleted ten minutes later.
+
+    A runtime that was shut down (its lease lapsed or it reached
+    ``max_lifetime_seconds``), crashed or was deleted is replaced on the next command,
+    and the episode in progress is replayed on the new runtime from its reset. Only an
+    episode that was reset with a seed can be replayed; one reset without a seed raises,
+    because its random map cannot be restored. Any other Runta failure is raised instead
+    of being turned into an observation.
+
+    Requires the ``runta-sdk`` package (``pip install runta-sdk``) and credentials in
+    ``RUNTA_TOKEN`` (or the config file written by ``runta login``).
+    """
+
+    CONTAINER_NAME = "roll-sokoban"
+
+    def __init__(
+        self,
+        image: str = SOKOBAN_SANDBOX_IMAGE,
+        vcpus: int = 1,
+        memory_mib: int = 2048,
+        server_start_timeout: int = 60,
+        startup_timeout: int = 600,
+        max_lifetime_seconds: int = 60 * 120,
+        endpoint: Optional[str] = None,
+        lease_seconds: int = 600,
+    ):
+        """
+        Args:
+            image: Docker image that contains the game server and client under ``/app``.
+            vcpus: Virtual CPUs of the runtime.
+            memory_mib: Memory of the runtime in MiB.
+            server_start_timeout: Seconds to wait for the game server to become healthy.
+            startup_timeout: Seconds to wait for the runtime to boot and pull the image.
+            max_lifetime_seconds: Hard cap on the lifetime of one runtime. The lease is
+                never renewed beyond it, so Runta shuts the runtime down after this long
+                even while the env is in use; the next command then starts a new one.
+            endpoint: Runta API endpoint; defaults to ``RUNTA_ENDPOINT`` or the SDK default.
+            lease_seconds: Seconds the runtime survives without a renewal, i.e. how long
+                a runtime outlives a worker that was killed. The heartbeat renews it
+                every ``lease_seconds / 3``; keep it well above the time one Runta API
+                request may take.
+        """
+        if lease_seconds < 1:
+            raise ValueError(f"lease_seconds must be at least 1, got {lease_seconds}")
+        # The parent constructor only builds ROCK's sandbox config, so it is not called.
+        self.image = image
+        self.vcpus = vcpus
+        self.memory_mib = memory_mib
+        self.server_start_timeout = server_start_timeout
+        self.startup_timeout = startup_timeout
+        self.max_lifetime_seconds = max_lifetime_seconds
+        self.endpoint = endpoint
+        self.lease_seconds = lease_seconds
+        self.server_port = 8001
+
+        self.client = None
+        self.runtime = None
+        self._lease: Optional[RuntaLease] = None
+        self.last_known_map_str: str = "Game has not been reset yet."
+
+        self._initialized: bool = False
+        # Client commands of the episode in progress, replayed if the runtime is replaced.
+        self._episode_commands: List[str] = []
+
+    def reset(self, seed=None, **kwargs):
+        """Resets the environment to a new game."""
+        self._episode_commands = []
+        return super().reset(seed=seed, **kwargs)
+
+    def close(self):
+        """Deletes the runtime and releases all cloud resources."""
+        runtime, client, lease = self.runtime, self.client, self._lease
+        self.runtime = None
+        self.client = None
+        self._lease = None
+        self._initialized = False
+        _LIVE_ENVS.discard(self)
+        # The heartbeat is stopped first, so it does not renew a runtime being deleted.
+        if lease is not None:
+            lease.stop()
+        try:
+            if runtime is not None:
+                runtime.delete()
+        except Exception:
+            logger.exception("An error occurred while deleting the Runta runtime.")
+        finally:
+            if client is not None:
+                client.close()
+
+    def _container_exec(self, command: str, timeout: int = 120):
+        """Runs a shell command in the game container and returns the SDK result."""
+        return self.runtime.exec(["docker", "exec", self.CONTAINER_NAME, "bash", "-c", command], timeout=timeout)
+
+    def _wait_for_server(self, timeout: int):
+        """Polls the game server inside the container until it answers."""
+        logger.debug("Waiting for game server to start...")
+        health_check_command = f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{self.server_port}/"
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            if self._container_exec(health_check_command, timeout=30).stdout_text.strip() == "200":
+                return
+            time.sleep(3)
+
+        raise RuntimeError(f"Server did not start within the {timeout}s timeout.")
+
+    def _start_runtime(self):
+        """Creates the runtime, starts the game container and launches the game server."""
+        from runta import Runta
+
+        self.client = Runta(endpoint=self.endpoint) if self.endpoint else Runta()
+        _LIVE_ENVS.add(self)
+        # The lifetime cap is counted from here, before the runtime exists.
+        self._lease = RuntaLease(
+            lease_seconds=self.lease_seconds,
+            max_lifetime_seconds=self.max_lifetime_seconds,
+            endpoint=self.endpoint,
+            owner=self,
+        )
+        # wait=False hands back the runtime as soon as it exists server-side, so close()
+        # can delete it even when it never becomes ready.
+        self.runtime = self.client.runtimes.create(
+            f"roll-sokoban-{uuid.uuid4().hex[:8]}",
+            vcpus=self.vcpus,
+            memory_mib=self.memory_mib,
+            auto_shutdown_after_secs=self._lease.initial_seconds,
+            auto_delete_after_secs=600,
+            wait=False,
+        )
+        # Renewed from now on: booting and pulling the image may take longer than a lease.
+        self._lease.start(self.runtime.id)
+        self.runtime.wait_until_ready(timeout=self.startup_timeout)
+        logger.info("Runta runtime %s created", self.runtime.id)
+
+        # --network host keeps the game server reachable on the runtime's localhost.
+        started = self.runtime.exec(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                self.CONTAINER_NAME,
+                "--network",
+                "host",
+                self.image,
+                "sleep",
+                "infinity",
+            ],
+            timeout=self.startup_timeout,
+        )
+        if started.exit_code != 0:
+            raise RuntimeError(f"Failed to start image {self.image}: {started.stderr_text[-400:]}")
+
+        # The server runs detached with its own log file, so its output never mixes
+        # with the JSON printed by client commands.
+        launched = self.runtime.exec(
+            [
+                "docker",
+                "exec",
+                "-d",
+                self.CONTAINER_NAME,
+                "bash",
+                "-c",
+                "cd /app && exec python server.py > /tmp/server.log 2>&1",
+            ],
+            timeout=60,
+        )
+        if launched.exit_code != 0:
+            raise RuntimeError(f"Failed to launch the game server: {launched.stderr_text[-400:]}")
+
+        self._wait_for_server(timeout=self.server_start_timeout)
+
+    def _lazy_init(self):
+        """
+        Performs one-time, heavy initialization of the sandbox environment.
+
+        Called "lazily" on the first `reset()` so that workers in a distributed run do
+        not all provision their runtimes at construction time. Transient Runta API
+        errors are retried; anything else fails the worker immediately.
+        """
+        if self._initialized:
+            return
+
+        from runta import ApiError
+
+        max_attempts = 3
+        base_wait_time = 10.0  # Seconds to wait after the first failure.
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.debug(f"Initialization attempt [{attempt}/{max_attempts}] starting...")
+                self._start_runtime()
+                self._initialized = True
+                return
+
+            except (ApiError, TimeoutError) as e:
+                logger.warning(f"Attempt [{attempt}/{max_attempts}] failed with a Runta API error: {e}")
+                self.close()
+
+                if attempt == max_attempts:
+                    logger.error(f"All {max_attempts} initialization attempts failed. Giving up.")
+                    raise RuntimeError(
+                        "Failed to initialize sandbox environment after multiple Runta API errors."
+                    ) from e
+
+                wait_time = base_wait_time * attempt
+                logger.info(f"Waiting {wait_time:.1f} seconds before retrying...")
+                time.sleep(wait_time)
+
+            except Exception as e:
+                logger.exception("A critical, non-retryable error occurred during lazy initialization.")
+                self.close()
+                raise RuntimeError("Failed to initialize sandbox environment due to a critical error.") from e
+
+    def _runtime_stopped(self) -> bool:
+        """Tells whether the runtime was deleted or is no longer running."""
+        from runta import ApiError, RuntimeStatus
+
+        try:
+            return self.runtime.status() != RuntimeStatus.RUNNING
+        except ApiError as e:
+            if e.status_code == 404:
+                return True
+            raise
+
+    def _run_client_command(self, command: str) -> str:
+        """Runs a client command and returns its output, replacing a runtime that stopped."""
+        from runta import ApiError
+
+        try:
+            output = self._container_exec(f"cd /app && {command}").stdout_text.strip()
+        except (ApiError, TimeoutError) as e:
+            if not self._runtime_stopped():
+                raise
+            logger.warning(
+                "%s Runtime is gone or no longer running (%s); starting a new one and replaying %d command(s).",
+                self._get_sandbox_info_str(),
+                e,
+                len(self._episode_commands),
+            )
+            self.close()
+            if self._episode_commands and "--seed" not in self._episode_commands[0]:
+                # An unseeded reset drew a random map, so replaying the actions on a new
+                # runtime would continue the episode on a different game.
+                raise RuntimeError(
+                    "The Runta runtime stopped in the middle of an episode that was reset without a seed, "
+                    "so the episode cannot be restored on a new runtime."
+                ) from e
+            self._lazy_init()
+            # The new game server is empty: bring it back to the state this command expects.
+            for earlier_command in self._episode_commands:
+                self._container_exec(f"cd /app && {earlier_command}")
+            output = self._container_exec(f"cd /app && {command}").stdout_text.strip()
+        self._episode_commands.append(command)
+        return output
+
+    def _execute_command(self, command: str) -> Union[dict, str]:
+        """
+        Executes a client command in the game container and parses its JSON output.
+
+        Output that is not JSON is returned as a string, like the parent class does. A
+        Runta failure that replacing the runtime does not cure is raised: turning it into
+        an observation would feed broken episodes to the trainer as normal trajectories.
+        """
+        raw_output = ""
+        try:
+            raw_output = self._run_client_command(command)
+            return json.loads(raw_output)
+        except json.JSONDecodeError:
+            sandbox_info = self._get_sandbox_info_str()
+            logger.error("%s Failed to decode JSON from sandbox. Raw output: >>>%s<<<", sandbox_info, raw_output)
+            return raw_output
+        except Exception as e:
+            sandbox_info = self._get_sandbox_info_str()
+            logger.exception(
+                "%s An unexpected error occurred executing command: %s. Error: %s. ", sandbox_info, command, e
+            )
+            raise
+
+    def _get_sandbox_info_str(self) -> str:
+        """Generates a standardized string with sandbox context for logging."""
+        current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        sandbox_info = f"[Runta runtime: {self.runtime.id}]" if self.runtime else "[Sandbox: Not Initialized]"
+        return f"Timestamp: {current_time_str} | Context: {sandbox_info}"
