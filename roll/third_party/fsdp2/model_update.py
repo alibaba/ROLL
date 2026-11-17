@@ -163,7 +163,7 @@ class FSDP2WeightUpdater:
         self.infer_cluster = infer_cluster
         self.is_colocated = is_actor_infer_overlapping_with_any_cluster(
             infer_cluster.worker_config, actor_train=worker_config
-        )
+        ) and current_platform.supports_tensor_ipc
 
         # Colocated mode attributes
         self._infer_parallel_cpu_group = None

@@ -21,7 +21,7 @@ def clear_memory(clear_host_memory: bool = False):
     if clear_host_memory:
         if current_platform.is_npu():
             torch.npu.host_empty_cache()
-        else:
+        elif hasattr(torch._C, "_host_emptyCache"):
             torch._C._host_emptyCache()
 
 
