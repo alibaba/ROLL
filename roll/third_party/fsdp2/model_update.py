@@ -2,7 +2,6 @@ import os
 from dataclasses import asdict
 
 import ray
-import torch
 import transformers
 from packaging import version
 import torch.distributed as dist
@@ -328,7 +327,7 @@ class FSDP2WeightUpdater:
                 is_lora=False,
             )
         self._add_lora_to_infer_workers()
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
         return {}
 
     def _colocated_stream_weights(self, named_weights_iter, is_lora: bool):
@@ -457,7 +456,7 @@ class FSDP2WeightUpdater:
                 is_lora=False,
             )
         self._add_lora_to_infer_workers()
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
         return {}
 
     def _separated_stream_weights(self, named_weights_iter, is_lora: bool):
