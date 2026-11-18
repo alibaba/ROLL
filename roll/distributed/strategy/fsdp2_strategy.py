@@ -2097,9 +2097,9 @@ class FSDP2TrainStrategy(FSDP2InferStrategy, TrainStrategy):
                 # Clean up old offloaded parameters after optimizer update
                 self._cleanup_offloaded_model_params()
 
-        # Log cuda memory
-        max_memory_allocated = torch.cuda.memory.max_memory_allocated() / (1024 ** 3)
-        max_memory_reserved = torch.cuda.memory.max_memory_reserved() / (1024 ** 3)
+        # Log device memory
+        max_memory_allocated = current_platform.max_memory_allocated() / (1024 ** 3)
+        max_memory_reserved = current_platform.max_memory_reserved() / (1024 ** 3)
         metrics[f"system/max_memory_allocated@max"] = max_memory_allocated
         metrics[f"system/max_memory_reserved@max"] = max_memory_reserved
         return metrics
