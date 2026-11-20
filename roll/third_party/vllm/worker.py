@@ -88,6 +88,10 @@ class WorkerBase:
                     initialize_layerwise_reload(self.model_runner.drafter.model)
                 self._layerwise_reload_active = True
 
+            if Version(vllm.__version__) >= Version("0.28.0"):
+                # vLLM 0.28+ delegates LoRA base-weight loading to the unwrapped layer.
+                weights = ((name.replace(".base_layer.", "."), weight) for name, weight in weights)
+
             # Retained layer weights must not alias the reusable IPC bucket.
             weights_list = [(name, weight.detach().clone()) for name, weight in weights]
         else:
