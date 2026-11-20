@@ -9,6 +9,7 @@ logging_dir: ./output/logs
 output_dir: ./output
 system_envs:
   USE_MODELSCOPE: '1'
+  ROLL_ASCEND_COLOCATED_IPC: '1'
 
 
 checkpoint_config:
@@ -127,6 +128,11 @@ actor_infer:
       tensor_parallel_size: 2
       enforce_eager: true
       load_format: dummy
+      sleep_level: 2
+      additional_config:
+        weight_nz_mode: 0
+        rl_config:
+          enabled: true
   device_mapping: list(range(0,16))
   infer_batch_size: 1
 

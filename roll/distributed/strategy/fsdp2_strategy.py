@@ -1467,6 +1467,13 @@ class FSDP2InferStrategy(FSDP2StrategyBase):
         )
 
         self.model = model
+        if current_platform.is_npu():
+            # Release full-state loading buffers after their asynchronous copies finish.
+            del full_state
+            if self.cpu_offload_enabled or self.worker_config.strategy_args.strategy_config.get(
+                "clear_host_memory_after_offload", False
+            ):
+                clear_memory(clear_host_memory=True)
 
     # Add torch.no_grad() to disable gradient calculation.
     # torch.no_grad() in pipeline cannot work because pipeline and worker are in different processes.
