@@ -81,6 +81,8 @@ class WorkerBase:
             if not self._layerwise_reload_active:
                 from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
 
+                # Clear stale adapters before FSDP2 registers the new adapter.
+                self.model_runner.reset_lora_state()
                 initialize_layerwise_reload(self.model_runner.model)
                 if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
                     initialize_layerwise_reload(self.model_runner.drafter.model)
@@ -176,7 +178,6 @@ class WorkerBase:
                 if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
                     finalize_layerwise_reload(self.model_runner.drafter.model, self.model_config)
                 self._layerwise_reload_active = False
-                self.model_runner.reset_lora_state()
                 logger.info("ROLL Ascend layerwise weight reload completed")
             return
         if Version(vllm.__version__) >= Version("0.11.1"):
