@@ -19,7 +19,10 @@ def clear_memory(clear_host_memory: bool = False):
     gc.collect()
     current_platform.empty_cache()
     if clear_host_memory:
-        torch._C._host_emptyCache()
+        if current_platform.is_npu():
+            torch.npu.host_empty_cache()
+        else:
+            torch._C._host_emptyCache()
 
 
 class OffloadStateType(str, Enum):

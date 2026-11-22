@@ -69,6 +69,9 @@ def patch_vllm_lora_manager():
             hf_to_vllm_mapper = None
             if hasattr(model, "hf_to_vllm_mapper") and model.hf_to_vllm_mapper is not None:
                 hf_to_vllm_mapper = model.hf_to_vllm_mapper
+                if Version(vllm_version) >= Version("0.29.0") and hasattr(hf_to_vllm_mapper, "get_rename_mapper"):
+                    # LoRA modules must stay separate until the adapter manager packs them.
+                    hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
 
             if isinstance(lora_request, TensorLoRARequest):
                 kwargs = {}

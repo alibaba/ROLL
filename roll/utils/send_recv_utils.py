@@ -153,12 +153,26 @@ class RecvBucketManager:
         assert len(self.waiting_tensors) == 0
 
 
+if current_platform.is_npu():
+    import torch_npu.multiprocessing.reductions as npu_reductions
+
+    def _rebuild_npu_tensor_modified(*args):
+        # Sender and receiver can assign different local indices to the same NPU.
+        args = _modify_tuple(args, _REDUCE_TENSOR_ARG_DEVICE_INDEX, lambda _: torch.npu.current_device())
+        return npu_reductions._roll_original_rebuild_npu_tensor(*args)
+
+
 # ref: https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/patch_torch.py
 def monkey_patch_torch_reductions():
     """Monkey patching before Torch https://github.com/pytorch/pytorch/pull/149248 is fixed"""
 
-    # Currently, NPU does not support UUID. This has been temporarily commented out, with support expected in the fourth quarter.
-    if current_platform.device_type == "npu":
+    if current_platform.is_npu():
+        import os
+
+        if os.environ.get("ROLL_ASCEND_COLOCATED_IPC") == "1":
+            if not hasattr(npu_reductions, "_roll_original_rebuild_npu_tensor"):
+                npu_reductions._roll_original_rebuild_npu_tensor = npu_reductions.rebuild_npu_tensor
+                npu_reductions.rebuild_npu_tensor = _rebuild_npu_tensor_modified
         return
 
     if hasattr(reductions, "_reduce_tensor_original"):
@@ -259,6 +273,13 @@ def _bucket_named_tensors(named_tensors: list[tuple[str, torch.Tensor]]) -> tupl
         flattened_tensors = []
 
         current_idx = 0
+        # CPU-offloaded experts and gathered accelerator weights can share a bucket.
+        bucket_device = next(
+            (tensor.device for _, tensor in named_tensors if tensor.device.type != "cpu"),
+            named_tensors[0][1].device,
+        )
+        named_tensors = [(name, tensor.to(bucket_device)) for name, tensor in named_tensors]
+
         for i, (name, tensor) in enumerate(named_tensors):
             flattened = tensor.flatten().view(torch.int8)
 

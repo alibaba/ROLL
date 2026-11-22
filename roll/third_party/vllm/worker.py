@@ -64,6 +64,9 @@ class WorkerBase:
         self.kv_cache_loaded: bool = True
         self.buffer_cache = None
         self.tensor_lora_manager = TensorLoraManager()
+        # Weight reload uses the LoRA rename mapper available since vLLM 0.29.
+        self._use_layerwise_reload = Version(vllm.__version__) >= Version("0.29.0")
+        self._layerwise_reload_active = False
 
     def reload_model(self):
         if not self.weight_loaded:
@@ -74,8 +77,30 @@ class WorkerBase:
         # before updating the parameters, we need to reinitialize the previously released model
         self.reload_model()
 
-        # Convert to list for multiple iterations (draft model also needs the same weights)
-        weights_list = list(weights)
+        if self._use_layerwise_reload:
+            # Restore checkpoint layouts before loading the new weight chunks.
+            if not self._layerwise_reload_active:
+                from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+
+                # Clear stale adapters before FSDP2 registers the new adapter.
+                self.model_runner.reset_lora_state()
+                initialize_layerwise_reload(self.model_runner.model)
+                if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
+                    initialize_layerwise_reload(self.model_runner.drafter.model)
+                self._layerwise_reload_active = True
+
+            # vLLM loads LoRA base weights into the unwrapped layer.
+            # ROCm reuses IPC buckets, so retained layer weights need independent storage.
+            weights_list = [
+                (
+                    name.replace(".base_layer.", "."),
+                    weight.detach().clone() if current_platform.is_rocm() else weight.detach(),
+                )
+                for name, weight in weights
+            ]
+        else:
+            # Convert to list for multiple iterations (draft model also needs the same weights)
+            weights_list = list(weights)
 
         # Update target model (skips mtp.* prefixed weights via skip_prefixes)
         self.model_runner.model.load_weights(weights=weights_list)
@@ -86,6 +111,9 @@ class WorkerBase:
         if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
             logger.info("Updating drafter (MTP/EAGLE) model weights...")
             self.model_runner.drafter.model.load_weights(weights=weights_list)
+        if self._use_layerwise_reload:
+            # Complete local copies before acknowledging a reusable IPC bucket.
+            current_platform.synchronize()
 
     def load_states(self):
         self.reload_model()
@@ -150,6 +178,16 @@ class WorkerBase:
         self.load_weights([(name, weight) for name, weight in named_params])
 
     def process_weights_after_loading(self):
+        if self._use_layerwise_reload:
+            if self._layerwise_reload_active:
+                from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+
+                finalize_layerwise_reload(self.model_runner.model, self.model_config)
+                if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
+                    finalize_layerwise_reload(self.model_runner.drafter.model, self.model_config)
+                self._layerwise_reload_active = False
+                logger.info("ROLL layerwise weight reload completed")
+            return
         if Version(vllm.__version__) >= Version("0.11.1"):
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
             from vllm.utils.torch_utils import set_default_torch_dtype

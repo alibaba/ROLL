@@ -1,6 +1,6 @@
 # ROLL x Ascend
 
-最后更新：2026/08/17。
+最后更新：2026/11/18。
 
 我们在 ROLL 上增加对华为昇腾设备的支持。
 
@@ -10,9 +10,9 @@ ROLL 昇腾适配当前覆盖以下训练系列硬件：
 
 | 产品 | 是否支持 | 说明 |
 | ---- | -------- | ---- |
-| Atlas 900 A2 PODc（Ascend 910B1）/ Atlas A2 训练系列产品 | √ | 使用 `docker/Dockerfile.A2` 或 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` 镜像。 |
-| Atlas 900 A3 PODc（Ascend 910_9391）/ Atlas A3 训练系列产品 | √ | 使用 `docker/Dockerfile.A3` 或 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` 镜像。 |
-| Ascend 950 训练系列产品 | √ | 使用 Ascend 950 安装配置：torch 2.10、vLLM v0.20.2、vLLM-Ascend `main`，并在构建 vLLM-Ascend 时设置 `COMPILE_CUSTOM_KERNELS=1`。 |
+| Atlas A2 训练系列产品 | √ | 使用 `docker/Dockerfile.A2` 或 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12` 镜像。 |
+| Atlas A3 训练系列产品 | √ | 使用 `docker/Dockerfile.A3` 或 `roll:v0.3-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12` 镜像。 |
+| Ascend 950 训练系列产品 | √ | 使用下文 CANN 9.2.0 安装配置：Python 3.12、torch 2.10.0，以及源码安装的 vLLM 0.30.0 和 vLLM-Ascend 0.30.0rc2。 |
 | Atlas A2/A3 推理系列产品、Atlas 200I/500 A2 推理产品 | x | 当前 ROLL NPU 镜像和示例面向训练系列设备。 |
 | 其他昇腾训练或推理产品 | 未验证 | 使用前请确认驱动、固件、CANN、`torch_npu` 与 vLLM-Ascend 版本配套。 |
 
@@ -34,9 +34,9 @@ ROLL 昇腾适配当前覆盖以下训练系列硬件：
 | 软件 | 版本 |
 |-----------|-------------|
 | Python    |  3.12       |
-| CANN      |  9.1.0      |
+| CANN      |  9.2.0      |
 
-Ascend 950 请保持 Python 3.11，并使用下文 [Ascend 950 安装配置](#Ascend 950-安装配置) 中的专用 torch/vLLM 版本组合。
+以下手动安装步骤使用 CANN 9.2.0、vLLM 0.30.0 和 vLLM-Ascend 0.30.0rc2。Ascend 950 使用下文 [Ascend 950 安装配置](#ascend-950-安装配置) 中的版本组合。
 
 ### 创建 conda 环境
 
@@ -66,65 +66,83 @@ python -m pip install \
 
 ### 安装 vllm & vllm-ascend
 
-为了能够在 ROLL 中正常使用 vllm，需使用以下命令编译安装 vllm 和 vllm-ascend：
+vLLM 和 vLLM-Ascend 均固定发布版本并从源码安装，其他依赖可使用预编译包。以下命令适用于 A2/A3，Ascend 950 使用下节的源码构建步骤。先按发布版本的 requirements 准备运行依赖，以下 `--no-deps` 命令复用已准备的依赖，不能单独用于空环境。编译前加载 CANN 9.2.0 开发环境。vLLM 使用 `empty` 构建目标，避免编译 CUDA kernel。
 
-```
-# vllm
-git clone -b v0.23.0 --depth 1 https://github.com/vllm-project/vllm.git
+```bash
+git clone -b v0.30.0 --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
-
-VLLM_TARGET_DEVICE=empty pip install -v -e .
+python -m pip install "cmake>=3.26.1" ninja "setuptools>=77.0.3,<81" "setuptools-scm>=8" "setuptools-rust>=1.9.0" wheel packaging jinja2
+VLLM_TARGET_DEVICE=empty VLLM_VERSION_OVERRIDE=0.30.0 \
+    python -m pip install -v -e . --no-deps --no-build-isolation
 cd ..
 
-# vllm-ascend
-git clone -b v0.23.0rc1 --depth 1 https://github.com/vllm-project/vllm-ascend.git
+git clone -b v0.30.0rc2 --depth 1 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
-
-pip install -e . --no-build-isolation --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+python -m pip install "cmake>=3.26" "setuptools>=64" "setuptools-scm>=8" pybind11 wheel
+COMPILE_CUSTOM_KERNELS=1 \
+    python -m pip install -v -e . --no-deps --no-build-isolation
 cd ..
 
-# 在其他依赖安装完成后安装昇腾 Triton 实现
-pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-```
-
-或者可以从预编译的 wheel 包安装 `vllm` 和 `vllm-ascend`：
-
-```
-# 安装 vllm-project/vllm，最新支持版本为 v0.23.0
-pip install vllm==0.23.0
-
-# 从 pypi 安装 vllm-project/vllm-ascend
-pip install \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    vllm-ascend==0.23.0rc1
+pip install triton-ascend==3.2.2 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
 
 ### Ascend 950 安装配置
 
-Ascend 950上使用 torch 2.10、vLLM v0.20.2，并从 `main` 分支安装 vLLM-Ascend。安装 vLLM-Ascend 前需要设置 `COMPILE_CUSTOM_KERNELS=1`，以便编译自定义 kernel：
+Ascend 950DT（A5）配合 CANN 9.2.0 使用以下版本组合。vLLM 和 vLLM-Ascend 均从发布标签安装，并为目标芯片编译昇腾自定义算子。
 
-```
-# 安装 torch 2.10
-pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+| 组件 | 版本 |
+| ---- | ---------- |
+| Python / 架构 | 3.12 / aarch64 |
+| CANN | 9.2.0 |
+| torch / torch-npu | 2.10.0 / 2.10.0.post4 |
+| vLLM / vLLM-Ascend | 0.30.0 / 0.30.0rc2（源码安装） |
+| triton-ascend | 3.2.2 |
+| Transformers | 5.14.1 |
+| FLA | flash-linear-attention-npu-a5 26.9.1 |
+| Ray / NumPy / FastAPI | 2.48.0 / 1.26.4 / 0.136.3 |
 
-# 安装与 torch 2.10 和 CANN 版本匹配的 torch_npu
-pip install torch_npu==2.10.0
+使用已配置好配套驱动、CANN 9.2.0 toolkit、对应芯片 ops 包、C/C++ 编译器和 torch 软件栈的容器，并在执行下列命令前准备运行依赖。这里的 `--no-deps` 用于复用已准备的运行环境，不是空环境下的完整依赖安装命令。两个发布版本的 FastAPI 要求存在冲突，上表是运行环境参考，不能视为通过所有 `pip check` 检查的依赖锁定文件。
 
-# vLLM v0.20.2
-git clone -b v0.20.2 --depth 1 https://github.com/vllm-project/vllm.git
+```bash
+# vLLM：只构建 Python 包，不编译 CUDA kernel。
+git clone -b v0.30.0 --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
-pip install -r requirements/build.txt
-VLLM_TARGET_DEVICE=empty pip install -v -e .
+python -m pip install "cmake>=3.26.1" ninja "setuptools>=77.0.3,<81" "setuptools-scm>=8" "setuptools-rust>=1.9.0" wheel packaging jinja2
+VLLM_TARGET_DEVICE=empty VLLM_VERSION_OVERRIDE=0.30.0 \
+    python -m pip install -v -e . --no-deps --no-build-isolation
 cd ..
 
-# vLLM-Ascend main
-git clone -b main --depth 1 https://github.com/vllm-project/vllm-ascend.git
+# vLLM-Ascend：为 A5 编译扩展和自定义算子。
+git clone -b v0.30.0rc2 --depth 1 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-export COMPILE_CUSTOM_KERNELS=1
-pip install -v -e .
+git submodule update --init --recursive
+python -m pip install "cmake>=3.26" "setuptools>=64" "setuptools-scm>=8" pybind11 wheel
+SOC_VERSION=ascend950dt_9582 COMPILE_CUSTOM_KERNELS=1 \
+    python -m pip install -v -e . --no-deps --no-build-isolation
 cd ..
+
+# Qwen3.5 GDN 算子使用 A5 包，不使用 A2 变体。
+python -m pip install --no-deps \
+    https://mirrors.huaweicloud.com/ascend/repos/pypi/flash-linear-attention-npu-a5/flash_linear_attention_npu_a5-26.9.1-py3-none-manylinux_2_34_aarch64.whl
 ```
+
+加载对应的 CANN 环境后，在**启动 Python/Ray 前**设置自定义算子路径：
+
+```bash
+vllm_ascend_dir="$(python -c 'import importlib.util; print(importlib.util.find_spec("vllm_ascend").submodule_search_locations[0])')"
+fla_npu_dir="$(python -c 'import importlib.util; print(importlib.util.find_spec("fla_npu").submodule_search_locations[0])')"
+export ASCEND_CUSTOM_OPP_PATH="$vllm_ascend_dir/_cann_ops_custom/vendors/custom_transformer:$fla_npu_dir/opp/vendors/fla_npu_transformer:$fla_npu_dir/opp"
+export LD_LIBRARY_PATH="$vllm_ascend_dir/_cann_ops_custom/vendors/custom_transformer/op_impl/ai_core/tbe/op_tiling:${LD_LIBRARY_PATH}"
+export HCCL_NPU_SOCKET_PORT_RANGE=auto
+export VLLM_ASCEND_ENABLE_NZ=0
+```
+
+算子路径按实际 Python 包位置解析，以兼容源码可编辑安装。`op_tiling` 库路径用于解析 `liboptiling.so`；缺少这一路径时，此前实测出现过 `AddRmsNormBias` 初始化失败。A5 测试还为 driver 和 worker 设置了 `ATEN_CPU_CAPABILITY=default`，用于避开该主机上观测到的较慢 CPU BF16 转换路径。示例 SOC 对应 Ascend 950DT，其他 A5 型号需结合 `npu-smi info` 和上游构建说明调整。
+
+训练和推理共卡时，在配置的 `system_envs` 中设置 `ROLL_ASCEND_COLOCATED_IPC: '1'`，并在 vLLM strategy 中使用 `sleep_level: 2` 和 `additional_config.rl_config.enabled: true`。ROLL 的 NPU 适配调用官方分层权重重载 API，需要安装提供这些接口的 vLLM/vLLM-Ascend 配套版本，无需修改 vLLM 或 vLLM-Ascend 源码。
+
+此前同版本环境已完成完整层数的 Qwen3.5-9B、Qwen3.5-35B-A3B 文本 RLVR 5 步测试，训练、推理和 reference 共用 0–7 卡。此前使用预编译的 vLLM-Ascend 包，本节源码构建方式尚未重新进行端到端测试。这些小批次、短序列测试不代表收敛、多模态或 checkpoint 导出恢复验证。流水线配置参见 [RLVR 指南](ascend_npu_rlvr.md)。
 
 ### 安装 ROLL
 
@@ -138,23 +156,27 @@ cd ..
 
 ### 其他三方库说明
 
+以下依赖与本文 CANN 9.2.0 / vLLM 0.30.0 配置保持一致。安装 ROLL 后检查版本，避免其他依赖安装过程覆盖这些版本。
+
 | 软件 | 说明 |
 | ---- | ---- |
-| transformers | >= v4.57.6 |
+| transformers | 5.14.1 |
 | torch-npu | 2.10.0.post4 |
-| triton-ascend | 3.2.1（替代 `triton`） |
+| triton-ascend | 3.2.2（替代 `triton`） |
 | flash_attn | 不支持 |
 | transformer-engine[pytorch] | 不支持 |
 
-1. `transformers` v4.57.6 支持启用 `--flash_attention_2`。
+1. 该环境固定使用 `transformers==5.14.1`；注意力配置需与模型和 NPU 后端匹配。
 2. 目前不支持 `flash_attn` 加速。
 3. 目前不支持 `transformer-engine[pytorch]`。
 
 ```
-pip install transformers==4.57.6
+pip install transformers==5.14.1
 pip uninstall -y triton triton-ascend
-pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+pip install triton-ascend==3.2.2 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
+
+A2 实测：以官方 main（`7c0ded3`）加本分支的最小 NPU 适配，在 CANN 9.2.0 / vLLM 0.30.0 / vLLM-Ascend 0.30.0rc2 环境完成 Qwen3.5-9B 文本 RLVR 5 步训练。配置为 8 卡 FSDP2、推理 TP2、每步 4 个 prompt × 2 条回答、response 上限 512 token，关闭 KL/reference；5 步梯度均有限且非零，两个推理 worker 各完成 5 次官方分层权重重载。本次验证了短序列训练流程，未验证收敛或 checkpoint 导出恢复。
 
 ## 快速开始：单节点部署指引
 
