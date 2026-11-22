@@ -1,75 +1,156 @@
-FROM quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12-devel
+# syntax=docker/dockerfile:1
+ARG CANN_IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.2.0-a3-ubuntu22.04-py3.12
+FROM ${CANN_IMAGE}
 
-ARG SOC_VERSION="ascend910_9391"
+ARG SOC_VERSION="ascend910_9382"
+ARG MAX_JOBS=8
+ARG FLA_PACKAGE=flash-linear-attention-npu-a3
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TERM=xterm-256color
-ENV PIP_ROOT_USER_ACTION=ignore
-ENV PIP_CONSTRAINT=""
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ENV LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/add-ons:/usr/local/Ascend/ascend-toolkit/latest/fwkacllib/lib64:/usr/local/Ascend/ascend-toolkit/latest/acllib/lib64:/usr/local/Ascend/ascend-toolkit/latest/atc/lib64:${LD_LIBRARY_PATH}
-ENV ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
-ENV HCCL_NPU_SOCKET_PORT_RANGE=auto
+ENV DEBIAN_FRONTEND=noninteractive \
+    TERM=xterm-256color \
+    PIP_ROOT_USER_ACTION=ignore \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/simple \
+    PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    PIP_CONSTRAINT=/opt/roll/python-constraints.txt \
+    VIRTUAL_ENV=/opt/roll-venv \
+    ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.2.0 \
+    HCCL_NPU_SOCKET_PORT_RANGE=auto \
+    ATEN_CPU_CAPABILITY=default
+ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
         gcc g++ cmake libnuma-dev wget git curl jq vim \
-        build-essential iproute2 openjdk-21-jdk && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+        build-essential iproute2 netbase openjdk-21-jdk && \
+    ln -s "/usr/lib/jvm/java-21-openjdk-$(dpkg --print-architecture)" /opt/java && \
+    rm -rf /var/lib/apt/lists/* && \
+    python3 -m venv "${VIRTUAL_ENV}"
 
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+ENV JAVA_HOME=/opt/java
 
-RUN pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple && \
-    pip config set global.trusted-host mirrors.huaweicloud.com && \
-    pip install --upgrade pip packaging setuptools && \
-    pip cache purge
+RUN <<'BASH'
+set -eo pipefail
 
-WORKDIR /workspace
+source /usr/local/Ascend/cann-9.2.0/set_env.sh
+if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+fi
+set -u
+export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"
+export MAX_JOBS="${MAX_JOBS}"
+mkdir -p /opt/roll
+cat > "${PIP_CONSTRAINT}" <<'PINS'
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+torchaudio==2.10.0+cpu
+torch-npu==2.10.0.post4
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+transformers==5.14.1
+triton-ascend==3.2.2
+ray==2.48.0
+fastapi==0.136.3
+pyarrow<26.0.0
+tensordict==0.14.3
+setuptools>=77.0.3,<81
+PINS
 
-RUN git clone --depth 1 -b v0.23.0 https://github.com/vllm-project/vllm.git && \
-    git clone --depth 1 -b v0.23.0rc1 https://github.com/vllm-project/vllm-ascend.git
+python -m pip install 'pip==25.0.1' packaging \
+    'cmake>=3.26.1' ninja 'setuptools>=77.0.3,<81' \
+    'setuptools-scm>=8' 'setuptools-rust>=1.9.0' pybind11 wheel jinja2
+# Use the official CPU wheels; keep ordinary dependencies on the PyPI mirror.
+cpu_wheel_tag="cp312-cp312-manylinux_2_28_$(uname -m)"
+cpu_wheel_dir="$(mktemp -d)"
+# Avoid pip waiting on unreachable IPv6 addresses on some build hosts.
+for package in torch-2.10.0 torchvision-0.25.0 torchaudio-2.10.0; do
+    curl -4 --fail --location --retry 3 --connect-timeout 15 \
+        "https://download.pytorch.org/whl/cpu/${package}%2Bcpu-${cpu_wheel_tag}.whl" \
+        --output "${cpu_wheel_dir}/${package}+cpu-${cpu_wheel_tag}.whl"
+done
+python -m pip install --only-binary=:all: "${cpu_wheel_dir}"/*.whl
+rm "${cpu_wheel_dir}"/*.whl
+rmdir "${cpu_wheel_dir}"
+python -m pip install --only-binary=:all: 'torch-npu==2.10.0.post4'
 
-RUN cd vllm && \
-    VLLM_TARGET_DEVICE=empty pip install -v -e . && \
-    pip uninstall -y triton && \
-    pip cache purge && \
-    cd ..
+mkdir -p /opt/roll/src
+cd /opt/roll/src
+git -c http.version=HTTP/1.1 clone --depth 1 -b v0.30.0 \
+    https://github.com/vllm-project/vllm.git
+git -c http.version=HTTP/1.1 clone --depth 1 -b v0.30.0rc2 \
+    https://github.com/vllm-project/vllm-ascend.git
 
-RUN pip install \
-        --index-url https://download.pytorch.org/whl/cpu \
-        --extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
-        torch==2.10.0+cpu torchvision==0.25.0 torchaudio==2.10.0;
+cd vllm
+# OpenCV 4.13 requires NumPy 2; ROLL currently requires NumPy 1.x.
+sed '/^opencv-python-headless/d' requirements/common.txt > /tmp/vllm-runtime.txt
+printf '\nopencv-python-headless==4.11.0.86\n' >> /tmp/vllm-runtime.txt
+python -m pip install -r /tmp/vllm-runtime.txt
+VLLM_TARGET_DEVICE=empty VLLM_VERSION_OVERRIDE=0.30.0 \
+    python -m pip install -v -e . --no-deps --no-build-isolation
 
-RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    cd vllm-ascend && \
-    git submodule update --init --recursive && \
-    pip install -r requirements.txt --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
-    SOC_VERSION=${SOC_VERSION} pip install -v -e . --no-build-isolation --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-
-RUN python3 -m pip install --index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
-        --no-deps torch-npu==2.10.0.post4
+cd ../vllm-ascend
+git -c http.version=HTTP/1.1 submodule update --init --recursive
+# vLLM requires newer FastAPI. Arctic's optional speculative decoder
+# builds against torch 2.7; it is not used by the validated RLVR path.
+sed -e '/^fastapi/d' -e '/^arctic-inference/d' requirements.txt > /tmp/ascend-runtime.txt
+printf '\nfastapi==0.136.3\n' >> /tmp/ascend-runtime.txt
+python -m pip install --only-binary=:all: -r /tmp/ascend-runtime.txt
+SOC_VERSION="${SOC_VERSION:?Set the target Ascend SOC}" COMPILE_CUSTOM_KERNELS=1 \
+    python -m pip install -v -e . --no-deps --no-build-isolation
+python -m pip install --only-binary=:all: "${FLA_PACKAGE:?Set the hardware-matched FLA package}==26.9.1"
+git -C ../vllm rev-parse HEAD > /opt/roll/vllm-commit.txt
+git rev-parse HEAD > /opt/roll/vllm-ascend-commit.txt
+git -C ../vllm diff --exit-code
+git diff --exit-code
+rm /tmp/vllm-runtime.txt /tmp/ascend-runtime.txt
+BASH
 
 WORKDIR /workspace/ROLL
 COPY . .
+RUN <<'BASH'
+set -eo pipefail
 
-RUN grep -v '^gem-llm' requirements_common.txt > requirements_npu.txt && \
-    pip install -r requirements_npu.txt && \
-    rm -f requirements_npu.txt
+source /usr/local/Ascend/cann-9.2.0/set_env.sh
+if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+fi
+set -u
+export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"
 
-RUN pip install "transformers==4.57.6" "tensorboard==2.20.0" "hydra-core==1.3.5" "sympy==1.14.0"
+cd /workspace/ROLL
+# CUDA graph and Megatron extras are not part of the NPU FSDP path.
+sed -e '/^gem-llm/d' -e '/^\.\/mcore_adapter/d' \
+    -e 's/ray\[default,cgraph\]/ray[default]/' \
+    requirements_common.txt > requirements_npu.txt
+python -m pip install --only-binary=torch,torch-npu,numpy,scipy,pyarrow -r requirements_npu.txt
+python -m pip install --no-deps --no-build-isolation -e . -e ./mcore_adapter
+rm requirements_npu.txt
+python -m pip freeze > /opt/roll/pip-freeze.txt
+# Preserve upstream metadata conflicts and optional-dependency omissions
+# for inspection; runtime and hardware tests are run from the built image.
+python -m pip check > /opt/roll/pip-check.txt || test "$?" -eq 1
+python - <<'PY'
+from importlib.metadata import version
 
-RUN pip install -e .
+expected = {
+    'torch': '2.10.0+cpu', 'torch-npu': '2.10.0.post4',
+    'vllm': '0.30.0', 'vllm-ascend': '0.30.0rc2',
+    'transformers': '5.14.1', 'triton-ascend': '3.2.2',
+    'ray': '2.48.0', 'numpy': '1.26.4',
+}
+for name, wanted in expected.items():
+    actual = version(name)
+    assert actual == wanted, (name, actual, wanted)
+    print(f'{name}=={actual}')
+PY
+BASH
 
-RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
-    pip uninstall -y triton && \
-    pip uninstall -y triton-ascend && \
-    pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
-    pip cache purge
+ENV ASCEND_CUSTOM_OPP_PATH=/opt/roll/src/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer:/opt/roll-venv/lib/python3.12/site-packages/fla_npu/opp/vendors/fla_npu_transformer:/opt/roll-venv/lib/python3.12/site-packages/fla_npu/opp
+ENV LD_LIBRARY_PATH=/opt/roll/src/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_impl/ai_core/tbe/op_tiling:${LD_LIBRARY_PATH}
 
-RUN echo "source /usr/local/Ascend/ascend-toolkit/set_env.sh" >> /root/.bashrc && \
-    echo "source /usr/local/Ascend/nnal/atb/set_env.sh" >> /root/.bashrc && \
-    echo "export HCCL_NPU_SOCKET_PORT_RANGE=auto" >> /root/.bashrc
+RUN echo "source /usr/local/Ascend/cann-9.2.0/set_env.sh" >> /root/.bashrc && \
+    echo "test ! -f /usr/local/Ascend/nnal/atb/set_env.sh || source /usr/local/Ascend/nnal/atb/set_env.sh" >> /root/.bashrc
 
 CMD ["/bin/bash"]
