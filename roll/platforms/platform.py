@@ -167,6 +167,16 @@ class Platform:
         return []
 
     @classmethod
+    def select_assigned_devices(cls) -> None:
+        """Select the physical device assigned to the current worker."""
+        return
+
+    @classmethod
+    def get_vllm_device_kwargs(cls, engine_kwargs: dict) -> dict:
+        """Return platform-specific device assignments for vLLM."""
+        return {}
+
+    @classmethod
     def get_vllm_worker_class(cls):
         """Return the custom vLLM WorkerWrapper class used in Ray."""
         raise NotImplementedError

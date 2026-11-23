@@ -77,6 +77,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], headless: bool
             f"got {data_parallel_backend!r}."
         )
     kwargs["distributed_executor_backend"] = executor_backend or "mp"
+    kwargs.update(current_platform.get_vllm_device_kwargs(kwargs))
     if "data_parallel_backend" in engine_arg_names:
         kwargs["data_parallel_backend"] = "mp"
     else:
