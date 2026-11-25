@@ -52,6 +52,10 @@ class PythonCodeTool(GEMPythonCodeTool):
     def instruction_string(self) -> str:
         return self.tool_instruction
 
+    def _run_python(self, code: str) -> Tuple[bool, str, str]:
+        """Run ``code`` and return ``(success, stdout, stderr)``; subclasses swap the backend."""
+        return run_python(code, self.sandbox_type, timeout=self.timeout)
+
     def execute_action(self, action):
         """
         Execute the parsed action
@@ -68,9 +72,7 @@ class PythonCodeTool(GEMPythonCodeTool):
             observation = ""
             has_error = True
         else:
-            success, stdout, stderr = run_python(
-                parsed_code, self.sandbox_type, timeout=self.timeout
-            )
+            success, stdout, stderr = self._run_python(parsed_code)
             has_error = not success
             if stderr and self.keep_error_last_line:
                 stderr = stderr.split("\n")[-1]

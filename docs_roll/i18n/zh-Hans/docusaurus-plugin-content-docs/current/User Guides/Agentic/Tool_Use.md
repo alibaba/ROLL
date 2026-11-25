@@ -32,6 +32,32 @@ class PythonCodeTool(GEMPythonCodeTool):
         pass
 ```
 
+#### RuntaPythonCodeTool
+
+`runta_python_code` 可直接替换 `python_code`：模型生成的代码在 [Runta](https://runta.com/docs/) 云端 runtime 中执行，而不是在 rollout worker 进程内执行，因此不可信代码不会运行在训练机器上。它的 action 解析和 observation 格式与 `PythonCodeTool` 完全一致。
+
+通过 `pip install runta-sdk` 安装 SDK，并通过 `RUNTA_TOKEN`（或 `runta login`）提供凭证，然后在 `tool_configs` 中替换 tool：
+
+```yaml
+tool_configs:
+  - tool_id: runta_python_code
+    tool_args:
+      timeout: 5
+      keep_error_last_line: false
+      # image: python:3.12-slim   # 可选：在该 Docker 镜像中执行代码
+      # memory_mib: 1024
+      # max_lifetime_seconds: 7200
+      # lease_seconds: 600
+```
+
+每个 tool 实例（每个环境一个）拥有一个 runtime，在第一次执行时创建并在之后复用。每次执行都会启动新的解释器：变量不会保留，文件会保留。
+
+runtime 依靠可续期的租约存活。距离上一次续期超过 `lease_seconds`（默认 600 秒）后，Runta 会自动关闭 runtime；tool 内的后台心跳线程每隔 `lease_seconds / 3` 续期一次。ROLL 通过 `ray stop --force` 停止 worker，worker 在执行任何清理代码之前就被杀死；被杀死的 worker 不再续期，因此它的 runtime 会在一个租约周期内被关闭，并在十分钟后被删除，而不会继续运行。`max_lifetime_seconds` 是单个 runtime 的寿命上限：续期不会超过这个上限。无论因为哪种原因被关闭，tool 都会在下一次执行时新建 runtime。续期失败只会记录一条 warning 日志，并在下一次心跳时重试。
+
+执行时间超过 `timeout` 的程序会被终止。设置了 `image` 时，tool 会自行杀死容器内该程序所在的进程组，这要求镜像中包含 `sh`。
+
+同一后端也可以承载完整的环境：`sokoban_runta_sandbox`（`roll/pipeline/agentic/env/sandbox/runta_sandbox_env.py`）在 Runta runtime 上运行沙箱版 Sokoban，其 `env_config` 支持同样的 `lease_seconds` / `max_lifetime_seconds` 租约配置，示例见 `examples/agentic_demo/agent_val_sokoban_runta_sandbox.yaml`。
+
 #### SearchTool
 - 功能：搜索外部信息
 - 用途：问答系统、知识检索、事实验证等
