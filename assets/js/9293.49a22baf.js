@@ -1,0 +1,1 @@
+"use strict";(Array.isArray(globalThis.webpackChunkdocs_roll)?globalThis.webpackChunkdocs_roll:globalThis.webpackChunkdocs_roll=[]).push([[9293],{69293(r,l,o){o.r(l),o.d(l,{default:()=>e});o(96540);var s=o(76469),a=o(44586),c=o(74848);function e(){const{i18n:r}=(0,a.A)(),{currentLocale:l}=r,o="en"!==l;return(0,c.jsx)(s.rd,{to:`/ROLL/${o?"zh-Hans/":""}docs/Overview`})}}}]);
