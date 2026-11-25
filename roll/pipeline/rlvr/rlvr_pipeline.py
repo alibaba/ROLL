@@ -120,8 +120,14 @@ def get_encode_function(template_name, tokenizer, data_args, tag_to_template=Non
 class RLVRPipeline(BasePipeline):
 
     def __init__(self, pipeline_config: RLVRConfig):
-        super().__init__(pipeline_config)
-        self.pipeline_config = pipeline_config
+        try:
+            super().__init__(pipeline_config)
+            self._initialize()
+        except BaseException:
+            self._finish_rl_insight_tracker()
+            raise
+
+    def _initialize(self):
         self.use_ref_model = self.pipeline_config.enable_reference and (not is_lora_training(self.pipeline_config))
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
 
@@ -501,6 +507,25 @@ class RLVRPipeline(BasePipeline):
 
     @torch.no_grad()
     def run(self):
+        try:
+            self._run()
+        finally:
+            self._finish_rl_insight_tracker()
+        logger.info("pipeline complete!")
+
+    def _finish_rl_insight_tracker(self):
+        if getattr(self, "tracker", None) is None or self.pipeline_config.track_with != "rl_insight":
+            return
+        # A failed or replay-only run may never reach do_checkpoint().
+        try:
+            self._wait_for_resume_metrics()
+        finally:
+            try:
+                self.tracker.finish()
+            except Exception:
+                logger.exception("Failed to finish the RL-Insight tracker")
+
+    def _run(self):
         # 计算tokens per second 系统吞吐
 
         # 创建一个专门管理监控指标的类
@@ -915,8 +940,6 @@ class RLVRPipeline(BasePipeline):
         ray.get([scheduler.shutdown.remote() for scheduler in self.generate_schedulers.values()])
         if self.val_dataset:
             ray.get(self.val_generate_scheduler.shutdown.remote())
-
-        logger.info("pipeline complete!")
 
     @torch.no_grad()
     def val(self, global_step):

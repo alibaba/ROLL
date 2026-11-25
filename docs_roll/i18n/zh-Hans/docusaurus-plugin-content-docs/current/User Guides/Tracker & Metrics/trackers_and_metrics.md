@@ -10,6 +10,7 @@ ROLL 框架目前支持以下几种trackers：
 2. **Weights & Biases (WandB)** - 功能强大的机器学习实验跟踪平台
 3. **SwanLab** - 新一代 AI 实验跟踪工具
 4. **Stdout** - 直接输出到标准输出
+5. **RL-Insight** - 标准 RLVR 训练的可选 driver 标量指标后端
 
 ## 配置跟踪器
 
@@ -47,6 +48,42 @@ tracker_kwargs:
 # 使用 Stdout
 track_with: stdout
 ```
+
+## RLVR 使用 RL-Insight
+
+`track_with: rl_insight` 为标准 RLVR 训练入口 `examples/start_rlvr_pipeline.py`
+切换指标后端。默认仍是 TensorBoard，选择 RL-Insight 不会同时写 TensorBoard。
+
+使用包含公开 `metric_log` API 的 SDK 和与之匹配的服务。验证使用的是 SDK 和服务
+提交 `bef6181dcaadc8e643697200c829b875461fefba`、Ray 2.48.0 和 Tempo 2.6.1。
+正式发布的 v0.3.0 不包含该 API。
+
+```bash
+python -m pip install 'rl-insight @ git+https://github.com/verl-project/rl-insight.git@bef6181dcaadc8e643697200c829b875461fefba'
+export RL_INSIGHT_SERVER_URL=http://monitor-host:18080
+```
+
+按[服务安装指南](https://github.com/verl-project/rl-insight/blob/bef6181dcaadc8e643697200c829b875461fefba/docs/tutorial/server_installation.md)
+启动对应版本并启用 Tempo。`RL_INSIGHT_SERVER_URL` 是服务 API 地址，不是 Tempo
+查询或 Grafana 地址。driver 需要能访问服务 API，Ray Hub 需要能访问 Tempo 的
+OTLP 端点。`RL_INSIGHT_SERVER_BACKEND` 留空或设为 `ray`，Ray 由 ROLL 初始化。
+
+```yaml
+track_with: rl_insight
+tracker_kwargs:
+  project: roll-experiments
+  name: ${exp_name}
+```
+
+只传送项目名、运行名和带原始训练步的有限实数标量。不发送训练配置、worker
+trace、硬件采样、提示词或训练样本。文本、嵌套指标、非标量、非 CPU 张量以及
+没有有效训练步的指标都会跳过。如果 SDK 未能建立启用了 Tempo 的运行，driver
+会告警并继续训练，不会自动切换 tracker。
+
+从 checkpoint 恢复时，ROLL 按原始步号重放历史，再记录新步，并在 driver 退出
+时请求写出尾部指标。用 driver 日志中的实际运行名在 Tempo 查询。Ray Hub 为每次
+执行分配不同的名称后缀。保存 step 2 后恢复到 step 4，在恢复执行中查询到的是
+历史 step 0–2 和新增 step 3–4，不会跨进程合并执行，也不保证跨执行去重。
 
 ## SwanLab 使用详解
 

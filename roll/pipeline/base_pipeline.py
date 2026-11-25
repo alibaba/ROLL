@@ -38,6 +38,7 @@ class BasePipeline:
         )
         self.state = WorkerState()
         self.checkpoint_manager = CheckpointManager(checkpoint_config=self.pipeline_config.checkpoint_config, register=True)
+        self.resume_futures = []
         self.tracker_config = self.pipeline_config.to_dict()
         self.tracker_kwargs = dict(self.pipeline_config.tracker_kwargs)
         if os.environ.get("ROLL_TAG_GPU_TYPE", "0") == "1":
@@ -64,7 +65,6 @@ class BasePipeline:
 
         self.resume_from_checkpoint = False
         self.executor: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(max_workers=5)
-        self.resume_futures = []
 
         if self.pipeline_config.resume_from_checkpoint or self.pipeline_config.auto_resume:
             ckpt_uri = None
@@ -184,7 +184,14 @@ class BasePipeline:
             # Clean up old checkpoints if max_ckpt_to_keep is set
             self._cleanup_old_checkpoints()
 
-        futures.wait(self.resume_futures)
+        self._wait_for_resume_metrics()
+
+    def _wait_for_resume_metrics(self):
+        for future in self.resume_futures:
+            try:
+                future.result()
+            except Exception:
+                logger.exception("Failed to replay checkpoint metrics")
         self.resume_futures.clear()
 
     def _cleanup_old_checkpoints(self):

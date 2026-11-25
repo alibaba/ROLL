@@ -11,6 +11,7 @@ The ROLL framework currently supports the following trackers:
 3. **SwanLab** - Next-generation AI experiment tracking tool
 4. **Stdout** - Direct output to standard output
 5. **Trackio** - Local-first experiment tracker with optional Hugging Face Hub synchronization
+6. **RL-Insight** - Optional driver-side scalar metrics for standard RLVR training
 
 ## Configuring Trackers
 
@@ -66,6 +67,59 @@ tracker_kwargs:
   # Optional GPU monitoring
   auto_log_gpu: true
   gpu_log_interval: 2
+```
+
+## RL-Insight for RLVR
+
+`track_with: rl_insight` replaces the tracker for the standard RLVR training driver
+(`examples/start_rlvr_pipeline.py`). It does not also write TensorBoard events.
+TensorBoard is still the default and does not require RL-Insight.
+
+Install a matching RL-Insight SDK and server with the public `metric_log` API.
+The SDK and server were tested at commit `bef6181dcaadc8e643697200c829b875461fefba`
+with Ray 2.48.0 and Tempo 2.6.1. The v0.3.0 release does not include this API.
+
+```bash
+python -m pip install 'rl-insight @ git+https://github.com/verl-project/rl-insight.git@bef6181dcaadc8e643697200c829b875461fefba'
+export RL_INSIGHT_SERVER_URL=http://monitor-host:18080
+```
+
+Start the matching [RL-Insight server](https://github.com/verl-project/rl-insight/blob/bef6181dcaadc8e643697200c829b875461fefba/docs/tutorial/server_installation.md)
+with Tempo enabled. Use the server API URL, not the Tempo query or Grafana URL.
+The driver must be able to reach the server API and the Ray Hub must be able
+to reach Tempo's OTLP endpoint. Leave `RL_INSIGHT_SERVER_BACKEND` unset or set it
+to `ray`. ROLL initializes Ray before creating the tracker.
+
+```yaml
+track_with: rl_insight
+tracker_kwargs:
+  project: roll-experiments
+  name: ${exp_name}
+```
+
+Only `project` and `name` are passed as run metadata. Training configuration,
+worker traces, hardware samples, prompts, and training samples are not sent.
+The tracker strips reducer suffixes such as `@mean` and sends finite real
+scalars (including zero-dimensional CPU tensors) with the original
+non-negative integral step. Text, nested metrics, non-scalar values, non-CPU
+tensors and metrics without a valid step are skipped. If the SDK cannot
+initialize a Tempo-enabled run, the driver warns and continues without
+RL-Insight metrics. It does not fall back to another tracker.
+
+On resume, ROLL sends the checkpoint's metric history with its original steps
+before sending new steps, and drains pending metrics at driver shutdown.
+Use the execution name printed in the driver log to query Tempo. The Ray
+Hub assigns an execution-specific suffix, so a fresh start through step 2
+and a resume through step 4 have separate execution names. The resumed
+execution contains historical steps 0–2 followed by new steps 3–4. This
+does not merge executions or guarantee cross-execution deduplication.
+
+To check the metric history, query Tempo with TraceQL, replacing the
+execution name with the one from the driver log:
+
+```text
+{ span.experiment_name = "my-run-<suffix>" && span."monitor.trace_segment" = "metric_log" }
+| select(span."metric.name", span."metric.value", span.global_step)
 ```
 
 ## SwanLab Usage Details
