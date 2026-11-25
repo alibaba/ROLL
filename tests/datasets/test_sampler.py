@@ -113,3 +113,17 @@ def test_data_integrity(sample_dataset):
     original_ids = set(range(len(sample_dataset)))
     used_ids = set(all_samples)
     assert used_ids.issuperset(original_ids)
+
+
+def test_empty_domain_is_pruned_and_remaining_ratios_are_renormalized() -> None:
+    dataset = MockDataset([{"domain": "a"} for _ in range(10)] + [{"domain": "b"} for _ in range(6)])
+    sampler = BatchStratifiedSampler(dataset, domain_ratios={"a": 5, "b": 3, "missing": 2}, batch_size=8)
+
+    batches = list(sampler)
+
+    assert sampler.domain_ratios == {"a": 0.625, "b": 0.375}
+    assert sampler.domain_batch_num == {"a": 5, "b": 3}
+    assert len(batches) == 2
+    for batch in batches:
+        counts = Counter(dataset[index]["domain"] for index in batch)
+        assert counts == Counter({"a": 5, "b": 3})
