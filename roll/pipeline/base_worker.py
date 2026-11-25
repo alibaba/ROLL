@@ -475,8 +475,7 @@ class InferWorker(Worker):
 
             # Verify offloaded workers have near-zero GPU memory usage
             if self.rank_info.dp_rank in target_dp_ranks:
-                import torch
-                gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
+                gpu_memory_gb = current_platform.memory_allocated() / 1024**3
                 if gpu_memory_gb > 1.0:
                     raise RuntimeError(
                         f"GPU memory not properly offloaded for Worker {self.rank} (DP {self.rank_info.dp_rank}): "
@@ -534,7 +533,7 @@ class InferWorker(Worker):
         global_step = data.meta_info.get("global_step", 0)
         self.logger.info(f"{self.worker_name} generate global step {global_step}")
 
-        data = data.to("cuda")
+        data = data.to(current_platform.device_type)
         data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
 
         output = await self.strategy.generate(batch=data, generation_config=generation_config)

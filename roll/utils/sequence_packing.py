@@ -13,6 +13,7 @@ from dataclasses import field, dataclass, asdict
 from typing import Iterator, Tuple, Dict, List
 import torch.distributed as dist
 from roll.configs.worker_config import SequencePackingConfig
+from roll.platforms import current_platform
 
 def make_micro_batch_iter_for_sequence_packing(mini_batch, tp_size, cp_size, vp_size, is_train=False, dp_group=None,
                                                micro_batch_size=None, config: SequencePackingConfig = None, pp_size: int = 1):
@@ -121,8 +122,8 @@ class LoadBalancePacker(SequencePackingPacker):
     @staticmethod
     def get_device_name():
         """Get current device name."""
-        if torch.cuda.is_available():
-            return f"cuda:{torch.cuda.current_device()}"
+        if current_platform.device_type != "cpu":
+            return f"{current_platform.device_type}:{current_platform.current_device()}"
         return "cpu"
 
     @staticmethod
