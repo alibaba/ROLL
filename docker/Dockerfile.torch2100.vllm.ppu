@@ -1,15 +1,15 @@
-FROM pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.10.0-ubuntu24.04-cuda13.0-vllm0.17.1-py312
+# ROLL on the PPU SDK 2.2.0 base image (torch 2.10.0, CUDA 13.0, Python 3.12).
+FROM pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.10.0-ubuntu24.04-cuda13.0-py312-20261008
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TERM=xterm-256color
 ENV PIP_ROOT_USER_ACTION=ignore
 
-# Internal PyPI index; packages missing from it fall back to the Aliyun mirror
 ENV PIP_INDEX_URL=https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
 ENV PIP_TRUSTED_HOST=pkg.flytiger-eco.com
 ENV PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
-# Base image /tmp lacks write permission which breaks apt; restore standard permission first
+# /tmp is not writable in the base image; apt needs it
 RUN chmod 1777 /tmp && apt-get update \
     && apt-get install -y --no-install-recommends iproute2 tmux zip git curl \
     && rm -rf /var/lib/apt/lists/*
@@ -17,32 +17,48 @@ RUN chmod 1777 /tmp && apt-get update \
 COPY . /opt/ROLL
 WORKDIR /opt/ROLL
 
-# Pin PPU-custom versions of torch/vllm/flash-attn etc. so public indexes cannot override them
+# Pin every PPU component to its SDK 2.2.0 build
 ENV PIP_CONSTRAINT=/opt/ROLL/docker/constraints_ppu.txt
 
-RUN pip install --upgrade pip setuptools wheel
+RUN pip install --upgrade pip wheel
 
-# gem-llm==0.0.4 wrongly excludes Python 3.12.x; install it separately with --ignore-requires-python.
-# --no-build-isolation: SAIL PPU sdist packages import torch in setup.py.
+# fa3: replace the base image's 2.8.2 with the 3.0.0 SDK build
+RUN pip uninstall -y flash-attn-3 \
+    && pip install --no-deps --no-build-isolation 'flash-attn-3==3.0.0+v0.2.0.ppu2.2.0'
+
+# Base cupy 14.0.1 is a numpy-2 build; swap in the numpy-1 SDK build.
+# cupy-cuda12x is only vLLM's ray dependency, satisfied by a metapackage.
+RUN pip install --no-deps --no-build-isolation 'cupy==13.6.0+v0.1.0.ppu2.2.0' fastrlock \
+    && mkdir -p /tmp/cupy_cuda12x_alias \
+    && printf '%s\n' \
+         'from setuptools import setup' \
+         'setup(name="cupy-cuda12x", version="13.6.0+v0.1.0.ppu2.2.0",' \
+         '      install_requires=["cupy==13.6.0+v0.1.0.ppu2.2.0"])' \
+         > /tmp/cupy_cuda12x_alias/setup.py \
+    && pip install --no-deps --no-build-isolation /tmp/cupy_cuda12x_alias \
+    && rm -rf /tmp/cupy_cuda12x_alias
+
+# vLLM wants opencv>=4.13, which needs numpy 2: install vLLM alone, opencv 4.11,
+# then the rest of its metadata deps.
+RUN pip install --no-deps --no-build-isolation 'vllm==0.17.1+v0.1.0.ppu2.2.0' \
+    && pip install --no-deps 'opencv-python-headless==4.11.0.86' \
+    && python -c "import importlib.metadata as m; sel=[r for r in (m.requires('vllm') or []) if 'extra ==' not in r and not r.lower().startswith('opencv-python-headless')]; open('/tmp/vllm_deps.txt','w').write('\n'.join(sel))" \
+    && pip install --no-build-isolation -r /tmp/vllm_deps.txt
+
+# gem-llm excludes Python 3.12; PPU sdists import torch in setup.py (--no-build-isolation)
 RUN sed -e '/^gem-llm/d' \
         -e '\|^\./mcore_adapter|d' \
         -e 's|^-r requirements_vision.txt|-r /opt/ROLL/requirements_vision.txt|' \
         requirements_common.txt > /tmp/requirements_common_ppu.txt \
     && sed 's|-r requirements_common.txt|-r /tmp/requirements_common_ppu.txt|' requirements_torch2100_vllm_ppu.txt > /tmp/requirements_ppu.txt \
     && pip install --no-build-isolation -r /tmp/requirements_ppu.txt \
-    && pip install --no-build-isolation --ignore-requires-python gem-llm==0.0.4
+    && pip install --no-build-isolation --ignore-requires-python gem-llm==0.0.4 \
+    && pip install --no-deps 'numpy==1.26.4'
 
-# Install mcore_adapter with deps: pulls full megatron-core to replace the base image's stripped stub.
+# Full megatron-core replaces the base image's stripped stub
 RUN pip install --no-build-isolation /opt/ROLL/mcore_adapter
 
-# torchvision (needed by vLLM Qwen3.5 VL) from SAIL only: clear PIP_EXTRA_INDEX_URL so the
-# stock mirror wheel is not preferred over the PPU build.
-RUN PIP_EXTRA_INDEX_URL= pip install --no-deps --no-build-isolation torchvision==0.25.0 \
-    -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple \
-    --trusted-host pkg.flytiger-eco.com
-
-# FLA for Qwen3.5 hybrid attention: install internal fla to back up the PPU kda shims,
-# replace with fla-org build, restore shims. Must precede 'pip install -e .'.
+# FLA: back up the PPU kda shim, install fla-org, restore the shim
 RUN pip install -q --no-deps --no-build-isolation fla \
     && mkdir -p /tmp/fla_ppu_backup \
     && cp /usr/local/lib/python3.12/site-packages/fla/kda.py \
@@ -60,4 +76,6 @@ RUN pip install -e .
 RUN python -c "import torch, vllm, roll; print('torch:', torch.__version__); print('vllm:', vllm.__version__)" \
     && python -c "import transformers, megatron.core; from transformers.models.qwen3_5 import modeling_qwen3_5; from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig; import importlib.metadata as md; print('transformers:', transformers.__version__); print('megatron_core:', md.version('megatron_core'))" \
     && python -c "from megatron.core import DistributedDataParallel; import mcore_adapter; print('megatron DDP + mcore_adapter OK')" \
-    && python -c "from fla.modules import FusedRMSNormGated; from fla.ops.gated_delta_rule import chunk_gated_delta_rule; import fla.kda; print('FLA (fla.modules + fla.kda) OK')"
+    && python -c "from fla.modules import FusedRMSNormGated; from fla.ops.gated_delta_rule import chunk_gated_delta_rule; import fla.kda; print('FLA (fla.modules + fla.kda) OK')" \
+    && python -c "import flash_attn_interface; import importlib.metadata as md; print('flash-attn-3:', md.version('flash-attn-3'))" \
+    && python -c "import numpy, cupy, scipy, sklearn; print('numpy:', numpy.__version__, 'cupy:', cupy.__version__)"

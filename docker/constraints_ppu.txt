@@ -1,14 +1,34 @@
-# Pin the PPU-custom components in the base image (torch/vllm/flash-attn etc. with the
-# +vX.X.X.ppu suffix) via PIP_CONSTRAINT so public-index versions cannot override them
-# while installing ROLL's dependencies.
-torch==2.10.0+v0.1.0.ppu2.1.1
-vllm==0.17.1+v0.1.0.ppu2.1.1
-flash-attn==2.7.4.post1+v0.1.0.ppu2.1.1
-flash-attn-3==2.8.2+v0.1.0.ppu2.1.1
-flash_mla==2.0.0+v0.1.0.ppu2.1.1
-flashinfer-python==0.6.4+v0.1.0.ppu2.1.1
-xformers==0.0.30+v0.1.0.ppu2.1.1
-triton==3.6.0+v0.2.0.ppu2.1.1
-deepspeed==0.14.4
-# omegaconf 2.3.1 requires antlr4 4.9.x; keep later-installed packages like gem-llm from bumping it to 4.11+
+# Keep every PPU component on its SDK 2.2.0 build
+torch==2.10.0+v0.2.0.ppu2.2.0
+torchvision==0.25.0+v0.1.0.ppu2.2.0
+torchao==0.11.0+v0.1.0.ppu2.2.0
+triton==3.6.0+v0.3.0.ppu2.2.0
+xformers==0.0.30+v0.2.0.ppu2.2.0
+flash-attn==2.7.4.post1+v0.2.0.ppu2.2.0
+flash-attn-3==3.0.0+v0.2.0.ppu2.2.0
+flashinfer-python==0.6.4+v0.2.0.ppu2.2.0
+transformer-engine==2.16+v0.1.0.ppu2.2.0
+apex==24.4.1+v0.1.0.ppu2.2.0
+bitsandbytes==0.48.1+v0.1.0.ppu2.2.0
+deep-ep==2.2.0+v0.1.0.ppu2.2.0
+deep-gemm==1.0.0+v0.4.0.ppu2.2.0
+cuda-bindings==13.0.0+v0.1.0.ppu2.2.0
+acext==1.1.0+v0.2.0.ppu2.2.0
+nvidia-dali-cuda130==1.53.0+v0.1.0.ppu2.2.0
+megatron-core==0.18.2+v0.1.0.ppu2.2.0
+vllm==0.17.1+v0.1.0.ppu2.2.0
+
+# numpy-1 compatible cupy; cupy-cuda12x is covered by the Dockerfile metapackage
+cupy==13.6.0+v0.1.0.ppu2.2.0
+cupy-cuda12x==13.6.0+v0.1.0.ppu2.2.0
+
+numpy<2.0a0,>=1.25
+# last numpy-1 OpenCV (installed with --no-deps)
+opencv-python-headless==4.11.0.86
+# vllm pins numba 0.61.2; the base image has 0.59.1
+numba==0.61.2
+ray==2.48.0
+sglang-router==0.3.2+v0.1.0.ppu2.2.0
+deepspeed==0.16.5
+# omegaconf needs antlr4 4.9.x; keep gem-llm from bumping it
 antlr4-python3-runtime==4.9.3
