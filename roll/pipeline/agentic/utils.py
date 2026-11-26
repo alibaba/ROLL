@@ -177,6 +177,20 @@ def build_state_group(batch: "DataProto") -> "DataProto":
     return merged
 
 
+def step_reward_normalization(reward_normalization: RewardNormalizationConfig) -> RewardNormalizationConfig:
+    """GiGPO step-level normalization: the user's choice of centering / scaling, within each anchor-state group.
+
+    Uses the resolved ``norm_mean_type`` / ``norm_std_type`` rather than the deprecated ``method``, so a config
+    that sets only the new fields normalizes step rewards as well.
+    """
+    return RewardNormalizationConfig(
+        grouping="state_group_id",
+        method=reward_normalization.method,
+        norm_mean_type="group" if reward_normalization.norm_mean_type is not None else None,
+        norm_std_type="group" if reward_normalization.norm_std_type is not None else None,
+    )
+
+
 @torch.no_grad()
 def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticConfig) -> "DataProto":
     reward_metrics = {}
@@ -198,9 +212,7 @@ def compute_response_level_rewards(batch: "DataProto", pipeline_config: AgenticC
         scores_to_group.non_tensor_batch = batch.non_tensor_batch
         step_rewards: torch.Tensor = agentic_reward_norm(
             batch=scores_to_group,
-            reward_normalization=RewardNormalizationConfig(
-                grouping="state_group_id", method=pipeline_config.reward_normalization.method
-            ),
+            reward_normalization=step_reward_normalization(pipeline_config.reward_normalization),
         )
 
         batch.batch["response_level_rewards"] = (
