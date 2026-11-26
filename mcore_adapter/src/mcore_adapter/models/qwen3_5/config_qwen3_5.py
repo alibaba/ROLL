@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 from transformers import PretrainedConfig
 
@@ -14,6 +14,10 @@ class Qwen3_5Config(McaModelConfig):
 
     # Gated Delta Net specific (for linear attention layers)
     layer_types: Optional[list[str]] = None
+    gdn_backend: Literal["fla", "torch"] = field(
+        default="fla",
+        metadata={"help": "Use torch to bypass the fused causal-conv1d and FLA delta-rule kernels."},
+    )
 
     # Vision specific
     vision_start_token_id: int = 248053
@@ -31,6 +35,8 @@ class Qwen3_5Config(McaModelConfig):
     )
 
     def __post_init__(self):
+        if self.gdn_backend not in ("fla", "torch"):
+            raise ValueError(f"Unsupported gdn_backend: {self.gdn_backend!r}; expected 'fla' or 'torch'.")
         super().__post_init__()
         from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5VisionConfig
 
