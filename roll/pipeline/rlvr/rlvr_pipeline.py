@@ -713,6 +713,7 @@ class RLVRPipeline(BasePipeline):
                             loss_agg_mode="token-mean",
                         )
                         batch.meta_info["agg_entropy"] = agg_entropy
+                        metrics_mgr.record_domain_entropy(batch, old_log_probs.batch["entropy"])
 
                         batch.batch["old_log_probs"] = old_log_probs.batch["log_probs"]
                         metrics_mgr.add_reduced_metrics(old_log_probs.meta_info.pop("metrics", {}))
