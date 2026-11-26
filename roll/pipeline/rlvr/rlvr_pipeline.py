@@ -121,7 +121,7 @@ class RLVRPipeline(BasePipeline):
 
     def __init__(self, pipeline_config: RLVRConfig):
         try:
-            super().__init__(pipeline_config)
+            super().__init__(pipeline_config, supports_rl_insight=True)
             self._initialize()
         except BaseException:
             self._finish_rl_insight_tracker()

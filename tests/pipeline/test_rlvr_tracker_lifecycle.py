@@ -7,6 +7,7 @@ import pytest
 
 from roll.pipeline import base_pipeline
 from roll.pipeline.rlvr import rlvr_pipeline
+from roll.pipeline.rlvr.rlvr_rollout_pipeline import RLVRRolloutPipeline
 
 
 def driver_without_training(tracker, *, backend="rl_insight"):
@@ -108,3 +109,39 @@ def test_rlvr_leaves_other_tracker_lifecycles_unchanged(monkeypatch):
     monkeypatch.setattr(rlvr_pipeline.ray, "get", Mock())
     driver.run()
     tracker.finish.assert_not_called()
+
+
+@pytest.mark.parametrize("driver_cls", [base_pipeline.BasePipeline, RLVRRolloutPipeline])
+def test_unsupported_driver_rejects_rl_insight_before_allocating_resources(monkeypatch, driver_cls):
+    config = SimpleNamespace(track_with="rl_insight", seed=1, num_nodes=1, num_gpus_per_node=0)
+    resource_manager = Mock(side_effect=AssertionError("unsupported driver reached resource allocation"))
+    create_tracker = Mock()
+    monkeypatch.setattr(base_pipeline, "ResourceManager", resource_manager)
+    monkeypatch.setattr(base_pipeline, "create_tracker", create_tracker)
+
+    with pytest.raises(ValueError, match=f"track_with=rl_insight.*{driver_cls.__name__}"):
+        driver_cls(config)
+
+    resource_manager.assert_not_called()
+    create_tracker.assert_not_called()
+
+
+def test_cancelled_replay_and_failed_flush_do_not_fail_a_successful_run(monkeypatch):
+    tracker = Mock()
+    tracker.finish.side_effect = RuntimeError("monitor cleanup")
+    report = Mock()
+    monkeypatch.setattr(rlvr_pipeline.logger, "exception", report)
+    monkeypatch.setattr(rlvr_pipeline.ray, "get", Mock())
+    driver = driver_without_training(tracker)
+    replay = Future()
+    assert replay.cancel()
+    driver.resume_futures = [replay]
+
+    driver.run()
+
+    tracker.finish.assert_called_once_with()
+    assert not driver.resume_futures
+    assert [call.args[0] for call in report.call_args_list] == [
+        "Failed to replay checkpoint metrics",
+        "Failed to finish the RL-Insight tracker",
+    ]

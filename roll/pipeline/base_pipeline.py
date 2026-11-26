@@ -30,7 +30,12 @@ class BasePipeline:
     model_update_groups: List[ModelUpdateGroup] = []
     checkpoint_clusters: List = []
 
-    def __init__(self, pipeline_config):
+    def __init__(self, pipeline_config, *, supports_rl_insight=False):
+        if pipeline_config.track_with == "rl_insight" and not supports_rl_insight:
+            raise ValueError(
+                f"track_with=rl_insight is not supported by {type(self).__name__}. "
+                "Use the standard text RLVR training entry point."
+            )
         set_seed(seed=pipeline_config.seed)
         self.pipeline_config = pipeline_config
         self.resource_manager = ResourceManager(

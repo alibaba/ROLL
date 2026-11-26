@@ -31,13 +31,12 @@ def run_driver(root, checkpoint, project, phase):
 
     class MetricDriver(RLVRPipeline):
         def _initialize(self):
-            # No model workers in the CPU integration. Only the replay-only
-            # phase needs the attributes the real RLVR loop reads on exit.
+            # No model workers in the CPU integration.
             self.generate_schedulers = {}
             self.val_dataset = None
 
         def _run(self):
-            if phase == "replay-only":
+            if phase in ("replay-only", "interrupted"):
                 return super()._run()
             for step in range(self.state.step + 1, self.pipeline_config.max_steps):
                 metrics = {f"{METRIC}@mean": step + 0.125}
@@ -75,7 +74,16 @@ def run_driver(root, checkpoint, project, phase):
                 assert driver.state.step == 2
             context = rl_insight.get_context()
             assert context is not None and context.otel_traces_enabled
-            driver.run()
+            if phase == "interrupted":
+                error = KeyboardInterrupt("interrupted before the first new step")
+                with (
+                    patch("roll.pipeline.rlvr.rlvr_pipeline.MetricsManager", side_effect=error),
+                    pytest.raises(KeyboardInterrupt) as raised,
+                ):
+                    driver.run()
+                assert raised.value is error
+            else:
+                driver.run()
     finally:
         ray.shutdown()
     print(RESULT_PREFIX + context.experiment_name, flush=True)
@@ -120,7 +128,7 @@ def test_checkpoint_resume_preserves_steps_and_flushes_tail(tmp_path):
     tempo_url = os.environ["ROLL_TEST_TEMPO_URL"]
     checkpoint = tmp_path / "train" / "pipeline" / "checkpoint-2"
     experiments = set()
-    for phase, last_step in (("train", 2), ("resume", 4), ("replay-only", 2)):
+    for phase, last_step in (("train", 2), ("resume", 4), ("replay-only", 2), ("interrupted", 2)):
         root = tmp_path / phase
         output = subprocess.run(
             [sys.executable, __file__, str(root), str(checkpoint), project, phase],

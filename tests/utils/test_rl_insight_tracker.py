@@ -177,3 +177,16 @@ def test_setup_exception_releases_session(monitor):
     with pytest.raises(RuntimeError, match="failed after init"):
         create_tracker("rl_insight", {})
     monitor.finish.assert_called_once_with()
+
+
+def test_failed_finish_is_not_retried_and_late_metrics_are_ignored(monitor):
+    tracker = create_tracker("rl_insight", {})
+    monitor.finish.side_effect = RuntimeError("flush failed")
+
+    with pytest.raises(RuntimeError, match="flush failed"):
+        tracker.finish()
+
+    tracker.finish()
+    tracker.log({"loss": 1.0}, step=5)
+    monitor.finish.assert_called_once_with()
+    monitor.metric_log.assert_not_called()
