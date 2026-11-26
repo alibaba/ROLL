@@ -87,6 +87,33 @@ Leveraging a multi-role distributed architecture with Ray for flexible resource 
 [Quick Start: Using Alibaba Cloud Function Compute DevPod for Rapid Development](https://alibaba.github.io/ROLL/docs/Getting%20Started/Quick%20Start/aliyun_serverless_devpod_quick_start)
 [Frequently Asked Questions](https://alibaba.github.io/ROLL/docs/Getting%20Started/FAQ/qa_issues)
 
+### Optional RL-Insight tracker
+
+Supported by the standard text RLVR entry point, `examples/start_rlvr_pipeline.py`.
+TensorBoard remains the default. Choosing RL-Insight replaces it for this run.
+
+Install an SDK with `metric_log` and run a matching RL-Insight server with Tempo enabled.
+The following SDK commit was tested with Ray 2.48.0 and Tempo 2.6.1.
+
+```bash
+python -m pip install 'rl-insight @ git+https://github.com/verl-project/rl-insight.git@bef6181dcaadc8e643697200c829b875461fefba'
+export RL_INSIGHT_SERVER_URL=http://monitor-host:18080
+```
+
+```yaml
+track_with: rl_insight
+tracker_kwargs:
+  project: roll-experiments
+  name: ${exp_name}
+```
+
+Set the server API URL, not the Tempo query or Grafana URL. Leave
+`RL_INSIGHT_SERVER_BACKEND` unset or set it to `ray`. A missing SDK or
+`metric_log` API, invalid required settings, or an unsupported pipeline causes
+a startup error. If the SDK cannot establish a Tempo-enabled run, ROLL logs a
+warning and continues training without RL-Insight metrics or a tracker fallback.
+[Server setup](https://github.com/verl-project/rl-insight/blob/bef6181dcaadc8e643697200c829b875461fefba/docs/tutorial/server_installation.md)
+
 ### UserGuide
 
 #### Pipeline Step by Step

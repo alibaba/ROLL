@@ -1,9 +1,13 @@
 from concurrent import futures
 import json
+import math
 import os
 from functools import wraps
+from numbers import Integral, Real
 from typing import Optional, Dict, Any
+from urllib.parse import urlsplit
 
+import numpy as np
 import torch
 
 from roll.utils.logging import get_logger
@@ -194,6 +198,105 @@ class StdoutTracker(BaseTracker):
         pass
 
 
+class RLInsightTracker(BaseTracker):
+    """Send driver scalar metrics to the RL-Insight Ray Hub at their ROLL steps."""
+
+    def __init__(self, config: dict, *, project: Optional[str] = None, name: Optional[str] = None, **kwargs):
+        try:
+            import rl_insight
+        except ImportError as exc:
+            raise ImportError("To use track_with=rl_insight, install the RL-Insight SDK with metric_log support.") from exc
+
+        for api in ("metric_log", "init", "get_context", "finish"):
+            if not callable(getattr(rl_insight, api, None)):
+                raise ImportError(f"The installed RL-Insight SDK is missing {api}(). See ROLL's Tracker & Metrics guide.")
+
+        server_url = os.environ.get("RL_INSIGHT_SERVER_URL", "").strip()
+        try:
+            url = urlsplit(server_url)
+            if (
+                url.scheme not in ("http", "https")
+                or not url.hostname
+                or url.username is not None
+                or url.password is not None
+                or url.query
+                or url.fragment
+                or any(char.isspace() for char in server_url)
+                or (url.port is not None and url.port == 0)
+            ):
+                raise ValueError
+        except ValueError:
+            raise ValueError(
+                "Set RL_INSIGHT_SERVER_URL to the RL-Insight server API URL, e.g. http://monitor-host:18080."
+            ) from None
+        if os.environ.get("RL_INSIGHT_SERVER_BACKEND", "").strip() not in ("", "ray"):
+            raise ValueError("The RL-Insight tracker requires RL_INSIGHT_SERVER_BACKEND=ray (or unset).")
+        for key, value in (("project", project), ("name", name)):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"Set tracker_kwargs.{key} to a non-empty string or omit it.")
+
+        import ray
+
+        if not ray.is_initialized():
+            raise RuntimeError("Ray must be initialized before creating the RL-Insight tracker.")
+        if rl_insight.get_context() is not None:
+            raise RuntimeError("This Ray job already has an RL-Insight run. Use one RL-Insight tracker per driver job.")
+
+        self._monitor = rl_insight
+        self._enabled = False
+        try:
+            rl_insight.init(
+                project=project,
+                experiment_name=name,
+                config={"server": {"backend": "ray"}, "hardware": {"enable": False}},
+            )
+            # The SDK can return without an initialized client, e.g. during a service outage.
+            context = rl_insight.get_context()
+            self._enabled = context is not None and context.otel_traces_enabled
+        except BaseException:
+            try:
+                self.finish()
+            except Exception:
+                logger.exception("Failed to finish RL-Insight after tracker initialization failed")
+            raise
+        if not self._enabled:
+            logger.warning("RL-Insight/Tempo is unavailable; training will continue without RL-Insight metrics.")
+        else:
+            logger.info("RL-Insight experiment: %s (project: %s)", context.experiment_name, context.project)
+
+    @strip_at_tag_in_log
+    def log(self, values: dict, step: Optional[int], **kwargs):
+        if self._monitor is None or not self._enabled:
+            return
+        if isinstance(step, bool) or not isinstance(step, Integral):
+            return
+        step = int(step)
+        if not 0 <= step < 2**63:
+            return
+        for key, value in values.items():
+            if not isinstance(key, str) or not key:
+                continue
+            if isinstance(value, torch.Tensor):
+                if value.device.type != "cpu" or value.ndim != 0 or value.layout != torch.strided:
+                    continue
+                value = value.item()
+            elif isinstance(value, np.ndarray) and value.ndim == 0:
+                value = value.item()
+            if isinstance(value, bool) or not isinstance(value, Real):
+                continue
+            try:
+                scalar = float(value)
+            except OverflowError:
+                continue
+            if math.isfinite(scalar):
+                self._monitor.metric_log(key, scalar, step=step)
+
+    def finish(self):
+        monitor, self._monitor = self._monitor, None
+        if monitor is not None:
+            monitor.finish()
+
+
 def create_tracker(tracker_name: str, config: dict, **kwargs) -> BaseTracker:
     if not tracker_name:
         return BaseTracker()
@@ -256,3 +359,4 @@ tracker_registry["wandb"] = WandbTracker
 tracker_registry["stdout"] = StdoutTracker
 tracker_registry["swanlab"] = SwanlabTracker
 tracker_registry["trackio"] = TrackioTracker
+tracker_registry["rl_insight"] = RLInsightTracker

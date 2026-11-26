@@ -11,6 +11,7 @@ The ROLL framework currently supports the following trackers:
 3. **SwanLab** - Next-generation AI experiment tracking tool
 4. **Stdout** - Direct output to standard output
 5. **Trackio** - Local-first experiment tracker with optional Hugging Face Hub synchronization
+6. **RL-Insight** - Optional driver-side scalar metrics for standard RLVR training
 
 ## Configuring Trackers
 
@@ -67,6 +68,21 @@ tracker_kwargs:
   auto_log_gpu: true
   gpu_log_interval: 2
 ```
+
+## RL-Insight for text RLVR
+
+`track_with: rl_insight` selects the driver metric backend for
+`examples/start_rlvr_pipeline.py`. It replaces TensorBoard for this run.
+TensorBoard remains the default and does not need the SDK.
+
+Use an SDK with `metric_log`, a matching RL-Insight server with Tempo enabled,
+and set `RL_INSIGHT_SERVER_URL` to the server API. The SDK, server setup, and
+YAML settings are in the [ROLL README](https://github.com/alibaba/ROLL#optional-rl-insight-tracker).
+
+Selecting this backend without the SDK or the required API, with invalid
+settings, or on an unsupported pipeline fails at startup. If the SDK cannot
+establish a Tempo-enabled run, ROLL warns and continues without RL-Insight
+metrics or a fallback tracker.
 
 ## SwanLab Usage Details
 

@@ -10,6 +10,7 @@ ROLL 框架目前支持以下几种trackers：
 2. **Weights & Biases (WandB)** - 功能强大的机器学习实验跟踪平台
 3. **SwanLab** - 新一代 AI 实验跟踪工具
 4. **Stdout** - 直接输出到标准输出
+5. **RL-Insight** - 标准 RLVR 训练的可选 driver 标量指标后端
 
 ## 配置跟踪器
 
@@ -47,6 +48,20 @@ tracker_kwargs:
 # 使用 Stdout
 track_with: stdout
 ```
+
+## 文本 RLVR 使用 RL-Insight
+
+`track_with: rl_insight` 为标准文本 RLVR 入口
+`examples/start_rlvr_pipeline.py` 切换 driver 指标后端，不会同时写入 TensorBoard。
+默认仍为 TensorBoard，不依赖 RL-Insight SDK。
+
+使用包含 `metric_log` 的 SDK 和匹配的服务，启用 Tempo，将
+`RL_INSIGHT_SERVER_URL` 设为服务 API 地址。SDK 安装、服务设置和 YAML 示例见
+[ROLL README](https://github.com/alibaba/ROLL#optional-rl-insight-tracker)。
+
+缺少 SDK 或所需 API、必填配置无效，或在不支持的 pipeline 中选择该后端时，启动会报错。
+如果 SDK 未能建立启用了 Tempo 的运行，ROLL 会告警并继续训练，不发送 RL-Insight 指标，
+也不会自动切换 tracker。
 
 ## SwanLab 使用详解
 
