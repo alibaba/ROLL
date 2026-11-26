@@ -68,4 +68,6 @@ class XpuPlatform(Platform):
 
     @classmethod
     def apply_ulysses_patch(cls) -> None:
-        return
+        from roll.utils.context_parallel import apply_ulysses_patch
+
+        return apply_ulysses_patch()
