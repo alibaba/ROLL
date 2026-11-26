@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from roll.utils.functionals import (
+    agg_loss,
     compute_approx_kl,
     divide_by_chunk_size,
     pad_to_length,
@@ -74,6 +75,33 @@ def test_compute_approx_kl_k3_clamps_before_exp():
     expected = torch.clamp(torch.exp(clamped_kl) - clamped_kl - 1, min=-10, max=10)
     torch.testing.assert_close(result, expected)
     assert torch.isfinite(result).all()
+
+
+@pytest.mark.parametrize("loss_agg_mode", ["token-mean", "seq-mean-token-sum", "seq-mean-token-mean"])
+def test_agg_loss_ignores_masked_tokens(loss_agg_mode):
+    # Token 2 of the first sequence is masked out (e.g. by a train-infer correction filter) and the last
+    # token of the second one is padding; their losses must not change the result or receive gradient.
+    loss_mask = torch.tensor([[1, 1, 0, 1], [1, 1, 1, 0]])
+    loss_mat = torch.tensor([[1.0, 2.0, 100.0, 3.0], [4.0, 5.0, 6.0, -100.0]], requires_grad=True)
+
+    loss = agg_loss(loss_mat, loss_mask, loss_agg_mode, batch_num_tokens=loss_mask.sum(), global_valid_samples=2)
+    loss.backward()
+
+    unmasked = loss_mat.detach() * loss_mask
+    expected = agg_loss(unmasked, loss_mask, loss_agg_mode, batch_num_tokens=loss_mask.sum(), global_valid_samples=2)
+    torch.testing.assert_close(loss.detach(), expected)
+    assert (loss_mat.grad[loss_mask == 0] == 0).all()
+
+
+def test_agg_loss_token_mean_uses_global_token_count():
+    # On one data-parallel rank the local sum is divided by the global number of valid tokens.
+    loss_mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
+    loss_mat = torch.tensor([[1.0, 2.0, 7.0], [3.0, 7.0, 7.0]])
+    weights = torch.tensor([1.0, 2.0])
+
+    loss = agg_loss(loss_mat, loss_mask, "token-mean", batch_num_tokens=torch.tensor(6), weights=weights)
+
+    torch.testing.assert_close(loss, torch.tensor((1.0 + 2.0 + 2 * 3.0) / 6))
 
 
 if __name__ == "__main__":
