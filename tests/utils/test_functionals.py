@@ -8,6 +8,7 @@ from roll.utils.functionals import (
     compute_approx_kl,
     divide_by_chunk_size,
     pad_to_length,
+    reward_norm,
     traverse_obj,
 )
 
@@ -74,6 +75,25 @@ def test_compute_approx_kl_k3_clamps_before_exp():
     expected = torch.clamp(torch.exp(clamped_kl) - clamped_kl - 1, min=-10, max=10)
     torch.testing.assert_close(result, expected)
     assert torch.isfinite(result).all()
+
+
+@pytest.mark.parametrize(
+    ("norm_mean_type", "norm_std_type"),
+    [("group", "group"), ("batch", "group"), (None, "group"), ("group", "batch"), ("batch", "batch"), (None, None)],
+)
+def test_reward_norm_combinations(norm_mean_type, norm_std_type):
+    rewards = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0])  # 2 prompts x 4 samples
+    groups = rewards.reshape(2, 4)
+    means = {"group": groups.mean(-1, keepdim=True), "batch": rewards.mean(), None: 0.0}
+    stds = {"group": groups.std(-1, keepdim=True), "batch": rewards.std()}
+    expected = groups - means[norm_mean_type]
+    if norm_std_type is not None:
+        expected = expected / (stds[norm_std_type] + 1e-6)
+
+    result = reward_norm(rewards, n_sample=4, norm_mean_type=norm_mean_type, norm_std_type=norm_std_type)
+
+    assert result.shape == rewards.shape
+    torch.testing.assert_close(result, expected.reshape(-1))
 
 
 if __name__ == "__main__":
