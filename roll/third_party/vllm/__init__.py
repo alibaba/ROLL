@@ -77,6 +77,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], headless: bool
             f"got {data_parallel_backend!r}."
         )
     kwargs["distributed_executor_backend"] = executor_backend or "mp"
+    kwargs.update(current_platform.get_vllm_device_kwargs(kwargs))
     if "data_parallel_backend" in engine_arg_names:
         kwargs["data_parallel_backend"] = "mp"
     else:
@@ -113,7 +114,8 @@ async def create_async_llm(resource_placement_groups: List[Dict], headless: bool
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ""
     # torch.cuda may already init, explicitly disable expandable_segments
     # here (only matters when VLLM_USE_RAY_SPMD_WORKER=0)
-    current_platform.memory._set_allocator_settings("expandable_segments:False")
+    if hasattr(current_platform.memory, "_set_allocator_settings"):
+        current_platform.memory._set_allocator_settings("expandable_segments:False")
 
     os.environ["VLLM_CACHE_ROOT"] = os.path.join(get_default_cache_root(), "vllm", os.environ.get("WORKER_NAME", ""))
 

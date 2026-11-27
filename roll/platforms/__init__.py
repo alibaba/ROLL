@@ -4,6 +4,7 @@ from .platform import Platform
 from .cuda import CudaPlatform
 from .npu import NpuPlatform
 from .rocm import RocmPlatform
+from .xpu import XpuPlatform
 from .unknown import UnknownPlatform
 from .cpu import CpuPlatform
 
@@ -36,6 +37,9 @@ def _init_platform() -> Platform:
             return RocmPlatform()
         logger.warning("Unrecognized CUDA device. Falling back to UnknownPlatform.")
         return UnknownPlatform()
+    elif torch.xpu.is_available():
+        logger.debug("Detected Intel XPU. Initializing XPU platform.")
+        return XpuPlatform()
     else:
         try:
             import torch_npu  # noqa: F401

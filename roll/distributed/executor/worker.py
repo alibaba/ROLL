@@ -45,6 +45,7 @@ class RankInfo:
 class Worker:
 
     def __init__(self, worker_config: WorkerConfig):
+        current_platform.select_assigned_devices()
         if worker_config.offload_nccl:
             # Validate the server-provided runtime in every worker before loading
             # models or allocating distributed training state.

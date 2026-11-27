@@ -65,6 +65,9 @@ class Platform:
     # Examples: "nccl", "hccl"
     communication_backend: str
 
+    # Whether colocated weight updates can share device tensors through IPC; otherwise broadcast is used.
+    supports_tensor_ipc: bool = True
+
     def __getattr__(self, key: str):
         """Fallback attribute accessor for device-specific Torch modules.
 
@@ -99,6 +102,10 @@ class Platform:
 
     @classmethod
     def is_rocm(cls) -> bool:
+        return False
+
+    @classmethod
+    def is_xpu(cls) -> bool:
         return False
 
     @classmethod
@@ -158,6 +165,16 @@ class Platform:
         if cls.device_control_env_var is not None:
             return os.environ.get(cls.device_control_env_var, "").split(",")
         return []
+
+    @classmethod
+    def select_assigned_devices(cls) -> None:
+        """Select the physical device assigned to the current worker."""
+        return
+
+    @classmethod
+    def get_vllm_device_kwargs(cls, engine_kwargs: dict) -> dict:
+        """Return platform-specific device assignments for vLLM."""
+        return {}
 
     @classmethod
     def get_vllm_worker_class(cls):
