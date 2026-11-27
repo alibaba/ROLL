@@ -8,8 +8,12 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
-from flash_attn import flash_attn_func, flash_attn_varlen_func
-from flash_attn.bert_padding import pad_input
+
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn.bert_padding import pad_input
+except ImportError:  # not needed on transformers>=4.53; XPU has no flash_attn package
+    flash_attn_func = flash_attn_varlen_func = pad_input = None
 from torch import Tensor
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import _upad_input
@@ -100,6 +104,12 @@ def _flash_attention_forward(
         deterministic (`bool`, *optional*):
             Determines if the deterministic option introduced in flash_attn>=2.4.1 is enabled.
     """
+
+    if flash_attn_func is None:
+        raise ImportError(
+            "flash_attn is required for Ulysses attention with transformers<4.53.0; "
+            "install flash_attn or use transformers>=4.53.0"
+        )
 
     # Assuming 4D tensors, key_states.shape[1] is the key/value sequence length (source length).
     use_sliding_windows = (
